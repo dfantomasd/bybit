@@ -5,7 +5,7 @@ for financial calculations.
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from typing import Any
 
@@ -41,9 +41,9 @@ def _parse_dt(ms_str: Any) -> datetime:
     """Convert a millisecond-epoch string/int to a UTC datetime."""
     try:
         ms = int(ms_str)
-        return datetime.fromtimestamp(ms / 1000, tz=timezone.utc)
+        return datetime.fromtimestamp(ms / 1000, tz=UTC)
     except (TypeError, ValueError, OSError):
-        return datetime.now(tz=timezone.utc)
+        return datetime.now(tz=UTC)
 
 
 class OrderMapper:
@@ -83,6 +83,9 @@ class OrderMapper:
         if intent.stop_loss is not None:
             params["stopLoss"] = str(intent.stop_loss)
             params["slOrderType"] = intent.sl_order_type.value
+
+        if intent.take_profit is not None or intent.stop_loss is not None:
+            params["tpslMode"] = "Full"
 
         # Linear / inverse perpetuals use positionIdx (0=one-way, 1=Buy, 2=Sell)
         if category in ("linear", "inverse"):

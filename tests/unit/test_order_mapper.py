@@ -4,12 +4,9 @@ from __future__ import annotations
 import uuid
 from decimal import Decimal
 
-import pytest
-
 from trader.domain.enums import MarketType, OrderSide, OrderType
-from trader.domain.models import Fill, InstrumentInfo, OrderIntent, Position
-from trader.exchange.order_mapper import OrderMapper, _d, _round_to_step
-
+from trader.domain.models import OrderIntent
+from trader.exchange.order_mapper import OrderMapper, _round_to_step
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -25,17 +22,17 @@ def _make_intent(
     sl: str | None = None,
     order_link_id: str = "TN-260605-MOMO-TEST1234-abc123",
 ) -> OrderIntent:
-    kwargs = dict(
-        decision_id=uuid.uuid4(),
-        proposal_id=uuid.uuid4(),
-        symbol="BTCUSDT",
-        market_type=MarketType.LINEAR,
-        side=side,
-        order_type=order_type,
-        qty=Decimal(qty),
-        order_link_id=order_link_id,
-        reduce_only=reduce_only,
-    )
+    kwargs = {
+        "decision_id": uuid.uuid4(),
+        "proposal_id": uuid.uuid4(),
+        "symbol": "BTCUSDT",
+        "market_type": MarketType.LINEAR,
+        "side": side,
+        "order_type": order_type,
+        "qty": Decimal(qty),
+        "order_link_id": order_link_id,
+        "reduce_only": reduce_only,
+    }
     if price is not None:
         kwargs["price"] = Decimal(price)
     if tp is not None:
@@ -119,6 +116,7 @@ class TestIntentToParams:
         params = self.mapper.intent_to_params(intent, "linear")
         assert params["takeProfit"] == "32000"
         assert params["stopLoss"] == "28000"
+        assert params["tpslMode"] == "Full"
 
     def test_time_in_force_preserved(self) -> None:
         intent = _make_intent()
