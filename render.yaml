@@ -20,6 +20,8 @@ services:
         value: GLOBAL
       - key: BYBIT_USE_TESTNET
         value: "true"
+      - key: BYBIT_CONNECTIVITY_REQUIRED
+        value: "false"
       - key: DEFAULT_MARKET_CATEGORY
         value: linear
       - key: REDIS_URL

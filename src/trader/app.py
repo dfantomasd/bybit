@@ -92,6 +92,7 @@ class TradingApplication:
             postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
             redis_url=self._settings.REDIS_URL.get_secret_value(),
             redis_required=self._settings.REDIS_REQUIRED,
+            bybit_required=self._settings.BYBIT_CONNECTIVITY_REQUIRED,
             bybit_rest_url=bybit_base,
             trading_mode=self._settings.TRADING_MODE,
             system_status=self._status,

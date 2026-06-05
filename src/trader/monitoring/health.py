@@ -47,13 +47,15 @@ class HealthChecker:
         postgres_dsn: str,
         redis_url: str,
         redis_required: bool = False,
+        bybit_required: bool = False,
         bybit_rest_url: str = "https://api.bybit.com",
         trading_mode: TradingMode = TradingMode.TESTNET,
         system_status: SystemStatus = SystemStatus.STOPPED,
     ) -> None:
         self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
-        self._redis_url = redis_url
+        self._redis_url = redis_url.strip().strip("\"'")
         self._redis_required = redis_required
+        self._bybit_required = bybit_required
         self._bybit_rest_url = bybit_rest_url
         self._trading_mode = trading_mode
         self._system_status = system_status
@@ -101,7 +103,7 @@ class HealthChecker:
         start = time.monotonic()
         try:
             conn = await asyncio.wait_for(
-                asyncpg.connect(self._postgres_dsn),
+                asyncpg.connect(self._postgres_dsn, statement_cache_size=0),
                 timeout=_DB_TIMEOUT_S,
             )
             try:
@@ -213,7 +215,7 @@ class HealthChecker:
             messages.append("PostgreSQL is unreachable")
         if not redis_ok and self._redis_required:
             messages.append("Redis is unreachable")
-        if not bybit_ok:
+        if not bybit_ok and self._bybit_required:
             messages.append("Bybit REST API is unreachable")
         if not ws_ok:
             messages.append("WebSocket feed is stale or disconnected")
@@ -224,7 +226,8 @@ class HealthChecker:
 
         # Determine overall status
         redis_critical_ok = redis_ok or not self._redis_required
-        critical_ok = pg_ok and redis_critical_ok and bybit_ok
+        bybit_critical_ok = bybit_ok or not self._bybit_required
+        critical_ok = pg_ok and redis_critical_ok and bybit_critical_ok
         if critical_ok and ws_ok and model_ok and feat_ok:
             overall = "healthy"
         elif critical_ok:
@@ -262,5 +265,9 @@ class HealthChecker:
             "redis": redis_ok,
             "bybit_connectivity": bybit_ok,
         }
-        passed = pg_ok and bybit_ok and (redis_ok or not self._redis_required)
+        passed = (
+            pg_ok
+            and (redis_ok or not self._redis_required)
+            and (bybit_ok or not self._bybit_required)
+        )
         return {"passed": passed, "checks": checks}
