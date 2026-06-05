@@ -604,6 +604,56 @@ class TradingApplication:
         )
 
         _balance_tick: int = 0
+        # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
+        _shadow_positions: dict[str, dict[str, Any]] = {}
+
+        async def _check_shadow_exits(
+            symbol: str, current_price: float
+        ) -> None:
+            """Close shadow positions that hit TP or SL."""
+            pos = _shadow_positions.get(symbol)
+            if pos is None:
+                return
+            side = pos["side"]
+            tp = pos["tp"]
+            sl = pos["sl"]
+            hit = None
+            if side == "Buy" and current_price >= tp:
+                hit = "TP"
+            elif side == "Buy" and current_price <= sl:
+                hit = "SL"
+            elif side == "Sell" and current_price <= tp:
+                hit = "TP"
+            elif side == "Sell" and current_price >= sl:
+                hit = "SL"
+            if hit:
+                pnl_pct = (
+                    (current_price - pos["entry"]) / pos["entry"] * 100
+                    if side == "Buy"
+                    else (pos["entry"] - current_price) / pos["entry"] * 100
+                )
+                log.info(
+                    "shadow.position_closed",
+                    symbol=symbol,
+                    reason=hit,
+                    entry=pos["entry"],
+                    exit=current_price,
+                    pnl_pct=round(pnl_pct, 3),
+                )
+                del _shadow_positions[symbol]
+                if self._execution_engine is not None:
+                    self._execution_engine.record_position_closed(symbol)
+                if self._telegram_bot is not None:
+                    try:
+                        label = "✅ TP" if hit == "TP" else "🛑 SL"
+                        pnl_sign = "+" if pnl_pct >= 0 else ""
+                        await self._telegram_bot.notify(
+                            f"{label} {symbol} {side} closed\n"
+                            f"Entry: {pos['entry']:.4f} → Exit: {current_price:.4f}\n"
+                            f"PnL: {pnl_sign}{pnl_pct:.2f}% [SHADOW]"
+                        )
+                    except Exception:
+                        pass
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
@@ -622,6 +672,9 @@ class TradingApplication:
             if not closes:
                 return
             current_price = closes[-1]
+
+            # Check shadow TP/SL exits first
+            await _check_shadow_exits(symbol, current_price)
 
             # Classify regime
             regime_ctx = None
@@ -645,12 +698,37 @@ class TradingApplication:
             if proposal is None:
                 return
 
-            # Log signal to deque and push Telegram notification
-            is_shadow = (
-                self._execution_engine._shadow_mode
-                if self._execution_engine is not None
-                else True
-            )
+            # Skip execution if operator paused trading
+            if self._trading_paused:
+                log.debug("strategy_loop.paused", symbol=symbol)
+                return
+
+            # ExecutionEngine: dedup/cooldown/risk → order (or shadow log)
+            # Notification fires only when execution engine actually approves
+            if self._execution_engine is None:
+                return
+
+            try:
+                decision = await self._execution_engine.submit(
+                    proposal=proposal,
+                    capital=capital,
+                    available_balance=balance,
+                    feature_vector=vec,
+                    regime_context=regime_ctx,
+                )
+            except Exception as exc:
+                log.warning("strategy_loop.execution_error", symbol=symbol, error=str(exc))
+                return
+
+            from trader.domain.enums import RiskDecisionStatus
+            if decision is None or decision.status not in (
+                RiskDecisionStatus.APPROVED,
+                RiskDecisionStatus.RESIZED,
+            ):
+                return
+
+            # Trade approved — notify Telegram once and log to signal deque
+            is_shadow = self._execution_engine._shadow_mode
             regime_str = regime_ctx.regime.value if regime_ctx is not None else "UNKNOWN"
             from trader.telegram_bot import SignalEntry
             entry = SignalEntry(
@@ -669,23 +747,15 @@ class TradingApplication:
                 except Exception as exc:
                     log.warning("telegram.notify_signal_failed", error=str(exc))
 
-            # Skip execution if operator paused trading
-            if self._trading_paused:
-                log.debug("strategy_loop.paused", symbol=symbol)
-                return
-
-            # ExecutionEngine: RiskManager → order (or shadow log)
-            if self._execution_engine is not None:
-                try:
-                    await self._execution_engine.submit(
-                        proposal=proposal,
-                        capital=capital,
-                        available_balance=balance,
-                        feature_vector=vec,
-                        regime_context=regime_ctx,
-                    )
-                except Exception as exc:
-                    log.warning("strategy_loop.execution_error", symbol=symbol, error=str(exc))
+            # Track shadow position for TP/SL simulation
+            if is_shadow and proposal.stop_loss and proposal.take_profit:
+                _shadow_positions[symbol] = {
+                    "side": proposal.side.value,
+                    "entry": float(proposal.entry_price or current_price),
+                    "tp": float(proposal.take_profit),
+                    "sl": float(proposal.stop_loss),
+                    "opened_at": datetime.now(tz=UTC),
+                }
 
         async def strategy_loop() -> None:
             nonlocal _balance_tick
