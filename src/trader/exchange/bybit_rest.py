@@ -93,13 +93,23 @@ class BybitRestClient:
         recv_window: int = 5000,
         max_workers: int = 4,
     ) -> None:
-        self._api_key = api_key
-        self._api_secret = api_secret
+        # Strip to guard against copy-paste whitespace in env vars
+        self._api_key = api_key.strip()
+        self._api_secret = api_secret.strip()
         self._endpoint_selector = endpoint_selector
         self._rate_limiter = rate_limiter
         self._recv_window = recv_window
         self._base_url = endpoint_selector.rest_base
         self._session: aiohttp.ClientSession | None = None
+
+        if self._api_key:
+            logger.info(
+                "bybit_rest_client_init",
+                base_url=self._base_url,
+                key_prefix=self._api_key[:6] + "…",
+                key_length=len(self._api_key),
+                recv_window=self._recv_window,
+            )
 
     # ------------------------------------------------------------------
     # Session management

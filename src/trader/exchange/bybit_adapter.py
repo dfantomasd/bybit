@@ -89,7 +89,30 @@ class BybitAdapter:
             passed=report.passed,
             checks=report.checks,
         )
+        await self._check_clock_skew()
         return report
+
+    async def _check_clock_skew(self) -> None:
+        """Fetch Bybit server time and log clock offset; warn if > 2 s."""
+        import time as _time
+        try:
+            resp = await self._rest.get_server_time()
+            server_ms = int((resp.get("result") or {}).get("timeSecond", 0)) * 1000
+            if not server_ms:
+                server_ms = int((resp.get("result") or {}).get("timeNano", 0)) // 1_000_000
+            local_ms = int(_time.time() * 1000)
+            skew_ms = local_ms - server_ms
+            if abs(skew_ms) > 2000:
+                logger.warning(
+                    "bybit_clock_skew_large",
+                    skew_ms=skew_ms,
+                    local_ms=local_ms,
+                    server_ms=server_ms,
+                )
+            else:
+                logger.info("bybit_clock_skew", skew_ms=skew_ms)
+        except Exception as exc:
+            logger.debug("bybit_clock_skew_check_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Account
