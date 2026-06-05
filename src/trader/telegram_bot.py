@@ -91,7 +91,8 @@ class TelegramMonitorBot:
         chat = update.effective_chat
         if chat is None or chat.id not in self._config.allowed_chat_ids:
             if update.effective_message is not None:
-                await update.effective_message.reply_text("Access denied.")
+                suffix = f" Chat ID: {chat.id}" if chat is not None else ""
+                await update.effective_message.reply_text(f"Access denied.{suffix}")
             log.warning("telegram_unauthorised_chat", chat_id=chat.id if chat else None)
             return False
         return True

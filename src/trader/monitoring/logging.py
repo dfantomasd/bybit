@@ -19,7 +19,7 @@ from __future__ import annotations
 import logging
 import re
 import sys
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from structlog.types import EventDict, Processor, WrappedLogger
@@ -134,6 +134,9 @@ def configure_logging(
     # Silence noisy third-party loggers
     logging.getLogger("asyncio").setLevel(logging.WARNING)
     logging.getLogger("aiohttp").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("telegram").setLevel(logging.WARNING)
+    logging.getLogger("telegram.ext").setLevel(logging.WARNING)
     logging.getLogger("urllib3").setLevel(logging.WARNING)
 
     shared_processors: list[Processor] = [
@@ -183,7 +186,7 @@ def get_logger(name: str | None = None) -> structlog.BoundLogger:
     Args:
         name: Optional logger name (typically ``__name__``).
     """
-    return structlog.get_logger(name)  # type: ignore[return-value]
+    return cast(structlog.BoundLogger, structlog.get_logger(name))
 
 
 def bind_context(**kwargs: Any) -> None:
