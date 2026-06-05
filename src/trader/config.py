@@ -144,13 +144,15 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         """Enforce critical safety invariants after field parsing."""
-        # Testnet must be enabled for non-live modes
-        if self.TRADING_MODE in (TradingMode.TESTNET, TradingMode.SHADOW):
-            if not self.BYBIT_USE_TESTNET:
-                raise ValueError(
-                    "BYBIT_USE_TESTNET must be True when TRADING_MODE is "
-                    f"{self.TRADING_MODE}. Set BYBIT_USE_TESTNET=true in .env"
-                )
+        # TESTNET mode must use testnet endpoints to avoid spending real money.
+        # SHADOW mode is safe with mainnet endpoints because orders are never
+        # submitted — mainnet is needed on US-hosted deployments where Bybit
+        # testnet blocks requests by IP.
+        if self.TRADING_MODE == TradingMode.TESTNET and not self.BYBIT_USE_TESTNET:
+            raise ValueError(
+                "BYBIT_USE_TESTNET must be True when TRADING_MODE=TESTNET. "
+                "To use mainnet endpoints without real orders, set TRADING_MODE=SHADOW."
+            )
 
         # Live mode requires explicit opt-in flags
         if self.TRADING_MODE == TradingMode.LIVE:
