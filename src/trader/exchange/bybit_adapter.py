@@ -241,17 +241,30 @@ class BybitAdapter:
         self,
         category: str,
         symbol: str,
-        stop_loss: str,
-        take_profit: str,
+        stop_loss: str | None = None,
+        take_profit: str | None = None,
+        trailing_stop: str | None = None,
+        active_price: str | None = None,
         position_idx: int = 0,
+        tpsl_mode: str = "Full",
     ) -> dict[str, Any]:
-        """Set stop-loss and take-profit for an open position."""
+        """Set TP/SL/trailing-stop controls for an open position."""
+        params: dict[str, Any] = {
+            "category": category,
+            "symbol": symbol,
+            "positionIdx": position_idx,
+            "tpslMode": tpsl_mode,
+        }
+        if stop_loss is not None:
+            params["stopLoss"] = stop_loss
+        if take_profit is not None:
+            params["takeProfit"] = take_profit
+        if trailing_stop is not None:
+            params["trailingStop"] = trailing_stop
+        if active_price is not None:
+            params["activePrice"] = active_price
         return await self._rest.set_trading_stop(
-            category=category,
-            symbol=symbol,
-            stopLoss=stop_loss,
-            takeProfit=take_profit,
-            positionIdx=position_idx,
+            **params,
         )
 
     # ------------------------------------------------------------------

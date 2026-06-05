@@ -26,7 +26,7 @@ import signal
 import sys
 from collections import deque
 from datetime import UTC, datetime
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
 
 import uvicorn
@@ -78,6 +78,8 @@ class TradingApplication:
         self._trade_journal: Any | None = None
         self._performance_blocked_symbols: set[str] = set()
         self._closed_pnl_refreshed_at: datetime | None = None
+        self._positions_managed_at: datetime | None = None
+        self._trailing_stop_keys: set[str] = set()
 
     # ------------------------------------------------------------------
     # Startup
@@ -660,6 +662,128 @@ class TradingApplication:
         except Exception as exc:
             log.debug("performance_filter.refresh_failed", error=str(exc))
 
+    async def _manage_open_positions(self) -> None:
+        """Move profitable positions to breakeven and enable exchange trailing stop."""
+        assert self._settings is not None
+        if (
+            not self._settings.PROFIT_MANAGER_ENABLED
+            or not self._settings.TRAILING_STOP_ENABLED
+            or self._bybit_adapter is None
+        ):
+            return
+
+        now = datetime.now(tz=UTC)
+        if self._positions_managed_at is not None:
+            elapsed = (now - self._positions_managed_at).total_seconds()
+            if elapsed < self._settings.POSITION_MANAGEMENT_INTERVAL_SECONDS:
+                return
+        self._positions_managed_at = now
+
+        try:
+            positions = await self._bybit_adapter.get_positions(
+                self._settings.DEFAULT_MARKET_CATEGORY
+            )
+        except Exception as exc:
+            log.debug("profit_manager.positions_fetch_failed", error=str(exc))
+            return
+
+        for pos in positions:
+            if pos.size <= Decimal("0") or pos.entry_price <= Decimal("0"):
+                continue
+            mark_price = pos.mark_price or pos.entry_price
+            if mark_price <= Decimal("0"):
+                continue
+
+            pnl_pct = (
+                (mark_price - pos.entry_price) / pos.entry_price * Decimal("100")
+                if pos.side.value == "Buy"
+                else (pos.entry_price - mark_price) / pos.entry_price * Decimal("100")
+            )
+            if pnl_pct < Decimal(str(self._settings.TRAILING_ACTIVATION_PCT)):
+                continue
+
+            position_key = f"{pos.symbol}:{pos.side.value}:{pos.size}:{pos.entry_price}"
+            if position_key in self._trailing_stop_keys:
+                continue
+
+            try:
+                info = (
+                    await self._execution_engine.get_instrument_info(pos.symbol)
+                    if self._execution_engine is not None
+                    else await self._bybit_adapter.get_instrument_info(
+                        self._settings.DEFAULT_MARKET_CATEGORY,
+                        pos.symbol,
+                    )
+                )
+                active_price = self._round_to_tick(
+                    self._activation_price(pos.entry_price, pos.side.value),
+                    info.tick_size,
+                    round_up=pos.side.value == "Buy",
+                )
+                trailing_distance = self._round_to_tick(
+                    mark_price
+                    * Decimal(str(self._settings.TRAILING_DISTANCE_PCT))
+                    / Decimal("100"),
+                    info.tick_size,
+                    round_up=True,
+                )
+                breakeven_stop = self._round_to_tick(
+                    self._breakeven_stop(pos.entry_price, pos.side.value),
+                    info.tick_size,
+                    round_up=pos.side.value == "Sell",
+                )
+                if trailing_distance < info.tick_size:
+                    trailing_distance = info.tick_size
+
+                await self._bybit_adapter.set_trading_stop(
+                    category=self._settings.DEFAULT_MARKET_CATEGORY,
+                    symbol=pos.symbol,
+                    stop_loss=str(breakeven_stop),
+                    trailing_stop=str(trailing_distance),
+                    active_price=str(active_price),
+                    position_idx=0,
+                    tpsl_mode="Full",
+                )
+                self._trailing_stop_keys.add(position_key)
+                log.info(
+                    "profit_manager.trailing_stop_set",
+                    symbol=pos.symbol,
+                    side=pos.side.value,
+                    pnl_pct=float(round(pnl_pct, 4)),
+                    stop_loss=str(breakeven_stop),
+                    trailing_stop=str(trailing_distance),
+                    active_price=str(active_price),
+                )
+            except Exception as exc:
+                log.debug(
+                    "profit_manager.trailing_stop_failed",
+                    symbol=pos.symbol,
+                    error=str(exc),
+                )
+
+    def _activation_price(self, entry_price: Decimal, side: str) -> Decimal:
+        assert self._settings is not None
+        delta = entry_price * Decimal(str(self._settings.TRAILING_ACTIVATION_PCT)) / Decimal("100")
+        return entry_price + delta if side == "Buy" else entry_price - delta
+
+    def _breakeven_stop(self, entry_price: Decimal, side: str) -> Decimal:
+        assert self._settings is not None
+        offset = entry_price * Decimal(str(self._settings.BREAKEVEN_STOP_OFFSET_PCT)) / Decimal("100")
+        return entry_price + offset if side == "Buy" else entry_price - offset
+
+    def _round_to_tick(
+        self,
+        price: Decimal,
+        tick_size: Decimal,
+        *,
+        round_up: bool,
+    ) -> Decimal:
+        if tick_size <= Decimal("0"):
+            return price
+        rounding = ROUND_CEILING if round_up else ROUND_DOWN
+        ticks = (price / tick_size).to_integral_value(rounding=rounding)
+        return ticks * tick_size
+
     async def _start_strategy_loop(self) -> None:
         """Run strategy ensemble → RiskManager → ExecutionEngine."""
         from trader.strategies.ensemble import StrategyEnsemble
@@ -875,6 +999,7 @@ class TradingApplication:
                 if _balance_tick % refresh_every == 0:
                     await self._refresh_balance()
                     await self._refresh_closed_pnl_memory()
+                await self._manage_open_positions()
 
                 balance = self._cached_balance
                 capital = balance

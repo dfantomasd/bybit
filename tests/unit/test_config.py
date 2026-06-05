@@ -57,6 +57,11 @@ class TestSettingsDefaults:
         assert settings.TRADE_JOURNAL_ENABLED is True  # type: ignore[union-attr]
         assert settings.PERFORMANCE_FILTER_ENABLED is True  # type: ignore[union-attr]
 
+    def test_profit_manager_defaults_enabled(self) -> None:
+        settings = self._make_settings()
+        assert settings.PROFIT_MANAGER_ENABLED is True  # type: ignore[union-attr]
+        assert settings.TRAILING_STOP_ENABLED is True  # type: ignore[union-attr]
+
     def test_max_positions_default(self) -> None:
         settings = self._make_settings()
         assert settings.MAX_POSITIONS == 2  # type: ignore[union-attr]

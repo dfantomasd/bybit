@@ -70,6 +70,15 @@ class Settings(BaseSettings):
     PERFORMANCE_MAX_SYMBOL_LOSS_USD: float = -2.0
     PERFORMANCE_LOOKBACK_DAYS: int = 7
     CLOSED_PNL_REFRESH_INTERVAL_SECONDS: int = 300
+    PROFIT_MANAGER_ENABLED: bool = True
+    TRAILING_STOP_ENABLED: bool = True
+    POSITION_MANAGEMENT_INTERVAL_SECONDS: int = 30
+    TRAILING_ACTIVATION_PCT: float = 0.45
+    """Unrealised profit percent before enabling exchange trailing stop."""
+    TRAILING_DISTANCE_PCT: float = 0.30
+    """Trailing stop distance as percent of current mark price."""
+    BREAKEVEN_STOP_OFFSET_PCT: float = 0.03
+    """Small offset beyond entry used when moving stop to breakeven."""
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""

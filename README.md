@@ -161,6 +161,11 @@ Key settings:
 | `PERFORMANCE_MAX_SYMBOL_LOSS_USD` | `-2.0` | Loss threshold for blocking a symbol over the lookback window |
 | `PERFORMANCE_LOOKBACK_DAYS` | `7` | Closed PnL lookback window for symbol performance |
 | `CLOSED_PNL_REFRESH_INTERVAL_SECONDS` | `300` | How often recent Bybit closed PnL is imported |
+| `PROFIT_MANAGER_ENABLED` | `true` | Manage open positions after entry |
+| `TRAILING_STOP_ENABLED` | `true` | Move profitable positions to breakeven and enable Bybit trailing stop |
+| `TRAILING_ACTIVATION_PCT` | `0.45` | Unrealised profit percent before trailing stop is enabled |
+| `TRAILING_DISTANCE_PCT` | `0.30` | Trailing stop distance as percent of current mark price |
+| `BREAKEVEN_STOP_OFFSET_PCT` | `0.03` | Small offset beyond entry when moving SL to breakeven |
 
 Risk profiles:
 
@@ -200,6 +205,14 @@ to temporarily skip symbols that have at least
 `PERFORMANCE_MAX_SYMBOL_LOSS_USD` during `PERFORMANCE_LOOKBACK_DAYS`.
 This is adaptive risk control, not a profit guarantee. If Postgres/Supabase is
 unavailable, trading continues without the filter.
+
+### Open position management
+
+The entry order sets full-position TP/SL immediately. Separately, when
+`PROFIT_MANAGER_ENABLED=true` and `TRAILING_STOP_ENABLED=true`, the bot monitors
+open positions. Once unrealised PnL reaches `TRAILING_ACTIVATION_PCT`, it moves
+the stop near breakeven and asks Bybit to manage an exchange-side trailing stop
+using `/v5/position/trading-stop`.
 
 ---
 
