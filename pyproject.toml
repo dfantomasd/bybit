@@ -60,7 +60,7 @@ dev = [
 ]
 
 [project.scripts]
-trader = "trader.app:cli_main"
+trader = "trader.app:main_sync"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/trader"]
