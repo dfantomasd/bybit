@@ -8,7 +8,7 @@ Lifecycle:
 5. Start WebSocket connections (public market data)
 6. Seed candle store from REST history
 7. Start feature pipeline
-8. Start strategy ensemble loop (SHADOW: log proposals, no execution)
+8. Start strategy ensemble loop → RiskManager → ExecutionEngine
 9. Enter shutdown-wait loop
 10. On SIGTERM/SIGINT: graceful shutdown
 
@@ -25,6 +25,7 @@ import os
 import signal
 import sys
 from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
 import uvicorn
@@ -40,6 +41,8 @@ _WS_INTERVAL = "1"   # 1-minute klines over WS
 _MIN_SEED_BARS = 60  # bars to fetch from REST at startup
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0         # seconds between feature recomputation
+_BALANCE_REFRESH_INTERVAL = 60.0   # seconds between balance refreshes
+_FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 
 
 class TradingApplication:
@@ -57,7 +60,13 @@ class TradingApplication:
         self._candle_store: Any | None = None
         self._feature_pipeline: Any | None = None
         self._strategy_ensemble: Any | None = None
+        self._risk_manager: Any | None = None
+        self._execution_engine: Any | None = None
+        self._exposure_tracker: Any | None = None
         self._background_tasks: list[asyncio.Task] = []
+        # Cached balance (refreshed periodically)
+        self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
+        self._balance_refreshed_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -191,6 +200,91 @@ class TradingApplication:
         )
         await self._telegram_bot.start()
         log.info("telegram_bot_started")
+
+    # ------------------------------------------------------------------
+    # Risk & Execution
+    # ------------------------------------------------------------------
+
+    async def _init_risk_manager(self, initial_capital: Decimal) -> None:
+        """Initialise RiskManager and all its dependencies."""
+        from trader.risk.circuit_breakers import CircuitBreakerManager
+        from trader.risk.drawdown import DrawdownTracker
+        from trader.risk.exposure import ExposureTracker
+        from trader.risk.kill_switch import KillSwitch
+        from trader.risk.manager import RiskManager
+        from trader.risk.profiles import get_risk_limits
+
+        assert self._settings is not None
+        profile = self._settings.RISK_PROFILE
+        limits = get_risk_limits(profile)
+
+        drawdown = DrawdownTracker(initial_equity=initial_capital)
+        self._exposure_tracker = ExposureTracker(
+            total_capital=initial_capital,
+            risk_limits=limits,
+        )
+        breakers = CircuitBreakerManager(risk_limits=limits)
+        kill_switch = KillSwitch()
+
+        self._risk_manager = RiskManager(
+            risk_profile=profile,
+            drawdown_tracker=drawdown,
+            exposure_tracker=self._exposure_tracker,
+            circuit_breaker_manager=breakers,
+            kill_switch=kill_switch,
+        )
+        log.info(
+            "risk_manager.initialized",
+            profile=profile.value,
+            initial_capital=str(initial_capital),
+        )
+
+    async def _refresh_balance(self) -> Decimal:
+        """Fetch current available balance from exchange; fall back to cached value."""
+        assert self._settings is not None
+        has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
+        if not has_key or self._bybit_adapter is None:
+            return self._cached_balance
+
+        try:
+            balance = await self._bybit_adapter.get_balance()
+            available = balance.available_balance
+            if available > Decimal("0"):
+                self._cached_balance = available
+                self._balance_refreshed_at = datetime.now(tz=UTC)
+                log.debug(
+                    "balance.refreshed",
+                    available_usd=str(available),
+                )
+            return self._cached_balance
+        except Exception as exc:
+            log.warning("balance.refresh_failed", error=str(exc))
+            return self._cached_balance
+
+    async def _init_execution_engine(self) -> None:
+        """Initialise ExecutionEngine after RiskManager is ready."""
+        from trader.execution.engine import ExecutionEngine
+
+        assert self._settings is not None
+        assert self._risk_manager is not None
+        assert self._exposure_tracker is not None
+        assert self._bybit_adapter is not None
+
+        shadow = self._settings.SHADOW_MODE or (
+            self._settings.TRADING_MODE != TradingMode.LIVE
+        )
+        self._execution_engine = ExecutionEngine(
+            adapter=self._bybit_adapter,
+            risk_manager=self._risk_manager,
+            exposure_tracker=self._exposure_tracker,
+            shadow_mode=shadow,
+            cooldown_s=300,
+            category=self._settings.DEFAULT_MARKET_CATEGORY,
+        )
+
+        # Sync open positions from exchange so we don't double-enter on restart
+        await self._execution_engine.sync_positions()
+        log.info("execution_engine.initialized", shadow_mode=shadow)
 
     # ------------------------------------------------------------------
     # Market data & features
@@ -345,16 +439,29 @@ class TradingApplication:
         log.info("feature_pipeline.started")
 
     async def _start_strategy_loop(self) -> None:
-        """Run strategy ensemble in SHADOW mode (proposals logged, not executed)."""
+        """Run strategy ensemble → RiskManager → ExecutionEngine."""
         from trader.strategies.ensemble import StrategyEnsemble
         from trader.strategies.trend import EMAcrossoverStrategy
 
         assert self._settings is not None
 
+        # Fetch initial balance to seed RiskManager
+        initial_capital = await self._refresh_balance()
+        if initial_capital <= Decimal("0"):
+            initial_capital = _FALLBACK_BALANCE_USD
+            log.warning(
+                "strategy_loop.using_fallback_capital",
+                capital=str(initial_capital),
+            )
+
+        # Build risk + execution stack
+        await self._init_risk_manager(initial_capital)
+        await self._init_execution_engine()
+
         strategies = [
             EMAcrossoverStrategy(
                 symbol=symbol,
-                allow_short=False,  # CONSERVATIVE: no shorts initially
+                allow_short=False,
                 min_qty_usd=10.0,
                 max_risk_pct=0.003,
             )
@@ -367,40 +474,71 @@ class TradingApplication:
             min_confidence=0.55,
         )
 
+        _balance_tick: int = 0
+
         async def strategy_loop() -> None:
+            nonlocal _balance_tick
+
             while not self._shutdown_event.is_set():
+                # Refresh balance every N iterations
+                _balance_tick += 1
+                refresh_every = max(
+                    1,
+                    int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL),
+                )
+                if _balance_tick % refresh_every == 0:
+                    await self._refresh_balance()
+
+                balance = self._cached_balance
+                capital = balance  # treat available balance as capital proxy
+
                 if self._feature_pipeline is not None:
                     for symbol in _SYMBOLS:
                         vec = self._feature_pipeline.latest(symbol, _WS_INTERVAL)
                         if vec is None:
                             continue
-                        # Current price from last close
-                        closes = self._candle_store.closes(symbol, _WS_INTERVAL, 1) if self._candle_store else []
+
+                        closes = (
+                            self._candle_store.closes(symbol, _WS_INTERVAL, 1)
+                            if self._candle_store
+                            else []
+                        )
                         if not closes:
                             continue
                         current_price = closes[-1]
+
                         try:
                             proposal = self._strategy_ensemble.evaluate_all(
                                 feature_vector=vec,
                                 current_price=current_price,
-                                available_balance_usd=1000.0,  # placeholder
+                                available_balance_usd=float(balance),
                             )
-                            if proposal is not None:
-                                log.info(
-                                    "shadow.proposal",
-                                    symbol=proposal.symbol,
-                                    side=proposal.side.value,
-                                    confidence=round(proposal.confidence, 3),
-                                    qty=str(proposal.requested_qty),
-                                    rationale=proposal.rationale,
-                                    mode="SHADOW_NO_EXECUTION",
-                                )
                         except Exception as exc:
                             log.warning(
-                                "strategy_loop.error",
+                                "strategy_loop.ensemble_error",
                                 symbol=symbol,
                                 error=str(exc),
                             )
+                            continue
+
+                        if proposal is None:
+                            continue
+
+                        # Send through RiskManager → ExecutionEngine
+                        if self._execution_engine is not None:
+                            try:
+                                await self._execution_engine.submit(
+                                    proposal=proposal,
+                                    capital=capital,
+                                    available_balance=balance,
+                                    feature_vector=vec,
+                                )
+                            except Exception as exc:
+                                log.warning(
+                                    "strategy_loop.execution_error",
+                                    symbol=symbol,
+                                    error=str(exc),
+                                )
 
                 try:
                     await asyncio.wait_for(
@@ -412,7 +550,14 @@ class TradingApplication:
 
         task = asyncio.create_task(strategy_loop(), name="strategy-loop")
         self._background_tasks.append(task)
-        log.info("strategy_loop.started", mode="SHADOW")
+        shadow = self._settings.SHADOW_MODE or (
+            self._settings.TRADING_MODE != TradingMode.LIVE
+        )
+        log.info(
+            "strategy_loop.started",
+            shadow_mode=shadow,
+            initial_capital=str(initial_capital),
+        )
 
     # ------------------------------------------------------------------
     # Main loop
@@ -454,6 +599,15 @@ class TradingApplication:
 
         if self._feature_pipeline:
             self._feature_pipeline.stop()
+
+        # Log final execution state before shutdown
+        if self._execution_engine is not None:
+            status = self._execution_engine.get_status()
+            log.info(
+                "execution_engine.shutdown_status",
+                open_positions=len(status["open_positions"]),
+                shadow_mode=status["shadow_mode"],
+            )
 
         if self._telegram_bot:
             await self._telegram_bot.stop()
