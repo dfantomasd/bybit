@@ -434,31 +434,6 @@ class BybitRestClient:
         return await self._call("get_fee_rate", "/v5/account/fee-rate", **kwargs)
 
     # ------------------------------------------------------------------
-    # Market data (public, no auth required)
-    # ------------------------------------------------------------------
-
-    async def get_kline(
-        self,
-        category: str,
-        symbol: str,
-        interval: str = "1",
-        limit: int = 200,
-    ) -> dict[str, Any]:
-        """Fetch historical klines (candlesticks).
-
-        Returns newest-first list in result.list.
-        Each element: [startTime, open, high, low, close, volume, turnover]
-        """
-        return await self._call(
-            "get_kline",
-            "/v5/market/kline",
-            category=category,
-            symbol=symbol,
-            interval=interval,
-            limit=limit,
-        )
-
-    # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
