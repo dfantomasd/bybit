@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Sequence
 
 import structlog
 
@@ -63,25 +63,54 @@ class FeaturePipeline:
     # Public
     # ------------------------------------------------------------------
 
-    async def run(self, symbols: list[str], intervals: list[str]) -> None:
-        """Compute features in a loop until ``stop()`` is called."""
+    async def run(
+        self,
+        symbols: list[str],
+        intervals: list[str],
+        symbol_source: Any | None = None,
+    ) -> None:
+        """Compute features in a loop until ``stop()`` is called.
+
+        Args:
+            symbols:       Initial symbol list (used when symbol_source is None).
+            intervals:     Candle intervals to compute features for.
+            symbol_source: Optional object with an ``active_symbols`` property
+                           that returns the current dynamic symbol list (e.g.
+                           MarketScreener). When provided, the symbol list is
+                           refreshed on every iteration.
+        """
         log.info("feature_pipeline.started", symbols=symbols, intervals=intervals)
         while not self._stop_event.is_set():
-            for symbol in symbols:
-                for interval in intervals:
-                    try:
-                        vec = self.compute(symbol, interval)
-                        if vec is not None:
-                            self._latest[(symbol, interval)] = vec
-                            if self._health is not None:
-                                self._health.set_feature_computed_at(datetime.now(tz=UTC))
-                    except Exception as exc:
-                        log.warning(
-                            "feature_pipeline.compute_error",
-                            symbol=symbol,
-                            interval=interval,
-                            error=str(exc),
-                        )
+            active = (
+                symbol_source.active_symbols
+                if symbol_source is not None
+                else symbols
+            )
+
+            # Compute all (symbol, interval) pairs concurrently
+            async def _compute_one(symbol: str, interval: str) -> None:
+                try:
+                    vec = self.compute(symbol, interval)
+                    if vec is not None:
+                        self._latest[(symbol, interval)] = vec
+                        if self._health is not None:
+                            self._health.set_feature_computed_at(datetime.now(tz=UTC))
+                except Exception as exc:
+                    log.warning(
+                        "feature_pipeline.compute_error",
+                        symbol=symbol,
+                        interval=interval,
+                        error=str(exc),
+                    )
+
+            tasks = [
+                _compute_one(symbol, interval)
+                for symbol in active
+                for interval in intervals
+            ]
+            if tasks:
+                await asyncio.gather(*tasks)
+
             try:
                 await asyncio.wait_for(
                     asyncio.shield(self._stop_event.wait()),

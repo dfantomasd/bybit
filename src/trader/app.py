@@ -63,6 +63,8 @@ class TradingApplication:
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
         self._exposure_tracker: Any | None = None
+        self._screener: Any | None = None
+        self._regime_classifier: Any | None = None
         self._background_tasks: list[asyncio.Task] = []
         # Cached balance (refreshed periodically)
         self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
@@ -286,11 +288,40 @@ class TradingApplication:
         await self._execution_engine.sync_positions()
         log.info("execution_engine.initialized", shadow_mode=shadow)
 
+    async def _start_screener(self) -> list[str]:
+        """Run the market screener and return initial symbol list."""
+        from trader.features.screener import MarketScreener
+
+        assert self._bybit_adapter is not None
+
+        self._screener = MarketScreener(
+            rest_client=self._bybit_adapter._rest,
+            max_symbols=10,
+            min_volume_usd=20_000_000,
+            interval_s=900,
+        )
+
+        # Run first screen synchronously so we have symbols before WS starts
+        try:
+            task = asyncio.create_task(self._screener.run(), name="screener")
+            self._background_tasks.append(task)
+            await self._screener.wait_ready()
+            symbols = self._screener.active_symbols
+            log.info("screener.initial_symbols", symbols=symbols)
+            return symbols
+        except Exception as exc:
+            log.warning(
+                "screener.startup_failed",
+                error=str(exc),
+                fallback=_SYMBOLS,
+            )
+            return list(_SYMBOLS)
+
     # ------------------------------------------------------------------
     # Market data & features
     # ------------------------------------------------------------------
 
-    async def _seed_candle_store(self) -> None:
+    async def _seed_candle_store(self, symbols: list[str] | None = None) -> None:
         """Fetch recent historical klines via REST to seed the CandleStore."""
         from trader.data.candles import Candle, CandleStore
 
@@ -301,8 +332,9 @@ class TradingApplication:
             self._candle_store = CandleStore(max_bars=500)
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
+        seed_symbols = symbols or _SYMBOLS
 
-        for symbol in _SYMBOLS:
+        for symbol in seed_symbols:
             for interval in [_WS_INTERVAL]:
                 try:
                     resp = await self._bybit_adapter._rest.get_kline(
@@ -348,7 +380,7 @@ class TradingApplication:
                         has_api_key=has_api_key,
                     )
 
-    async def _start_public_ws(self) -> None:
+    async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
         from trader.data.candles import CandleStore
         from trader.exchange.bybit_ws_public import BybitPublicWebSocket
@@ -365,10 +397,10 @@ class TradingApplication:
             self._settings.BYBIT_USE_TESTNET,
         )
 
-        # Build subscription list
+        # Build subscription list from screened symbols
         category = self._settings.DEFAULT_MARKET_CATEGORY
         subs: list[str] = []
-        for symbol in _SYMBOLS:
+        for symbol in symbols:
             subs.append(f"kline.{_WS_INTERVAL}.{symbol}")
             subs.append(f"tickers.{symbol}")
 
@@ -417,8 +449,9 @@ class TradingApplication:
         )
 
     async def _start_feature_pipeline(self) -> None:
-        """Start feature computation in background."""
+        """Start feature computation in background (parallel across symbols)."""
         from trader.features.pipeline import FeaturePipeline
+        from trader.features.regime import RegimeClassifier
 
         assert self._candle_store is not None
 
@@ -427,16 +460,18 @@ class TradingApplication:
             health_checker=self._health_checker,
             interval_s=_FEATURE_INTERVAL,
         )
+        self._regime_classifier = RegimeClassifier()
 
         task = asyncio.create_task(
             self._feature_pipeline.run(
-                symbols=_SYMBOLS,
+                symbols=_SYMBOLS,  # fallback; screener overrides at runtime
                 intervals=[_WS_INTERVAL],
+                symbol_source=self._screener,  # dynamic symbol list
             ),
             name="feature-pipeline",
         )
         self._background_tasks.append(task)
-        log.info("feature_pipeline.started")
+        log.info("feature_pipeline.started", parallel=True)
 
     async def _start_strategy_loop(self) -> None:
         """Run strategy ensemble → RiskManager → ExecutionEngine."""
@@ -476,69 +511,87 @@ class TradingApplication:
 
         _balance_tick: int = 0
 
+        async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
+            """Evaluate one symbol: features → regime → ensemble → execution."""
+            if self._feature_pipeline is None:
+                return
+
+            vec = self._feature_pipeline.latest(symbol, _WS_INTERVAL)
+            if vec is None:
+                return
+
+            closes = (
+                self._candle_store.closes(symbol, _WS_INTERVAL, 1)
+                if self._candle_store
+                else []
+            )
+            if not closes:
+                return
+            current_price = closes[-1]
+
+            # Classify regime
+            regime_ctx = None
+            if self._regime_classifier is not None:
+                try:
+                    regime_ctx = self._regime_classifier.classify(vec)
+                except Exception as exc:
+                    log.warning("strategy_loop.regime_error", symbol=symbol, error=str(exc))
+
+            # Strategy ensemble
+            try:
+                proposal = self._strategy_ensemble.evaluate_all(
+                    feature_vector=vec,
+                    current_price=current_price,
+                    available_balance_usd=float(balance),
+                )
+            except Exception as exc:
+                log.warning("strategy_loop.ensemble_error", symbol=symbol, error=str(exc))
+                return
+
+            if proposal is None:
+                return
+
+            # ExecutionEngine: RiskManager → order (or shadow log)
+            if self._execution_engine is not None:
+                try:
+                    await self._execution_engine.submit(
+                        proposal=proposal,
+                        capital=capital,
+                        available_balance=balance,
+                        feature_vector=vec,
+                        regime_context=regime_ctx,
+                    )
+                except Exception as exc:
+                    log.warning("strategy_loop.execution_error", symbol=symbol, error=str(exc))
+
         async def strategy_loop() -> None:
             nonlocal _balance_tick
 
             while not self._shutdown_event.is_set():
                 # Refresh balance every N iterations
                 _balance_tick += 1
-                refresh_every = max(
-                    1,
-                    int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL),
-                )
+                refresh_every = max(1, int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL))
                 if _balance_tick % refresh_every == 0:
                     await self._refresh_balance()
 
                 balance = self._cached_balance
-                capital = balance  # treat available balance as capital proxy
+                capital = balance
 
-                if self._feature_pipeline is not None:
-                    for symbol in _SYMBOLS:
-                        vec = self._feature_pipeline.latest(symbol, _WS_INTERVAL)
-                        if vec is None:
-                            continue
+                # Get current active symbols from screener (dynamic)
+                active_symbols = (
+                    self._screener.active_symbols
+                    if self._screener is not None
+                    else _SYMBOLS
+                )
 
-                        closes = (
-                            self._candle_store.closes(symbol, _WS_INTERVAL, 1)
-                            if self._candle_store
-                            else []
-                        )
-                        if not closes:
-                            continue
-                        current_price = closes[-1]
-
-                        try:
-                            proposal = self._strategy_ensemble.evaluate_all(
-                                feature_vector=vec,
-                                current_price=current_price,
-                                available_balance_usd=float(balance),
-                            )
-                        except Exception as exc:
-                            log.warning(
-                                "strategy_loop.ensemble_error",
-                                symbol=symbol,
-                                error=str(exc),
-                            )
-                            continue
-
-                        if proposal is None:
-                            continue
-
-                        # Send through RiskManager → ExecutionEngine
-                        if self._execution_engine is not None:
-                            try:
-                                await self._execution_engine.submit(
-                                    proposal=proposal,
-                                    capital=capital,
-                                    available_balance=balance,
-                                    feature_vector=vec,
-                                )
-                            except Exception as exc:
-                                log.warning(
-                                    "strategy_loop.execution_error",
-                                    symbol=symbol,
-                                    error=str(exc),
-                                )
+                # Analyse ALL symbols in parallel
+                await asyncio.gather(
+                    *[
+                        process_symbol(symbol, balance, capital)
+                        for symbol in active_symbols
+                    ],
+                    return_exceptions=True,
+                )
 
                 try:
                     await asyncio.wait_for(
@@ -651,8 +704,14 @@ class TradingApplication:
             await self._start_telegram_bot()
 
             # Market data pipeline
-            await self._seed_candle_store()
-            await self._start_public_ws()
+            # 1. Screen market to get dynamic symbol list
+            active_symbols = await self._start_screener()
+
+            # 2. Seed historical data for all selected symbols
+            await self._seed_candle_store(symbols=active_symbols)
+
+            # 3. Start WS with the screened symbol list
+            await self._start_public_ws(symbols=active_symbols)
 
             # Give WS a moment to connect before starting strategies
             await asyncio.sleep(3.0)

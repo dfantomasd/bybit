@@ -26,6 +26,7 @@ from trader.domain.models import (
     FeatureVector,
     InstrumentInfo,
     OrderIntent,
+    RegimeContext,
     RiskDecision,
     TradeProposal,
 )
@@ -140,6 +141,7 @@ class ExecutionEngine:
         capital: Decimal,
         available_balance: Decimal,
         feature_vector: FeatureVector | None = None,
+        regime_context: RegimeContext | None = None,
     ) -> RiskDecision | None:
         """Evaluate and (optionally) execute a trade proposal.
 
@@ -186,6 +188,7 @@ class ExecutionEngine:
                 available_balance=available_balance,
                 instrument_info=instrument_info,
                 feature_vector=feature_vector,
+                regime_context=regime_context,
             )
         except Exception as exc:
             log.error(
