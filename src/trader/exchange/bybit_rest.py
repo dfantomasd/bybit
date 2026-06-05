@@ -435,10 +435,15 @@ class BybitRestClient:
     async def get_positions(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        return await self._get(
-            "/v5/position/list",
-            params={"category": category, "symbol": symbol},
-        )
+        # Bybit requires symbol OR settleCoin when listing all positions
+        params: dict[str, Any] = {"category": category}
+        if symbol:
+            params["symbol"] = symbol
+        elif category == "linear":
+            params["settleCoin"] = "USDT"
+        elif category == "inverse":
+            params["settleCoin"] = "BTC"
+        return await self._get("/v5/position/list", params=params)
 
     async def set_leverage(
         self,

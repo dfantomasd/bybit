@@ -170,7 +170,13 @@ class TelegramMonitorBot:
         await app.start()
         if app.updater is None:
             raise RuntimeError("Telegram updater was not created")
-        await app.updater.start_polling(drop_pending_updates=True)
+        # allowed_updates=[] means "all types"; error_callback suppresses the
+        # one-time Conflict error that fires during rolling redeploys on Render
+        # (old instance is still alive for a few seconds while new one starts).
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            error_callback=self._polling_error_callback,
+        )
         self._app = app
         log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
 
@@ -184,6 +190,18 @@ class TelegramMonitorBot:
         await app.stop()
         await app.shutdown()
         log.info("telegram_bot_stopped")
+
+    def _polling_error_callback(self, error: Exception) -> None:
+        """Suppress Conflict errors during rolling redeploys; log the rest."""
+        from telegram.error import Conflict, NetworkError
+        if isinstance(error, Conflict):
+            # Expected during Render rolling deploys — old instance displaced
+            log.debug("telegram_polling_conflict_suppressed")
+            return
+        if isinstance(error, NetworkError):
+            log.warning("telegram_polling_network_error", error=str(error))
+            return
+        log.error("telegram_polling_error", error=str(error))
 
     # ------------------------------------------------------------------
     # Push notifications (called by app.py)
