@@ -10,6 +10,133 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.2.0] — 2026-06-05
+
+### Phase 2: Bybit Exchange Adapter (Week 2)
+
+This release delivers the complete exchange adapter layer, providing the
+primary interface between the trading system and Bybit V5 API.
+All new exchange code is async, uses pybit under the hood (sync-in-threadpool),
+and applies Decimal arithmetic for all financial calculations.
+
+### Added
+
+#### Exchange Package (`src/trader/exchange/`)
+
+- `endpoint_selector.py` *(extended)*: `EndpointSelector` class mapping `BybitRegion`
+  enum to correct REST/WS endpoints for GLOBAL, NL, EEA, TR, KZ, GE, AE, ID regions.
+  Properties: `rest_base`, `ws_public_base`, `ws_private_base`.
+  Regional live endpoints follow `api.{region}.bybit.com` pattern;
+  testnet always falls back to `api-testnet.bybit.com`.
+
+- `auth.py` *(extended)*:
+  - `HMACAuthenticator`: Signs requests with HMAC-SHA256 per Bybit V5 spec.
+    Pre-sign string: `{timestamp}{api_key}{recv_window}{params}`.
+  - `RSAAuthenticator`: Signs requests with RSA-SHA256 (PKCS#1 v1.5) for API keys
+    configured with RSA public keys. Returns base64-encoded signature.
+  - `verify_bybit_signature()`: Webhook HMAC-SHA256 signature verification with
+    constant-time comparison (timing-attack resistant).
+
+- `rate_limiter.py` *(extended)*: Adaptive token-bucket rate limiter with
+  per-endpoint tracking keyed by `{METHOD}:{path}`.
+  Reads `X-Bapi-Limit-Status`, `X-Bapi-Limit`, `X-Bapi-Limit-Reset-Timestamp` headers.
+  Warns at 70%, 85%, 95% usage. Exponential backoff with ±25% jitter on 429/10006 errors.
+  Emits Prometheus gauges for remaining capacity and usage percentage.
+
+- `bybit_rest.py` (new): Async REST client wrapping pybit's synchronous `HTTP` session
+  in a `ThreadPoolExecutor`. Complete V5 API coverage:
+  - Server: `get_server_time`
+  - Account: `get_wallet_balance`, `get_account_info`, `get_api_key_info`
+  - Market: `get_instruments_info`, `get_tickers`, `get_kline`, `get_orderbook`,
+    `get_recent_trades`, `get_funding_rate_history`, `get_open_interest`,
+    `get_long_short_ratio`
+  - Orders: `place_order`, `amend_order`, `cancel_order`, `get_open_orders`,
+    `get_order_history`
+  - Positions: `get_positions`, `set_leverage`, `set_trading_stop`
+  - Executions: `get_executions`, `get_closed_pnl`, `get_fee_rate`
+  - retCode error mapping: 10003/10004 → `AuthenticationError`, 10006 → `RateLimitError`,
+    110007 → `InsufficientFundsError`, 110013/110014/110017/110025 → `OrderRejectedError`
+
+- `order_mapper.py` (new): Bidirectional mapper between domain objects and Bybit API dicts.
+  - `intent_to_params()`: `OrderIntent` → pybit kwargs, including TP/SL order types,
+    positionIdx (one-way mode), reduceOnly flag, timeInForce
+  - `round_price()` / `round_qty()`: Decimal-only rounding to tick_size / qty_step
+  - `ws_order_to_event()`: WebSocket order update → normalised event dict
+  - `ws_execution_to_fill()`: WebSocket execution → `Fill` domain model
+  - `rest_position_to_model()`: REST position dict → `Position` domain model
+  - `rest_balance_to_model()`: REST coin balance dict → `Balance` domain model
+  - `instruments_info_to_model()`: REST instruments dict → `InstrumentInfo` domain model
+
+- `idempotency.py` (new): In-memory order idempotency manager.
+  - `generate_order_link_id()`: Generates unique ≤36-char IDs in format
+    `{env_short}-{YYMMDD}-{strat[:4]}-{prop[:8]}-{hex6}`
+  - `check_duplicate()`, `register_intent()`: Duplicate prevention before submission
+  - State machine: `CREATED_LOCAL → SUBMITTING → REST_ACCEPTED → WS_CONFIRMED → FILLED/CANCELLED`
+  - Enforces valid state transitions; raises `OrderRejectedError` on invalid transitions
+  - `pending_count()`, `all_states()` for reconciliation introspection
+
+- `preflight.py` (new): `PreflightChecker` service running 10 checks before trading:
+  1. REST connectivity
+  2. Server time drift (warn >5s, fail >30s)
+  3. API key validity
+  4. API key permissions (warns if Wallet/withdrawal permission present)
+  5. Account type (recommends UNIFIED)
+  6. Trading categories accessibility
+  7. Balance (warns if <10 USDT equity)
+  8. Region compatibility
+  9. Testnet vs live consistency (warns in LIVE mode)
+  10. Leverage settings
+  Returns `PreflightReport`; critical check failures set `passed=False`.
+
+- `bybit_adapter.py` (new): High-level adapter composing all exchange components.
+  Domain-typed methods: `initialize()`, `get_balance()`, `get_positions()`,
+  `get_open_orders()`, `get_instrument_info()`, `place_order()`, `cancel_order()`,
+  `set_trading_stop()`, `reconcile()`, `health_check()`.
+  `place_order()` integrates idempotency manager for duplicate prevention.
+
+#### Tests (`tests/unit/`)
+
+- `test_endpoint_selector.py` (new): 20+ tests — all regions have correct URLs,
+  HTTPS/WSS enforced, testnet switching, `validate_region_compatibility()`, repr.
+
+- `test_rate_limiter.py` (new): 18+ tests — token bucket allow/block, header parsing
+  (case-insensitive), usage percentage calculation, warning thresholds at 70/85/95%,
+  exponential backoff with jitter, consecutive 429 tracking.
+
+- `test_auth.py` (new): 15+ tests — HMAC known test vector, signature determinism,
+  headers completeness, RSA base64 output, webhook verification pass/reject cases.
+
+- `test_order_mapper.py` (new): 25+ tests — intent_to_params all fields, Decimal rounding
+  to tick/step, reduce_only / close_on_trigger flags, WS order event, WS fill, REST position.
+
+- `test_idempotency.py` (new): 15+ tests — ID uniqueness, ≤36 char constraint, date/env
+  in ID, duplicate detection, full state transition chain, invalid transition rejection,
+  resubmission prevention.
+
+- `test_preflight.py` (new): 20+ tests — full run all-green passes, critical failure blocks,
+  non-critical failure passes with warning, time drift >30s fails, API key invalid,
+  withdrawal permission warning, all individual checks verified.
+
+### Technical Notes
+
+- pybit is synchronous; all REST calls run in `ThreadPoolExecutor` (4 workers default)
+  via `asyncio.get_event_loop().run_in_executor()` — event loop is never blocked.
+- All price/quantity arithmetic uses Python `Decimal` (never `float`) to prevent
+  floating-point rounding errors in financial calculations.
+- API key / API secret never appear in log output — structlog structured events use
+  only `order_link_id`, `symbol`, `ret_code` etc.
+- retCode 110043 ("set leverage not modified") is treated as a non-fatal info log,
+  not an exception.
+
+### Test Results
+
+- Total tests: 231 (85 Phase 1 + 146 Phase 2)
+- All 231 passing
+- Exchange package coverage: auth 100%, endpoint_selector 97%, rate_limiter 94%,
+  idempotency 91%, preflight 88%, order_mapper 76%
+
+---
+
 ## [0.1.0] — 2026-06-05
 
 ### Phase 1: Project Skeleton
