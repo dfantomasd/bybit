@@ -127,6 +127,7 @@ class TradingApplication:
             bybit_rest_url=bybit_base,
             trading_mode=self._settings.TRADING_MODE,
             system_status=self._status,
+            model_enabled=self._settings.LLM_ENABLED,
         )
 
         result = await self._health_checker.run_preflight()

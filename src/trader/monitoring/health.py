@@ -30,7 +30,7 @@ _DB_TIMEOUT_S = 3.0
 _REDIS_TIMEOUT_S = 2.0
 _BYBIT_TIMEOUT_S = 5.0
 _MODEL_STALE_THRESHOLD_S = 3600.0  # 1 hour
-_FEATURE_STALE_THRESHOLD_S = 10.0  # 10 seconds
+_FEATURE_STALE_THRESHOLD_S = 120.0  # 2 minutes — allows pipeline warm-up on startup
 
 
 class HealthChecker:
@@ -51,6 +51,7 @@ class HealthChecker:
         bybit_rest_url: str = "https://api.bybit.com",
         trading_mode: TradingMode = TradingMode.TESTNET,
         system_status: SystemStatus = SystemStatus.STOPPED,
+        model_enabled: bool = False,
     ) -> None:
         self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._redis_url = redis_url.strip().strip("\"'")
@@ -59,6 +60,7 @@ class HealthChecker:
         self._bybit_rest_url = bybit_rest_url
         self._trading_mode = trading_mode
         self._system_status = system_status
+        self._model_enabled = model_enabled
 
         # Mutable state updated by the trading system
         self._ws_connected: bool = False
@@ -215,20 +217,27 @@ class HealthChecker:
             messages.append("PostgreSQL is unreachable")
         if not redis_ok and self._redis_required:
             messages.append("Redis is unreachable")
+        if not redis_ok and not self._redis_required:
+            messages.append("Redis unavailable (optional)")
         if not bybit_ok and self._bybit_required:
             messages.append("Bybit REST API is unreachable")
+        if not bybit_ok and not self._bybit_required:
+            messages.append("Bybit REST unavailable (geo-restricted or optional)")
         if not ws_ok:
             messages.append("WebSocket feed is stale or disconnected")
-        if not model_ok:
+        if self._model_enabled and not model_ok:
             messages.append("Model has not produced inferences recently")
         if not feat_ok:
             messages.append("Feature pipeline has not produced features recently")
 
         # Determine overall status
+        # Non-required components (redis, bybit_rest) and model (when disabled)
+        # are excluded from the critical path.
         redis_critical_ok = redis_ok or not self._redis_required
         bybit_critical_ok = bybit_ok or not self._bybit_required
+        model_critical_ok = model_ok if self._model_enabled else True
         critical_ok = pg_ok and redis_critical_ok and bybit_critical_ok
-        if critical_ok and ws_ok and model_ok and feat_ok:
+        if critical_ok and ws_ok and feat_ok and model_critical_ok:
             overall = "healthy"
         elif critical_ok:
             overall = "degraded"

@@ -315,12 +315,11 @@ class TelegramMonitorBot:
 
         lines += [
             "",
-            self._component_line("Postgres", health.postgres, health.postgres_latency_ms),
-            self._component_line("Redis", health.redis, health.redis_latency_ms),
-            self._component_line("Bybit REST", health.bybit_rest, health.bybit_rest_latency_ms),
-            self._component_line("Bybit WS", health.bybit_ws, None),
-            self._component_line("Features", health.features_fresh, None),
-            self._component_line("Model", health.model_fresh, None),
+            self._component_line("Postgres", health.postgres, health.postgres_latency_ms, required=True),
+            self._component_line("Redis", health.redis, health.redis_latency_ms, required=False),
+            self._component_line("Bybit REST", health.bybit_rest, health.bybit_rest_latency_ms, required=False),
+            self._component_line("Bybit WS", health.bybit_ws, None, required=True),
+            self._component_line("Features", health.features_fresh, None, required=True),
         ]
         if health.messages:
             lines += ["", "<b>Alerts</b>"]
@@ -629,8 +628,13 @@ class TelegramMonitorBot:
             + ctrl_section
         )
 
-    def _component_line(self, name: str, ok: bool, latency_ms: float | None) -> str:
-        icon = "✅" if ok else "❌"
+    def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
+        if ok:
+            icon = "✅"
+        elif required:
+            icon = "❌"
+        else:
+            icon = "⚠️"
         s = f"{icon} {name}"
         if latency_ms is not None:
             s += f" <code>{latency_ms:.0f}ms</code>"
