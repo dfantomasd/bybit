@@ -1,8 +1,10 @@
 version: "3.9"
 
 # Minimal always-on deployment for the current safe monitoring MVP.
-# Starts only the app, PostgreSQL, and Redis. No trainer/reporter/monitoring
-# services are included because those modules are not implemented yet.
+# Starts the app and Redis. PostgreSQL is optional: use an external POSTGRES_DSN
+# such as Supabase by default, or start the local database with the local-db
+# profile. No trainer/reporter/monitoring services are included because those
+# modules are not implemented yet.
 
 networks:
   backend:
@@ -25,8 +27,6 @@ services:
     env_file:
       - .env
     depends_on:
-      postgres:
-        condition: service_healthy
       redis:
         condition: service_healthy
     networks:
@@ -50,6 +50,7 @@ services:
         max-file: "3"
 
   postgres:
+    profiles: ["local-db"]
     image: postgres:16-alpine
     container_name: trader-postgres
     restart: unless-stopped

@@ -54,8 +54,15 @@ For the current safe monitoring MVP, use the minimal compose file instead:
 docker compose -f docker-compose.mini.yml up -d --build
 ```
 
-This starts only `trader-core`, PostgreSQL, and Redis. Telegram commands are
-read-only: `/status`, `/balance`, `/positions`, and `/help`.
+This starts only `trader-core` and Redis by default, and expects `POSTGRES_DSN`
+to point at an external PostgreSQL database such as Supabase. Telegram commands
+are read-only: `/status`, `/balance`, `/positions`, and `/help`.
+
+To use the bundled local PostgreSQL service instead:
+
+```bash
+docker compose -f docker-compose.mini.yml --profile local-db up -d --build
+```
 
 ### 4. Verify
 
