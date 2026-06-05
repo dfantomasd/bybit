@@ -10,6 +10,94 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
+## [0.3.0] — 2026-06-05
+
+### Phase 3: WebSocket Layer, Order State Machine, Reconciliation & Chaos Tests (Week 3)
+
+This release delivers the complete WebSocket layer, order lifecycle state machine,
+reconciliation service, event bus, and orderbook analytics. All new code is async-native.
+
+### Added
+
+#### Exchange Package (`src/trader/exchange/`)
+
+- `bybit_ws_public.py` (new): `BybitPublicWebSocket` — manages Bybit V5 public
+  WebSocket connections (orderbook, trades, ticker, kline, liquidations).
+  Features: automatic reconnect, heartbeat/ping every 20s with 5s pong timeout,
+  watchdog reconnect after 30s silence, local orderbook with snapshot+delta merge,
+  sequence number validation (gap detection → invalidation), latency measurement,
+  typed event emission to asyncio.Queue, reconnect counter metric.
+
+- `bybit_ws_private.py` (new): `BybitPrivateWebSocket` — manages Bybit V5 private
+  WebSocket connections (order, execution, position, wallet).
+  Features: HMAC-SHA256 auth on connect, reconnect with re-auth, typed event emission
+  (OrderUpdateEvent, PositionUpdateEvent, BalanceUpdateEvent), event deduplication by
+  orderId+updateTime, audit logging via structlog.
+
+- `state_machine.py` (new): `OrderStateMachine` + `OrderStateStore` — complete order
+  lifecycle state machine with 11 states and validated transition graph.
+  `VALID_TRANSITIONS` dict covers all OrderStatus values.
+  `OrderStateStore` provides asyncio.Lock-protected in-memory store with `create`,
+  `get`, `transition`, `get_all_active`, `get_by_status` operations.
+  `InvalidStateTransitionError` raised on illegal transitions.
+
+- `reconciliation.py` (new): `ReconciliationService` — periodic reconciliation of
+  local state vs Bybit exchange. Runs every 15-60s (configurable) and after every
+  reconnect. Checks: positions, orders, balance, stop-loss presence.
+  Triggers safe mode on positions without SL or unknown positions.
+  `ReconciliationDiff` dataclass captures structured diff output.
+
+- `reconnect_supervisor.py` (new): `ReconnectSupervisor` — WebSocket reconnect lifecycle
+  manager with exponential backoff (1→2→4→…→60s), ±20% jitter, max 20 reconnects/hour,
+  10s settle window blocking new trade entries, alert on >3 reconnects in 5 min,
+  downtime tracking, Prometheus metrics.
+
+#### Data Package (`src/trader/data/`)
+
+- `__init__.py` (new): Package init.
+
+- `event_bus.py` (new): `EventBus` — in-process async event bus with 5 named queues
+  (market_data, execution, risk, persistence, system). Features: bounded queues
+  (configurable maxsize), non-blocking publish, dropped event counter,
+  dead letter queue for critical events, graceful shutdown with drain, async generator
+  consumer (`subscribe`), queue size and drop count introspection.
+
+- `orderbook.py` (new): `LocalOrderBook` + analytics utilities.
+  `LocalOrderBook`: snapshot+delta management, sequence gap detection, best bid/ask,
+  mid-price, spread, imbalance. Analytics: `compute_microprice`,
+  `compute_weighted_midprice`, `compute_depth_imbalance`, `compute_top_n_imbalance`,
+  `detect_abnormal_spread`.
+
+#### Tests
+
+- `tests/unit/test_state_machine.py` (new): 22 tests covering all valid transitions,
+  terminal states, invalid transition errors, history recording, timing, and
+  OrderStateStore CRUD operations.
+
+- `tests/unit/test_orderbook.py` (new): 19 tests covering snapshot init, delta updates,
+  zero-qty removal, sequence gap invalidation, snapshot reset, best bid/ask,
+  mid-price, spread, imbalance, microprice, weighted midprice, abnormal spread detection.
+
+- `tests/unit/test_event_bus.py` (new): 9 tests covering publish/consume, bounded queue
+  dropping, critical events to dead letter queue, drain, queue sizes, drop counters.
+
+- `tests/unit/test_reconnect_supervisor.py` (new): 7 tests covering backoff sequence,
+  jitter bounds, max cap, entry blocking, stability, downtime tracking, reconnect count.
+
+- `tests/chaos/test_ws_chaos.py` (new): 10 chaos scenarios (each run as both async and
+  sync wrapper = 20 test functions) covering snapshot→delta flow, sequence gap
+  invalidation, reconnect rebuild, stale WS reconnect, duplicate event idempotency,
+  queue full dropping, reconciliation after reconnect, position-without-SL safe mode,
+  unknown order detection.
+
+- `tests/chaos/__init__.py` (new): Package init.
+
+### Changed
+
+- Total test count: 231 → **309** (78 new tests added)
+
+---
+
 ## [0.2.0] — 2026-06-05
 
 ### Phase 2: Bybit Exchange Adapter (Week 2)
