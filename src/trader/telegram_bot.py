@@ -1,30 +1,101 @@
-"""Read-only Telegram monitoring bot.
+"""Telegram bot — monitoring + operator control.
 
-The bot intentionally exposes observability commands only. It must never submit,
-cancel, amend, or close orders.
+Observability commands (anyone in allowed_chat_ids):
+  /status    — system health
+  /balance   — wallet balance
+  /positions — open positions + unrealised PnL
+  /signals   — last 10 strategy signals
+  /regime    — current market regime per symbol
+  /symbols   — active symbols from screener
+  /pnl       — recent closed PnL
+
+Control commands (require /confirm for dangerous ones):
+  /pause              — pause new entries (keep existing positions)
+  /resume             — resume after pause
+  /shadow on|off      — toggle shadow mode
+  /risk conservative|moderate|aggressive — change risk profile
+  /stop               — emergency full stop (requires /confirm)
+
+Push notifications (sent to subscribed chats):
+  • Signal generated
+  • Position opened / closed
+  • Circuit breaker triggered
+  • Risk profile changed
+
+Safety:
+  - Control commands only affect new-entry logic and shadow mode.
+  - The bot can NEVER submit, cancel, amend, or close orders directly.
+  - All financial operations still go through RiskManager + ExecutionEngine.
 """
 from __future__ import annotations
 
+import asyncio
+from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from decimal import Decimal
 from typing import Any
 
+import structlog
 from telegram import Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CommandHandler, ContextTypes
 
+from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
-from trader.monitoring.logging import get_logger
 
-log = get_logger(__name__)
-
+log = structlog.get_logger(__name__)
 
 AdapterFactory = Callable[[], Any | None]
+HealthProvider = Callable[[], Awaitable[HealthStatus]]
 
 
-@dataclass(frozen=True)
+# ---------------------------------------------------------------------------
+# Signal log entry (lightweight — no circular import on TradeProposal)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class SignalEntry:
+    timestamp: datetime
+    symbol: str
+    side: str            # "BUY" or "SELL"
+    confidence: float
+    regime: str          # MarketRegime.value
+    rationale: str
+    shadow: bool         # True = not executed
+
+
+# ---------------------------------------------------------------------------
+# Control interface (callbacks wired from app.py)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class TradingController:
+    """Callbacks that the bot can call to control the trading system."""
+
+    pause: Callable[[], Awaitable[None]]
+    resume: Callable[[], Awaitable[None]]
+    set_shadow: Callable[[bool], Awaitable[None]]
+    set_risk_profile: Callable[[RiskProfile], Awaitable[None]]
+    emergency_stop: Callable[[], Awaitable[None]]
+
+    # Read-only state
+    is_paused: Callable[[], bool]
+    is_shadow: Callable[[], bool]
+    current_profile: Callable[[], str]
+    active_symbols: Callable[[], list[str]]
+    regime_for: Callable[[str], str | None]      # symbol → regime string
+    signal_log: deque[SignalEntry] = field(default_factory=lambda: deque(maxlen=20))
+
+
+# ---------------------------------------------------------------------------
+# Config
+# ---------------------------------------------------------------------------
+
+@dataclass
 class TelegramBotConfig:
-    """Runtime configuration for the read-only Telegram bot."""
+    """Runtime configuration for the Telegram bot."""
 
     token: str
     allowed_chat_ids: set[int]
@@ -34,51 +105,78 @@ class TelegramBotConfig:
     default_category: str = "linear"
 
 
+# ---------------------------------------------------------------------------
+# Bot
+# ---------------------------------------------------------------------------
+
 class TelegramMonitorBot:
-    """Small read-only Telegram bot for operator visibility."""
+    """Telegram bot with monitoring and operator control."""
 
     def __init__(
         self,
         config: TelegramBotConfig,
-        health_provider: Callable[[], Awaitable[HealthStatus]],
+        health_provider: HealthProvider,
         adapter_factory: AdapterFactory,
+        controller: TradingController | None = None,
     ) -> None:
         self._config = config
         self._health_provider = health_provider
         self._adapter_factory = adapter_factory
+        self._controller = controller
         self._app: Application[Any, Any, Any, Any, Any, Any] | None = None
+
+        # Subscribed chat IDs for push notifications (union of allowed_chat_ids
+        # that have typed /start in this session)
+        self._subscribed: set[int] = set()
+
+        # Pending confirmations: chat_id → (action_name, coroutine_factory)
+        self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     @property
     def enabled(self) -> bool:
         return bool(self._config.token and self._config.allowed_chat_ids)
 
     async def start(self) -> None:
-        """Start Telegram polling in the current event loop."""
         if not self.enabled:
             log.info("telegram_bot_disabled")
             return
 
         app = Application.builder().token(self._config.token).build()
+
+        # Observability
         app.add_handler(CommandHandler("start", self._cmd_start))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("status", self._cmd_status))
         app.add_handler(CommandHandler("balance", self._cmd_balance))
         app.add_handler(CommandHandler("positions", self._cmd_positions))
+        app.add_handler(CommandHandler("signals", self._cmd_signals))
+        app.add_handler(CommandHandler("regime", self._cmd_regime))
+        app.add_handler(CommandHandler("symbols", self._cmd_symbols))
+        app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+
+        # Control
+        app.add_handler(CommandHandler("pause", self._cmd_pause))
+        app.add_handler(CommandHandler("resume", self._cmd_resume))
+        app.add_handler(CommandHandler("shadow", self._cmd_shadow))
+        app.add_handler(CommandHandler("risk", self._cmd_risk))
+        app.add_handler(CommandHandler("stop", self._cmd_stop))
+        app.add_handler(CommandHandler("confirm", self._cmd_confirm))
 
         await app.initialize()
         await app.start()
         if app.updater is None:
             raise RuntimeError("Telegram updater was not created")
         await app.updater.start_polling(drop_pending_updates=True)
-
         self._app = app
         log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
 
     async def stop(self) -> None:
-        """Stop Telegram polling and release resources."""
         if self._app is None:
             return
-
         app = self._app
         self._app = None
         if app.updater is not None:
@@ -87,11 +185,76 @@ class TelegramMonitorBot:
         await app.shutdown()
         log.info("telegram_bot_stopped")
 
+    # ------------------------------------------------------------------
+    # Push notifications (called by app.py)
+    # ------------------------------------------------------------------
+
+    async def notify(self, text: str) -> None:
+        """Send a push message to all subscribed chats."""
+        if self._app is None:
+            return
+        for chat_id in list(self._subscribed):
+            try:
+                await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                log.warning("telegram_notify_failed", chat_id=chat_id, error=str(exc))
+
+    async def notify_signal(self, entry: SignalEntry) -> None:
+        icon = "🟢" if entry.side == "BUY" else "🔴"
+        mode = "SHADOW" if entry.shadow else "LIVE"
+        text = (
+            f"{icon} <b>Signal [{mode}]</b>\n"
+            f"{entry.symbol} {entry.side} | conf: <code>{entry.confidence:.2f}</code>\n"
+            f"Regime: <code>{entry.regime}</code>\n"
+            f"{entry.rationale}"
+        )
+        await self.notify(text)
+
+    async def notify_position_opened(
+        self, symbol: str, side: str, qty: Decimal, price: Decimal
+    ) -> None:
+        icon = "🟢" if side == "BUY" else "🔴"
+        await self.notify(
+            f"{icon} <b>Position opened</b>\n"
+            f"{symbol} {side} {qty} @ {price}"
+        )
+
+    async def notify_position_closed(
+        self, symbol: str, realized_pnl: Decimal
+    ) -> None:
+        icon = "✅" if realized_pnl >= 0 else "❌"
+        await self.notify(
+            f"{icon} <b>Position closed</b>\n"
+            f"{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>"
+        )
+
+    async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
+        await self.notify(
+            f"⚠️ <b>Circuit breaker</b>\n"
+            f"Type: <code>{breaker_type}</code>\n"
+            f"Reason: {reason}"
+        )
+
+    async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
+        await self.notify(
+            f"⚙️ <b>Risk profile changed</b>\n"
+            f"{old_profile} → <code>{new_profile}</code>"
+        )
+
+    # ------------------------------------------------------------------
+    # Auth helpers
+    # ------------------------------------------------------------------
+
     async def _authorised(self, update: Update) -> bool:
         chat = update.effective_chat
         if chat is None or chat.id not in self._config.allowed_chat_ids:
             if update.effective_message is not None:
-                suffix = f" Chat ID: {chat.id}" if chat is not None else ""
+                suffix = f" Chat ID: {chat.id}" if chat else ""
                 await update.effective_message.reply_text(f"Access denied.{suffix}")
             log.warning("telegram_unauthorised_chat", chat_id=chat.id if chat else None)
             return False
@@ -100,15 +263,23 @@ class TelegramMonitorBot:
     async def _reply(self, update: Update, text: str) -> None:
         if update.effective_message is not None:
             await update.effective_message.reply_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
+                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
             )
+
+    def _chat_id(self, update: Update) -> int | None:
+        return update.effective_chat.id if update.effective_chat else None
+
+    # ------------------------------------------------------------------
+    # Observability commands
+    # ------------------------------------------------------------------
 
     async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid:
+            self._subscribed.add(cid)
         await self._reply(update, self._help_text())
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -121,116 +292,346 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
-
         try:
             health = await self._health_provider()
         except Exception as exc:
-            log.warning("telegram_status_failed", error=str(exc))
-            await self._reply(update, f"<b>Status</b>\nHealth check failed: <code>{exc}</code>")
+            await self._reply(update, f"<b>Status</b>\nCheck failed: <code>{exc}</code>")
             return
 
+        ctrl = self._controller
         lines = [
-            "<b>Status</b>",
+            "<b>System Status</b>",
             f"Overall: <code>{health.overall}</code>",
             f"System: <code>{health.system_status.value}</code>",
             f"Mode: <code>{health.trading_mode.value}</code>",
-            f"Risk: <code>{self._config.risk_profile}</code>",
             f"Testnet: <code>{str(self._config.bybit_use_testnet).lower()}</code>",
+        ]
+        if ctrl:
+            paused = " ⏸ PAUSED" if ctrl.is_paused() else ""
+            shadow = " (SHADOW)" if ctrl.is_shadow() else ""
+            lines.append(f"Risk: <code>{ctrl.current_profile()}</code>{shadow}{paused}")
+        else:
+            lines.append(f"Risk: <code>{self._config.risk_profile}</code>")
+
+        lines += [
             "",
             self._component_line("Postgres", health.postgres, health.postgres_latency_ms),
             self._component_line("Redis", health.redis, health.redis_latency_ms),
             self._component_line("Bybit REST", health.bybit_rest, health.bybit_rest_latency_ms),
             self._component_line("Bybit WS", health.bybit_ws, None),
+            self._component_line("Features", health.features_fresh, None),
+            self._component_line("Model", health.model_fresh, None),
         ]
         if health.messages:
-            lines.append("")
-            lines.append("<b>Messages</b>")
-            lines.extend(f"- {message}" for message in health.messages[:6])
+            lines += ["", "<b>Alerts</b>"]
+            lines.extend(f"• {m}" for m in health.messages[:6])
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
             return
-
         adapter = self._adapter_factory()
         if adapter is None:
-            await self._reply(update, "Bybit adapter is not available yet.")
+            await self._reply(update, "Adapter not ready.")
             return
-
         try:
-            balance: Balance = await adapter.get_balance()
+            bal: Balance = await adapter.get_balance()
         except Exception as exc:
-            log.warning("telegram_balance_failed", error=str(exc))
-            await self._reply(update, f"<b>Balance</b>\nBybit request failed: <code>{exc}</code>")
+            await self._reply(update, f"<b>Balance</b>\nFailed: <code>{exc}</code>")
             return
-
         lines = [
-            "<b>Balance</b>",
-            f"Currency: <code>{balance.currency}</code>",
-            f"Wallet: <code>{balance.wallet_balance}</code>",
-            f"Available: <code>{balance.available_balance}</code>",
+            "<b>Balance (UNIFIED)</b>",
+            f"Currency: <code>{bal.currency}</code>",
+            f"Wallet:   <code>{bal.wallet_balance}</code>",
+            f"Available:<code>{bal.available_balance}</code>",
         ]
-        if balance.margin_balance is not None:
-            lines.append(f"Margin: <code>{balance.margin_balance}</code>")
-        if balance.unrealised_pnl:
-            lines.append(f"Unrealised PnL: <code>{balance.unrealised_pnl}</code>")
+        if bal.margin_balance is not None:
+            lines.append(f"Margin:   <code>{bal.margin_balance}</code>")
+        if bal.unrealised_pnl:
+            pnl_icon = "📈" if bal.unrealised_pnl >= 0 else "📉"
+            lines.append(f"Unreal PnL: {pnl_icon} <code>{bal.unrealised_pnl:+}</code>")
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
             return
-
         adapter = self._adapter_factory()
         if adapter is None:
-            await self._reply(update, "Bybit adapter is not available yet.")
+            await self._reply(update, "Adapter not ready.")
             return
-
         try:
             positions: list[Position] = await adapter.get_positions(self._config.default_category)
         except Exception as exc:
-            log.warning("telegram_positions_failed", error=str(exc))
-            await self._reply(update, f"<b>Positions</b>\nBybit request failed: <code>{exc}</code>")
+            await self._reply(update, f"<b>Positions</b>\nFailed: <code>{exc}</code>")
             return
-
-        open_positions = [position for position in positions if position.size > 0]
-        if not open_positions:
+        open_pos = [p for p in positions if p.size > 0]
+        if not open_pos:
             await self._reply(update, "<b>Positions</b>\nNo open positions.")
             return
-
-        lines = ["<b>Positions</b>"]
-        for position in open_positions[:10]:
-            lines.extend(
-                [
-                    "",
-                    f"<b>{position.symbol}</b> {position.side.value}",
-                    f"Size: <code>{position.size}</code>",
-                    f"Entry: <code>{position.entry_price}</code>",
-                    f"Mark: <code>{position.mark_price}</code>",
-                    f"PnL: <code>{position.unrealised_pnl}</code>",
-                    f"Leverage: <code>{position.leverage}</code>",
-                ]
-            )
-        if len(open_positions) > 10:
-            lines.append(f"\nShowing 10 of {len(open_positions)} positions.")
+        lines = [f"<b>Open Positions ({len(open_pos)})</b>"]
+        for pos in open_pos[:10]:
+            pnl_icon = "📈" if pos.unrealised_pnl >= 0 else "📉"
+            side_icon = "🟢" if pos.side.value == "BUY" else "🔴"
+            lines += [
+                "",
+                f"{side_icon} <b>{pos.symbol}</b> {pos.side.value}",
+                f"  Size:  <code>{pos.size}</code>",
+                f"  Entry: <code>{pos.entry_price}</code>",
+                f"  Mark:  <code>{pos.mark_price}</code>",
+                f"  PnL:   {pnl_icon} <code>{pos.unrealised_pnl:+}</code>",
+                f"  Lev:   <code>{pos.leverage}x</code>",
+            ]
+            if pos.liquidation_price:
+                lines.append(f"  Liq:   <code>{pos.liquidation_price}</code>")
+        if len(open_pos) > 10:
+            lines.append(f"\n… +{len(open_pos) - 10} more")
         await self._reply(update, "\n".join(lines))
 
-    def _help_text(self) -> str:
-        return "\n".join(
-            [
-                "<b>Bybit AI Trader</b>",
-                "Read-only monitoring bot.",
+    async def _cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or not self._controller.signal_log:
+            await self._reply(update, "<b>Signals</b>\nNo signals yet.")
+            return
+        lines = ["<b>Recent Signals</b>"]
+        for s in list(self._controller.signal_log)[-10:]:
+            icon = "🟢" if s.side == "BUY" else "🔴"
+            mode = "shadow" if s.shadow else "live"
+            ts = s.timestamp.strftime("%H:%M:%S")
+            lines += [
                 "",
-                "/status - system health",
-                "/balance - Bybit wallet balance",
-                "/positions - open positions",
-                "/help - command list",
+                f"{icon} <b>{s.symbol}</b> {s.side} [{mode}] {ts}",
+                f"  Conf: <code>{s.confidence:.2f}</code>  Regime: <code>{s.regime}</code>",
+                f"  {s.rationale[:80]}",
             ]
+        await self._reply(update, "\n".join(lines))
+
+    async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Controller not available.")
+            return
+        symbols = self._controller.active_symbols()
+        if not symbols:
+            await self._reply(update, "<b>Regime</b>\nNo active symbols.")
+            return
+        _REGIME_ICONS = {
+            "BULL_TREND": "🐂", "BEAR_TREND": "🐻",
+            "SIDEWAYS": "↔️", "HIGH_VOLATILITY": "⚡",
+            "LOW_LIQUIDITY": "🔇", "EVENT_RISK": "⚠️", "UNCERTAIN": "❓",
+        }
+        lines = ["<b>Market Regime</b>"]
+        for sym in symbols:
+            regime = self._controller.regime_for(sym) or "UNKNOWN"
+            icon = _REGIME_ICONS.get(regime, "•")
+            lines.append(f"{icon} <code>{sym}</code>: {regime}")
+        await self._reply(update, "\n".join(lines))
+
+    async def _cmd_symbols(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Controller not available.")
+            return
+        symbols = self._controller.active_symbols()
+        if not symbols:
+            await self._reply(update, "<b>Active Symbols</b>\nNone.")
+            return
+        lines = [f"<b>Active Symbols ({len(symbols)})</b>"]
+        lines.extend(f"• <code>{s}</code>" for s in symbols)
+        await self._reply(update, "\n".join(lines))
+
+    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        adapter = self._adapter_factory()
+        if adapter is None:
+            await self._reply(update, "Adapter not ready.")
+            return
+        try:
+            resp = await adapter._rest.get_closed_pnl(
+                category=self._config.default_category, limit=20
+            )
+            records = resp.get("result", {}).get("list", [])
+        except Exception as exc:
+            await self._reply(update, f"<b>PnL</b>\nFailed: <code>{exc}</code>")
+            return
+        if not records:
+            await self._reply(update, "<b>Closed PnL</b>\nNo closed trades.")
+            return
+        total = Decimal("0")
+        lines = ["<b>Closed PnL (last 20)</b>"]
+        for r in records[:10]:
+            sym = r.get("symbol", "?")
+            pnl = Decimal(str(r.get("closedPnl", "0")))
+            total += pnl
+            icon = "✅" if pnl >= 0 else "❌"
+            lines.append(f"{icon} <code>{sym}</code>: <code>{pnl:+.4f}</code>")
+        total_icon = "📈" if total >= 0 else "📉"
+        lines.append(f"\n{total_icon} <b>Total (shown):</b> <code>{total:+.4f} USDT</code>")
+        await self._reply(update, "\n".join(lines))
+
+    # ------------------------------------------------------------------
+    # Control commands
+    # ------------------------------------------------------------------
+
+    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        await self._controller.pause()
+        await self._reply(update, "⏸ Trading <b>paused</b>. No new entries will be opened.\nUse /resume to restart.")
+
+    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        if not self._controller.is_paused():
+            await self._reply(update, "Trading is not paused.")
+            return
+        await self._controller.resume()
+        await self._reply(update, "▶️ Trading <b>resumed</b>.")
+
+    async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        args = context.args or []
+        if not args or args[0].lower() not in ("on", "off"):
+            current = "on" if self._controller.is_shadow() else "off"
+            await self._reply(
+                update,
+                f"Shadow mode is currently <code>{current}</code>.\n"
+                "Use: /shadow on  or  /shadow off"
+            )
+            return
+        enable = args[0].lower() == "on"
+        await self._controller.set_shadow(enable)
+        status = "ON (orders logged, not sent)" if enable else "OFF (orders sent to exchange)"
+        await self._reply(update, f"🔦 Shadow mode: <code>{status}</code>")
+
+    async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        args = context.args or []
+        valid = [p.value.lower() for p in RiskProfile]
+        if not args or args[0].lower() not in valid:
+            current = self._controller.current_profile()
+            await self._reply(
+                update,
+                f"Current risk profile: <code>{current}</code>\n"
+                f"Usage: /risk {' | '.join(valid)}"
+            )
+            return
+        new_profile_str = args[0].upper()
+        new_profile = RiskProfile(new_profile_str)
+        old_profile = self._controller.current_profile()
+        if new_profile_str == old_profile:
+            await self._reply(update, f"Risk profile is already <code>{old_profile}</code>.")
+            return
+
+        cid = self._chat_id(update)
+        if cid:
+            self._pending[cid] = (
+                f"change risk profile from {old_profile} to {new_profile_str}",
+                lambda: self._controller.set_risk_profile(new_profile),  # type: ignore[union-attr]
+            )
+        await self._reply(
+            update,
+            f"⚠️ Change risk profile: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
+            "Send /confirm to apply, or ignore to cancel."
+        )
+
+    async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        cid = self._chat_id(update)
+        if cid:
+            self._pending[cid] = (
+                "EMERGENCY STOP (requires manual restart)",
+                self._controller.emergency_stop,
+            )
+        await self._reply(
+            update,
+            "🚨 <b>Emergency stop</b> requested.\n"
+            "This will halt ALL new entries and require a manual restart.\n"
+            "Send /confirm to execute, or ignore to cancel."
+        )
+
+    async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        cid = self._chat_id(update)
+        if cid is None or cid not in self._pending:
+            await self._reply(update, "No pending action to confirm.")
+            return
+        action_name, action_fn = self._pending.pop(cid)
+        try:
+            await action_fn()
+            await self._reply(update, f"✅ Done: <i>{action_name}</i>")
+            log.info("telegram_control_confirmed", action=action_name, chat_id=cid)
+        except Exception as exc:
+            await self._reply(update, f"❌ Failed: <code>{exc}</code>")
+            log.error("telegram_control_failed", action=action_name, error=str(exc))
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _help_text(self) -> str:
+        ctrl_section = ""
+        if self._controller is not None:
+            ctrl_section = (
+                "\n<b>Control</b>\n"
+                "/pause   — stop new entries\n"
+                "/resume  — restart after pause\n"
+                "/shadow on|off — toggle shadow mode\n"
+                "/risk conservative|moderate|aggressive\n"
+                "/stop    — emergency stop (requires /confirm)\n"
+                "/confirm — confirm a pending action\n"
+            )
+        return (
+            "<b>Bybit AI Trader</b>\n\n"
+            "<b>Monitoring</b>\n"
+            "/status   — system health\n"
+            "/balance  — wallet balance\n"
+            "/positions — open positions\n"
+            "/signals  — recent strategy signals\n"
+            "/regime   — market regime per symbol\n"
+            "/symbols  — active symbols\n"
+            "/pnl      — closed PnL history\n"
+            "/help     — this message\n"
+            + ctrl_section
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None) -> str:
-        state = "ok" if ok else "fail"
-        if latency_ms is None:
-            return f"{name}: <code>{state}</code>"
-        return f"{name}: <code>{state}</code> ({latency_ms:.0f} ms)"
+        icon = "✅" if ok else "❌"
+        s = f"{icon} {name}"
+        if latency_ms is not None:
+            s += f" <code>{latency_ms:.0f}ms</code>"
+        return s

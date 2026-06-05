@@ -24,6 +24,7 @@ import asyncio
 import os
 import signal
 import sys
+from collections import deque
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -69,6 +70,11 @@ class TradingApplication:
         # Cached balance (refreshed periodically)
         self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
         self._balance_refreshed_at: datetime | None = None
+        # Operator control state
+        self._trading_paused: bool = False
+        self._current_risk_profile_str: str = ""
+        self._signal_log: deque = deque(maxlen=20)
+        self._kill_switch: Any | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -92,6 +98,7 @@ class TradingApplication:
             log_level=self._settings.LOG_LEVEL,
             log_format=self._settings.LOG_FORMAT,
         )
+        self._current_risk_profile_str = self._settings.RISK_PROFILE.value
         log.info(
             "settings_loaded",
             trading_mode=self._settings.TRADING_MODE,
@@ -177,8 +184,58 @@ class TradingApplication:
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
+    # ------------------------------------------------------------------
+    # Operator control callbacks (wired into TradingController)
+    # ------------------------------------------------------------------
+
+    async def _pause_trading(self) -> None:
+        self._trading_paused = True
+        log.info("trading.paused")
+
+    async def _resume_trading(self) -> None:
+        self._trading_paused = False
+        log.info("trading.resumed")
+
+    async def _set_shadow_mode(self, enabled: bool) -> None:
+        if self._execution_engine is not None:
+            self._execution_engine._shadow_mode = enabled
+        log.info("shadow_mode.changed", enabled=enabled)
+
+    async def _change_risk_profile(self, profile: Any) -> None:
+        """Hot-swap the risk profile without restarting."""
+        old = self._current_risk_profile_str
+        capital = await self._refresh_balance()
+        # Reinitialise risk manager with new profile; preserves balance state
+        if self._settings is not None:
+            self._settings.RISK_PROFILE = profile
+        await self._init_risk_manager(capital)
+        # Rewire execution engine to the new risk manager
+        if self._execution_engine is not None:
+            self._execution_engine._risk_manager = self._risk_manager
+        self._current_risk_profile_str = profile.value
+        log.info("risk_profile.changed", old=old, new=profile.value)
+        if self._telegram_bot is not None:
+            await self._telegram_bot.notify_risk_changed(old, profile.value)
+
+    async def _emergency_stop(self) -> None:
+        self._trading_paused = True
+        if self._kill_switch is not None:
+            from trader.domain.enums import KillSwitchMode
+            await self._kill_switch.activate(
+                KillSwitchMode.FULL_STOP,
+                reason="operator emergency stop via Telegram",
+                operator="telegram",
+            )
+        log.critical("emergency_stop.activated", source="telegram")
+        if self._telegram_bot is not None:
+            await self._telegram_bot.notify(
+                "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
+            )
+
+    # ------------------------------------------------------------------
+
     async def _start_telegram_bot(self) -> None:
-        from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot
+        from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot, TradingController
 
         assert self._settings is not None
         assert self._health_checker is not None
@@ -186,6 +243,40 @@ class TradingApplication:
         if not token:
             log.info("telegram_bot_skipped", reason="no token configured")
             return
+
+        def _regime_for(symbol: str) -> str | None:
+            if self._feature_pipeline is None or self._regime_classifier is None:
+                return None
+            vec = self._feature_pipeline.latest(symbol, _WS_INTERVAL)
+            if vec is None:
+                return None
+            try:
+                ctx = self._regime_classifier.classify(vec)
+                return ctx.regime.value
+            except Exception:
+                return None
+
+        controller = TradingController(
+            pause=self._pause_trading,
+            resume=self._resume_trading,
+            set_shadow=self._set_shadow_mode,
+            set_risk_profile=self._change_risk_profile,
+            emergency_stop=self._emergency_stop,
+            is_paused=lambda: self._trading_paused,
+            is_shadow=lambda: (
+                self._execution_engine._shadow_mode
+                if self._execution_engine is not None
+                else True
+            ),
+            current_profile=lambda: self._current_risk_profile_str,
+            active_symbols=lambda: (
+                self._screener.active_symbols
+                if self._screener is not None
+                else list(_SYMBOLS)
+            ),
+            regime_for=_regime_for,
+            signal_log=self._signal_log,  # type: ignore[arg-type]
+        )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
         self._telegram_bot = TelegramMonitorBot(
@@ -199,6 +290,7 @@ class TradingApplication:
             ),
             health_provider=self._health_checker.overall_health,
             adapter_factory=lambda: self._bybit_adapter,
+            controller=controller,
         )
         await self._telegram_bot.start()
         log.info("telegram_bot_started")
@@ -235,6 +327,7 @@ class TradingApplication:
             circuit_breaker_manager=breakers,
             kill_switch=kill_switch,
         )
+        self._kill_switch = kill_switch
         log.info(
             "risk_manager.initialized",
             profile=profile.value,
@@ -549,6 +642,35 @@ class TradingApplication:
                 return
 
             if proposal is None:
+                return
+
+            # Log signal to deque and push Telegram notification
+            is_shadow = (
+                self._execution_engine._shadow_mode
+                if self._execution_engine is not None
+                else True
+            )
+            regime_str = regime_ctx.regime.value if regime_ctx is not None else "UNKNOWN"
+            from trader.telegram_bot import SignalEntry
+            entry = SignalEntry(
+                timestamp=datetime.now(tz=UTC),
+                symbol=proposal.symbol,
+                side=proposal.side.value,
+                confidence=proposal.confidence,
+                regime=regime_str,
+                rationale=proposal.rationale or "",
+                shadow=is_shadow,
+            )
+            self._signal_log.append(entry)
+            if self._telegram_bot is not None:
+                try:
+                    await self._telegram_bot.notify_signal(entry)
+                except Exception as exc:
+                    log.warning("telegram.notify_signal_failed", error=str(exc))
+
+            # Skip execution if operator paused trading
+            if self._trading_paused:
+                log.debug("strategy_loop.paused", symbol=symbol)
                 return
 
             # ExecutionEngine: RiskManager → order (or shadow log)
