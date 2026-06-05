@@ -97,7 +97,7 @@ class HealthChecker:
         Returns:
             (is_healthy, latency_ms)
         """
-        if not self._redis_url:
+        if not self._postgres_dsn:
             return True, None
 
         start = time.monotonic()
