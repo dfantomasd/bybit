@@ -5,7 +5,6 @@ import os
 from unittest.mock import patch
 
 import pytest
-from pydantic import ValidationError
 
 from trader.domain.enums import RiskProfile, TradingMode
 
@@ -56,6 +55,14 @@ class TestSettingsDefaults:
     def test_max_positions_default(self) -> None:
         settings = self._make_settings()
         assert settings.MAX_POSITIONS == 2  # type: ignore[union-attr]
+
+    def test_single_telegram_chat_id_string(self) -> None:
+        settings = self._make_settings(TELEGRAM_ALLOWED_CHAT_IDS="-1003976706688")
+        assert settings.TELEGRAM_ALLOWED_CHAT_IDS == [-1003976706688]  # type: ignore[union-attr]
+
+    def test_comma_separated_telegram_chat_ids(self) -> None:
+        settings = self._make_settings(TELEGRAM_ALLOWED_CHAT_IDS="123, -456")
+        assert settings.TELEGRAM_ALLOWED_CHAT_IDS == [123, -456]  # type: ignore[union-attr]
 
 
 class TestSettingsSecrets:

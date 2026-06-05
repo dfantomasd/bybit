@@ -64,6 +64,9 @@ To use the bundled local PostgreSQL service instead:
 docker compose -f docker-compose.mini.yml --profile local-db up -d --build
 ```
 
+For Render Free deployment, see [RENDER.md](RENDER.md). The included
+`render.yaml` creates a single Free Web Service and uses Supabase for Postgres.
+
 ### 4. Verify
 
 ```bash

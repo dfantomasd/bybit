@@ -16,6 +16,7 @@ CRITICAL SAFETY RULES:
 from __future__ import annotations
 
 import asyncio
+import os
 import signal
 import sys
 from typing import Any
@@ -90,6 +91,7 @@ class TradingApplication:
         self._health_checker = HealthChecker(
             postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
             redis_url=self._settings.REDIS_URL.get_secret_value(),
+            redis_required=self._settings.REDIS_REQUIRED,
             bybit_rest_url=bybit_base,
             trading_mode=self._settings.TRADING_MODE,
             system_status=self._status,
@@ -120,9 +122,10 @@ class TradingApplication:
         import secrets
 
         internal_api_key = secrets.token_urlsafe(32)
+        port = int(os.getenv("PORT", str(self._settings.FASTAPI_PORT)))
         log.info(
             "http_server_starting",
-            port=self._settings.FASTAPI_PORT,
+            port=port,
         )
 
         fastapi_app = create_app(
@@ -133,7 +136,7 @@ class TradingApplication:
         config = uvicorn.Config(
             app=fastapi_app,
             host="0.0.0.0",  # noqa: S104 - container service must bind internally.
-            port=self._settings.FASTAPI_PORT,
+            port=port,
             log_level="warning",
             access_log=False,
         )

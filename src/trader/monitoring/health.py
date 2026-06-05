@@ -13,7 +13,7 @@ import time
 from datetime import UTC, datetime
 from typing import Any
 
-import asyncpg  # type: ignore[import-untyped]
+import asyncpg
 import redis.asyncio as aioredis
 
 from trader.domain.enums import SystemStatus, TradingMode
@@ -46,12 +46,14 @@ class HealthChecker:
         self,
         postgres_dsn: str,
         redis_url: str,
+        redis_required: bool = False,
         bybit_rest_url: str = "https://api.bybit.com",
         trading_mode: TradingMode = TradingMode.TESTNET,
         system_status: SystemStatus = SystemStatus.STOPPED,
     ) -> None:
         self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._redis_url = redis_url
+        self._redis_required = redis_required
         self._bybit_rest_url = bybit_rest_url
         self._trading_mode = trading_mode
         self._system_status = system_status
@@ -93,6 +95,9 @@ class HealthChecker:
         Returns:
             (is_healthy, latency_ms)
         """
+        if not self._redis_url:
+            return True, None
+
         start = time.monotonic()
         try:
             conn = await asyncio.wait_for(
@@ -121,7 +126,7 @@ class HealthChecker:
             try:
                 await asyncio.wait_for(client.ping(), timeout=_REDIS_TIMEOUT_S)
             finally:
-                await client.aclose()
+                await client.close()
             latency = (time.monotonic() - start) * 1000
             return True, latency
         except Exception as exc:
@@ -206,7 +211,7 @@ class HealthChecker:
         messages: list[str] = []
         if not pg_ok:
             messages.append("PostgreSQL is unreachable")
-        if not redis_ok:
+        if not redis_ok and self._redis_required:
             messages.append("Redis is unreachable")
         if not bybit_ok:
             messages.append("Bybit REST API is unreachable")
@@ -218,7 +223,8 @@ class HealthChecker:
             messages.append("Feature pipeline has not produced features recently")
 
         # Determine overall status
-        critical_ok = pg_ok and redis_ok and bybit_ok
+        redis_critical_ok = redis_ok or not self._redis_required
+        critical_ok = pg_ok and redis_critical_ok and bybit_ok
         if critical_ok and ws_ok and model_ok and feat_ok:
             overall = "healthy"
         elif critical_ok:
@@ -256,5 +262,5 @@ class HealthChecker:
             "redis": redis_ok,
             "bybit_connectivity": bybit_ok,
         }
-        passed = all(checks.values())
+        passed = pg_ok and bybit_ok and (redis_ok or not self._redis_required)
         return {"passed": passed, "checks": checks}

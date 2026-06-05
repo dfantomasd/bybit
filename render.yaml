@@ -1,0 +1,42 @@
+services:
+  - type: web
+    name: bybit-monitor
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    dockerCommand: trader
+    healthCheckPath: /livez
+    envVars:
+      - key: TRADING_MODE
+        value: TESTNET
+      - key: RISK_PROFILE
+        value: CONSERVATIVE
+      - key: LIVE_MODE
+        value: "false"
+      - key: SHADOW_MODE
+        value: "true"
+      - key: BYBIT_REGION
+        value: GLOBAL
+      - key: BYBIT_USE_TESTNET
+        value: "true"
+      - key: DEFAULT_MARKET_CATEGORY
+        value: linear
+      - key: REDIS_URL
+        value: ""
+      - key: REDIS_REQUIRED
+        value: "false"
+      - key: LOG_LEVEL
+        value: INFO
+      - key: LOG_FORMAT
+        value: json
+      - key: BYBIT_API_KEY
+        sync: false
+      - key: BYBIT_API_SECRET
+        sync: false
+      - key: POSTGRES_DSN
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_ALLOWED_CHAT_IDS
+        sync: false

@@ -12,10 +12,10 @@ context that requires the actual credential.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import SecretStr
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import SecretStr, field_validator
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from trader.domain.enums import BybitRegion, RiskProfile, TradingMode
 
@@ -60,13 +60,15 @@ class Settings(BaseSettings):
     POSTGRES_DSN: SecretStr = SecretStr(
         "postgresql+asyncpg://trader:trader@postgres:5432/trader"
     )
-    REDIS_URL: SecretStr = SecretStr("redis://redis:6379/0")
+    REDIS_URL: SecretStr = SecretStr("")
+    REDIS_REQUIRED: bool = False
+    """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""
 
     # ------------------------------------------------------------------
     # Telegram notifications
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: SecretStr = SecretStr("")
-    TELEGRAM_ALLOWED_CHAT_IDS: list[int] = []
+    TELEGRAM_ALLOWED_CHAT_IDS: Annotated[list[int], NoDecode] = []
 
     # ------------------------------------------------------------------
     # LLM (optional, disabled by default)
@@ -120,6 +122,23 @@ class Settings(BaseSettings):
     DATA_STALENESS_THRESHOLD_SECONDS: int = 5
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
+
+    @field_validator("TELEGRAM_ALLOWED_CHAT_IDS", mode="before")
+    @classmethod
+    def parse_chat_ids(cls, value: Any) -> list[int]:
+        """Accept JSON-style, comma-separated, or single chat ID strings."""
+        if value is None or value == "":
+            return []
+        if isinstance(value, list):
+            return [int(item) for item in value]
+        if isinstance(value, str):
+            stripped = value.strip()
+            if stripped.startswith("[") and stripped.endswith("]"):
+                stripped = stripped[1:-1]
+            if not stripped:
+                return []
+            return [int(item.strip()) for item in stripped.split(",") if item.strip()]
+        raise TypeError("TELEGRAM_ALLOWED_CHAT_IDS must be a list or string")
 
     def model_post_init(self, __context: Any) -> None:
         """Enforce critical safety invariants after field parsing."""
