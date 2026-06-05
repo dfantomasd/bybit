@@ -201,7 +201,7 @@ class OrderMapper:
             unrealised_pnl=_d(data.get("unrealisedPnl", "0")),
             realised_pnl=_d(data.get("cumRealisedPnl", data.get("realisedPnl", "0"))),
             leverage=_d(data.get("leverage", "1")),
-            margin_type=data.get("tradeMode", data.get("marginType", "cross")),
+            margin_type=str(data.get("tradeMode", data.get("marginType", "cross"))),
             updated_at=_parse_dt(data.get("updatedTime", 0)),
         )
 

@@ -318,3 +318,9 @@ class TestRestPositionToModel:
     def test_position_unrealised_pnl(self) -> None:
         pos = self.mapper.rest_position_to_model(self._make_position_data())
         assert pos.unrealised_pnl == Decimal("50")
+
+    def test_numeric_trade_mode_is_cast_to_string(self) -> None:
+        data = self._make_position_data()
+        data["tradeMode"] = 0
+        pos = self.mapper.rest_position_to_model(data)
+        assert pos.margin_type == "0"
