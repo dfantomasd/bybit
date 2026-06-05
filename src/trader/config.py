@@ -62,6 +62,14 @@ class Settings(BaseSettings):
     POSTGRES_DSN: SecretStr = SecretStr(
         "postgresql+asyncpg://trader:trader@postgres:5432/trader"
     )
+    TRADE_JOURNAL_ENABLED: bool = True
+    """Persist signals, risk decisions, order events, and closed PnL in Postgres."""
+    PERFORMANCE_FILTER_ENABLED: bool = True
+    """Use stored closed PnL to temporarily skip recently losing symbols."""
+    PERFORMANCE_MIN_CLOSED_TRADES: int = 5
+    PERFORMANCE_MAX_SYMBOL_LOSS_USD: float = -2.0
+    PERFORMANCE_LOOKBACK_DAYS: int = 7
+    CLOSED_PNL_REFRESH_INTERVAL_SECONDS: int = 300
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""

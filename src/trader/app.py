@@ -75,6 +75,9 @@ class TradingApplication:
         self._current_risk_profile_str: str = ""
         self._signal_log: deque = deque(maxlen=20)
         self._kill_switch: Any | None = None
+        self._trade_journal: Any | None = None
+        self._performance_blocked_symbols: set[str] = set()
+        self._closed_pnl_refreshed_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -144,6 +147,17 @@ class TradingApplication:
             raise SystemExit(1)
 
         log.info("preflight_passed")
+
+    async def _start_trade_journal(self) -> None:
+        """Start best-effort Postgres memory for trades and performance."""
+        from trader.storage.trade_journal import TradeJournal
+
+        assert self._settings is not None
+        self._trade_journal = TradeJournal(
+            postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
+            enabled=self._settings.TRADE_JOURNAL_ENABLED,
+        )
+        await self._trade_journal.connect()
 
     async def _start_http_server(self) -> asyncio.Task:
         from trader.api.fastapi_app import create_app
@@ -412,6 +426,7 @@ class TradingApplication:
             shadow_mode=shadow,
             cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
+            trade_journal=self._trade_journal,
         )
 
         # Sync open positions from exchange so we don't double-enter on restart
@@ -603,6 +618,48 @@ class TradingApplication:
         self._background_tasks.append(task)
         log.info("feature_pipeline.started", parallel=True)
 
+    async def _refresh_closed_pnl_memory(self) -> None:
+        """Import recent Bybit closed PnL and update performance symbol blocks."""
+        assert self._settings is not None
+        if (
+            self._trade_journal is None
+            or not self._settings.PERFORMANCE_FILTER_ENABLED
+            or self._bybit_adapter is None
+            or not self._trade_journal.is_enabled
+        ):
+            return
+
+        now = datetime.now(tz=UTC)
+        if self._closed_pnl_refreshed_at is not None:
+            elapsed = (now - self._closed_pnl_refreshed_at).total_seconds()
+            if elapsed < self._settings.CLOSED_PNL_REFRESH_INTERVAL_SECONDS:
+                return
+
+        try:
+            resp = await self._bybit_adapter._rest.get_closed_pnl(
+                category=self._settings.DEFAULT_MARKET_CATEGORY,
+                limit=100,
+            )
+            records = resp.get("result", {}).get("list", [])
+            await self._trade_journal.record_closed_pnl_records(records)
+            blocked = await self._trade_journal.get_blocked_symbols(
+                min_closed_trades=self._settings.PERFORMANCE_MIN_CLOSED_TRADES,
+                max_loss_usd=Decimal(str(self._settings.PERFORMANCE_MAX_SYMBOL_LOSS_USD)),
+                lookback_days=self._settings.PERFORMANCE_LOOKBACK_DAYS,
+            )
+            if blocked != self._performance_blocked_symbols:
+                log.info(
+                    "performance_filter.updated",
+                    blocked_symbols=sorted(blocked),
+                    min_closed_trades=self._settings.PERFORMANCE_MIN_CLOSED_TRADES,
+                    max_loss_usd=self._settings.PERFORMANCE_MAX_SYMBOL_LOSS_USD,
+                    lookback_days=self._settings.PERFORMANCE_LOOKBACK_DAYS,
+                )
+            self._performance_blocked_symbols = blocked
+            self._closed_pnl_refreshed_at = now
+        except Exception as exc:
+            log.debug("performance_filter.refresh_failed", error=str(exc))
+
     async def _start_strategy_loop(self) -> None:
         """Run strategy ensemble → RiskManager → ExecutionEngine."""
         from trader.strategies.ensemble import StrategyEnsemble
@@ -641,6 +698,7 @@ class TradingApplication:
             health_checker=self._health_checker,
             min_confidence=profile_cfg.min_confidence,
         )
+        await self._refresh_closed_pnl_memory()
 
         _balance_tick: int = 0
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
@@ -696,6 +754,10 @@ class TradingApplication:
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
+            if symbol in self._performance_blocked_symbols:
+                log.debug("performance_filter.symbol_blocked", symbol=symbol)
+                return
+
             if self._feature_pipeline is None:
                 return
 
@@ -736,6 +798,13 @@ class TradingApplication:
 
             if proposal is None:
                 return
+
+            if self._trade_journal is not None:
+                await self._trade_journal.record_signal(
+                    proposal=proposal,
+                    feature_vector=vec,
+                    regime_context=regime_ctx,
+                )
 
             # Skip execution if operator paused trading
             if self._trading_paused:
@@ -805,6 +874,7 @@ class TradingApplication:
                 refresh_every = max(1, int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL))
                 if _balance_tick % refresh_every == 0:
                     await self._refresh_balance()
+                    await self._refresh_closed_pnl_memory()
 
                 balance = self._cached_balance
                 capital = balance
@@ -912,6 +982,9 @@ class TradingApplication:
         if self._bybit_adapter:
             self._bybit_adapter.close()
 
+        if self._trade_journal:
+            await self._trade_journal.close()
+
         self._status = SystemStatus.STOPPED
         log.info("graceful_shutdown_complete")
 
@@ -931,6 +1004,7 @@ class TradingApplication:
 
             await self._start_http_server()
             await self._start_bybit_adapter()
+            await self._start_trade_journal()
             await self._start_telegram_bot()
 
             # Market data pipeline

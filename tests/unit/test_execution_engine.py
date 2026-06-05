@@ -85,6 +85,7 @@ def _make_engine(
     approved: bool = True,
     shadow_mode: bool = True,
     qty: Decimal | None = None,
+    trade_journal: MagicMock | None = None,
 ) -> ExecutionEngine:
     adapter = MagicMock()
     adapter.get_positions = AsyncMock(return_value=[])
@@ -109,6 +110,7 @@ def _make_engine(
         exposure_tracker=exposure,
         shadow_mode=shadow_mode,
         cooldown_s=0,  # disable cooldown for tests
+        trade_journal=trade_journal,
     )
     return engine
 
@@ -135,6 +137,27 @@ class TestExecutionEngine:
         assert decision is not None
         assert decision.status == RiskDecisionStatus.APPROVED
         assert engine.has_open_position("BTCUSDT")
+
+    @pytest.mark.asyncio
+    async def test_shadow_order_event_recorded_in_trade_journal(self):
+        trade_journal = MagicMock()
+        trade_journal.record_risk_decision = AsyncMock()
+        trade_journal.record_order_event = AsyncMock()
+        engine = _make_engine(approved=True, shadow_mode=True, trade_journal=trade_journal)
+        proposal = _proposal()
+
+        decision = await engine.submit(
+            proposal=proposal,
+            capital=Decimal("10000"),
+            available_balance=Decimal("10000"),
+        )
+
+        assert decision is not None
+        trade_journal.record_risk_decision.assert_awaited_once()
+        trade_journal.record_order_event.assert_awaited_once()
+        kwargs = trade_journal.record_order_event.await_args.kwargs
+        assert kwargs["status"] == "SHADOW"
+        assert kwargs["symbol"] == "BTCUSDT"
 
     @pytest.mark.asyncio
     async def test_rejected_proposal_not_recorded(self):

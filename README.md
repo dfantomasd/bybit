@@ -155,6 +155,12 @@ Key settings:
 | `BYBIT_USE_TESTNET` | `true` | Must be `true` for non-live modes |
 | `MAX_POSITIONS` | `2` | Max concurrent open positions |
 | `INTERNAL_API_KEY` | generated | API key for `/health`, `/status`, `/metrics` |
+| `TRADE_JOURNAL_ENABLED` | `true` | Store signals, risk decisions, order events, and closed PnL in Postgres/Supabase |
+| `PERFORMANCE_FILTER_ENABLED` | `true` | Temporarily skip symbols with weak recent closed PnL |
+| `PERFORMANCE_MIN_CLOSED_TRADES` | `5` | Minimum closed trades before a symbol can be performance-blocked |
+| `PERFORMANCE_MAX_SYMBOL_LOSS_USD` | `-2.0` | Loss threshold for blocking a symbol over the lookback window |
+| `PERFORMANCE_LOOKBACK_DAYS` | `7` | Closed PnL lookback window for symbol performance |
+| `CLOSED_PNL_REFRESH_INTERVAL_SECONDS` | `300` | How often recent Bybit closed PnL is imported |
 
 Risk profiles:
 
@@ -177,6 +183,23 @@ Autonomous execution presets:
 
 Risk profile YAML configuration: `config/profiles.yaml`
 Feature flags: `config/feature_flags.yaml`
+
+### Trade memory and performance filter
+
+When `TRADE_JOURNAL_ENABLED=true`, the bot creates Postgres tables on startup
+and records:
+
+- generated trade signals with feature values and regime;
+- risk decisions, including rejection reasons;
+- order events, including shadow, placed, and failed orders;
+- recent closed PnL imported from Bybit.
+
+When `PERFORMANCE_FILTER_ENABLED=true`, the strategy loop uses stored closed PnL
+to temporarily skip symbols that have at least
+`PERFORMANCE_MIN_CLOSED_TRADES` closed trades and total PnL below
+`PERFORMANCE_MAX_SYMBOL_LOSS_USD` during `PERFORMANCE_LOOKBACK_DAYS`.
+This is adaptive risk control, not a profit guarantee. If Postgres/Supabase is
+unavailable, trading continues without the filter.
 
 ---
 

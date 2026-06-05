@@ -58,6 +58,7 @@ class ExecutionEngine:
         shadow_mode: bool = True,
         cooldown_s: int = _DEFAULT_COOLDOWN_S,
         category: str = "linear",
+        trade_journal: Any | None = None,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -65,6 +66,7 @@ class ExecutionEngine:
         self._shadow_mode = shadow_mode
         self._cooldown = timedelta(seconds=cooldown_s)
         self._category = category
+        self._trade_journal = trade_journal
 
         # symbol → last entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -231,6 +233,8 @@ class ExecutionEngine:
             approved_qty=str(decision.approved_qty) if decision.approved_qty else None,
             portfolio_heat=decision.portfolio_heat,
         )
+        if self._trade_journal is not None:
+            await self._trade_journal.record_risk_decision(symbol, decision)
 
         if not approved:
             return decision
@@ -253,6 +257,16 @@ class ExecutionEngine:
                 confidence=round(proposal.confidence, 3),
                 mode="SHADOW_NO_EXECUTION",
             )
+            if self._trade_journal is not None:
+                await self._trade_journal.record_order_event(
+                    order_link_id=intent.order_link_id,
+                    proposal_id=intent.proposal_id,
+                    decision_id=intent.decision_id,
+                    symbol=symbol,
+                    side=proposal.side.value,
+                    qty=decision.approved_qty,
+                    status="SHADOW",
+                )
         else:
             try:
                 resp = await self._adapter.place_order(intent)
@@ -265,6 +279,17 @@ class ExecutionEngine:
                     exchange_order_id=exchange_order_id,
                     order_link_id=intent.order_link_id,
                 )
+                if self._trade_journal is not None:
+                    await self._trade_journal.record_order_event(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="PLACED",
+                        exchange_order_id=exchange_order_id,
+                    )
             except Exception as exc:
                 self._last_entry_at[symbol] = datetime.now(tz=UTC)
                 log.error(
@@ -272,6 +297,17 @@ class ExecutionEngine:
                     symbol=symbol,
                     error=str(exc),
                 )
+                if self._trade_journal is not None:
+                    await self._trade_journal.record_order_event(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="FAILED",
+                        error=str(exc),
+                    )
                 return decision
 
         # 7. Update local state ────────────────────────────────────────
