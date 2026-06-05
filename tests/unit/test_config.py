@@ -144,13 +144,14 @@ class TestSettingsSafetyGates:
                 BYBIT_USE_TESTNET="false",
             )
 
-    def test_shadow_mode_with_testnet_false_raises(self) -> None:
-        """SHADOW mode must use BYBIT_USE_TESTNET=true."""
-        with pytest.raises(ValueError, match="BYBIT_USE_TESTNET"):
-            self._make_settings(
-                TRADING_MODE="SHADOW",
-                BYBIT_USE_TESTNET="false",
-            )
+    def test_shadow_mode_allows_mainnet_data(self) -> None:
+        """SHADOW mode may use mainnet endpoints because it never submits orders."""
+        settings = self._make_settings(
+            TRADING_MODE="SHADOW",
+            BYBIT_USE_TESTNET="false",
+        )
+        assert settings.TRADING_MODE == TradingMode.SHADOW  # type: ignore[union-attr]
+        assert settings.BYBIT_USE_TESTNET is False  # type: ignore[union-attr]
 
     def test_live_trading_mode_allowed_when_live_mode_true(self) -> None:
         """LIVE mode is permitted only when LIVE_MODE=true is explicitly set."""
@@ -183,6 +184,13 @@ class TestRiskProfileConfig:
 
         assert AGGRESSIVE_PROFILE.max_positions > 4
         assert AGGRESSIVE_PROFILE.max_leverage > 2.0
+
+    def test_scalp_profile(self) -> None:
+        from trader.config import SCALP_PROFILE
+
+        assert SCALP_PROFILE.max_positions >= 8
+        assert SCALP_PROFILE.min_confidence < 0.50
+        assert SCALP_PROFILE.cooldown_seconds <= 60
 
     def test_get_risk_profile_config_returns_correct(self) -> None:
         from trader.config import CONSERVATIVE_PROFILE, get_risk_profile_config

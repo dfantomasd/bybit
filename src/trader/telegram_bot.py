@@ -13,7 +13,8 @@ Control commands (require /confirm for dangerous ones):
   /pause              — pause new entries (keep existing positions)
   /resume             — resume after pause
   /shadow on|off      — toggle shadow mode
-  /risk conservative|moderate|aggressive — change risk profile
+  /risk conservative|moderate|aggressive|scalp — change risk profile
+  /mode shadow|active — switch execution mode
   /stop               — emergency full stop (requires /confirm)
 
 Push notifications (sent to subscribed chats):
@@ -29,18 +30,17 @@ Safety:
 """
 from __future__ import annotations
 
-import asyncio
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
 from typing import Any
 
 import structlog
-from telegram import Update
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
 
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
@@ -162,9 +162,11 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("pause", self._cmd_pause))
         app.add_handler(CommandHandler("resume", self._cmd_resume))
         app.add_handler(CommandHandler("shadow", self._cmd_shadow))
+        app.add_handler(CommandHandler("mode", self._cmd_mode))
         app.add_handler(CommandHandler("risk", self._cmd_risk))
         app.add_handler(CommandHandler("stop", self._cmd_stop))
         app.add_handler(CommandHandler("confirm", self._cmd_confirm))
+        app.add_handler(CallbackQueryHandler(self._on_button))
 
         await app.initialize()
         await app.start()
@@ -278,14 +280,78 @@ class TelegramMonitorBot:
             return False
         return True
 
-    async def _reply(self, update: Update, text: str) -> None:
+    async def _reply(
+        self,
+        update: Update,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
         if update.effective_message is not None:
             await update.effective_message.reply_text(
-                text, parse_mode=ParseMode.HTML, disable_web_page_preview=True
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
             )
 
     def _chat_id(self, update: Update) -> int | None:
         return update.effective_chat.id if update.effective_chat else None
+
+    def _main_menu(self) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton("Status", callback_data="view:status"),
+                InlineKeyboardButton("Balance", callback_data="view:balance"),
+            ],
+            [
+                InlineKeyboardButton("Positions", callback_data="view:positions"),
+                InlineKeyboardButton("Signals", callback_data="view:signals"),
+            ],
+            [
+                InlineKeyboardButton("Symbols", callback_data="view:symbols"),
+                InlineKeyboardButton("PnL", callback_data="view:pnl"),
+            ],
+        ]
+        if self._controller is not None:
+            rows.extend(
+                [
+                    [
+                        InlineKeyboardButton("Pause", callback_data="control:pause"),
+                        InlineKeyboardButton("Resume", callback_data="control:resume"),
+                    ],
+                    [
+                        InlineKeyboardButton("Shadow", callback_data="mode:shadow"),
+                        InlineKeyboardButton("Active", callback_data="mode:active"),
+                    ],
+                    [
+                        InlineKeyboardButton("Risk: Conservative", callback_data="risk:CONSERVATIVE"),
+                        InlineKeyboardButton("Risk: Moderate", callback_data="risk:MODERATE"),
+                    ],
+                    [
+                        InlineKeyboardButton("Risk: Aggressive", callback_data="risk:AGGRESSIVE"),
+                        InlineKeyboardButton("Risk: Scalp", callback_data="risk:SCALP"),
+                    ],
+                    [InlineKeyboardButton("Emergency stop", callback_data="control:stop")],
+                ]
+            )
+        return InlineKeyboardMarkup(rows)
+
+    async def _button_reply(
+        self,
+        update: Update,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
+        query = update.callback_query
+        if query is not None and query.message is not None:
+            await query.message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
+            )
+            return
+        await self._reply(update, text, reply_markup=reply_markup)
 
     # ------------------------------------------------------------------
     # Observability commands
@@ -298,13 +364,13 @@ class TelegramMonitorBot:
         cid = self._chat_id(update)
         if cid:
             self._subscribed.add(cid)
-        await self._reply(update, self._help_text())
+        await self._reply(update, self._help_text(), reply_markup=self._main_menu())
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
             return
-        await self._reply(update, self._help_text())
+        await self._reply(update, self._help_text(), reply_markup=self._main_menu())
 
     async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -437,15 +503,15 @@ class TelegramMonitorBot:
         if not symbols:
             await self._reply(update, "<b>Regime</b>\nNo active symbols.")
             return
-        _REGIME_ICONS = {
-            "BULL_TREND": "🐂", "BEAR_TREND": "🐻",
-            "SIDEWAYS": "↔️", "HIGH_VOLATILITY": "⚡",
-            "LOW_LIQUIDITY": "🔇", "EVENT_RISK": "⚠️", "UNCERTAIN": "❓",
+        regime_icons = {
+            "BULL_TREND": "+", "BEAR_TREND": "-",
+            "SIDEWAYS": "=", "HIGH_VOLATILITY": "!",
+            "LOW_LIQUIDITY": ".", "EVENT_RISK": "!", "UNCERTAIN": "?",
         }
         lines = ["<b>Market Regime</b>"]
         for sym in symbols:
             regime = self._controller.regime_for(sym) or "UNKNOWN"
-            icon = _REGIME_ICONS.get(regime, "•")
+            icon = regime_icons.get(regime, "*")
             lines.append(f"{icon} <code>{sym}</code>: {regime}")
         await self._reply(update, "\n".join(lines))
 
@@ -523,7 +589,6 @@ class TelegramMonitorBot:
         await self._reply(update, "▶️ Trading <b>resumed</b>.")
 
     async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         if not await self._authorised(update):
             return
         if self._controller is None:
@@ -543,8 +608,40 @@ class TelegramMonitorBot:
         status = "ON (orders logged, not sent)" if enable else "OFF (orders sent to exchange)"
         await self._reply(update, f"🔦 Shadow mode: <code>{status}</code>")
 
+    async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "Control not available.")
+            return
+        args = context.args or []
+        if not args or args[0].lower() not in ("shadow", "active"):
+            current = "shadow" if self._controller.is_shadow() else "active"
+            venue = "testnet" if self._config.bybit_use_testnet else "configured live endpoint"
+            await self._reply(
+                update,
+                f"Current execution mode: <code>{current}</code> on <code>{venue}</code>.\n"
+                "Use: /mode shadow  or  /mode active"
+            )
+            return
+        if args[0].lower() == "shadow":
+            await self._controller.set_shadow(True)
+            await self._reply(update, "Mode: <b>SHADOW</b>. Orders are not sent.")
+            return
+        cid = self._chat_id(update)
+        if cid:
+            venue = "testnet" if self._config.bybit_use_testnet else "configured live endpoint"
+            self._pending[cid] = (
+                f"switch execution to ACTIVE on {venue}",
+                lambda: self._controller.set_shadow(False),
+            )
+        await self._reply(
+            update,
+            "<b>Active execution requested.</b>\n"
+            "Orders will be sent to the currently configured exchange endpoint after /confirm.",
+        )
+
     async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        del context
         if not await self._authorised(update):
             return
         if self._controller is None:
@@ -616,6 +713,136 @@ class TelegramMonitorBot:
             await self._reply(update, f"❌ Failed: <code>{exc}</code>")
             log.error("telegram_control_failed", action=action_name, error=str(exc))
 
+    async def _on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        query = update.callback_query
+        if query is None:
+            return
+        await query.answer()
+        if not await self._authorised(update):
+            return
+
+        data = query.data or ""
+        if data.startswith("view:"):
+            await self._handle_view_button(update, data.removeprefix("view:"))
+            return
+        if data.startswith("control:"):
+            await self._handle_control_button(update, data.removeprefix("control:"))
+            return
+        if data.startswith("mode:"):
+            await self._handle_mode_button(update, data.removeprefix("mode:"))
+            return
+        if data.startswith("risk:"):
+            await self._queue_risk_change(update, data.removeprefix("risk:").upper())
+            return
+        await self._button_reply(update, "Unknown button.", reply_markup=self._main_menu())
+
+    async def _handle_view_button(self, update: Update, action: str) -> None:
+        fake_context = type("_Context", (), {"args": []})()
+        handlers = {
+            "status": self._cmd_status,
+            "balance": self._cmd_balance,
+            "positions": self._cmd_positions,
+            "signals": self._cmd_signals,
+            "symbols": self._cmd_symbols,
+            "pnl": self._cmd_pnl,
+        }
+        handler = handlers.get(action)
+        if handler is None:
+            await self._button_reply(update, "Unknown view.", reply_markup=self._main_menu())
+            return
+        await handler(update, fake_context)  # type: ignore[arg-type]
+
+    async def _handle_control_button(self, update: Update, action: str) -> None:
+        if self._controller is None:
+            await self._button_reply(update, "Control not available.", reply_markup=self._main_menu())
+            return
+        if action == "pause":
+            await self._controller.pause()
+            await self._button_reply(
+                update,
+                "Trading <b>paused</b>. No new entries will be opened.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if action == "resume":
+            await self._controller.resume()
+            await self._button_reply(update, "Trading <b>resumed</b>.", reply_markup=self._main_menu())
+            return
+        if action == "stop":
+            cid = self._chat_id(update)
+            if cid:
+                self._pending[cid] = (
+                    "EMERGENCY STOP (requires manual restart)",
+                    self._controller.emergency_stop,
+                )
+            await self._button_reply(
+                update,
+                "<b>Emergency stop</b> requested.\nSend /confirm to execute, or ignore to cancel.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        await self._button_reply(update, "Unknown control.", reply_markup=self._main_menu())
+
+    async def _handle_mode_button(self, update: Update, action: str) -> None:
+        if self._controller is None:
+            await self._button_reply(update, "Control not available.", reply_markup=self._main_menu())
+            return
+        if action == "shadow":
+            await self._controller.set_shadow(True)
+            await self._button_reply(
+                update,
+                "Mode: <b>SHADOW</b>\nSignals are evaluated, orders are not sent.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if action == "active":
+            cid = self._chat_id(update)
+            if cid:
+                venue = "testnet" if self._config.bybit_use_testnet else "configured live endpoint"
+                self._pending[cid] = (
+                    f"switch execution to ACTIVE on {venue}",
+                    lambda: self._controller.set_shadow(False),
+                )
+            await self._button_reply(
+                update,
+                "<b>Active execution requested.</b>\n"
+                "Orders will be sent to the currently configured exchange endpoint after /confirm.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        await self._button_reply(update, "Unknown mode.", reply_markup=self._main_menu())
+
+    async def _queue_risk_change(self, update: Update, new_profile_str: str) -> None:
+        if self._controller is None:
+            await self._button_reply(update, "Control not available.", reply_markup=self._main_menu())
+            return
+        try:
+            new_profile = RiskProfile(new_profile_str)
+        except ValueError:
+            await self._button_reply(update, "Unknown risk profile.", reply_markup=self._main_menu())
+            return
+        old_profile = self._controller.current_profile()
+        if new_profile_str == old_profile:
+            await self._button_reply(
+                update,
+                f"Risk profile is already <code>{old_profile}</code>.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        cid = self._chat_id(update)
+        if cid:
+            self._pending[cid] = (
+                f"change risk profile from {old_profile} to {new_profile_str}",
+                lambda: self._controller.set_risk_profile(new_profile),
+            )
+        await self._button_reply(
+            update,
+            f"Change risk profile: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
+            "Send /confirm to apply, or ignore to cancel.",
+            reply_markup=self._main_menu(),
+        )
+
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
@@ -627,10 +854,12 @@ class TelegramMonitorBot:
                 "\n<b>Control</b>\n"
                 "/pause   — stop new entries\n"
                 "/resume  — restart after pause\n"
+                "/mode shadow|active — switch execution mode\n"
                 "/shadow on|off — toggle shadow mode\n"
-                "/risk conservative|moderate|aggressive\n"
+                "/risk conservative|moderate|aggressive|scalp\n"
                 "/stop    — emergency stop (requires /confirm)\n"
                 "/confirm — confirm a pending action\n"
+                "\nUse /start to show the button menu.\n"
             )
         return (
             "<b>Bybit AI Trader</b>\n\n"

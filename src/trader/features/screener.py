@@ -31,8 +31,8 @@ _SKIP_BASE = {
     "USDD", "GUSD", "USDJ", "USDN",
 }
 
-# Always exclude — minimum order far exceeds small-balance budget
-_EXCLUDED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
+# Always exclude — reserved for venue-specific problem symbols if needed.
+_EXCLUDED_SYMBOLS: set[str] = set()
 
 
 class MarketScreener:
@@ -50,7 +50,7 @@ class MarketScreener:
         rest_client: Any,
         max_symbols: int = 10,
         min_volume_usd: float = 20_000_000.0,  # 20M USD/day minimum
-        max_price_usd: float = 100.0,          # skip coins with price > $100
+        max_price_usd: float = 0.0,            # 0 disables price cap
         interval_s: int = 900,  # 15 min
     ) -> None:
         self._rest = rest_client
@@ -87,7 +87,7 @@ class MarketScreener:
                     asyncio.shield(self._stop_event.wait()),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     async def wait_ready(self) -> None:

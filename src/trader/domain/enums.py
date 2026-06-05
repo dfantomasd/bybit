@@ -57,6 +57,7 @@ class RiskProfile(str, Enum):
     CONSERVATIVE = "CONSERVATIVE"
     MODERATE = "MODERATE"
     AGGRESSIVE = "AGGRESSIVE"
+    SCALP = "SCALP"
 
 
 class MarketRegime(str, Enum):

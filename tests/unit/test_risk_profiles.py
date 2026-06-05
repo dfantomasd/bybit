@@ -1,8 +1,9 @@
 """Tests for risk profile definitions."""
 from __future__ import annotations
 
-import pytest
 from decimal import Decimal
+
+import pytest
 
 from trader.domain.enums import MarketType, RiskProfile
 from trader.risk.profiles import RISK_PROFILES, RiskLimits, get_risk_limits
@@ -11,17 +12,17 @@ from trader.risk.profiles import RISK_PROFILES, RiskLimits, get_risk_limits
 def test_conservative_limits():
     """Test conservative profile has correct values from spec."""
     limits = RISK_PROFILES[RiskProfile.CONSERVATIVE]
-    assert limits.risk_per_trade_min_pct == Decimal("0.25")
-    assert limits.risk_per_trade_max_pct == Decimal("0.50")
-    assert limits.risk_per_trade_hard_cap_pct == Decimal("1.00")
-    assert limits.max_leverage == Decimal("1")
-    assert limits.daily_loss_limit_pct == Decimal("1.50")
-    assert limits.daily_loss_hard_stop_pct == Decimal("2.00")
-    assert limits.max_drawdown_pct == Decimal("8.00")
-    assert limits.hard_stop_drawdown_pct == Decimal("10.00")
-    assert limits.max_simultaneous_positions == 2
-    assert limits.max_capital_per_position_pct == Decimal("10")
-    assert limits.max_total_exposure_pct == Decimal("30")
+    assert limits.risk_per_trade_min_pct == Decimal("0.50")
+    assert limits.risk_per_trade_max_pct == Decimal("1.50")
+    assert limits.risk_per_trade_hard_cap_pct == Decimal("2.00")
+    assert limits.max_leverage == Decimal("5")
+    assert limits.daily_loss_limit_pct == Decimal("3.00")
+    assert limits.daily_loss_hard_stop_pct == Decimal("5.00")
+    assert limits.max_drawdown_pct == Decimal("10.00")
+    assert limits.hard_stop_drawdown_pct == Decimal("15.00")
+    assert limits.max_simultaneous_positions == 3
+    assert limits.max_capital_per_position_pct == Decimal("30")
+    assert limits.max_total_exposure_pct == Decimal("70")
 
 
 def test_moderate_limits():
@@ -56,19 +57,21 @@ def test_aggressive_limits():
     assert limits.max_total_exposure_pct == Decimal("100")
 
 
-def test_conservative_no_short():
-    """Conservative profile must not allow short selling."""
+def test_conservative_allows_small_linear_trades():
+    """Conservative is calibrated for small linear testnet/live-canary trades."""
     limits = RISK_PROFILES[RiskProfile.CONSERVATIVE]
-    assert limits.short_allowed is False
-
-
-def test_conservative_no_derivatives():
-    """Conservative profile must not allow derivatives."""
-    limits = RISK_PROFILES[RiskProfile.CONSERVATIVE]
-    assert limits.derivatives_allowed is False
-    assert MarketType.SPOT in limits.allowed_market_types
-    assert MarketType.LINEAR not in limits.allowed_market_types
+    assert limits.short_allowed is True
+    assert limits.derivatives_allowed is True
+    assert MarketType.SPOT not in limits.allowed_market_types
     assert MarketType.INVERSE not in limits.allowed_market_types
+    assert MarketType.LINEAR in limits.allowed_market_types
+
+
+def test_scalp_profile_has_more_slots_but_smaller_risk():
+    limits = RISK_PROFILES[RiskProfile.SCALP]
+    assert limits.max_simultaneous_positions > RISK_PROFILES[RiskProfile.AGGRESSIVE].max_simultaneous_positions
+    assert limits.risk_per_trade_max_pct < RISK_PROFILES[RiskProfile.MODERATE].risk_per_trade_max_pct
+    assert limits.hard_stop_drawdown_pct < RISK_PROFILES[RiskProfile.AGGRESSIVE].hard_stop_drawdown_pct
 
 
 def test_aggressive_has_higher_limits_than_moderate():
@@ -136,10 +139,11 @@ def test_get_risk_limits_returns_correct_profile():
 
 
 def test_all_profiles_present():
-    """All three profiles must be present in RISK_PROFILES."""
+    """All profiles must be present in RISK_PROFILES."""
     assert RiskProfile.CONSERVATIVE in RISK_PROFILES
     assert RiskProfile.MODERATE in RISK_PROFILES
     assert RiskProfile.AGGRESSIVE in RISK_PROFILES
+    assert RiskProfile.SCALP in RISK_PROFILES
 
 
 def test_risk_limits_immutable():

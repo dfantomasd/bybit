@@ -71,10 +71,10 @@ For Render Free deployment, see [RENDER.md](RENDER.md). The included
 
 ```bash
 # Check health
-curl http://localhost:8080/health
+curl -H "X-API-Key: $INTERNAL_API_KEY" http://localhost:8080/health
 
 # View metrics
-curl http://localhost:8080/metrics
+curl -H "X-API-Key: $INTERNAL_API_KEY" http://localhost:8080/metrics
 
 # View logs
 make docker-logs-trader
@@ -134,7 +134,10 @@ Reconciliation, model training, reporting, Telegram notifications
 | `CANARY_LIVE` | Live with severely reduced sizes | Yes | Explicit activation |
 | `LIVE` | Full live trading | Yes | `LIVE_MODE=true` + `TRADING_MODE=LIVE` |
 
-**The system defaults to TESTNET. Reaching LIVE mode requires two independent flags.**
+**The system defaults to TESTNET endpoints with SHADOW execution enabled.**
+In that state it computes signals and simulates positions, but does not submit
+orders until shadow mode is disabled. Reaching LIVE mode requires two independent
+flags.
 
 ---
 
@@ -151,6 +154,16 @@ Key settings:
 | `LIVE_MODE` | `false` | Must be `true` for live trading |
 | `BYBIT_USE_TESTNET` | `true` | Must be `true` for non-live modes |
 | `MAX_POSITIONS` | `2` | Max concurrent open positions |
+| `INTERNAL_API_KEY` | generated | API key for `/health`, `/status`, `/metrics` |
+
+Risk profiles:
+
+| Profile | Intent |
+|---------|--------|
+| `CONSERVATIVE` | Small, safer linear trades |
+| `MODERATE` | Balanced frequency and risk |
+| `AGGRESSIVE` | Larger exposure envelope |
+| `SCALP` | More frequent small-risk entries with shorter cooldown |
 
 Risk profile YAML configuration: `config/profiles.yaml`
 Feature flags: `config/feature_flags.yaml`
@@ -216,6 +229,17 @@ src/trader/
 | Grafana | http://localhost:3000 | Dashboards |
 | Prometheus | Internal only | Metrics scrape |
 | Loki | Internal only | Log aggregation |
+
+## Telegram Controls
+
+Use `/start` to open the button menu. The bot supports status, balance,
+positions, recent signals, active symbols, closed PnL, pause/resume, shadow vs
+active execution, risk profile changes, and emergency stop. Risk changes and
+active execution require `/confirm`.
+
+`/mode shadow` keeps evaluating signals without submitting orders.
+`/mode active` sends orders to the currently configured exchange endpoint after
+confirmation. Configure `BYBIT_USE_TESTNET=true` for testnet execution.
 
 ---
 

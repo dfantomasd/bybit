@@ -14,14 +14,14 @@ Live execution requires LIVE_MODE=true AND TRADING_MODE=LIVE.
 """
 from __future__ import annotations
 
-import uuid
+import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
 import structlog
 
-from trader.domain.enums import OrderSide, OrderType, RiskDecisionStatus
+from trader.domain.enums import OrderType, RiskDecisionStatus
 from trader.domain.models import (
     FeatureVector,
     InstrumentInfo,
@@ -72,6 +72,8 @@ class ExecutionEngine:
         self._open_positions: dict[str, dict[str, Any]] = {}
         # symbol → InstrumentInfo (fetched once, cached forever)
         self._instrument_cache: dict[str, InstrumentInfo] = {}
+        # Serialises risk evaluation + local exposure updates across symbols.
+        self._submit_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # Position awareness
@@ -149,6 +151,24 @@ class ExecutionEngine:
             RiskDecision if the proposal was evaluated, None if it was
             skipped before reaching the RiskManager (dedup / cooldown).
         """
+        async with self._submit_lock:
+            return await self._submit_locked(
+                proposal=proposal,
+                capital=capital,
+                available_balance=available_balance,
+                feature_vector=feature_vector,
+                regime_context=regime_context,
+            )
+
+    async def _submit_locked(
+        self,
+        proposal: TradeProposal,
+        capital: Decimal,
+        available_balance: Decimal,
+        feature_vector: FeatureVector | None = None,
+        regime_context: RegimeContext | None = None,
+    ) -> RiskDecision | None:
+        """Submit implementation guarded by ``_submit_lock``."""
         symbol = proposal.symbol
 
         # 1. Deduplication ─────────────────────────────────────────────
@@ -254,6 +274,18 @@ class ExecutionEngine:
                 return decision
 
         # 7. Update local state ────────────────────────────────────────
+        self._last_entry_at[symbol] = datetime.now(tz=UTC)
+
+        if not self._shadow_mode:
+            await self.sync_positions()
+            if not self.has_open_position(symbol):
+                log.warning(
+                    "execution.order_accepted_position_not_confirmed",
+                    symbol=symbol,
+                    order_link_id=intent.order_link_id,
+                )
+            return decision
+
         entry_price = proposal.entry_price or Decimal("0")
         notional = decision.approved_qty * entry_price
         self._open_positions[symbol] = {
@@ -264,7 +296,6 @@ class ExecutionEngine:
             "order_link_id": intent.order_link_id,
             "opened_at": datetime.now(tz=UTC),
         }
-        self._last_entry_at[symbol] = datetime.now(tz=UTC)
 
         if notional > Decimal("0"):
             await self._exposure.update_position(

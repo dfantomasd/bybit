@@ -151,7 +151,13 @@ class TradingApplication:
         assert self._settings is not None
         import secrets
 
-        internal_api_key = secrets.token_urlsafe(32)
+        internal_api_key = self._settings.INTERNAL_API_KEY.get_secret_value()
+        if not internal_api_key:
+            internal_api_key = secrets.token_urlsafe(32)
+            log.warning(
+                "http_server.generated_internal_api_key",
+                reason="INTERNAL_API_KEY is not configured; authenticated endpoints are only usable inside this process",
+            )
         port = int(os.getenv("PORT", str(self._settings.FASTAPI_PORT)))
         log.info("http_server_starting", port=port)
 
@@ -198,6 +204,16 @@ class TradingApplication:
         log.info("trading.resumed")
 
     async def _set_shadow_mode(self, enabled: bool) -> None:
+        assert self._settings is not None
+        if not enabled:
+            live_armed = (
+                self._settings.LIVE_MODE
+                and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+            )
+            if not self._settings.BYBIT_USE_TESTNET and not live_armed:
+                raise RuntimeError(
+                    "Active execution requires BYBIT_USE_TESTNET=true, or LIVE_MODE=true with TRADING_MODE=LIVE/CANARY_LIVE."
+                )
         if self._execution_engine is not None:
             self._execution_engine._shadow_mode = enabled
         log.info("shadow_mode.changed", enabled=enabled)
@@ -369,6 +385,9 @@ class TradingApplication:
         assert self._risk_manager is not None
         assert self._exposure_tracker is not None
         assert self._bybit_adapter is not None
+        from trader.config import get_risk_profile_config
+
+        profile_cfg = get_risk_profile_config(self._settings.RISK_PROFILE)
 
         shadow = self._settings.SHADOW_MODE or (
             self._settings.TRADING_MODE != TradingMode.LIVE
@@ -378,7 +397,7 @@ class TradingApplication:
             risk_manager=self._risk_manager,
             exposure_tracker=self._exposure_tracker,
             shadow_mode=shadow,
-            cooldown_s=300,
+            cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
         )
 
@@ -527,7 +546,7 @@ class TradingApplication:
                             connected=True,
                             last_message_at=datetime.now(tz=UTC),
                         )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     # Check if WS is still connected
                     if self._ws_public and not self._ws_public.is_connected:
                         if self._health_checker:
@@ -579,6 +598,9 @@ class TradingApplication:
         assert self._settings is not None
 
         # Fetch initial balance to seed RiskManager
+        from trader.config import get_risk_profile_config
+
+        profile_cfg = get_risk_profile_config(self._settings.RISK_PROFILE)
         initial_capital = await self._refresh_balance()
         if initial_capital <= Decimal("0"):
             initial_capital = _FALLBACK_BALANCE_USD
@@ -604,7 +626,7 @@ class TradingApplication:
         self._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
             health_checker=self._health_checker,
-            min_confidence=0.55,
+            min_confidence=profile_cfg.min_confidence,
         )
 
         _balance_tick: int = 0
@@ -656,8 +678,8 @@ class TradingApplication:
                             f"Entry: {pos['entry']:.4f} → Exit: {current_price:.4f}\n"
                             f"PnL: {pnl_sign}{pnl_pct:.2f}% [SHADOW]"
                         )
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        log.debug("telegram.shadow_exit_notify_failed", error=str(exc))
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
@@ -795,7 +817,7 @@ class TradingApplication:
                         asyncio.shield(self._shutdown_event.wait()),
                         timeout=_STRATEGY_LOOP_INTERVAL,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     pass
 
         task = asyncio.create_task(strategy_loop(), name="strategy-loop")

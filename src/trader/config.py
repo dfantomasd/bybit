@@ -103,6 +103,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     PROMETHEUS_PORT: int = 9090
     FASTAPI_PORT: int = 8080
+    INTERNAL_API_KEY: SecretStr = SecretStr("")
+    """Optional API key for observability endpoints. Generated at startup when empty."""
     LOG_LEVEL: str = "INFO"
     LOG_FORMAT: str = "json"
     """'json' for production, 'console' for development."""
@@ -274,10 +276,29 @@ AGGRESSIVE_PROFILE = RiskProfileConfig(
     cooldown_seconds=120,
 )
 
+SCALP_PROFILE = RiskProfileConfig(
+    max_positions=8,
+    max_position_size_pct=0.75,
+    max_position_notional_usd=1500.0,
+    max_portfolio_heat_pct=8.0,
+    max_daily_drawdown_pct=2.5,
+    max_weekly_drawdown_pct=6.0,
+    max_monthly_drawdown_pct=12.0,
+    kelly_fraction=0.15,
+    max_leverage=7.0,
+    allowed_regimes=["BULL_TREND", "BEAR_TREND", "SIDEWAYS", "HIGH_VOLATILITY"],
+    max_volatility_level="EXTREME",
+    use_post_only=False,
+    max_slippage_bps=25.0,
+    min_confidence=0.45,
+    cooldown_seconds=45,
+)
+
 RISK_PROFILE_MAP: dict[RiskProfile, RiskProfileConfig] = {
     RiskProfile.CONSERVATIVE: CONSERVATIVE_PROFILE,
     RiskProfile.MODERATE: MODERATE_PROFILE,
     RiskProfile.AGGRESSIVE: AGGRESSIVE_PROFILE,
+    RiskProfile.SCALP: SCALP_PROFILE,
 }
 
 

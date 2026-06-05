@@ -266,7 +266,7 @@ class BybitAdapter:
             open_orders_resp = await self._rest.get_open_orders(
                 category=self._default_category
             )
-            exchange_open = open_orders_(resp.get("result") or {}).get("list", [])
+            exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
             exchange_ids = {o.get("orderLinkId") for o in exchange_open}
 
             local_ids = set(self._idempotency.all_states().keys())

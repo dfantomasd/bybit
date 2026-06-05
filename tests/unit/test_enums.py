@@ -56,9 +56,10 @@ class TestRiskProfile:
         assert RiskProfile.CONSERVATIVE == "CONSERVATIVE"
         assert RiskProfile.MODERATE == "MODERATE"
         assert RiskProfile.AGGRESSIVE == "AGGRESSIVE"
+        assert RiskProfile.SCALP == "SCALP"
 
     def test_count(self) -> None:
-        assert len(RiskProfile) == 3
+        assert len(RiskProfile) == 4
 
 
 class TestMarketRegime:

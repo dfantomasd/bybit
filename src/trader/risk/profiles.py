@@ -182,6 +182,30 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         # Market types
         allowed_market_types=[MarketType.SPOT, MarketType.LINEAR, MarketType.INVERSE],
     ),
+    RiskProfile.SCALP: RiskLimits(
+        # Position sizing — more frequent entries, but small risk per idea.
+        risk_per_trade_min_pct=Decimal("0.25"),
+        risk_per_trade_max_pct=Decimal("0.75"),
+        risk_per_trade_hard_cap_pct=Decimal("1.25"),
+        # Leverage
+        max_leverage=Decimal("7"),
+        # Daily limits
+        daily_loss_limit_pct=Decimal("2.50"),
+        daily_loss_hard_stop_pct=Decimal("4.00"),
+        # Drawdown
+        max_drawdown_pct=Decimal("8.00"),
+        hard_stop_drawdown_pct=Decimal("12.00"),
+        # Portfolio
+        max_simultaneous_positions=8,
+        max_capital_per_position_pct=Decimal("18"),
+        max_total_exposure_pct=Decimal("90"),
+        # Permissions
+        short_allowed=True,
+        derivatives_allowed=True,
+        auto_resume_after_hard_stop=False,
+        # Market types
+        allowed_market_types=[MarketType.LINEAR],
+    ),
 }
 
 

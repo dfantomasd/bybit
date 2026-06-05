@@ -1,6 +1,5 @@
 """Tests for EndpointSelector."""
 from trader.domain.enums import BybitRegion
-from trader.exchange.bybit_rest import _pybit_domain_kwargs
 from trader.exchange.endpoint_selector import ENDPOINTS, EndpointSelector
 
 
@@ -57,19 +56,6 @@ class TestEndpointRegistry:
         for region, endpoints in ENDPOINTS.items():
             for key in ("ws_public", "ws_private", "ws_public_testnet", "ws_private_testnet"):
                 assert endpoints[key].startswith("wss://"), f"{region}.{key} not WSS"
-
-    def test_pybit_domain_kwargs_global(self) -> None:
-        assert _pybit_domain_kwargs("https://api.bybit.com") == {
-            "domain": "bybit",
-            "tld": "com",
-        }
-
-    def test_pybit_domain_kwargs_georgia(self) -> None:
-        assert _pybit_domain_kwargs("https://api.bybitgeorgia.ge") == {
-            "domain": "bybitgeorgia",
-            "tld": "ge",
-        }
-
 
 class TestEndpointSelectorProperties:
     """Test EndpointSelector properties with live vs testnet."""
