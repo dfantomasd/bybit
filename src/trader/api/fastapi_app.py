@@ -1,6 +1,7 @@
 """Read-only FastAPI observability application.
 
 Endpoints:
+  GET /livez           - Unauthenticated process liveness
   GET /health          - Component health status
   GET /status          - System status summary
   GET /positions       - Current open positions (no secrets)
@@ -118,11 +119,20 @@ def create_app(
                 headers={"WWW-Authenticate": "ApiKey"},
             )
 
-    AuthDep = Depends(verify_api_key)
+    auth_dep = Depends(verify_api_key)
 
     # -----------------------------------------------------------------------
     # Routes
     # -----------------------------------------------------------------------
+
+    @app.get(
+        "/livez",
+        summary="Process liveness",
+        tags=["observability"],
+    )
+    async def get_livez() -> dict[str, str]:
+        """Return minimal unauthenticated liveness for container probes."""
+        return {"status": "ok"}
 
     @app.get(
         "/health",
@@ -130,7 +140,7 @@ def create_app(
         summary="Component health status",
         tags=["observability"],
     )
-    async def get_health(_auth: None = AuthDep) -> JSONResponse:
+    async def get_health(_auth: None = auth_dep) -> JSONResponse:
         """Return aggregated health of all system components."""
         if health_checker is None:
             return JSONResponse(
@@ -152,7 +162,7 @@ def create_app(
         summary="System status summary",
         tags=["observability"],
     )
-    async def get_status(_auth: None = AuthDep) -> dict[str, Any]:
+    async def get_status(_auth: None = auth_dep) -> dict[str, Any]:
         """Return current system lifecycle status and trading mode."""
         if state_store is None:
             return {
@@ -172,7 +182,7 @@ def create_app(
         summary="Current open positions",
         tags=["trading"],
     )
-    async def get_positions(_auth: None = AuthDep) -> list[dict[str, Any]]:
+    async def get_positions(_auth: None = auth_dep) -> list[dict[str, Any]]:
         """Return sanitised view of open positions. No secrets or credentials."""
         if state_store is None:
             return []
@@ -197,7 +207,7 @@ def create_app(
         tags=["observability"],
         response_class=PlainTextResponse,
     )
-    async def get_metrics(_auth: None = AuthDep) -> PlainTextResponse:
+    async def get_metrics(_auth: None = auth_dep) -> PlainTextResponse:
         """Expose Prometheus metrics in text format."""
         data = generate_latest()
         return PlainTextResponse(
@@ -210,7 +220,7 @@ def create_app(
         summary="Current market regime per symbol",
         tags=["trading"],
     )
-    async def get_regime(_auth: None = AuthDep) -> dict[str, Any]:
+    async def get_regime(_auth: None = auth_dep) -> dict[str, Any]:
         """Return the currently detected market regime for each tracked symbol."""
         if state_store is None:
             return {}
@@ -231,7 +241,7 @@ def create_app(
         summary="Deployed model metadata",
         tags=["trading"],
     )
-    async def get_model_info(_auth: None = AuthDep) -> dict[str, Any]:
+    async def get_model_info(_auth: None = auth_dep) -> dict[str, Any]:
         """Return metadata about the currently deployed ML model."""
         if state_store is None:
             return {}

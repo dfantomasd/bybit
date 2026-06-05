@@ -117,6 +117,12 @@ docker-up: ## Start all services (production config)
 docker-up-dev: ## Start all services (development config with hot-reload)
 	$(DOCKER_COMPOSE) -f docker-compose.yml -f docker-compose.dev.yml up
 
+docker-up-mini: ## Start the minimal monitoring MVP stack
+	$(DOCKER_COMPOSE) -f docker-compose.mini.yml up -d --build
+
+docker-down-mini: ## Stop the minimal monitoring MVP stack
+	$(DOCKER_COMPOSE) -f docker-compose.mini.yml down
+
 docker-down: ## Stop all services
 	$(DOCKER_COMPOSE) down
 

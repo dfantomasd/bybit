@@ -32,8 +32,8 @@ WORKDIR /build
 COPY pyproject.toml ./
 COPY README.md ./
 
-# Install all production dependencies
-RUN uv pip install --system ".[dev]"
+# Install production dependencies only; ML/training extras are optional.
+RUN uv pip install --system "."
 
 # Copy application source
 COPY src/ ./src/
@@ -86,6 +86,6 @@ EXPOSE 8080 9090
 
 # Health check via the FastAPI /health endpoint
 HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-    CMD curl -f -s -H "X-API-Key: ${INTERNAL_API_KEY:-}" http://localhost:8080/health || exit 1
+    CMD curl -f -s http://localhost:8080/livez || exit 1
 
 CMD ["trader"]

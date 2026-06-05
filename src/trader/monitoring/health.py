@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import asyncpg  # type: ignore[import-untyped]
@@ -50,7 +50,7 @@ class HealthChecker:
         trading_mode: TradingMode = TradingMode.TESTNET,
         system_status: SystemStatus = SystemStatus.STOPPED,
     ) -> None:
-        self._postgres_dsn = postgres_dsn
+        self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._redis_url = redis_url
         self._bybit_rest_url = bybit_rest_url
         self._trading_mode = trading_mode
@@ -161,21 +161,21 @@ class HealthChecker:
             return False
         if self._last_ws_message_at is None:
             return False
-        age = (datetime.now(tz=timezone.utc) - self._last_ws_message_at).total_seconds()
+        age = (datetime.now(tz=UTC) - self._last_ws_message_at).total_seconds()
         return age < 30.0
 
     async def check_model_freshness(self) -> bool:
         """Return True if a model inference happened within the threshold."""
         if self._last_model_inference_at is None:
             return False
-        age = (datetime.now(tz=timezone.utc) - self._last_model_inference_at).total_seconds()
+        age = (datetime.now(tz=UTC) - self._last_model_inference_at).total_seconds()
         return age < _MODEL_STALE_THRESHOLD_S
 
     async def check_feature_freshness(self) -> bool:
         """Return True if features were computed within the threshold."""
         if self._last_feature_computed_at is None:
             return False
-        age = (datetime.now(tz=timezone.utc) - self._last_feature_computed_at).total_seconds()
+        age = (datetime.now(tz=UTC) - self._last_feature_computed_at).total_seconds()
         return age < _FEATURE_STALE_THRESHOLD_S
 
     # ------------------------------------------------------------------

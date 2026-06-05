@@ -51,6 +51,8 @@ class Settings(BaseSettings):
     BYBIT_REGION: BybitRegion = BybitRegion.GLOBAL
     BYBIT_USE_TESTNET: bool = True
     """Must be True whenever TRADING_MODE is not LIVE."""
+    DEFAULT_MARKET_CATEGORY: str = "linear"
+    """Default Bybit category for read-only monitoring commands."""
 
     # ------------------------------------------------------------------
     # Database

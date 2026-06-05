@@ -10,6 +10,7 @@ import functools
 import time
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any
+from urllib.parse import urlparse
 
 import structlog
 
@@ -43,6 +44,18 @@ _BYBIT_ERROR_MAP: dict[int, type[TradingSystemError]] = {
 
 _NON_RETRYABLE_CODES = {10003, 10004, 110007, 110013, 110014, 110017, 110025}
 _ALLOWED_NON_ZERO_CODES = {110043}  # "set leverage not modified" — not a real error
+
+
+def _pybit_domain_kwargs(rest_base: str) -> dict[str, str]:
+    """Convert an EndpointSelector REST base URL into pybit domain kwargs."""
+    host = urlparse(rest_base).hostname or ""
+    parts = host.split(".")
+    if len(parts) < 3 or parts[0] != "api":
+        return {}
+    return {
+        "domain": ".".join(parts[1:-1]),
+        "tld": parts[-1],
+    }
 
 
 def _raise_for_ret_code(response: dict[str, Any], context: str = "") -> None:
@@ -116,6 +129,8 @@ class BybitRestClient:
             "api_secret": self._api_secret,
             "recv_window": self._recv_window,
         }
+        if not self._use_testnet:
+            kwargs.update(_pybit_domain_kwargs(self._endpoint_selector.rest_base))
         if use_rsa and rsa_private_key:
             kwargs["rsa_authentication"] = True
             kwargs["private_key"] = rsa_private_key
@@ -170,7 +185,7 @@ class BybitRestClient:
         if isinstance(response, dict):
             _raise_for_ret_code(response, context=method_name)
 
-        return response  # type: ignore[return-value]
+        return response
 
     # ------------------------------------------------------------------
     # Server

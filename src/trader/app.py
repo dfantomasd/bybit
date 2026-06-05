@@ -37,6 +37,8 @@ class TradingApplication:
         self._settings: Any | None = None
         self._health_checker: Any | None = None
         self._uvicorn_server: uvicorn.Server | None = None
+        self._bybit_adapter: Any | None = None
+        self._telegram_bot: Any | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -74,16 +76,16 @@ class TradingApplication:
 
     async def _run_preflight(self) -> None:
         """Run preflight checks. Abort startup if critical checks fail."""
+        from trader.exchange.endpoint_selector import EndpointSelector
         from trader.monitoring.health import HealthChecker
 
         assert self._settings is not None
         self._status = SystemStatus.PREFLIGHT
 
-        bybit_base = (
-            "https://api-testnet.bybit.com"
-            if self._settings.BYBIT_USE_TESTNET
-            else "https://api.bybit.com"
-        )
+        bybit_base = EndpointSelector(
+            self._settings.BYBIT_REGION,
+            self._settings.BYBIT_USE_TESTNET,
+        ).rest_base
 
         self._health_checker = HealthChecker(
             postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
@@ -130,7 +132,7 @@ class TradingApplication:
 
         config = uvicorn.Config(
             app=fastapi_app,
-            host="0.0.0.0",
+            host="0.0.0.0",  # noqa: S104 - container service must bind internally.
             port=self._settings.FASTAPI_PORT,
             log_level="warning",
             access_log=False,
@@ -141,6 +143,43 @@ class TradingApplication:
             self._uvicorn_server.serve(),
             name="http-server",
         )
+
+    async def _start_bybit_adapter(self) -> None:
+        """Create the read/write exchange adapter; trading remains gated elsewhere."""
+        from trader.exchange.bybit_adapter import BybitAdapter
+
+        assert self._settings is not None
+        self._bybit_adapter = BybitAdapter(
+            api_key=self._settings.BYBIT_API_KEY.get_secret_value(),
+            api_secret=self._settings.BYBIT_API_SECRET.get_secret_value(),
+            region_code=self._settings.BYBIT_REGION.value,
+            use_testnet=self._settings.BYBIT_USE_TESTNET,
+            default_category=self._settings.DEFAULT_MARKET_CATEGORY,
+        )
+        log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
+
+    async def _start_telegram_bot(self) -> None:
+        """Start read-only Telegram monitoring if configured."""
+        from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot
+
+        assert self._settings is not None
+        assert self._health_checker is not None
+        token = self._settings.TELEGRAM_BOT_TOKEN.get_secret_value()
+        allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
+
+        self._telegram_bot = TelegramMonitorBot(
+            config=TelegramBotConfig(
+                token=token,
+                allowed_chat_ids=allowed_chat_ids,
+                trading_mode=self._settings.TRADING_MODE.value,
+                risk_profile=self._settings.RISK_PROFILE.value,
+                bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
+                default_category=self._settings.DEFAULT_MARKET_CATEGORY,
+            ),
+            health_provider=self._health_checker.overall_health,
+            adapter_factory=lambda: self._bybit_adapter,
+        )
+        await self._telegram_bot.start()
 
     # ------------------------------------------------------------------
     # Main loop
@@ -161,8 +200,8 @@ class TradingApplication:
             live_mode=self._settings.LIVE_MODE,
         )
 
-        # Phase 2 will start strategy workers, data feeds, etc. here.
-        # For now, just keep the process alive until shutdown is requested.
+        # Strategy execution is intentionally not wired yet. The current runtime
+        # exposes health, Bybit read-only account views, and Telegram monitoring.
         while not self._shutdown_event.is_set():
             await asyncio.sleep(1)
 
@@ -183,12 +222,16 @@ class TradingApplication:
         if self._health_checker:
             self._health_checker.set_system_status(self._status)
 
-        # Phase 2: cancel open orders, flush queues, close WS, etc.
-        # For now, just stop the HTTP server.
+        if self._telegram_bot:
+            await self._telegram_bot.stop()
+
         if self._uvicorn_server:
             self._uvicorn_server.should_exit = True
             # Give it a moment to finish in-flight requests
             await asyncio.sleep(1)
+
+        if self._bybit_adapter:
+            self._bybit_adapter.close()
 
         self._status = SystemStatus.STOPPED
         log.info("graceful_shutdown_complete")
@@ -211,6 +254,8 @@ class TradingApplication:
             await self._run_preflight()
 
             http_task = await self._start_http_server()
+            await self._start_bybit_adapter()
+            await self._start_telegram_bot()
 
             try:
                 await self._main_loop()

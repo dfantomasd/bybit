@@ -48,6 +48,15 @@ make docker-up
 make docker-up-dev
 ```
 
+For the current safe monitoring MVP, use the minimal compose file instead:
+
+```bash
+docker compose -f docker-compose.mini.yml up -d --build
+```
+
+This starts only `trader-core`, PostgreSQL, and Redis. Telegram commands are
+read-only: `/status`, `/balance`, `/positions`, and `/help`.
+
 ### 4. Verify
 
 ```bash

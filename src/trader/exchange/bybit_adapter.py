@@ -186,8 +186,12 @@ class BybitAdapter:
         )
         try:
             await self._idempotency.mark_cancelled(order_link_id)
-        except (KeyError, Exception):
-            pass  # May not be in our idempotency store (externally created order)
+        except Exception as exc:
+            logger.debug(
+                "bybit_adapter.cancelled_order_not_in_local_store",
+                order_link_id=order_link_id,
+                error=str(exc),
+            )
         return resp
 
     # ------------------------------------------------------------------
@@ -286,3 +290,7 @@ class BybitAdapter:
                 "error": str(exc),
                 "latency_ms": None,
             }
+
+    def close(self) -> None:
+        """Release resources held by the underlying REST client."""
+        self._rest.close()

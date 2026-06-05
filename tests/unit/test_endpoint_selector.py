@@ -1,10 +1,6 @@
 """Tests for EndpointSelector."""
-from __future__ import annotations
-
-import pytest
-
 from trader.domain.enums import BybitRegion
-from trader.domain.errors import ConfigurationError
+from trader.exchange.bybit_rest import _pybit_domain_kwargs
 from trader.exchange.endpoint_selector import ENDPOINTS, EndpointSelector
 
 
@@ -33,25 +29,25 @@ class TestEndpointRegistry:
         assert ENDPOINTS[BybitRegion.GLOBAL]["ws_private"] == "wss://stream.bybit.com/v5/private"
 
     def test_nl_rest_url(self) -> None:
-        assert "nl.bybit.com" in ENDPOINTS[BybitRegion.NL]["rest"]
+        assert ENDPOINTS[BybitRegion.NL]["rest"] == "https://api.bybit.nl"
 
     def test_eea_rest_url(self) -> None:
-        assert "eea.bybit.com" in ENDPOINTS[BybitRegion.EEA]["rest"]
+        assert ENDPOINTS[BybitRegion.EEA]["rest"] == "https://api.bybit.eu"
 
     def test_tr_rest_url(self) -> None:
-        assert "tr.bybit.com" in ENDPOINTS[BybitRegion.TR]["rest"]
+        assert ENDPOINTS[BybitRegion.TR]["rest"] == "https://api.bybit.tr"
 
     def test_kz_rest_url(self) -> None:
-        assert "kz.bybit.com" in ENDPOINTS[BybitRegion.KZ]["rest"]
+        assert ENDPOINTS[BybitRegion.KZ]["rest"] == "https://api.bybit.kz"
 
     def test_ge_rest_url(self) -> None:
-        assert "ge.bybit.com" in ENDPOINTS[BybitRegion.GE]["rest"]
+        assert ENDPOINTS[BybitRegion.GE]["rest"] == "https://api.bybitgeorgia.ge"
 
     def test_ae_rest_url(self) -> None:
-        assert "ae.bybit.com" in ENDPOINTS[BybitRegion.AE]["rest"]
+        assert ENDPOINTS[BybitRegion.AE]["rest"] == "https://api.bybit.ae"
 
     def test_id_rest_url(self) -> None:
-        assert "id.bybit.com" in ENDPOINTS[BybitRegion.ID]["rest"]
+        assert ENDPOINTS[BybitRegion.ID]["rest"] == "https://api.bybit.id"
 
     def test_all_rest_urls_are_https(self) -> None:
         for region, endpoints in ENDPOINTS.items():
@@ -61,6 +57,18 @@ class TestEndpointRegistry:
         for region, endpoints in ENDPOINTS.items():
             for key in ("ws_public", "ws_private", "ws_public_testnet", "ws_private_testnet"):
                 assert endpoints[key].startswith("wss://"), f"{region}.{key} not WSS"
+
+    def test_pybit_domain_kwargs_global(self) -> None:
+        assert _pybit_domain_kwargs("https://api.bybit.com") == {
+            "domain": "bybit",
+            "tld": "com",
+        }
+
+    def test_pybit_domain_kwargs_georgia(self) -> None:
+        assert _pybit_domain_kwargs("https://api.bybitgeorgia.ge") == {
+            "domain": "bybitgeorgia",
+            "tld": "ge",
+        }
 
 
 class TestEndpointSelectorProperties:
@@ -92,7 +100,7 @@ class TestEndpointSelectorProperties:
 
     def test_nl_live_rest_base(self) -> None:
         sel = EndpointSelector(BybitRegion.NL, use_testnet=False)
-        assert "nl.bybit.com" in sel.rest_base
+        assert sel.rest_base == "https://api.bybit.nl"
 
     def test_nl_testnet_falls_back_to_global(self) -> None:
         sel = EndpointSelector(BybitRegion.NL, use_testnet=True)

@@ -1,0 +1,89 @@
+version: "3.9"
+
+# Minimal always-on deployment for the current safe monitoring MVP.
+# Starts only the app, PostgreSQL, and Redis. No trainer/reporter/monitoring
+# services are included because those modules are not implemented yet.
+
+networks:
+  backend:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+
+services:
+  trader-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: runtime
+    image: bybit-trader:monitoring
+    container_name: trader-core
+    restart: unless-stopped
+    command: ["trader"]
+    env_file:
+      - .env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - backend
+    volumes:
+      - ./config:/app/config:ro
+    ports:
+      - "${FASTAPI_PORT:-8080}:${FASTAPI_PORT:-8080}"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f -s http://localhost:$${FASTAPI_PORT:-8080}/livez"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: trader-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: trader
+      POSTGRES_USER: trader
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-trader}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U trader -d trader"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+    security_opt:
+      - no-new-privileges:true
+
+  redis:
+    image: redis:7-alpine
+    container_name: trader-redis
+    restart: unless-stopped
+    command: ["redis-server", "--save", "60", "1", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+    security_opt:
+      - no-new-privileges:true
