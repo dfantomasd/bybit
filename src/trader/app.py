@@ -344,13 +344,17 @@ class TradingApplication:
 
         try:
             balance = await self._bybit_adapter.get_balance()
+            # Use available; if zero (e.g. all collateralised) fall back to wallet
             available = balance.available_balance
+            if available <= Decimal("0") and balance.wallet_balance > Decimal("0"):
+                available = balance.wallet_balance
             if available > Decimal("0"):
                 self._cached_balance = available
                 self._balance_refreshed_at = datetime.now(tz=UTC)
-                log.debug(
+                log.info(
                     "balance.refreshed",
                     available_usd=str(available),
+                    wallet_usd=str(balance.wallet_balance),
                 )
             return self._cached_balance
         except Exception as exc:

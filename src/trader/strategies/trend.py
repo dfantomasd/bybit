@@ -142,6 +142,8 @@ class EMAcrossoverStrategy(BaseStrategy):
                 entry_price = current_price
 
                 qty_usd = available_balance_usd * self._max_risk_pct / stop_dist
+                # Cap: never more than 30% of balance (prevents ATR-blown positions)
+                qty_usd = min(qty_usd, available_balance_usd * 0.30)
                 qty_usd = max(qty_usd, self._min_qty_usd)
                 qty = qty_usd / current_price
 
@@ -189,6 +191,7 @@ class EMAcrossoverStrategy(BaseStrategy):
                 entry_price = current_price
 
                 qty_usd = available_balance_usd * self._max_risk_pct / stop_dist
+                qty_usd = min(qty_usd, available_balance_usd * 0.30)
                 qty_usd = max(qty_usd, self._min_qty_usd)
                 qty = qty_usd / current_price
 

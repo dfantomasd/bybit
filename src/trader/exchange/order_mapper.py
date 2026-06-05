@@ -211,7 +211,13 @@ class OrderMapper:
             account_type=data.get("accountType", "UNIFIED"),
             currency=data.get("coin", data.get("currency", "USDT")),
             wallet_balance=_d(data.get("walletBalance", "0")),
-            available_balance=_d(data.get("availableToWithdraw", data.get("availableBalance", "0"))),
+            available_balance=_d(
+                # Bybit UNIFIED: prefer availableToWithdraw; if zero fall back
+                # to walletBalance so the bot doesn't use $1000 fallback capital
+                data.get("availableToWithdraw")
+                or data.get("availableBalance")
+                or data.get("walletBalance", "0")
+            ),
             unrealised_pnl=_d(data.get("unrealisedPnl", "0")),
             margin_balance=_d(data.get("equity")) if data.get("equity") else None,
         )
