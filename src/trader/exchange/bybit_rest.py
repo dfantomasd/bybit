@@ -1,17 +1,19 @@
-"""Thin async REST client wrapping pybit's HTTP session.
+"""Bybit V5 REST client — direct aiohttp with manual HMAC-SHA256 signing.
 
-pybit is a synchronous library; we wrap calls in a thread pool executor
-so the rest of the async application is not blocked.
+Replaces the pybit-based implementation to give full control over request
+signing and eliminate pybit version incompatibilities.
 """
 from __future__ import annotations
 
 import asyncio
-import functools
+import hashlib
+import hmac
+import json
 import time
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import urlencode
 
+import aiohttp
 import structlog
 
 from trader.domain.errors import (
@@ -46,18 +48,6 @@ _NON_RETRYABLE_CODES = {10003, 10004, 110007, 110013, 110014, 110017, 110025}
 _ALLOWED_NON_ZERO_CODES = {110043}  # "set leverage not modified" — not a real error
 
 
-def _pybit_domain_kwargs(rest_base: str) -> dict[str, str]:
-    """Convert an EndpointSelector REST base URL into pybit domain kwargs."""
-    host = urlparse(rest_base).hostname or ""
-    parts = host.split(".")
-    if len(parts) < 3 or parts[0] != "api":
-        return {}
-    return {
-        "domain": ".".join(parts[1:-1]),
-        "tld": parts[-1],
-    }
-
-
 def _raise_for_ret_code(response: dict[str, Any], context: str = "") -> None:
     """Raise an appropriate exception if retCode != 0."""
     ret_code = response.get("retCode", 0)
@@ -81,15 +71,14 @@ def _raise_for_ret_code(response: dict[str, Any], context: str = "") -> None:
             f"{msg} (code={ret_code})",
             exchange_code=str(ret_code),
         )
-    # Generic fallback
     raise TradingSystemError(f"{msg} (code={ret_code})", code=str(ret_code))
 
 
 class BybitRestClient:
-    """Async REST client for Bybit V5 API using pybit under the hood.
+    """Async REST client for Bybit V5 API using aiohttp with manual HMAC signing.
 
-    All public methods are coroutines that run pybit's synchronous HTTP
-    session in a thread-pool executor so the event loop is never blocked.
+    All authenticated requests use the standard Bybit V5 signature:
+        HMAC-SHA256(timestamp + apiKey + recvWindow + queryString, apiSecret)
     """
 
     def __init__(
@@ -108,82 +97,123 @@ class BybitRestClient:
         self._api_secret = api_secret
         self._endpoint_selector = endpoint_selector
         self._rate_limiter = rate_limiter
-        self._use_testnet = use_testnet
         self._recv_window = recv_window
-        self._executor = ThreadPoolExecutor(max_workers=max_workers, thread_name_prefix="bybit_rest")
-
-        # Build pybit HTTP session
-        self._session = self._build_session(use_rsa, rsa_private_key)
+        self._base_url = endpoint_selector.rest_base
+        self._session: aiohttp.ClientSession | None = None
 
     # ------------------------------------------------------------------
-    # Session factory
+    # Session management
     # ------------------------------------------------------------------
 
-    def _build_session(self, use_rsa: bool, rsa_private_key: str | None) -> Any:
-        """Instantiate a pybit HTTP session."""
-        from pybit.unified_trading import HTTP
+    def _get_session(self) -> aiohttp.ClientSession:
+        if self._session is None or self._session.closed:
+            self._session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=10),
+            )
+        return self._session
 
-        kwargs: dict[str, Any] = {
-            "testnet": self._use_testnet,
-            "api_key": self._api_key,
-            "api_secret": self._api_secret,
-            "recv_window": self._recv_window,
+    # ------------------------------------------------------------------
+    # Signature
+    # ------------------------------------------------------------------
+
+    def _sign(self, timestamp: str, params_str: str) -> str:
+        """Generate HMAC-SHA256 signature for Bybit V5."""
+        payload = f"{timestamp}{self._api_key}{self._recv_window}{params_str}"
+        return hmac.new(
+            self._api_secret.encode("utf-8"),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+
+    def _auth_headers(self, timestamp: str, signature: str) -> dict[str, str]:
+        return {
+            "X-BAPI-API-KEY": self._api_key,
+            "X-BAPI-SIGN": signature,
+            "X-BAPI-SIGN-ALGO": "HMAC_SHA256",
+            "X-BAPI-TIMESTAMP": timestamp,
+            "X-BAPI-RECV-WINDOW": str(self._recv_window),
         }
-        if not self._use_testnet:
-            kwargs.update(_pybit_domain_kwargs(self._endpoint_selector.rest_base))
-        if use_rsa and rsa_private_key:
-            kwargs["rsa_authentication"] = True
-            kwargs["private_key"] = rsa_private_key
-
-        return HTTP(**kwargs)
 
     # ------------------------------------------------------------------
-    # Internal helpers
+    # Core request
     # ------------------------------------------------------------------
 
-    async def _call(self, method_name: str, endpoint_hint: str = "/", **kwargs: Any) -> dict[str, Any]:
-        """Run a pybit session method in the thread pool, applying rate limiting.
-
-        Args:
-            method_name:   Name of the pybit HTTP session method to call.
-            endpoint_hint: Short path used for rate limiter key (no real routing).
-            **kwargs:      Arguments forwarded to the pybit method.
-        """
+    async def _get(
+        self,
+        path: str,
+        params: dict[str, Any] | None = None,
+        authenticated: bool = True,
+    ) -> dict[str, Any]:
+        endpoint_hint = path
         await self._rate_limiter.acquire(endpoint_hint, "GET")
 
-        pybit_method = getattr(self._session, method_name)
-        loop = asyncio.get_event_loop()
-
         t0 = time.monotonic()
-        log = logger.bind(method=method_name, endpoint=endpoint_hint)
+        log = logger.bind(method="GET", endpoint=path)
         log.debug("bybit_rest_request")
 
+        params = {k: v for k, v in (params or {}).items() if v is not None}
+        query_string = urlencode(params)
+        url = f"{self._base_url}{path}"
+
+        headers: dict[str, str] = {}
+        if authenticated and self._api_key:
+            timestamp = str(int(time.time() * 1000))
+            signature = self._sign(timestamp, query_string)
+            headers = self._auth_headers(timestamp, signature)
+
         try:
-            response: dict[str, Any] = await loop.run_in_executor(
-                self._executor,
-                functools.partial(pybit_method, **kwargs),
-            )
+            session = self._get_session()
+            async with session.get(url, params=params, headers=headers) as resp:
+                response: dict[str, Any] = await resp.json(content_type=None)
         except Exception as exc:
             log.error("bybit_rest_exception", error=str(exc))
             raise
 
         elapsed_ms = (time.monotonic() - t0) * 1000
-
-        # Feed headers back to rate limiter (pybit response dict has no headers, but
-        # some pybit versions expose them via response["headers"] — handle gracefully)
-        headers = response.get("headers", {}) if isinstance(response, dict) else {}
-        if headers:
-            self._rate_limiter.record_response(endpoint_hint, headers)
-
         ret_code = response.get("retCode", 0) if isinstance(response, dict) else 0
-        log.debug(
-            "bybit_rest_response",
-            ret_code=ret_code,
-            elapsed_ms=round(elapsed_ms, 1),
-        )
+        log.debug("bybit_rest_response", ret_code=ret_code, elapsed_ms=round(elapsed_ms, 1))
 
         if isinstance(response, dict):
-            _raise_for_ret_code(response, context=method_name)
+            _raise_for_ret_code(response, context=path)
+
+        return response
+
+    async def _post(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        endpoint_hint = path
+        await self._rate_limiter.acquire(endpoint_hint, "POST")
+
+        t0 = time.monotonic()
+        log = logger.bind(method="POST", endpoint=path)
+        log.debug("bybit_rest_request")
+
+        body = body or {}
+        body_str = json.dumps(body)
+        url = f"{self._base_url}{path}"
+
+        headers: dict[str, str] = {"Content-Type": "application/json"}
+        if self._api_key:
+            timestamp = str(int(time.time() * 1000))
+            signature = self._sign(timestamp, body_str)
+            headers.update(self._auth_headers(timestamp, signature))
+
+        try:
+            session = self._get_session()
+            async with session.post(url, data=body_str, headers=headers) as resp:
+                response: dict[str, Any] = await resp.json(content_type=None)
+        except Exception as exc:
+            log.error("bybit_rest_exception", error=str(exc))
+            raise
+
+        elapsed_ms = (time.monotonic() - t0) * 1000
+        ret_code = response.get("retCode", 0) if isinstance(response, dict) else 0
+        log.debug("bybit_rest_response", ret_code=ret_code, elapsed_ms=round(elapsed_ms, 1))
+
+        if isinstance(response, dict):
+            _raise_for_ret_code(response, context=path)
 
         return response
 
@@ -192,24 +222,23 @@ class BybitRestClient:
     # ------------------------------------------------------------------
 
     async def get_server_time(self) -> dict[str, Any]:
-        return await self._call("get_server_time", "/v5/market/time")
+        return await self._get("/v5/market/time", authenticated=False)
 
     # ------------------------------------------------------------------
     # Account
     # ------------------------------------------------------------------
 
     async def get_wallet_balance(self, account_type: str = "UNIFIED") -> dict[str, Any]:
-        return await self._call(
-            "get_wallet_balance",
+        return await self._get(
             "/v5/account/wallet-balance",
-            accountType=account_type,
+            params={"accountType": account_type},
         )
 
     async def get_account_info(self) -> dict[str, Any]:
-        return await self._call("get_account_info", "/v5/account/info")
+        return await self._get("/v5/account/info")
 
     async def get_api_key_info(self) -> dict[str, Any]:
-        return await self._call("get_api_key_information", "/v5/user/query-api")
+        return await self._get("/v5/user/query-api")
 
     # ------------------------------------------------------------------
     # Instruments / market data
@@ -218,18 +247,20 @@ class BybitRestClient:
     async def get_instruments_info(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_instruments_info", "/v5/market/instruments-info", **kwargs)
+        return await self._get(
+            "/v5/market/instruments-info",
+            params={"category": category, "symbol": symbol},
+            authenticated=False,
+        )
 
     async def get_tickers(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_tickers", "/v5/market/tickers", **kwargs)
+        return await self._get(
+            "/v5/market/tickers",
+            params={"category": category, "symbol": symbol},
+            authenticated=False,
+        )
 
     async def get_kline(
         self,
@@ -240,49 +271,44 @@ class BybitRestClient:
         end: int | None = None,
         limit: int = 200,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {
-            "category": category,
-            "symbol": symbol,
-            "interval": interval,
-            "limit": limit,
-        }
-        if start is not None:
-            kwargs["start"] = start
-        if end is not None:
-            kwargs["end"] = end
-        return await self._call("get_kline", "/v5/market/kline", **kwargs)
+        return await self._get(
+            "/v5/market/kline",
+            params={
+                "category": category,
+                "symbol": symbol,
+                "interval": interval,
+                "limit": limit,
+                "start": start,
+                "end": end,
+            },
+            authenticated=False,
+        )
 
     async def get_orderbook(
         self, category: str, symbol: str, limit: int = 50
     ) -> dict[str, Any]:
-        return await self._call(
-            "get_orderbook",
+        return await self._get(
             "/v5/market/orderbook",
-            category=category,
-            symbol=symbol,
-            limit=limit,
+            params={"category": category, "symbol": symbol, "limit": limit},
+            authenticated=False,
         )
 
     async def get_recent_trades(
         self, category: str, symbol: str, limit: int = 60
     ) -> dict[str, Any]:
-        return await self._call(
-            "get_public_trade_history",
+        return await self._get(
             "/v5/market/recent-trade",
-            category=category,
-            symbol=symbol,
-            limit=limit,
+            params={"category": category, "symbol": symbol, "limit": limit},
+            authenticated=False,
         )
 
     async def get_funding_rate_history(
         self, category: str, symbol: str, limit: int = 200
     ) -> dict[str, Any]:
-        return await self._call(
-            "get_funding_rate_history",
+        return await self._get(
             "/v5/market/funding/history",
-            category=category,
-            symbol=symbol,
-            limit=limit,
+            params={"category": category, "symbol": symbol, "limit": limit},
+            authenticated=False,
         )
 
     async def get_open_interest(
@@ -292,13 +318,15 @@ class BybitRestClient:
         interval_time: str,
         limit: int = 50,
     ) -> dict[str, Any]:
-        return await self._call(
-            "get_open_interest",
+        return await self._get(
             "/v5/market/open-interest",
-            category=category,
-            symbol=symbol,
-            intervalTime=interval_time,
-            limit=limit,
+            params={
+                "category": category,
+                "symbol": symbol,
+                "intervalTime": interval_time,
+                "limit": limit,
+            },
+            authenticated=False,
         )
 
     async def get_long_short_ratio(
@@ -308,13 +336,15 @@ class BybitRestClient:
         period: str,
         limit: int = 50,
     ) -> dict[str, Any]:
-        return await self._call(
-            "get_long_short_ratio",
+        return await self._get(
             "/v5/market/account-ratio",
-            category=category,
-            symbol=symbol,
-            period=period,
-            limit=limit,
+            params={
+                "category": category,
+                "symbol": symbol,
+                "period": period,
+                "limit": limit,
+            },
+            authenticated=False,
         )
 
     # ------------------------------------------------------------------
@@ -322,10 +352,10 @@ class BybitRestClient:
     # ------------------------------------------------------------------
 
     async def place_order(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._call("place_order", "/v5/order/create", **kwargs)
+        return await self._post("/v5/order/create", body=kwargs)
 
     async def amend_order(self, **kwargs: Any) -> dict[str, Any]:
-        return await self._call("amend_order", "/v5/order/amend", **kwargs)
+        return await self._post("/v5/order/amend", body=kwargs)
 
     async def cancel_order(
         self,
@@ -334,20 +364,20 @@ class BybitRestClient:
         order_id: str | None = None,
         order_link_id: str | None = None,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category, "symbol": symbol}
+        body: dict[str, Any] = {"category": category, "symbol": symbol}
         if order_id:
-            kwargs["orderId"] = order_id
+            body["orderId"] = order_id
         if order_link_id:
-            kwargs["orderLinkId"] = order_link_id
-        return await self._call("cancel_order", "/v5/order/cancel", **kwargs)
+            body["orderLinkId"] = order_link_id
+        return await self._post("/v5/order/cancel", body=body)
 
     async def get_open_orders(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_open_orders", "/v5/order/realtime", **kwargs)
+        return await self._get(
+            "/v5/order/realtime",
+            params={"category": category, "symbol": symbol},
+        )
 
     async def get_order_history(
         self,
@@ -355,10 +385,10 @@ class BybitRestClient:
         symbol: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category, "limit": limit}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_order_history", "/v5/order/history", **kwargs)
+        return await self._get(
+            "/v5/order/history",
+            params={"category": category, "symbol": symbol, "limit": limit},
+        )
 
     # ------------------------------------------------------------------
     # Positions
@@ -367,10 +397,10 @@ class BybitRestClient:
     async def get_positions(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_positions", "/v5/position/list", **kwargs)
+        return await self._get(
+            "/v5/position/list",
+            params={"category": category, "symbol": symbol},
+        )
 
     async def set_leverage(
         self,
@@ -379,24 +409,22 @@ class BybitRestClient:
         buy_leverage: str,
         sell_leverage: str,
     ) -> dict[str, Any]:
-        return await self._call(
-            "set_leverage",
+        return await self._post(
             "/v5/position/set-leverage",
-            category=category,
-            symbol=symbol,
-            buyLeverage=buy_leverage,
-            sellLeverage=sell_leverage,
+            body={
+                "category": category,
+                "symbol": symbol,
+                "buyLeverage": buy_leverage,
+                "sellLeverage": sell_leverage,
+            },
         )
 
     async def set_trading_stop(
         self, category: str, symbol: str, **kwargs: Any
     ) -> dict[str, Any]:
-        return await self._call(
-            "set_trading_stop",
+        return await self._post(
             "/v5/position/trading-stop",
-            category=category,
-            symbol=symbol,
-            **kwargs,
+            body={"category": category, "symbol": symbol, **kwargs},
         )
 
     # ------------------------------------------------------------------
@@ -409,10 +437,10 @@ class BybitRestClient:
         symbol: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category, "limit": limit}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_executions", "/v5/execution/list", **kwargs)
+        return await self._get(
+            "/v5/execution/list",
+            params={"category": category, "symbol": symbol, "limit": limit},
+        )
 
     async def get_closed_pnl(
         self,
@@ -420,23 +448,24 @@ class BybitRestClient:
         symbol: str | None = None,
         limit: int = 50,
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category, "limit": limit}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_closed_pnl", "/v5/position/closed-pnl", **kwargs)
+        return await self._get(
+            "/v5/position/closed-pnl",
+            params={"category": category, "symbol": symbol, "limit": limit},
+        )
 
     async def get_fee_rate(
         self, category: str, symbol: str | None = None
     ) -> dict[str, Any]:
-        kwargs: dict[str, Any] = {"category": category}
-        if symbol:
-            kwargs["symbol"] = symbol
-        return await self._call("get_fee_rate", "/v5/account/fee-rate", **kwargs)
+        return await self._get(
+            "/v5/account/fee-rate",
+            params={"category": category, "symbol": symbol},
+        )
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Shutdown the thread-pool executor."""
-        self._executor.shutdown(wait=False)
+        """Close the aiohttp session."""
+        if self._session and not self._session.closed:
+            asyncio.create_task(self._session.close())
