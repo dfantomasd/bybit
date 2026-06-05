@@ -206,17 +206,32 @@ class TradingApplication:
     async def _set_shadow_mode(self, enabled: bool) -> None:
         assert self._settings is not None
         if not enabled:
-            live_armed = (
-                self._settings.LIVE_MODE
-                and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
-            )
-            if not self._settings.BYBIT_USE_TESTNET and not live_armed:
+            if not self._active_execution_allowed():
                 raise RuntimeError(
                     "Active execution requires BYBIT_USE_TESTNET=true, or LIVE_MODE=true with TRADING_MODE=LIVE/CANARY_LIVE."
                 )
         if self._execution_engine is not None:
             self._execution_engine._shadow_mode = enabled
         log.info("shadow_mode.changed", enabled=enabled)
+
+    def _active_execution_allowed(self) -> bool:
+        """Return True when orders may be submitted to the configured endpoint."""
+        assert self._settings is not None
+        if self._settings.TRADING_MODE == TradingMode.SHADOW:
+            return False
+        if self._settings.BYBIT_USE_TESTNET:
+            return True
+        return (
+            self._settings.LIVE_MODE
+            and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+        )
+
+    def _initial_shadow_mode(self) -> bool:
+        """Compute startup execution mode from settings and safety gates."""
+        assert self._settings is not None
+        if self._settings.SHADOW_MODE:
+            return True
+        return not self._active_execution_allowed()
 
     async def _change_risk_profile(self, profile: Any) -> None:
         """Hot-swap the risk profile without restarting."""
@@ -389,9 +404,7 @@ class TradingApplication:
 
         profile_cfg = get_risk_profile_config(self._settings.RISK_PROFILE)
 
-        shadow = self._settings.SHADOW_MODE or (
-            self._settings.TRADING_MODE != TradingMode.LIVE
-        )
+        shadow = self._initial_shadow_mode()
         self._execution_engine = ExecutionEngine(
             adapter=self._bybit_adapter,
             risk_manager=self._risk_manager,
@@ -822,9 +835,7 @@ class TradingApplication:
 
         task = asyncio.create_task(strategy_loop(), name="strategy-loop")
         self._background_tasks.append(task)
-        shadow = self._settings.SHADOW_MODE or (
-            self._settings.TRADING_MODE != TradingMode.LIVE
-        )
+        shadow = self._initial_shadow_mode()
         log.info(
             "strategy_loop.started",
             shadow_mode=shadow,

@@ -165,6 +165,16 @@ Risk profiles:
 | `AGGRESSIVE` | Larger exposure envelope |
 | `SCALP` | More frequent small-risk entries with shorter cooldown |
 
+Autonomous execution presets:
+
+| Goal | Key settings |
+|------|--------------|
+| Observe only | `TRADING_MODE=SHADOW`, `SHADOW_MODE=true`, `BYBIT_USE_TESTNET=false` |
+| Testnet autopilot | `TRADING_MODE=TESTNET`, `SHADOW_MODE=false`, `BYBIT_USE_TESTNET=true`, `RISK_PROFILE=SCALP` |
+| Live shadow | `TRADING_MODE=SHADOW`, `SHADOW_MODE=true`, `BYBIT_USE_TESTNET=false` |
+| Canary live | `TRADING_MODE=CANARY_LIVE`, `LIVE_MODE=true`, `SHADOW_MODE=false`, `BYBIT_USE_TESTNET=false` |
+| Full live | `TRADING_MODE=LIVE`, `LIVE_MODE=true`, `SHADOW_MODE=false`, `BYBIT_USE_TESTNET=false` |
+
 Risk profile YAML configuration: `config/profiles.yaml`
 Feature flags: `config/feature_flags.yaml`
 
