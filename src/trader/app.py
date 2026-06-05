@@ -36,8 +36,8 @@ from trader.monitoring.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
 
-# Symbols and intervals to track
-_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# Fallback symbols (used only if screener fails); prefer cheap coins for small balance
+_SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 _WS_INTERVAL = "1"   # 1-minute klines over WS
 _MIN_SEED_BARS = 60  # bars to fetch from REST at startup
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations

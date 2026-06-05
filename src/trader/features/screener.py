@@ -19,8 +19,8 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
-# Used when all API calls fail
-_FALLBACK_SYMBOLS = ["BTCUSDT", "ETHUSDT"]
+# Used when all API calls fail — cheap, liquid coins suitable for small balance
+_FALLBACK_SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 
 # Quote coins we accept (USDT perpetual futures only)
 _ACCEPTED_QUOTE = "USDT"
@@ -30,6 +30,9 @@ _SKIP_BASE = {
     "USDC", "BUSD", "DAI", "TUSD", "USDP", "FRAX",
     "USDD", "GUSD", "USDJ", "USDN",
 }
+
+# Always exclude — minimum order far exceeds small-balance budget
+_EXCLUDED_SYMBOLS = {"BTCUSDT", "ETHUSDT"}
 
 
 class MarketScreener:
@@ -47,11 +50,13 @@ class MarketScreener:
         rest_client: Any,
         max_symbols: int = 10,
         min_volume_usd: float = 20_000_000.0,  # 20M USD/day minimum
+        max_price_usd: float = 100.0,          # skip coins with price > $100
         interval_s: int = 900,  # 15 min
     ) -> None:
         self._rest = rest_client
         self._max_symbols = max_symbols
         self._min_volume = min_volume_usd
+        self._max_price = max_price_usd
         self._interval = interval_s
         self._stop_event = asyncio.Event()
         self._active_symbols: list[str] = list(_FALLBACK_SYMBOLS)
@@ -130,18 +135,24 @@ class MarketScreener:
             if not symbol.endswith(_ACCEPTED_QUOTE):
                 continue
 
+            # Skip explicitly excluded symbols (too expensive for small balance)
+            if symbol in _EXCLUDED_SYMBOLS:
+                continue
+
             # Skip stablecoins
             base = symbol.removesuffix(_ACCEPTED_QUOTE)
             if base in _SKIP_BASE:
                 continue
 
-            # Skip if price is suspiciously low (< $0.00001) — likely dead
+            # Price checks
             try:
                 last_price = float(t.get("lastPrice", 0) or 0)
             except (ValueError, TypeError):
                 continue
-            if last_price <= 0.00001:
+            if last_price <= 0.00001:  # dead coin
                 continue
+            if self._max_price and last_price > self._max_price:
+                continue  # too expensive — min order would exceed budget
 
             # Volume filter (turnover24h = USD volume)
             try:
