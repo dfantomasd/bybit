@@ -50,13 +50,6 @@ class TradingApplication:
         from trader.config import Settings
 
         self._settings = Settings()
-        log.info(
-            "settings_loaded",
-            trading_mode=self._settings.TRADING_MODE,
-            risk_profile=self._settings.RISK_PROFILE,
-            bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
-            live_mode=self._settings.LIVE_MODE,
-        )
 
         # Enforce safety gate
         if self._settings.TRADING_MODE == TradingMode.LIVE and not self._settings.LIVE_MODE:
@@ -72,6 +65,13 @@ class TradingApplication:
         configure_logging(
             log_level=self._settings.LOG_LEVEL,
             log_format=self._settings.LOG_FORMAT,
+        )
+        log.info(
+            "settings_loaded",
+            trading_mode=self._settings.TRADING_MODE,
+            risk_profile=self._settings.RISK_PROFILE,
+            bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
+            live_mode=self._settings.LIVE_MODE,
         )
         log.info("observability_configured")
 

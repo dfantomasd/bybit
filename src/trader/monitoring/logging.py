@@ -160,7 +160,7 @@ def configure_logging(
         ],
         wrapper_class=structlog.make_filtering_bound_logger(level),
         context_class=dict,
-        logger_factory=structlog.PrintLoggerFactory(),
+        logger_factory=structlog.stdlib.LoggerFactory(),
         cache_logger_on_first_use=True,
     )
 
