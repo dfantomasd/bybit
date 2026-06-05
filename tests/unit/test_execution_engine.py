@@ -1,21 +1,24 @@
 """Tests for ExecutionEngine."""
 from __future__ import annotations
 
-import asyncio
-import uuid
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskDecisionStatus
+from trader.domain.enums import (
+    MarketRegime,
+    MarketType,
+    OrderSide,
+    OrderType,
+    RiskDecisionStatus,
+)
 from trader.domain.models import (
     InstrumentInfo,
     RiskDecision,
     TradeProposal,
 )
 from trader.execution.engine import ExecutionEngine
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -172,6 +175,27 @@ class TestExecutionEngine:
         proposal = _proposal()
         await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
         engine._adapter.place_order.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_live_order_uses_market_tp_sl(self):
+        engine = _make_engine(approved=True, shadow_mode=False)
+        proposal = _proposal()
+        await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
+
+        intent = engine._adapter.place_order.await_args.args[0]
+        assert intent.tp_order_type == OrderType.MARKET
+        assert intent.sl_order_type == OrderType.MARKET
+
+    @pytest.mark.asyncio
+    async def test_live_order_failure_starts_cooldown(self):
+        engine = _make_engine(approved=True, shadow_mode=False)
+        engine._adapter.place_order = AsyncMock(side_effect=RuntimeError("exchange rejected"))
+        proposal = _proposal()
+
+        decision = await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
+
+        assert decision is not None
+        assert engine._last_entry_at["BTCUSDT"] is not None
 
     @pytest.mark.asyncio
     async def test_exposure_tracker_updated_on_approval(self):

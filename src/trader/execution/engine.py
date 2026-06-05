@@ -266,6 +266,7 @@ class ExecutionEngine:
                     order_link_id=intent.order_link_id,
                 )
             except Exception as exc:
+                self._last_entry_at[symbol] = datetime.now(tz=UTC)
                 log.error(
                     "execution.order_failed",
                     symbol=symbol,
@@ -342,7 +343,7 @@ class ExecutionEngine:
             order_link_id=link_id,
             take_profit=take_profit,
             stop_loss=stop_loss,
-            tp_order_type=OrderType.LIMIT,
+            tp_order_type=OrderType.MARKET,
             sl_order_type=OrderType.MARKET,
         )
 
