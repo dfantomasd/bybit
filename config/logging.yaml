@@ -1,0 +1,40 @@
+# =============================================================================
+# Logging Configuration
+# =============================================================================
+# Structlog is used for all logging. This file documents the configuration
+# options; the actual configuration is applied in src/trader/monitoring/logging.py
+# via the configure_logging() function called at startup.
+# =============================================================================
+
+logging:
+  # Log level: DEBUG | INFO | WARNING | ERROR | CRITICAL
+  level: INFO
+
+  # Output format: json (production) | console (development)
+  format: json
+
+  # Service name injected into every log record
+  service_name: bybit-trader
+
+  # Environment tag injected into every log record
+  environment: production
+
+  # Noisy third-party loggers to suppress
+  suppress_loggers:
+    - asyncio
+    - aiohttp
+    - aiohttp.access
+    - urllib3
+    - websockets
+    - httpx
+
+  # Fields that must NEVER appear in logs (will be redacted)
+  secret_fields:
+    - api_key
+    - api_secret
+    - secret
+    - token
+    - password
+    - private_key
+    - postgres_dsn
+    - redis_url

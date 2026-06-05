@@ -1,0 +1,169 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: ["main", "develop"]
+  pull_request:
+    branches: ["main", "develop"]
+  schedule:
+    # Run daily at 02:00 UTC
+    - cron: "0 2 * * *"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Secret scanning with gitleaks
+  # ---------------------------------------------------------------------------
+  gitleaks:
+    name: Secret Scanning (gitleaks)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Full history for scanning
+
+      - name: Run gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # SAST with bandit
+  # ---------------------------------------------------------------------------
+  bandit:
+    name: SAST (bandit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install bandit
+        run: pip install bandit[toml]>=1.7.0
+
+      - name: Run bandit SAST
+        run: |
+          bandit -r src/ \
+            -c pyproject.toml \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json \
+            -o bandit-report.json
+        continue-on-error: true
+
+      - name: Fail on HIGH/CRITICAL findings
+        run: |
+          bandit -r src/ \
+            -c pyproject.toml \
+            --severity-level high \
+            --confidence-level medium
+
+      - name: Upload bandit SARIF report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-sarif
+          path: bandit-report.json
+
+  # ---------------------------------------------------------------------------
+  # Dependency vulnerability scanning with pip-audit
+  # ---------------------------------------------------------------------------
+  pip-audit:
+    name: Dependency Audit (pip-audit)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install uv and pip-audit
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+          pip install pip-audit>=2.7.0
+
+      - name: Run pip-audit
+        run: |
+          pip-audit \
+            --requirement <(uv pip compile pyproject.toml --all-extras 2>/dev/null || cat pyproject.toml) \
+            --format json \
+            --output pip-audit-report.json || true
+          pip-audit
+
+      - name: Upload pip-audit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pip-audit-report
+          path: pip-audit-report.json
+
+  # ---------------------------------------------------------------------------
+  # Container scanning with Trivy
+  # ---------------------------------------------------------------------------
+  trivy-container:
+    name: Container Scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build Docker image for scanning
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          push: false
+          load: true
+          tags: bybit-trader:scan
+
+      - name: Run Trivy on container image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: bybit-trader:scan
+          format: "sarif"
+          output: "trivy-container.sarif"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"
+
+      - name: Upload Trivy SARIF to GitHub Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-container.sarif"
+        continue-on-error: true
+
+  # ---------------------------------------------------------------------------
+  # Filesystem scan with Trivy
+  # ---------------------------------------------------------------------------
+  trivy-filesystem:
+    name: Filesystem Scan (trivy)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run Trivy on repository
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: "fs"
+          scan-ref: "."
+          format: "sarif"
+          output: "trivy-fs.sarif"
+          exit-code: "0"
+          severity: "CRITICAL,HIGH"
+
+      - name: Upload Trivy filesystem SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: "trivy-fs.sarif"
+        continue-on-error: true

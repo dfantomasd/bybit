@@ -1,0 +1,85 @@
+version: "3.9"
+
+# =============================================================================
+# Development override for docker-compose.yml
+# =============================================================================
+# Usage: docker compose -f docker-compose.yml -f docker-compose.dev.yml up
+#
+# Differences from production:
+# - Source code is mounted for hot-reload
+# - PostgreSQL and Redis ports are exposed on localhost
+# - Hot-reload via watchfiles
+# - Relaxed resource limits
+# - Pretty (console) log output instead of JSON
+# =============================================================================
+
+services:
+  trader-core:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: builder   # Include dev tools
+    command:
+      - "python"
+      - "-m"
+      - "watchfiles"
+      - "python -m trader.app"
+      - "src/"
+    environment:
+      LOG_FORMAT: console
+      LOG_LEVEL: DEBUG
+      TRADING_MODE: TESTNET
+      LIVE_MODE: "false"
+      SHADOW_MODE: "true"
+    volumes:
+      - ./src:/app/src:ro          # Live source mount for hot-reload
+      - ./config:/app/config:ro
+      - ./tests:/app/tests:ro
+    ports:
+      - "8080:8080"   # FastAPI — exposed in dev
+      - "9090:9090"   # Prometheus — exposed in dev
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+          cpus: "4.0"
+
+  postgres:
+    ports:
+      - "5432:5432"  # Exposed for direct DB access in development
+    environment:
+      POSTGRES_PASSWORD: devpassword  # Override secret for dev
+    secrets: []  # Remove secrets requirement in dev
+
+  redis:
+    ports:
+      - "6379:6379"  # Exposed for direct Redis access in development
+    command:
+      - redis-server
+      - "--save"
+      - "60"
+      - "1"
+      - "--appendonly"
+      - "yes"
+    # No password in dev for convenience
+
+  trainer-worker:
+    environment:
+      LOG_FORMAT: console
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./src:/app/src:ro
+
+  reporter-worker:
+    environment:
+      LOG_FORMAT: console
+      LOG_LEVEL: DEBUG
+    volumes:
+      - ./src:/app/src:ro
+
+  grafana:
+    ports:
+      - "3000:3000"
+    environment:
+      GF_SECURITY_ADMIN_PASSWORD: admin  # Weak password acceptable in dev
+      GF_AUTH_ANONYMOUS_ENABLED: "true"  # Allow anonymous access in dev

@@ -1,0 +1,55 @@
+# =============================================================================
+# Feature Flags
+# =============================================================================
+# Controls which optional system features are active.
+# All flags default to the SAFEST option (disabled).
+# Changing these flags requires a system restart.
+# =============================================================================
+
+feature_flags:
+  # Enable LLM-assisted market analysis (cannot submit orders directly)
+  llm_enabled: false
+
+  # Enable reinforcement learning model inference
+  rl_enabled: false
+
+  # Shadow mode: compute all signals but never submit any orders
+  # Produces paper-trading results for validation
+  shadow_mode: true
+
+  # Live mode: allow real order submission (requires explicit activation)
+  # This flag AND TRADING_MODE=LIVE AND LIVE_MODE env var must all be true
+  live_mode: false
+
+  # Prioritised experience replay for RL training
+  prioritized_replay: false
+
+  # Conformal prediction for uncertainty-aware position sizing
+  conformal_prediction: false
+
+  # Meta-labeling: use a secondary model to filter primary model signals
+  meta_labeling: false
+
+  # Online learning: update model parameters in real-time from fills
+  online_learning: false
+
+  # Regime-gated entries: block new entries outside allowed regimes
+  regime_gating: true
+
+  # Kelly criterion position sizing (fractional Kelly)
+  kelly_sizing: true
+
+  # Telegram notifications
+  telegram_alerts: true
+
+  # Prometheus metrics exposition
+  prometheus_metrics: true
+
+  # FastAPI observability endpoints
+  fastapi_enabled: true
+
+  # Reconciliation loop
+  reconciliation_enabled: true
+
+  # Automatic model retraining trigger on drift detection
+  auto_retrain_on_drift: false

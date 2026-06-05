@@ -1,0 +1,31 @@
+# =============================================================================
+# Tradeable Symbols Configuration
+# =============================================================================
+# Only symbols on the whitelist AND not on the blacklist will be traded.
+# The system verifies each symbol against the exchange instrument list at startup.
+# =============================================================================
+
+symbols:
+  # Symbols the system is permitted to trade
+  whitelist:
+    - BTCUSDT
+    - ETHUSDT
+
+  # Symbols explicitly blocked (takes priority over whitelist)
+  blacklist: []
+
+  # Minimum 24-hour volume in USD to consider a symbol tradeable
+  min_volume_24h: 100000000  # $100M
+
+  # Minimum liquidity score [0, 1] based on order book depth analysis
+  min_liquidity_score: 0.7
+
+  # Market category for all whitelisted symbols
+  default_market_type: linear
+
+  # Whether to verify instrument status is "Trading" at startup
+  verify_status_at_startup: true
+
+  # Minimum time-to-funding for perpetual contracts to avoid funding events
+  # (hours before next funding; avoid entering positions within this window)
+  min_hours_before_funding: 0.5

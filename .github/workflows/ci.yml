@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["main", "develop"]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  PYTHON_VERSION: "3.11"
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Lint & type-check
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+          restore-keys: |
+            uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-
+
+      - name: Install dependencies
+        run: uv pip install --system ".[dev]"
+
+      - name: Run ruff (linter)
+        run: ruff check src/ tests/
+
+      - name: Run ruff (formatter check)
+        run: ruff format --check src/ tests/
+
+      - name: Run mypy (type checking)
+        run: mypy src/trader/
+        continue-on-error: false
+
+  # ---------------------------------------------------------------------------
+  # Security scanning
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ env.PYTHON_VERSION }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install dependencies
+        run: uv pip install --system ".[dev]"
+
+      - name: Run bandit (SAST)
+        run: |
+          bandit -r src/ \
+            --exclude src/trader/tests \
+            --severity-level medium \
+            --confidence-level medium \
+            -f json \
+            -o bandit-report.json || true
+          bandit -r src/ \
+            --exclude src/trader/tests \
+            --severity-level high \
+            --confidence-level high
+        # Fail only on HIGH severity + HIGH confidence findings
+
+      - name: Upload bandit report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bandit-report
+          path: bandit-report.json
+
+      - name: Run pip-audit
+        run: |
+          pip-audit --requirement <(uv pip compile pyproject.toml 2>/dev/null || echo "") \
+            --format json \
+            --output pip-audit-report.json || true
+          pip-audit --format cyclonedx-json 2>/dev/null || pip-audit
+
+      - name: Check for secrets with gitleaks
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: false
+
+  # ---------------------------------------------------------------------------
+  # Unit tests
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: true
+      matrix:
+        python-version: ["3.11", "3.12"]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install uv
+        run: |
+          curl -LsSf https://astral.sh/uv/install.sh | sh
+          echo "$HOME/.cargo/bin" >> $GITHUB_PATH
+
+      - name: Cache uv dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ matrix.python-version }}-${{ hashFiles('pyproject.toml') }}
+
+      - name: Install dependencies
+        run: uv pip install --system ".[dev]"
+
+      - name: Run unit tests
+        run: |
+          pytest tests/unit/ \
+            --cov=src/trader \
+            --cov-report=xml:coverage.xml \
+            --cov-report=term-missing \
+            -v \
+            --tb=short
+        env:
+          BYBIT_API_KEY: test-key
+          BYBIT_API_SECRET: test-secret
+          POSTGRES_DSN: postgresql+asyncpg://trader:trader@localhost:5432/trader
+          REDIS_URL: redis://localhost:6379/0
+          TELEGRAM_BOT_TOKEN: "1234567890:test"
+          TELEGRAM_ALLOWED_CHAT_IDS: "[123]"
+          TRADING_MODE: TESTNET
+          LIVE_MODE: "false"
+
+      - name: Upload coverage report
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.python-version }}
+          path: coverage.xml
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ---------------------------------------------------------------------------
+  # Docker build
+  # ---------------------------------------------------------------------------
+  docker-build:
+    name: Docker Build
+    runs-on: ubuntu-latest
+    needs: [lint, test]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Cache Docker layers
+        uses: actions/cache@v4
+        with:
+          path: /tmp/.buildx-cache
+          key: buildx-${{ runner.os }}-${{ hashFiles('Dockerfile', 'pyproject.toml') }}
+          restore-keys: |
+            buildx-${{ runner.os }}-
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          target: runtime
+          push: false
+          load: true
+          tags: bybit-trader:ci-${{ github.sha }}
+          cache-from: type=local,src=/tmp/.buildx-cache
+          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+
+      - name: Move cache
+        run: |
+          rm -rf /tmp/.buildx-cache
+          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+
+      - name: Run Trivy vulnerability scanner on image
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: bybit-trader:ci-${{ github.sha }}
+          format: "table"
+          exit-code: "1"
+          ignore-unfixed: true
+          vuln-type: "os,library"
+          severity: "CRITICAL,HIGH"

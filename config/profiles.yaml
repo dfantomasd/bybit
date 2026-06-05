@@ -1,0 +1,110 @@
+# =============================================================================
+# Risk Profile Parameters
+# =============================================================================
+# These values define the risk envelope for each profile.
+# The Risk Manager enforces all limits at runtime.
+# These are MAXIMUMS — the Kelly fraction further scales position sizes down.
+# =============================================================================
+
+profiles:
+  CONSERVATIVE:
+    # --- Position Sizing ---
+    max_positions: 2
+    max_position_size_pct: 1.0        # % of equity per position
+    max_position_notional_usd: 500.0  # Hard USD cap per position
+    kelly_fraction: 0.1               # Fractional Kelly (10%)
+
+    # --- Portfolio Heat ---
+    max_portfolio_heat_pct: 3.0       # Sum of all risk across positions
+
+    # --- Circuit Breakers ---
+    max_daily_drawdown_pct: 2.0       # Triggers SAFE_MODE
+    max_weekly_drawdown_pct: 5.0      # Triggers KILL_SWITCH
+    max_monthly_drawdown_pct: 10.0    # Triggers FULL_STOP
+
+    # --- Leverage ---
+    max_leverage: 1.0                 # No leverage
+
+    # --- Regime Gates ---
+    allowed_regimes:
+      - BULL_TREND
+      - SIDEWAYS
+    max_volatility_level: NORMAL      # Block entries when vol is HIGH or EXTREME
+
+    # --- Order Parameters ---
+    default_time_in_force: GTC
+    use_post_only: true               # Always use maker orders
+    max_slippage_bps: 10.0
+
+    # --- Signal Quality ---
+    min_confidence: 0.65              # Minimum model confidence to trade
+    cooldown_seconds: 600             # Minimum time between trades on same symbol
+
+  MODERATE:
+    # --- Position Sizing ---
+    max_positions: 4
+    max_position_size_pct: 2.0
+    max_position_notional_usd: 2000.0
+    kelly_fraction: 0.2               # Fractional Kelly (20%)
+
+    # --- Portfolio Heat ---
+    max_portfolio_heat_pct: 6.0
+
+    # --- Circuit Breakers ---
+    max_daily_drawdown_pct: 3.0
+    max_weekly_drawdown_pct: 8.0
+    max_monthly_drawdown_pct: 15.0
+
+    # --- Leverage ---
+    max_leverage: 2.0
+
+    # --- Regime Gates ---
+    allowed_regimes:
+      - BULL_TREND
+      - BEAR_TREND
+      - SIDEWAYS
+    max_volatility_level: HIGH
+
+    # --- Order Parameters ---
+    default_time_in_force: GTC
+    use_post_only: false
+    max_slippage_bps: 20.0
+
+    # --- Signal Quality ---
+    min_confidence: 0.55
+    cooldown_seconds: 300
+
+  AGGRESSIVE:
+    # --- Position Sizing ---
+    max_positions: 6
+    max_position_size_pct: 4.0
+    max_position_notional_usd: 10000.0
+    kelly_fraction: 0.3               # Fractional Kelly (30%)
+
+    # --- Portfolio Heat ---
+    max_portfolio_heat_pct: 12.0
+
+    # --- Circuit Breakers ---
+    max_daily_drawdown_pct: 5.0
+    max_weekly_drawdown_pct: 12.0
+    max_monthly_drawdown_pct: 25.0
+
+    # --- Leverage ---
+    max_leverage: 5.0
+
+    # --- Regime Gates ---
+    allowed_regimes:
+      - BULL_TREND
+      - BEAR_TREND
+      - SIDEWAYS
+      - HIGH_VOLATILITY
+    max_volatility_level: EXTREME
+
+    # --- Order Parameters ---
+    default_time_in_force: GTC
+    use_post_only: false
+    max_slippage_bps: 40.0
+
+    # --- Signal Quality ---
+    min_confidence: 0.50
+    cooldown_seconds: 120
