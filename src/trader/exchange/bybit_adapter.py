@@ -98,7 +98,7 @@ class BybitAdapter:
     async def get_balance(self) -> Balance:
         """Return the primary USDT balance from the UNIFIED account."""
         resp = await self._rest.get_wallet_balance(account_type="UNIFIED")
-        accounts = resp.get("result", {}).get("list", [])
+        accounts = (resp.get("result") or {}).get("list", [])
         for account in accounts:
             for coin_data in account.get("coin", []):
                 if coin_data.get("coin") in ("USDT", "USDC"):
@@ -119,7 +119,7 @@ class BybitAdapter:
     async def get_positions(self, category: str) -> list[Position]:
         """Return all open positions for the given category."""
         resp = await self._rest.get_positions(category=category)
-        items = resp.get("result", {}).get("list", [])
+        items = (resp.get("result") or {}).get("list", [])
         positions = []
         for item in items:
             item["category"] = category
@@ -136,7 +136,7 @@ class BybitAdapter:
     ) -> list[dict[str, Any]]:
         """Return open orders as raw dicts (mapper can be applied later)."""
         resp = await self._rest.get_open_orders(category=category, symbol=symbol)
-        return resp.get("result", {}).get("list", [])
+        return (resp.get("result") or {}).get("list", [])
 
     async def place_order(self, intent: OrderIntent) -> dict[str, Any]:
         """Submit an order to Bybit after idempotency and mapper processing.
@@ -158,7 +158,7 @@ class BybitAdapter:
 
         try:
             resp = await self._rest.place_order(**params)
-            exchange_id = resp.get("result", {}).get("orderId", "")
+            exchange_id = (resp.get("result") or {}).get("orderId", "")
             await self._idempotency.mark_confirmed(intent.order_link_id, exchange_id)
             logger.info(
                 "bybit_adapter.order_placed",
@@ -203,7 +203,7 @@ class BybitAdapter:
     ) -> InstrumentInfo:
         """Fetch and return parsed InstrumentInfo for a symbol."""
         resp = await self._rest.get_instruments_info(category=category, symbol=symbol)
-        items = resp.get("result", {}).get("list", [])
+        items = (resp.get("result") or {}).get("list", [])
         if not items:
             raise ValueError(f"No instrument info found for {symbol}")
         item = items[0]
@@ -243,7 +243,7 @@ class BybitAdapter:
             open_orders_resp = await self._rest.get_open_orders(
                 category=self._default_category
             )
-            exchange_open = open_orders_resp.get("result", {}).get("list", [])
+            exchange_open = open_orders_(resp.get("result") or {}).get("list", [])
             exchange_ids = {o.get("orderLinkId") for o in exchange_open}
 
             local_ids = set(self._idempotency.all_states().keys())

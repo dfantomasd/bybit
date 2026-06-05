@@ -164,18 +164,32 @@ class BybitRestClient:
         try:
             session = self._get_session()
             async with session.get(url, params=params, headers=headers) as resp:
-                response: dict[str, Any] = await resp.json(content_type=None)
+                http_status = resp.status
+                resp_headers = dict(resp.headers)
+                response: Any = await resp.json(content_type=None)
         except Exception as exc:
             log.error("bybit_rest_exception", error=str(exc))
             raise
 
+        self._rate_limiter.record_response(endpoint_hint, resp_headers, "GET")
+
         elapsed_ms = (time.monotonic() - t0) * 1000
         ret_code = response.get("retCode", 0) if isinstance(response, dict) else 0
-        log.debug("bybit_rest_response", ret_code=ret_code, elapsed_ms=round(elapsed_ms, 1))
+        log.debug(
+            "bybit_rest_response",
+            http_status=http_status,
+            ret_code=ret_code,
+            elapsed_ms=round(elapsed_ms, 1),
+        )
 
-        if isinstance(response, dict):
-            _raise_for_ret_code(response, context=path)
+        if not isinstance(response, dict):
+            raise TradingSystemError(
+                f"Bybit returned non-dict response for {path}: "
+                f"http_status={http_status} type={type(response).__name__} value={response!r}",
+                code="INVALID_RESPONSE",
+            )
 
+        _raise_for_ret_code(response, context=path)
         return response
 
     async def _post(
@@ -203,18 +217,32 @@ class BybitRestClient:
         try:
             session = self._get_session()
             async with session.post(url, data=body_str, headers=headers) as resp:
-                response: dict[str, Any] = await resp.json(content_type=None)
+                http_status = resp.status
+                resp_headers = dict(resp.headers)
+                response: Any = await resp.json(content_type=None)
         except Exception as exc:
             log.error("bybit_rest_exception", error=str(exc))
             raise
 
+        self._rate_limiter.record_response(endpoint_hint, resp_headers, "POST")
+
         elapsed_ms = (time.monotonic() - t0) * 1000
         ret_code = response.get("retCode", 0) if isinstance(response, dict) else 0
-        log.debug("bybit_rest_response", ret_code=ret_code, elapsed_ms=round(elapsed_ms, 1))
+        log.debug(
+            "bybit_rest_response",
+            http_status=http_status,
+            ret_code=ret_code,
+            elapsed_ms=round(elapsed_ms, 1),
+        )
 
-        if isinstance(response, dict):
-            _raise_for_ret_code(response, context=path)
+        if not isinstance(response, dict):
+            raise TradingSystemError(
+                f"Bybit returned non-dict response for {path}: "
+                f"http_status={http_status} type={type(response).__name__} value={response!r}",
+                code="INVALID_RESPONSE",
+            )
 
+        _raise_for_ret_code(response, context=path)
         return response
 
     # ------------------------------------------------------------------
