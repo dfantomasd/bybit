@@ -111,28 +111,28 @@ class RiskLimits:
 
 RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
     RiskProfile.CONSERVATIVE: RiskLimits(
-        # Position sizing
-        risk_per_trade_min_pct=Decimal("0.25"),
-        risk_per_trade_max_pct=Decimal("0.50"),
-        risk_per_trade_hard_cap_pct=Decimal("1.00"),
-        # Leverage
-        max_leverage=Decimal("1"),
+        # Position sizing — calibrated for small balance ($20-100)
+        risk_per_trade_min_pct=Decimal("0.50"),
+        risk_per_trade_max_pct=Decimal("1.50"),
+        risk_per_trade_hard_cap_pct=Decimal("2.00"),
+        # Leverage — 5x so $5 notional needs only $1 margin
+        max_leverage=Decimal("5"),
         # Daily limits
-        daily_loss_limit_pct=Decimal("1.50"),
-        daily_loss_hard_stop_pct=Decimal("2.00"),
+        daily_loss_limit_pct=Decimal("3.00"),
+        daily_loss_hard_stop_pct=Decimal("5.00"),
         # Drawdown
-        max_drawdown_pct=Decimal("8.00"),
-        hard_stop_drawdown_pct=Decimal("10.00"),
+        max_drawdown_pct=Decimal("10.00"),
+        hard_stop_drawdown_pct=Decimal("15.00"),
         # Portfolio
-        max_simultaneous_positions=2,
-        max_capital_per_position_pct=Decimal("10"),
-        max_total_exposure_pct=Decimal("30"),
+        max_simultaneous_positions=3,
+        max_capital_per_position_pct=Decimal("30"),
+        max_total_exposure_pct=Decimal("70"),
         # Permissions
-        short_allowed=False,
-        derivatives_allowed=False,
+        short_allowed=True,
+        derivatives_allowed=True,
         auto_resume_after_hard_stop=False,
         # Market types
-        allowed_market_types=[MarketType.SPOT],
+        allowed_market_types=[MarketType.LINEAR],
     ),
     RiskProfile.MODERATE: RiskLimits(
         # Position sizing

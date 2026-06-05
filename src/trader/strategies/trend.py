@@ -56,12 +56,12 @@ class EMAcrossoverStrategy(BaseStrategy):
 
     def __init__(
         self,
-        symbol: str,
-        allow_short: bool = False,
-        min_qty_usd: float = 10.0,
-        max_risk_pct: float = 0.005,  # 0.5% of balance per trade
+        symbol: str | None = None,  # None = evaluate any symbol
+        allow_short: bool = True,
+        min_qty_usd: float = 5.0,
+        max_risk_pct: float = 0.01,  # 1% of balance per trade
     ) -> None:
-        self._symbol = symbol.upper()
+        self._symbol = symbol.upper() if symbol else None
         self._allow_short = allow_short
         self._min_qty_usd = min_qty_usd
         self._max_risk_pct = max_risk_pct
@@ -76,16 +76,18 @@ class EMAcrossoverStrategy(BaseStrategy):
         current_price: float,
         available_balance_usd: float,
     ) -> TradeProposal | None:
-        if feature_vector.symbol != self._symbol:
+        # If bound to a specific symbol, skip others
+        if self._symbol is not None and feature_vector.symbol != self._symbol:
             return None
         if feature_vector.quality_score < 0.6:
             log.debug(
                 "ema_crossover.skip_low_quality",
-                symbol=self._symbol,
+                symbol=feature_vector.symbol,
                 quality=feature_vector.quality_score,
             )
             return None
 
+        symbol = feature_vector.symbol
         f = dict(zip(feature_vector.feature_names, feature_vector.values))
 
         # Extract required features
@@ -145,7 +147,7 @@ class EMAcrossoverStrategy(BaseStrategy):
 
                 log.info(
                     "ema_crossover.long_signal",
-                    symbol=self._symbol,
+                    symbol=symbol,
                     confidence=round(confidence, 3),
                     rsi14=round(rsi14, 3),
                     ema9_slope=round(ema9_slope, 6),
@@ -155,7 +157,7 @@ class EMAcrossoverStrategy(BaseStrategy):
                 return TradeProposal(
                     proposal_id=uuid.uuid4(),
                     strategy_id=_STRATEGY_ID,
-                    symbol=self._symbol,
+                    symbol=symbol,
                     market_type=MarketType.LINEAR,
                     side=OrderSide.BUY,
                     requested_qty=Decimal(str(round(qty, 4))),
@@ -192,14 +194,14 @@ class EMAcrossoverStrategy(BaseStrategy):
 
                 log.info(
                     "ema_crossover.short_signal",
-                    symbol=self._symbol,
+                    symbol=symbol,
                     confidence=round(confidence, 3),
                 )
 
                 return TradeProposal(
                     proposal_id=uuid.uuid4(),
                     strategy_id=_STRATEGY_ID,
-                    symbol=self._symbol,
+                    symbol=symbol,
                     market_type=MarketType.LINEAR,
                     side=OrderSide.SELL,
                     requested_qty=Decimal(str(round(qty, 4))),

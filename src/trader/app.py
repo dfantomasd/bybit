@@ -587,14 +587,14 @@ class TradingApplication:
         await self._init_risk_manager(initial_capital)
         await self._init_execution_engine()
 
+        # One symbol-agnostic strategy instance handles ALL screener symbols
         strategies = [
             EMAcrossoverStrategy(
-                symbol=symbol,
-                allow_short=False,
-                min_qty_usd=10.0,
-                max_risk_pct=0.003,
+                symbol=None,       # None = evaluate any symbol passed in
+                allow_short=True,
+                min_qty_usd=5.0,   # Bybit minimum notional is $5
+                max_risk_pct=0.01, # 1% of balance per trade
             )
-            for symbol in _SYMBOLS
         ]
 
         self._strategy_ensemble = StrategyEnsemble(
