@@ -50,6 +50,13 @@ _MAX_ATR_PCT = 0.05          # skip if market is too volatile
 _BASE_CONFIDENCE = 0.55      # starting confidence if all conditions met
 _CONFIDENCE_PER_CONDITION = 0.05  # bonus per extra confirmed condition
 
+_PRICE_DECIMALS = Decimal("0.00000001")
+
+
+def _price(value: float) -> Decimal:
+    """Keep enough precision for cheap symbols; exchange tick rounding happens later."""
+    return Decimal(str(value)).quantize(_PRICE_DECIMALS)
+
 
 class EMAcrossoverStrategy(BaseStrategy):
     """Rule-based EMA crossover strategy with RSI and volume filters."""
@@ -88,7 +95,7 @@ class EMAcrossoverStrategy(BaseStrategy):
             return None
 
         symbol = feature_vector.symbol
-        f = dict(zip(feature_vector.feature_names, feature_vector.values))
+        f = dict(zip(feature_vector.feature_names, feature_vector.values, strict=True))
 
         # Extract required features
         ema9_dist = f.get("ema_9")       # normalised distance: ema/price - 1
@@ -164,9 +171,9 @@ class EMAcrossoverStrategy(BaseStrategy):
                     side=OrderSide.BUY,
                     requested_qty=Decimal(str(round(qty, 4))),
                     requested_notional_usd=Decimal(str(round(qty_usd, 2))),
-                    entry_price=Decimal(str(round(entry_price, 2))),
-                    stop_loss=Decimal(str(round(stop_price, 2))),
-                    take_profit=Decimal(str(round(entry_price * (1 + tp_dist), 2))),
+                    entry_price=_price(entry_price),
+                    stop_loss=_price(stop_price),
+                    take_profit=_price(entry_price * (1 + tp_dist)),
                     confidence=min(confidence, 0.95),
                     regime=MarketRegime.BULL_TREND,
                     rationale=(
@@ -209,9 +216,9 @@ class EMAcrossoverStrategy(BaseStrategy):
                     side=OrderSide.SELL,
                     requested_qty=Decimal(str(round(qty, 4))),
                     requested_notional_usd=Decimal(str(round(qty_usd, 2))),
-                    entry_price=Decimal(str(round(entry_price, 2))),
-                    stop_loss=Decimal(str(round(stop_price, 2))),
-                    take_profit=Decimal(str(round(entry_price * (1 - tp_dist), 2))),
+                    entry_price=_price(entry_price),
+                    stop_loss=_price(stop_price),
+                    take_profit=_price(entry_price * (1 - tp_dist)),
                     confidence=min(confidence, 0.95),
                     regime=MarketRegime.BEAR_TREND,
                     rationale=(

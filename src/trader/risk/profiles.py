@@ -197,7 +197,7 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         hard_stop_drawdown_pct=Decimal("12.00"),
         # Portfolio
         max_simultaneous_positions=8,
-        max_capital_per_position_pct=Decimal("18"),
+        max_capital_per_position_pct=Decimal("35"),
         max_total_exposure_pct=Decimal("90"),
         # Permissions
         short_allowed=True,

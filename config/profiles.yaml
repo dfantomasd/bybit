@@ -118,6 +118,7 @@ profiles:
 
     # --- Portfolio Heat ---
     max_portfolio_heat_pct: 8.0
+    max_capital_per_position_pct: 35.0
 
     # --- Circuit Breakers ---
     max_daily_drawdown_pct: 2.5

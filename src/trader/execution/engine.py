@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
 
 import structlog
 
-from trader.domain.enums import OrderType, RiskDecisionStatus
+from trader.domain.enums import OrderSide, OrderType, RiskDecisionStatus
 from trader.domain.models import (
     FeatureVector,
     InstrumentInfo,
@@ -237,7 +237,7 @@ class ExecutionEngine:
 
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
-        intent = self._build_intent(proposal, decision)
+        intent = self._build_intent(proposal, decision, instrument_info)
 
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
@@ -308,11 +308,28 @@ class ExecutionEngine:
     # Helpers
     # ------------------------------------------------------------------
 
-    def _build_intent(self, proposal: TradeProposal, decision: RiskDecision) -> OrderIntent:
+    def _build_intent(
+        self,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+        instrument_info: InstrumentInfo,
+    ) -> OrderIntent:
         # Compact UUID → alphanumeric ID (max 36 chars for Bybit)
         link_id = str(proposal.proposal_id).replace("-", "")[:36]
 
         assert decision.approved_qty is not None
+        take_profit = self._round_exit_price(
+            proposal.take_profit,
+            instrument_info.tick_size,
+            proposal.side,
+            is_stop_loss=False,
+        )
+        stop_loss = self._round_exit_price(
+            proposal.stop_loss,
+            instrument_info.tick_size,
+            proposal.side,
+            is_stop_loss=True,
+        )
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,
@@ -323,11 +340,27 @@ class ExecutionEngine:
             qty=decision.approved_qty,
             price=None,  # Market order — no price needed
             order_link_id=link_id,
-            take_profit=proposal.take_profit,
-            stop_loss=proposal.stop_loss,
+            take_profit=take_profit,
+            stop_loss=stop_loss,
             tp_order_type=OrderType.LIMIT,
             sl_order_type=OrderType.MARKET,
         )
+
+    def _round_exit_price(
+        self,
+        price: Decimal | None,
+        tick_size: Decimal,
+        side: OrderSide,
+        is_stop_loss: bool,
+    ) -> Decimal | None:
+        """Round exit prices without moving stops to the wrong side."""
+        if price is None or tick_size <= Decimal("0"):
+            return price
+        rounding = ROUND_DOWN
+        if is_stop_loss and side == OrderSide.SELL:
+            rounding = ROUND_CEILING
+        ticks = (price / tick_size).to_integral_value(rounding=rounding)
+        return ticks * tick_size
 
     # ------------------------------------------------------------------
     # Status
