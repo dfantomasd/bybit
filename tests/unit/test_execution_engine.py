@@ -210,7 +210,8 @@ class TestExecutionEngine:
         assert intent.sl_order_type == OrderType.MARKET
 
     @pytest.mark.asyncio
-    async def test_live_order_failure_starts_cooldown(self):
+    async def test_live_order_failure_starts_failure_cooldown_not_entry_cooldown(self):
+        """API failure sets _last_failure_at, NOT _last_entry_at."""
         engine = _make_engine(approved=True, shadow_mode=False)
         engine._adapter.place_order = AsyncMock(side_effect=RuntimeError("exchange rejected"))
         proposal = _proposal()
@@ -218,7 +219,10 @@ class TestExecutionEngine:
         decision = await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
 
         assert decision is None
-        assert engine._last_entry_at["BTCUSDT"] is not None
+        # Failure timestamp is recorded (enables failure cooldown)
+        assert engine._last_failure_at["BTCUSDT"] is not None
+        # Entry cooldown must NOT be set on API failure
+        assert "BTCUSDT" not in engine._last_entry_at
 
     @pytest.mark.asyncio
     async def test_exposure_tracker_updated_on_approval(self):

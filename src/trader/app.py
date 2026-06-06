@@ -25,7 +25,7 @@ import os
 import signal
 import sys
 from collections import deque
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
 
@@ -44,6 +44,12 @@ _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0         # seconds between feature recomputation
 _BALANCE_REFRESH_INTERVAL = 60.0   # seconds between balance refreshes
 _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
+_SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
+_SUPERVISOR_HEARTBEAT_INTERVAL = 60.0  # seconds between heartbeat log lines
+_DIAG_WINDOW = timedelta(hours=1)  # sliding window for per-hour diagnostics
+_CRITICAL_TASK_NAMES = frozenset(
+    {"screener", "ws-public", "ws-consumer", "feature-pipeline", "strategy-loop"}
+)
 
 
 class TradingApplication:
@@ -83,6 +89,9 @@ class TradingApplication:
         self._latest_exchange_positions: list[Any] = []
         self._latest_exchange_positions_at: datetime | None = None
         self._trailing_stop_keys: set[str] = set()
+        # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
+        self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
+        self._last_strategy_loop_at: datetime | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -327,6 +336,7 @@ class TradingApplication:
             ),
             regime_for=_regime_for,
             signal_log=self._signal_log,  # type: ignore[arg-type]
+            diagnostics_provider=self.get_diagnostics,
         )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
@@ -438,6 +448,20 @@ class TradingApplication:
         await self._execution_engine.sync_positions()
         log.info("execution_engine.initialized", shadow_mode=shadow)
 
+    async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
+        """Seed candles and subscribe WebSocket for newly added screener symbols."""
+        for symbol in symbols:
+            # Seed historical candles
+            await self._seed_candle_store(symbols=[symbol])
+            # Subscribe WebSocket to the new symbol's topics
+            if self._ws_public is not None:
+                topics = [f"kline.{_WS_INTERVAL}.{symbol}", f"tickers.{symbol}"]
+                await self._ws_public.subscribe(topics)
+                log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
+
+    async def _on_screener_symbols_removed(self, symbols: list[str]) -> None:
+        log.info("screener.symbols_removed", symbols=symbols)
+
     async def _start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
         from trader.features.screener import MarketScreener
@@ -449,6 +473,13 @@ class TradingApplication:
             max_symbols=10,
             min_volume_usd=20_000_000,
             interval_s=900,
+            on_symbols_added=self._on_screener_symbols_added,
+            on_symbols_removed=self._on_screener_symbols_removed,
+            has_open_position=(
+                self._execution_engine.has_open_position
+                if self._execution_engine is not None
+                else None
+            ),
         )
 
         # Run first screen synchronously so we have symbols before WS starts
@@ -846,6 +877,95 @@ class TradingApplication:
         ticks = (price / tick_size).to_integral_value(rounding=rounding)
         return ticks * tick_size
 
+    def _record_diag(self, event: str) -> None:
+        """Record a diagnostics event with the current timestamp."""
+        self._diag_events.append((datetime.now(tz=UTC), event))
+
+    def get_diagnostics(self) -> dict[str, Any]:
+        """Return a diagnostics snapshot for the /diagnostics Telegram command."""
+        now = datetime.now(tz=UTC)
+        cutoff = now - _DIAG_WINDOW
+
+        # Count events in the last hour
+        hour_counts: dict[str, int] = {}
+        for ts, event in self._diag_events:
+            if ts >= cutoff:
+                hour_counts[event] = hour_counts.get(event, 0) + 1
+
+        ws_age: float | None = None
+        if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
+            ws_age = (now - self._health_checker._last_ws_message_at).total_seconds()
+
+        return {
+            "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
+            "last_ws_message_age_s": ws_age,
+            "active_symbols": (
+                self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
+            ),
+            "open_positions": (
+                list(self._execution_engine._open_positions.keys())
+                if self._execution_engine is not None
+                else []
+            ),
+            "portfolio_heat_pct": (
+                float(self._exposure_tracker.total_exposure_pct)
+                if self._exposure_tracker is not None
+                else None
+            ),
+            "hour_signals_emitted": hour_counts.get("signals_emitted", 0),
+            "hour_risk_rejected": hour_counts.get("risk_rejected", 0),
+            "hour_api_rejected": hour_counts.get("api_rejected", 0),
+            "hour_min_notional_rejected": hour_counts.get("post_multiplier_min_notional_rejected", 0),
+            "hour_skipped_open_position": hour_counts.get("skipped_open_position", 0),
+            "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
+            "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
+        }
+
+    async def _run_supervisor(self) -> None:
+        """Monitor critical background tasks; on unexpected exit alert + exit(1)."""
+        last_heartbeat = datetime.now(tz=UTC)
+        while not self._shutdown_event.is_set():
+            now = datetime.now(tz=UTC)
+
+            if (now - last_heartbeat).total_seconds() >= _SUPERVISOR_HEARTBEAT_INTERVAL:
+                alive = [t.get_name() for t in self._background_tasks if not t.done()]
+                log.info("runtime_supervisor.heartbeat", alive_tasks=alive)
+                last_heartbeat = now
+
+            for task in list(self._background_tasks):
+                if not task.done():
+                    continue
+                name = task.get_name()
+                if name not in _CRITICAL_TASK_NAMES:
+                    continue
+                if self._shutdown_event.is_set():
+                    return
+
+                exc = task.exception() if not task.cancelled() else None
+                log.critical(
+                    "runtime_supervisor.critical_task_died",
+                    task=name,
+                    error=str(exc),
+                )
+                if self._telegram_bot is not None:
+                    try:
+                        await self._telegram_bot.notify(
+                            f"🚨 <b>Critical task died</b>: <code>{name}</code>\n"
+                            f"Error: <code>{exc}</code>\n"
+                            "Container will restart automatically."
+                        )
+                    except Exception as notify_exc:  # noqa: BLE001
+                        log.warning("supervisor.telegram_notify_failed", error=str(notify_exc))
+                sys.exit(1)
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=_SUPERVISOR_CHECK_INTERVAL,
+                )
+            except TimeoutError:
+                pass
+
     async def _start_strategy_loop(self) -> None:
         """Run strategy ensemble → RiskManager → ExecutionEngine."""
         from trader.strategies.ensemble import StrategyEnsemble
@@ -986,6 +1106,8 @@ class TradingApplication:
             if proposal is None:
                 return
 
+            self._record_diag("signals_emitted")
+
             if self._trade_journal is not None:
                 await self._trade_journal.record_signal(
                     proposal=proposal,
@@ -1016,7 +1138,15 @@ class TradingApplication:
                 return
 
             from trader.domain.enums import RiskDecisionStatus
-            if decision is None or decision.status not in (
+            if decision is None:
+                return
+            if decision.status == RiskDecisionStatus.REJECTED:
+                self._record_diag("risk_rejected")
+                # Track specific rejection reasons
+                for rule in decision.triggered_rules or []:
+                    if rule == "post_multiplier_min_notional_rejected":
+                        self._record_diag("post_multiplier_min_notional_rejected")
+            if decision.status not in (
                 RiskDecisionStatus.APPROVED,
                 RiskDecisionStatus.RESIZED,
             ):
@@ -1056,6 +1186,7 @@ class TradingApplication:
             nonlocal _balance_tick, _effective_blocked_symbols
 
             while not self._shutdown_event.is_set():
+                self._last_strategy_loop_at = datetime.now(tz=UTC)
                 # Refresh balance every N iterations
                 _balance_tick += 1
                 refresh_every = max(1, int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL))
@@ -1226,6 +1357,10 @@ class TradingApplication:
             await asyncio.sleep(2.0)
 
             await self._start_strategy_loop()
+
+            # Supervisor monitors critical tasks and exits on unexpected failure
+            supervisor_task = asyncio.create_task(self._run_supervisor(), name="supervisor")
+            self._background_tasks.append(supervisor_task)
 
             try:
                 await self._main_loop()

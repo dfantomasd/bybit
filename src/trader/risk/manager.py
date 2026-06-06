@@ -14,7 +14,7 @@ CRITICAL INVARIANTS:
 from __future__ import annotations
 
 import logging
-from decimal import Decimal
+from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
 from trader.domain.enums import (
@@ -39,6 +39,14 @@ from trader.risk.profiles import RiskLimits, get_risk_limits
 from trader.risk.sizing import PositionSizer
 
 logger = logging.getLogger(__name__)
+
+
+def _ceil_to_step(qty: Decimal, step: Decimal) -> Decimal:
+    """Round qty UP to the nearest qty_step (used only for min-notional floor)."""
+    if step <= Decimal("0"):
+        return qty
+    steps = (qty / step).to_integral_value(rounding=ROUND_CEILING)
+    return steps * step
 
 # Regime-based risk multipliers
 _REGIME_MULTIPLIERS: dict[MarketRegime, Decimal] = {
@@ -380,8 +388,72 @@ class RiskManager:
             max_qty_hard_cap = hard_cap_risk / (stop_distance_pct * proposal.entry_price)
             approved_qty = min(approved_qty, max_qty_hard_cap)
 
-        # Re-round after multipliers
+        # Re-round after multipliers (always ROUND_DOWN)
         approved_qty = sizer.round_to_step(approved_qty, instrument_info.qty_step)
+
+        # ----------------------------------------------------------------
+        # 15.5  Post-multiplier min-notional guard
+        #
+        # After confidence + regime multipliers reduce qty, the resulting
+        # notional may fall below Bybit's $5 minimum.  We attempt to bump
+        # qty to the min-notional floor — but ONLY if every risk constraint
+        # is still satisfied.  If any constraint is violated we reject here
+        # rather than let Bybit return code 110094.
+        # ----------------------------------------------------------------
+        if (
+            instrument_info.min_notional is not None
+            and proposal.entry_price is not None
+            and proposal.entry_price > Decimal("0")
+            and approved_qty > Decimal("0")
+        ):
+            final_notional = approved_qty * proposal.entry_price
+            if final_notional < instrument_info.min_notional:
+                min_qty = _ceil_to_step(
+                    instrument_info.min_notional / proposal.entry_price,
+                    instrument_info.qty_step,
+                )
+                min_notional_value = min_qty * proposal.entry_price
+                # Remaining portfolio exposure budget in USD
+                remaining_exposure_usd = (
+                    capital
+                    * max(
+                        Decimal("0"),
+                        self._limits.max_total_exposure_pct - self._exposure.total_exposure_pct,
+                    )
+                    / Decimal("100")
+                )
+                # Hard-cap risk at the bumped qty
+                hard_cap_usd = capital * self._limits.risk_per_trade_hard_cap_pct / Decimal("100")
+                bumped_risk_usd = min_qty * proposal.entry_price * stop_distance_pct
+
+                can_bump = (
+                    min_qty <= instrument_info.max_order_qty
+                    and min_qty >= instrument_info.min_order_qty
+                    and min_qty <= proposal.requested_qty
+                    and min_notional_value <= available_balance
+                    and min_notional_value <= remaining_exposure_usd
+                    and bumped_risk_usd <= hard_cap_usd
+                )
+                if can_bump:
+                    approved_qty = min_qty
+                    triggered_rules.append("min_notional_floor_applied")
+                    self._log.debug(
+                        "risk.min_notional_floor_applied symbol=%s bumped_to_qty=%s min_notional=%s",
+                        proposal.symbol,
+                        str(approved_qty),
+                        str(instrument_info.min_notional),
+                    )
+                else:
+                    return self._reject(
+                        proposal,
+                        (
+                            f"post-multiplier notional {final_notional:.4f} < "
+                            f"min_notional {instrument_info.min_notional}; "
+                            "cannot raise without violating risk limits"
+                        ),
+                        ["post_multiplier_min_notional_rejected"],
+                        capital,
+                    )
 
         if approved_qty <= Decimal("0") or approved_qty < instrument_info.min_order_qty:
             return self._reject(

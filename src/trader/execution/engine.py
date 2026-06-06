@@ -33,8 +33,10 @@ from trader.domain.models import (
 
 log = structlog.get_logger(__name__)
 
-# Default cooldown between entries on the same symbol
+# Default cooldown between successful entries on the same symbol
 _DEFAULT_COOLDOWN_S = 300  # 5 minutes
+# Separate shorter cooldown after an API-level order failure
+_DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
 
 
 class ExecutionEngine:
@@ -57,6 +59,7 @@ class ExecutionEngine:
         exposure_tracker: Any,
         shadow_mode: bool = True,
         cooldown_s: int = _DEFAULT_COOLDOWN_S,
+        failure_cooldown_s: int = _DEFAULT_FAILURE_COOLDOWN_S,
         category: str = "linear",
         trade_journal: Any | None = None,
     ) -> None:
@@ -65,11 +68,14 @@ class ExecutionEngine:
         self._exposure = exposure_tracker
         self._shadow_mode = shadow_mode
         self._cooldown = timedelta(seconds=cooldown_s)
+        self._failure_cooldown = timedelta(seconds=failure_cooldown_s)
         self._category = category
         self._trade_journal = trade_journal
 
-        # symbol → last entry timestamp
+        # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
+        # symbol → last API-failure timestamp (separate from entry cooldown)
+        self._last_failure_at: dict[str, datetime] = {}
         # symbol → open position metadata (size, entry_price, side)
         self._open_positions: dict[str, dict[str, Any]] = {}
         # symbol → InstrumentInfo (fetched once, cached forever)
@@ -191,14 +197,27 @@ class ExecutionEngine:
             log.debug("execution.skipped_open_position", symbol=symbol)
             return None
 
-        # 2. Cooldown ──────────────────────────────────────────────────
-        last = self._last_entry_at.get(symbol)
-        if last is not None:
-            elapsed = datetime.now(tz=UTC) - last
+        # 2a. Entry cooldown (successful entries only) ────────────────
+        last_entry = self._last_entry_at.get(symbol)
+        if last_entry is not None:
+            elapsed = datetime.now(tz=UTC) - last_entry
             if elapsed < self._cooldown:
                 remaining = int((self._cooldown - elapsed).total_seconds())
                 log.debug(
-                    "execution.skipped_cooldown",
+                    "execution.skipped_entry_cooldown",
+                    symbol=symbol,
+                    remaining_s=remaining,
+                )
+                return None
+
+        # 2b. Failure cooldown (API errors) ────────────────────────────
+        last_failure = self._last_failure_at.get(symbol)
+        if last_failure is not None:
+            elapsed = datetime.now(tz=UTC) - last_failure
+            if elapsed < self._failure_cooldown:
+                remaining = int((self._failure_cooldown - elapsed).total_seconds())
+                log.debug(
+                    "execution.skipped_failure_cooldown",
                     symbol=symbol,
                     remaining_s=remaining,
                 )
@@ -304,7 +323,8 @@ class ExecutionEngine:
                         exchange_order_id=exchange_order_id,
                     )
             except Exception as exc:
-                self._last_entry_at[symbol] = datetime.now(tz=UTC)
+                # Record failure timestamp (NOT an entry cooldown — separate state)
+                self._last_failure_at[symbol] = datetime.now(tz=UTC)
                 log.error(
                     "execution.order_failed",
                     symbol=symbol,
@@ -428,8 +448,13 @@ class ExecutionEngine:
                 for sym, pos in self._open_positions.items()
             },
             "cooldown_s": int(self._cooldown.total_seconds()),
+            "failure_cooldown_s": int(self._failure_cooldown.total_seconds()),
             "last_entries": {
                 sym: ts.isoformat()
                 for sym, ts in self._last_entry_at.items()
+            },
+            "last_failures": {
+                sym: ts.isoformat()
+                for sym, ts in self._last_failure_at.items()
             },
         }

@@ -123,7 +123,18 @@ class HealthChecker:
 
         Returns:
             (is_healthy, latency_ms)
+
+        When REDIS_URL is empty and Redis is optional (``redis_required=False``),
+        the check is silently skipped (returns healthy/None) so no warning fires.
+        When the URL is empty but Redis is required, returns unhealthy immediately.
         """
+        if not self._redis_url:
+            if self._redis_required:
+                log.warning("redis_health_check_failed", error="REDIS_URL is not configured but REDIS_REQUIRED=true")
+                return False, None
+            # Optional and not configured → silently skip
+            return True, None
+
         start = time.monotonic()
         try:
             client = aioredis.from_url(self._redis_url, socket_connect_timeout=_REDIS_TIMEOUT_S)
@@ -217,7 +228,9 @@ class HealthChecker:
             messages.append("PostgreSQL is unreachable")
         if not redis_ok and self._redis_required:
             messages.append("Redis is unreachable")
-        if not redis_ok and not self._redis_required:
+        # Only add optional-Redis warning when a URL was configured but is down;
+        # an empty optional URL is intentionally unconfigured — no warning needed.
+        if not redis_ok and not self._redis_required and self._redis_url:
             messages.append("Redis unavailable (optional)")
         if not bybit_ok and self._bybit_required:
             messages.append("Bybit REST API is unreachable")
