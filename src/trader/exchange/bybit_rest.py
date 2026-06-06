@@ -5,7 +5,6 @@ signing and eliminate pybit version incompatibilities.
 """
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -508,7 +507,7 @@ class BybitRestClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the aiohttp session."""
         if self._session and not self._session.closed:
-            asyncio.create_task(self._session.close())
+            await self._session.close()

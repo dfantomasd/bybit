@@ -92,6 +92,8 @@ class TradingApplication:
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
+        # Private WebSocket (order/position/balance real-time events)
+        self._ws_private: Any | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -219,6 +221,38 @@ class TradingApplication:
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
+        # Run Bybit exchange preflight checks (clock skew, API perms, balance, etc.)
+        has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
+        if has_key:
+            try:
+                report = await self._bybit_adapter.initialize()
+                is_live = (
+                    self._settings.LIVE_MODE
+                    and self._settings.TRADING_MODE
+                    in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+                )
+                if not report.passed:
+                    if is_live:
+                        log.critical(
+                            "bybit_preflight_failed_blocking_live",
+                            errors=report.errors,
+                        )
+                        raise SystemExit(1)
+                    else:
+                        log.warning(
+                            "bybit_preflight_partial_continuing_shadow",
+                            errors=report.errors,
+                            warnings=report.warnings,
+                        )
+                else:
+                    log.info("bybit_preflight_passed", warnings=report.warnings)
+            except SystemExit:
+                raise
+            except Exception as exc:
+                log.warning("bybit_preflight_exception", error=str(exc))
+        else:
+            log.info("bybit_adapter_skipped_preflight", reason="no_api_key_configured")
+
     # ------------------------------------------------------------------
     # Operator control callbacks (wired into TradingController)
     # ------------------------------------------------------------------
@@ -262,13 +296,24 @@ class TradingApplication:
         return not self._active_execution_allowed()
 
     async def _change_risk_profile(self, profile: Any) -> None:
-        """Hot-swap the risk profile without restarting."""
+        """Hot-swap the risk profile without restarting — preserves drawdown history."""
         old = self._current_risk_profile_str
         capital = await self._refresh_balance()
-        # Reinitialise risk manager with new profile; preserves balance state
+
+        # Preserve the existing DrawdownTracker so accumulated drawdown is not erased.
+        # Reinitialising would silently reset peak equity → new hard-stop baseline
+        # that ignores any losses already taken — a critical safety hole.
+        old_drawdown = (
+            self._risk_manager._drawdown if self._risk_manager is not None else None
+        )
+
         if self._settings is not None:
             self._settings.RISK_PROFILE = profile
         await self._init_risk_manager(capital)
+
+        if old_drawdown is not None and self._risk_manager is not None:
+            self._risk_manager._drawdown = old_drawdown
+
         # Rewire execution engine to the new risk manager
         if self._execution_engine is not None:
             self._execution_engine._risk_manager = self._risk_manager
@@ -628,6 +673,89 @@ class TradingApplication:
             endpoint=selector.ws_public_base,
             subscriptions=subs,
         )
+
+    async def _start_private_ws(self) -> None:
+        """Start Bybit private WebSocket for real-time order/position/balance events."""
+        from trader.exchange.bybit_ws_private import BybitPrivateWebSocket
+        from trader.exchange.endpoint_selector import EndpointSelector
+
+        assert self._settings is not None
+        api_key = self._settings.BYBIT_API_KEY.get_secret_value()
+        api_secret = self._settings.BYBIT_API_SECRET.get_secret_value()
+
+        if not api_key or not api_secret:
+            log.info("private_ws.skipped", reason="no_api_credentials_configured")
+            return
+
+        selector = EndpointSelector(
+            self._settings.BYBIT_REGION,
+            self._settings.BYBIT_USE_TESTNET,
+        )
+
+        private_event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+
+        self._ws_private = BybitPrivateWebSocket(
+            endpoint=selector.ws_private_base,
+            api_key=api_key,
+            api_secret=api_secret,
+            event_queue=private_event_queue,
+        )
+
+        async def consume_private_events() -> None:
+            from trader.domain.events import BalanceUpdateEvent
+
+            while not self._shutdown_event.is_set():
+                try:
+                    event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
+                    if isinstance(event, BalanceUpdateEvent) and event.available_balance > Decimal("0"):
+                        self._cached_balance = event.available_balance
+                        self._balance_refreshed_at = datetime.now(tz=UTC)
+                        log.debug(
+                            "private_ws.balance_update",
+                            available=str(event.available_balance),
+                        )
+                except TimeoutError:
+                    pass
+                except asyncio.CancelledError:
+                    break
+                except Exception as exc:
+                    log.warning("private_ws_consumer.error", error=str(exc))
+
+        ws_task = asyncio.create_task(self._ws_private.start(), name="ws-private")
+        consumer_task = asyncio.create_task(
+            consume_private_events(), name="ws-private-consumer"
+        )
+        self._background_tasks.extend([ws_task, consumer_task])
+        log.info("private_ws.started", endpoint=selector.ws_private_base)
+
+    async def _run_reconciliation(self) -> None:
+        """Periodic reconciliation: compare local order state with exchange."""
+        assert self._settings is not None
+        interval = float(self._settings.RECONCILIATION_INTERVAL_SECONDS)
+
+        while not self._shutdown_event.is_set():
+            try:
+                if self._bybit_adapter is not None and not self._initial_shadow_mode():
+                    result = await self._bybit_adapter.reconcile()
+                    if result.discrepancies_found > 0:
+                        log.warning(
+                            "reconciliation.discrepancies_found",
+                            discrepancies=result.discrepancies_found,
+                            mismatched=result.mismatched_order_ids[:10],
+                            summary=result.summary,
+                        )
+                    else:
+                        log.debug("reconciliation.clean", summary=result.summary)
+            except Exception as exc:
+                log.warning("reconciliation.error", error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
 
     async def _start_feature_pipeline(self) -> None:
         """Start feature computation in background (parallel across symbols)."""
@@ -1299,6 +1427,9 @@ class TradingApplication:
         if self._ws_public:
             await self._ws_public.stop()
 
+        if self._ws_private:
+            await self._ws_private.stop()
+
         # Cancel all background tasks
         for task in self._background_tasks:
             if not task.done():
@@ -1311,7 +1442,7 @@ class TradingApplication:
             await asyncio.sleep(1)
 
         if self._bybit_adapter:
-            self._bybit_adapter.close()
+            await self._bybit_adapter.close()
 
         if self._trade_journal:
             await self._trade_journal.close()
@@ -1338,6 +1469,9 @@ class TradingApplication:
             await self._start_trade_journal()
             await self._start_telegram_bot()
 
+            # Start private WebSocket for real-time order/position/balance events
+            await self._start_private_ws()
+
             # Market data pipeline
             # 1. Screen market to get dynamic symbol list
             active_symbols = await self._start_screener()
@@ -1361,6 +1495,12 @@ class TradingApplication:
             # Supervisor monitors critical tasks and exits on unexpected failure
             supervisor_task = asyncio.create_task(self._run_supervisor(), name="supervisor")
             self._background_tasks.append(supervisor_task)
+
+            # Periodic order/position reconciliation (non-critical, shadow skipped)
+            reconciliation_task = asyncio.create_task(
+                self._run_reconciliation(), name="reconciliation"
+            )
+            self._background_tasks.append(reconciliation_task)
 
             try:
                 await self._main_loop()

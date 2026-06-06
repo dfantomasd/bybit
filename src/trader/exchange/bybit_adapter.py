@@ -327,6 +327,6 @@ class BybitAdapter:
                 "latency_ms": None,
             }
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Release resources held by the underlying REST client."""
-        self._rest.close()
+        await self._rest.close()
