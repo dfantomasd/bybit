@@ -48,7 +48,21 @@ _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
 _SUPERVISOR_HEARTBEAT_INTERVAL = 60.0  # seconds between heartbeat log lines
 _DIAG_WINDOW = timedelta(hours=1)  # sliding window for per-hour diagnostics
-_CRITICAL_TASK_NAMES = frozenset({"screener", "ws-public", "ws-consumer", "feature-pipeline", "strategy-loop"})
+_CRITICAL_TASK_NAMES = frozenset(
+    {
+        "screener",
+        "ws-public",
+        "ws-consumer",
+        "ws-private",
+        "ws-private-consumer",
+        "feature-pipeline",
+        "strategy-loop",
+        "risk-monitor",
+        "reconciliation",
+        "outcome-resolver",
+        "load-governor",
+    }
+)
 
 
 class TradingApplication:
@@ -93,6 +107,8 @@ class TradingApplication:
         self._last_strategy_loop_at: datetime | None = None
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
+        # ML shadow scoring
+        self._model_registry: Any | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -217,6 +233,7 @@ class TradingApplication:
             region_code=self._settings.BYBIT_REGION.value,
             use_testnet=self._settings.BYBIT_USE_TESTNET,
             default_category=self._settings.DEFAULT_MARKET_CATEGORY,
+            trade_journal=self._trade_journal,
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
@@ -247,7 +264,15 @@ class TradingApplication:
             except SystemExit:
                 raise
             except Exception as exc:
-                log.warning("bybit_preflight_exception", error=str(exc))
+                # P0.7: exception during preflight is fatal for CANARY_LIVE / LIVE
+                is_active = self._settings.LIVE_MODE and self._settings.TRADING_MODE in (
+                    TradingMode.LIVE,
+                    TradingMode.CANARY_LIVE,
+                )
+                if is_active:
+                    log.critical("bybit_preflight_exception_blocking_live", error=str(exc))
+                    raise SystemExit(1) from exc
+                log.warning("bybit_preflight_exception_continuing_shadow", error=str(exc))
         else:
             log.info("bybit_adapter_skipped_preflight", reason="no_api_key_configured")
 
@@ -372,6 +397,11 @@ class TradingApplication:
             except Exception:
                 return None
 
+        async def _db_diagnostics_provider() -> dict:
+            if self._trade_journal is None:
+                return {"connected": False}
+            return await self._trade_journal.get_db_diagnostics()
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -385,6 +415,7 @@ class TradingApplication:
             regime_for=_regime_for,
             signal_log=self._signal_log,  # type: ignore[arg-type]
             diagnostics_provider=self.get_diagnostics,
+            db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
         )
 
@@ -483,6 +514,7 @@ class TradingApplication:
         profile_cfg = get_risk_profile_config(self._settings.RISK_PROFILE)
 
         shadow = self._initial_shadow_mode()
+        is_canary = self._settings.TRADING_MODE == TradingMode.CANARY_LIVE
         self._execution_engine = ExecutionEngine(
             adapter=self._bybit_adapter,
             risk_manager=self._risk_manager,
@@ -492,11 +524,26 @@ class TradingApplication:
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
             min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
+            max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
+            max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
+            max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
+            startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
+            is_canary=is_canary,
         )
+
+        # P0.2: Restore pending entry IDs from durable storage before any new entries
+        if self._trade_journal is not None:
+            try:
+                pending_ids = await self._trade_journal.load_pending_from_db()
+                if pending_ids:
+                    self._execution_engine.restore_pending_entries(pending_ids)
+                    log.info("execution_engine.pending_restored", count=len(pending_ids))
+            except Exception as exc:
+                log.warning("execution_engine.pending_restore_failed", error=str(exc))
 
         # Sync open positions from exchange so we don't double-enter on restart
         await self._execution_engine.sync_positions()
-        log.info("execution_engine.initialized", shadow_mode=shadow)
+        log.info("execution_engine.initialized", shadow_mode=shadow, is_canary=is_canary)
 
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
@@ -647,8 +694,9 @@ class TradingApplication:
             event_queue=event_queue,
         )
 
-        # Event consumer: feeds CandleStore and updates health
+        # Event consumer: feeds CandleStore, triggers features, writes candle journal
         async def consume_events() -> None:
+
             from trader.data.candles import candle_from_kline_event
             from trader.domain.events import KlineEvent
 
@@ -658,6 +706,49 @@ class TradingApplication:
                     if isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         self._candle_store.add(event.symbol, event.interval, candle)
+
+                        if event.confirm:
+                            # Event-driven feature recompute for this (symbol, interval)
+                            if self._feature_pipeline is not None:
+                                await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
+
+                            # Persist confirmed candle to PostgreSQL (best-effort)
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                _interval_ms = {
+                                    "1": 60_000,
+                                    "3": 180_000,
+                                    "5": 300_000,
+                                    "15": 900_000,
+                                    "30": 1_800_000,
+                                    "60": 3_600_000,
+                                }
+                                bar_ms = _interval_ms.get(event.interval, 60_000)
+                                close_time = datetime.fromtimestamp(
+                                    (event.open_time.timestamp() * 1000 + bar_ms - 1) / 1000,
+                                    tz=UTC,
+                                )
+                                try:
+                                    await self._trade_journal.upsert_market_candle(
+                                        symbol=event.symbol,
+                                        interval=event.interval,
+                                        open_time=event.open_time,
+                                        close_time=close_time,
+                                        open=event.open,
+                                        high=event.high,
+                                        low=event.low,
+                                        close=event.close,
+                                        volume=event.volume,
+                                        turnover=event.turnover,
+                                        confirmed=True,
+                                        source="ws",
+                                    )
+                                except Exception as _candle_exc:
+                                    log.debug(
+                                        "ws_consumer.candle_journal_failed",
+                                        symbol=event.symbol,
+                                        error=str(_candle_exc),
+                                    )
+
                     # Update WS health on any message
                     if self._health_checker:
                         self._health_checker.set_ws_status(
@@ -711,9 +802,21 @@ class TradingApplication:
         )
 
         async def consume_private_events() -> None:
-            from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent
+            from trader.domain.enums import OrderStatus
+            from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent, OrderUpdateEvent
+
+            _terminal_order_states = {
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }
 
             seen_exec_ids: set[str] = set()
+            # Guard: track order_link_ids whose pending count has already been released
+            # to prevent double-release if multiple terminal events arrive for the same order.
+            _pending_released: set[str] = set()
+
             while not self._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
@@ -724,6 +827,50 @@ class TradingApplication:
                             "private_ws.balance_update",
                             available=str(event.available_balance),
                         )
+                    elif isinstance(event, OrderUpdateEvent):
+                        # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
+                        order_link_id = event.order_link_id or event.order_id
+                        order_status = event.status  # OrderUpdateEvent.status is the correct field
+                        log.info(
+                            "private_ws.order_update",
+                            order_link_id=order_link_id,
+                            symbol=event.symbol,
+                            status=order_status.value if order_status else "unknown",
+                            side=event.side.value if event.side else "unknown",
+                        )
+                        # Update both idempotency and durable state atomically via adapter
+                        if self._bybit_adapter is not None:
+                            try:
+                                is_terminal = await self._bybit_adapter.handle_order_update(event)
+                            except Exception as _h_exc:
+                                log.debug("private_ws.handle_order_update_failed", error=str(_h_exc))
+                                is_terminal = order_status in _terminal_order_states
+                        else:
+                            # Fallback: write directly to journal when adapter unavailable
+                            if self._trade_journal is not None:
+                                try:
+                                    await self._trade_journal.record_order_update_event(
+                                        order_link_id=order_link_id,
+                                        exchange_order_id=event.order_id,
+                                        symbol=event.symbol,
+                                        side=event.side.value if event.side else "unknown",
+                                        qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
+                                        state=order_status.value if order_status else "UNKNOWN",
+                                    )
+                                except Exception as _j_exc:
+                                    log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
+                            is_terminal = order_status in _terminal_order_states
+                        # Release pending entry count on terminal — exactly once per order
+                        if is_terminal and order_link_id not in _pending_released:
+                            if self._execution_engine is not None:
+                                self._execution_engine.mark_entry_resolved()
+                            _pending_released.add(order_link_id)
+                        # Trigger position sync on fill
+                        if order_status == OrderStatus.FILLED and self._execution_engine is not None:
+                            try:
+                                await self._execution_engine.sync_positions()
+                            except Exception as _sync_exc:
+                                log.debug("private_ws.order_fill_sync_failed", error=str(_sync_exc))
                     elif isinstance(event, ExecutionUpdateEvent):
                         if event.exec_id in seen_exec_ids:
                             continue
@@ -738,6 +885,16 @@ class TradingApplication:
                         )
                         if self._trade_journal is not None:
                             try:
+                                # P0.5: persist to execution_events (nullable proposal/decision)
+                                await self._trade_journal.record_execution_event(
+                                    exec_id=event.exec_id,
+                                    order_link_id=event.order_link_id or None,
+                                    exchange_order_id=event.order_id,
+                                    symbol=event.symbol,
+                                    side=event.side.value,
+                                    exec_price=event.exec_price,
+                                    exec_qty=event.exec_qty,
+                                )
                                 await self._trade_journal.record_order_event(
                                     order_link_id=event.order_link_id or event.exec_id,
                                     proposal_id=None,
@@ -754,6 +911,9 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
+                        # P0.3: Release pending entry slot for this order_link_id only
+                        if self._execution_engine is not None and event.order_link_id:
+                            self._execution_engine.mark_entry_resolved(event.order_link_id)
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
@@ -783,6 +943,102 @@ class TradingApplication:
         consumer_task = asyncio.create_task(consume_private_events(), name="ws-private-consumer")
         self._background_tasks.extend([ws_task, consumer_task])
         log.info("private_ws.started", endpoint=selector.ws_private_base)
+
+    async def _run_load_governor(self) -> None:
+        """Adaptive load governor: reduce feature symbols when system is under pressure.
+
+        Monitors event-loop lag and WS queue utilisation every
+        LOAD_GOVERNOR_CHECK_SECONDS. When any metric exceeds its threshold,
+        the screener's feature universe is narrowed by one symbol (down to the
+        configured minimum). When all metrics are healthy the universe is
+        gradually restored toward the original maximum.
+        """
+        assert self._settings is not None
+        if not self._settings.ADAPTIVE_LOAD_GOVERNOR_ENABLED:
+            return
+
+        check_interval = float(self._settings.LOAD_GOVERNOR_CHECK_SECONDS)
+        max_lag_ms = float(self._settings.MAX_EVENT_LOOP_LAG_MS)
+        min_symbols = int(self._settings.LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS)
+
+        # Original feature_max from screener (set at startup)
+        original_max: int | None = None
+
+        while not self._shutdown_event.is_set():
+            await asyncio.sleep(check_interval)
+            if self._screener is None:
+                continue
+
+            if original_max is None:
+                original_max = self._screener._feature_max
+
+            # --- Measure event-loop lag ---
+            t0 = asyncio.get_event_loop().time()
+            await asyncio.sleep(0)  # yield and immediately return
+            lag_ms = (asyncio.get_event_loop().time() - t0) * 1000
+
+            # --- Measure WS queue utilisation (if accessible) ---
+            # The event queue is local to _start_public_ws, so we track pressure
+            # by checking if health checker reports recent WS staleness
+            ws_stale = False
+            if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
+                ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
+                ws_stale = ws_age > 30.0
+
+            overloaded = lag_ms > max_lag_ms or ws_stale
+            current = self._screener._feature_max
+
+            if overloaded and current > min_symbols:
+                new_max = max(min_symbols, current - 1)
+                self._screener._feature_max = new_max
+                log.warning(
+                    "load_governor.reducing_symbols",
+                    lag_ms=round(lag_ms, 1),
+                    ws_stale=ws_stale,
+                    from_max=current,
+                    to_max=new_max,
+                    min_symbols=min_symbols,
+                )
+            elif not overloaded and current < original_max:
+                # Restore one symbol at a time
+                new_max = min(original_max, current + 1)
+                self._screener._feature_max = new_max
+                log.info(
+                    "load_governor.restoring_symbols",
+                    lag_ms=round(lag_ms, 1),
+                    from_max=current,
+                    to_max=new_max,
+                )
+
+    async def _run_outcome_resolver(self) -> None:
+        """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
+        interval = 300.0  # every 5 minutes
+        horizons = [5, 15, 30]
+
+        while not self._shutdown_event.is_set():
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                for horizon in horizons:
+                    try:
+                        resolved = await self._trade_journal.resolve_outcomes_from_candles(
+                            horizon_minutes=horizon,
+                            label_bps_threshold=5.0,
+                        )
+                        if resolved > 0:
+                            log.info(
+                                "outcome_resolver.resolved",
+                                horizon_minutes=horizon,
+                                count=resolved,
+                            )
+                    except Exception as exc:
+                        log.debug("outcome_resolver.error", horizon=horizon, error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
 
     async def _run_risk_monitor(self) -> None:
         """Periodic risk monitor: update equity, check WS freshness, feed circuit breakers."""
@@ -853,7 +1109,7 @@ class TradingApplication:
                 pass
 
     async def _start_feature_pipeline(self) -> None:
-        """Start feature computation in background (parallel across symbols)."""
+        """Start event-driven feature pipeline with 60 s staleness watchdog."""
         from trader.features.pipeline import FeaturePipeline
         from trader.features.regime import RegimeClassifier
 
@@ -862,20 +1118,21 @@ class TradingApplication:
         self._feature_pipeline = FeaturePipeline(
             candle_store=self._candle_store,
             health_checker=self._health_checker,
-            interval_s=_FEATURE_INTERVAL,
+            stale_threshold_s=90.0,
+            watchdog_interval_s=60.0,
         )
         self._regime_classifier = RegimeClassifier()
 
         task = asyncio.create_task(
             self._feature_pipeline.run(
-                symbols=_SYMBOLS,  # fallback; screener overrides at runtime
+                symbols=_SYMBOLS,  # fallback; screener overrides via symbol_source
                 intervals=[_WS_INTERVAL],
-                symbol_source=self._screener,  # dynamic symbol list
+                symbol_source=self._screener,
             ),
             name="feature-pipeline",
         )
         self._background_tasks.append(task)
-        log.info("feature_pipeline.started", parallel=True)
+        log.info("feature_pipeline.started", mode="event_driven", watchdog_interval_s=60.0)
 
     async def _refresh_closed_pnl_memory(self) -> None:
         """Import recent Bybit closed PnL and update performance symbol blocks."""
@@ -1213,6 +1470,18 @@ class TradingApplication:
         )
         await self._refresh_closed_pnl_memory()
 
+        # Initialise ML shadow scoring registry (shadow only; never influences decisions)
+        if self._settings.MODEL_SHADOW_SCORING_ENABLED:
+            try:
+                from trader.ml.challenger import ModelRegistry
+
+                self._model_registry = ModelRegistry(trade_journal=self._trade_journal)
+                if self._trade_journal is not None and self._trade_journal.is_enabled:
+                    await self._model_registry.load_champion()
+                log.info("model_registry.initialized")
+            except Exception as _mr_exc:
+                log.warning("model_registry.init_failed", error=str(_mr_exc))
+
         _balance_tick: int = 0
         _effective_blocked_symbols: set[str] = set()
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
@@ -1316,10 +1585,72 @@ class TradingApplication:
                     regime_context=regime_ctx,
                 )
 
+            # Record feature snapshot for ML training (no lookahead — uses candle open_time)
+            snapshot_id = ""
+            if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
+                try:
+                    import hashlib
+                    import json as _json
+
+                    _schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+                    _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
+                    _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
+                    snapshot_id = await self._trade_journal.record_feature_snapshot(
+                        symbol=proposal.symbol,
+                        interval=_WS_INTERVAL,
+                        candle_open_time=_candle_open_time,
+                        feature_schema_hash=_schema_hash,
+                        feature_names=vec.feature_names,
+                        feature_values=vec.values,
+                    )
+                except Exception as _snap_exc:
+                    log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
+
+            # ML shadow scoring — only records metadata, never influences trade decisions
+            if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+                try:
+                    prediction = self._model_registry.score(vec.values)
+                    if prediction is not None:
+                        if self._trade_journal is not None and self._trade_journal.is_enabled:
+                            await self._trade_journal.record_prediction_event(
+                                symbol=proposal.symbol,
+                                interval=_WS_INTERVAL,
+                                model_version=prediction.model_version,
+                                score=prediction.score,
+                                strategy_signal=proposal.side.value,
+                                feature_snapshot_id=snapshot_id,
+                            )
+                    else:
+                        log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
+                except Exception as _ml_exc:
+                    log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
+
             # Skip execution if operator paused trading
             if self._trading_paused:
                 log.debug("strategy_loop.paused", symbol=symbol)
                 return
+
+            # DB availability guard for CANARY_LIVE / LIVE
+            if self._settings.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+                if self._settings.TRADE_JOURNAL_REQUIRED_FOR_ACTIVE:
+                    if self._trade_journal is None or not self._trade_journal.is_enabled:
+                        log.warning(
+                            "strategy_loop.blocked_no_journal",
+                            symbol=symbol,
+                            mode=self._settings.TRADING_MODE,
+                        )
+                        return
+                if self._settings.DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE:
+                    if self._trade_journal is None or not self._trade_journal.durable_state_healthy:
+                        log.warning(
+                            "strategy_loop.blocked_durable_store_unhealthy",
+                            symbol=symbol,
+                            mode=self._settings.TRADING_MODE,
+                            write_health=(
+                                self._trade_journal.write_health() if self._trade_journal is not None else {}
+                            ),
+                        )
+                        return
 
             # ExecutionEngine: dedup/cooldown/risk → order (or shadow log)
             # Notification fires only when execution engine actually approves
@@ -1402,16 +1733,18 @@ class TradingApplication:
                 balance = self._cached_balance
                 capital = balance
 
-                # Get current active symbols from screener (dynamic)
-                active_symbols = self._screener.active_symbols if self._screener is not None else _SYMBOLS
+                # Feature pipeline runs on full active_symbols universe (set at startup)
+                active_symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
                 _effective_blocked_symbols = self._effective_performance_blocks(active_symbols)
 
-                # Analyse ALL symbols in parallel
+                # Strategy evaluation uses execution_candidates only (Starter-optimized subset)
+                exec_symbols = self._screener.execution_candidates if self._screener is not None else list(_SYMBOLS)
+
                 results = await asyncio.gather(
-                    *[process_symbol(symbol, balance, capital) for symbol in active_symbols],
+                    *[process_symbol(symbol, balance, capital) for symbol in exec_symbols],
                     return_exceptions=True,
                 )
-                for symbol, result in zip(active_symbols, results, strict=False):
+                for symbol, result in zip(exec_symbols, results, strict=False):
                     if isinstance(result, Exception):
                         log.warning(
                             "strategy_loop.symbol_task_failed",
@@ -1506,7 +1839,7 @@ class TradingApplication:
                     pos_list = ", ".join(status["open_positions"].keys())
                     await self._telegram_bot.notify(
                         f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
-                        "Stop-losses remain active on the exchange."
+                        "Open positions remain on exchange. Verify SL manually."
                     )
                 except Exception as exc:
                     log.debug("graceful_shutdown.telegram_failed", error=str(exc))
@@ -1555,8 +1888,8 @@ class TradingApplication:
             await self._run_preflight()
 
             await self._start_http_server()
-            await self._start_bybit_adapter()
             await self._start_trade_journal()
+            await self._start_bybit_adapter()
             await self._start_telegram_bot()
 
             # Start private WebSocket for real-time order/position/balance events
@@ -1593,6 +1926,14 @@ class TradingApplication:
             # Risk monitor: updates equity/drawdown, checks WS staleness
             risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
             self._background_tasks.append(risk_monitor_task)
+
+            # Outcome resolver: labels prediction events with horizon returns (every 5 min)
+            outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")
+            self._background_tasks.append(outcome_resolver_task)
+
+            # Adaptive load governor: narrows feature universe under memory/lag pressure
+            load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
+            self._background_tasks.append(load_governor_task)
 
             try:
                 await self._main_loop()

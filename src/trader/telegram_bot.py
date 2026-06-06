@@ -99,6 +99,8 @@ class TradingController:
     signal_log: deque[SignalEntry] = field(default_factory=lambda: deque(maxlen=20))
     # Optional diagnostics provider (returns dict from TradingApplication.get_diagnostics)
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
+    # Optional async DB diagnostics provider
+    db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
     allow_risk_increase: bool = False
 
@@ -141,9 +143,9 @@ class TelegramMonitorBot:
         self._controller = controller
         self._app: Application[Any, Any, Any, Any, Any, Any] | None = None
 
-        # Subscribed chat IDs for push notifications (union of allowed_chat_ids
-        # that have typed /start in this session)
-        self._subscribed: set[int] = set()
+        # Pre-populate subscribed set so allowed chats receive push notifications
+        # immediately after restart without requiring /start.
+        self._subscribed: set[int] = set(config.allowed_chat_ids)
 
         # Pending confirmations: chat_id → (action_name, coroutine_factory)
         self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
@@ -301,40 +303,37 @@ class TelegramMonitorBot:
     def _main_menu(self) -> InlineKeyboardMarkup:
         rows = [
             [
-                InlineKeyboardButton("Status", callback_data="view:status"),
-                InlineKeyboardButton("Balance", callback_data="view:balance"),
+                InlineKeyboardButton("📂 Позиции", callback_data="view:positions"),
+                InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
             ],
             [
-                InlineKeyboardButton("Positions", callback_data="view:positions"),
-                InlineKeyboardButton("Signals", callback_data="view:signals"),
+                InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
+                InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
             [
-                InlineKeyboardButton("Symbols", callback_data="view:symbols"),
-                InlineKeyboardButton("PnL", callback_data="view:pnl"),
+                InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
+                InlineKeyboardButton("🖥 Нагрузка", callback_data="view:diagnostics"),
+            ],
+            [
+                InlineKeyboardButton("⚙️ Управление", callback_data="view:control"),
+                InlineKeyboardButton("🔄 Обновить", callback_data="view:status"),
             ],
         ]
-        if self._controller is not None:
-            rows.extend(
-                [
-                    [
-                        InlineKeyboardButton("Pause", callback_data="control:pause"),
-                        InlineKeyboardButton("Resume", callback_data="control:resume"),
-                    ],
-                    [
-                        InlineKeyboardButton("Shadow", callback_data="mode:shadow"),
-                        InlineKeyboardButton("Active", callback_data="mode:active"),
-                    ],
-                    [
-                        InlineKeyboardButton("Risk: Conservative", callback_data="risk:CONSERVATIVE"),
-                        InlineKeyboardButton("Risk: Moderate", callback_data="risk:MODERATE"),
-                    ],
-                    [
-                        InlineKeyboardButton("Risk: Aggressive", callback_data="risk:AGGRESSIVE"),
-                        InlineKeyboardButton("Risk: Scalp", callback_data="risk:SCALP"),
-                    ],
-                    [InlineKeyboardButton("Emergency stop", callback_data="control:stop")],
-                ]
-            )
+        return InlineKeyboardMarkup(rows)
+
+    def _control_menu(self) -> InlineKeyboardMarkup:
+        """Control submenu — safe operations only (no risk escalation, no LIVE activation)."""
+        rows = [
+            [
+                InlineKeyboardButton("Pause", callback_data="control:pause"),
+                InlineKeyboardButton("Resume", callback_data="control:resume"),
+            ],
+            [
+                InlineKeyboardButton("Shadow ON", callback_data="mode:shadow"),
+            ],
+            [InlineKeyboardButton("Emergency stop", callback_data="control:stop")],
+            [InlineKeyboardButton("Back", callback_data="view:status")],
+        ]
         return InlineKeyboardMarkup(rows)
 
     async def _button_reply(
@@ -343,8 +342,20 @@ class TelegramMonitorBot:
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
+        from telegram.error import BadRequest
+
         query = update.callback_query
         if query is not None and query.message is not None:
+            try:
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=reply_markup,
+                )
+                return
+            except BadRequest:
+                pass
             await query.message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
@@ -603,6 +614,66 @@ class TelegramMonitorBot:
         ]
         await self._reply(update, "\n".join(lines))
 
+    async def _cmd_db_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """🗄 БАЗА И МОДЕЛЬ screen."""
+        del context
+        if not await self._authorised(update):
+            return
+
+        db_diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+            try:
+                db_diag = await self._controller.db_diagnostics_provider()
+            except Exception as exc:
+                db_diag = {"error": str(exc)}
+
+        diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.diagnostics_provider is not None:
+            try:
+                diag = self._controller.diagnostics_provider()
+            except Exception as _diag_exc:
+                log.debug("telegram.diagnostics_provider_failed", error=str(_diag_exc))
+
+        connected = db_diag.get("connected", False)
+        db_icon = "🟢" if connected else "🔴"
+        candles = db_diag.get("candles_by_interval", {})
+        latest_1m = db_diag.get("latest_candle_1m")
+        latest_str = latest_1m.strftime("%H:%M:%S UTC") if latest_1m else "none"
+
+        model_info = diag.get("model", {}) or {}
+        champion_ver = model_info.get("champion_version", "none")
+        challenger_ver = model_info.get("challenger_version", "none")
+        last_training = model_info.get("last_training", "never")
+        samples = model_info.get("training_samples", 0)
+        wf_exp = model_info.get("walk_forward_expectancy", "n/a")
+        drift = model_info.get("drift_status", "n/a")
+
+        lines = [
+            "<b>🗄 БАЗА И МОДЕЛЬ</b>",
+            "",
+            f"БД: {db_icon} {'connected' if connected else 'unavailable'}",
+            f"Последняя свеча 1m: <code>{latest_str}</code>",
+            f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
+            f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
+            f"Свечей 15m: <code>{candles.get('15', 0)}</code>",
+            f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
+            f"Feature snapshots:   <code>{db_diag.get('feature_snapshots', 0)}</code>",
+            f"Prediction outcomes: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
+            "",
+            "<b>Модель</b>",
+            f"Последнее обучение: <code>{last_training}</code>",
+            f"Training samples:   <code>{samples}</code>",
+            f"Champion version:   <code>{champion_ver}</code>",
+            f"Challenger version: <code>{challenger_ver}</code>",
+            f"Walk-forward exp:   <code>{wf_exp}</code>",
+            f"Drift:              <code>{drift}</code>",
+            "Model live decisions: <b>disabled</b>",
+        ]
+        if db_diag.get("error"):
+            lines.append(f"\n<i>Error: {db_diag['error']}</i>")
+
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
     # ------------------------------------------------------------------
     # Control commands
     # ------------------------------------------------------------------
@@ -644,9 +715,19 @@ class TelegramMonitorBot:
             )
             return
         enable = args[0].lower() == "on"
-        await self._controller.set_shadow(enable)
-        status = "ON (orders logged, not sent)" if enable else "OFF (orders sent to exchange)"
-        await self._reply(update, f"🔦 Shadow mode: <code>{status}</code>")
+        if not enable:
+            # Disabling shadow mode via Telegram is blocked.
+            # CANARY_LIVE activation requires env-var change (TRADING_MODE, LIVE_MODE, LIVE_ARMED).
+            await self._reply(
+                update,
+                "<b>Shadow OFF blocked.</b>\n"
+                "Live trading activation requires environment variable changes "
+                "(TRADING_MODE=CANARY_LIVE, LIVE_MODE=true, LIVE_ARMED=true). "
+                "Telegram cannot activate live trading.",
+            )
+            return
+        await self._controller.set_shadow(True)
+        await self._reply(update, "🔦 Shadow mode: <code>ON (orders logged, not sent)</code>")
 
     async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorised(update):
@@ -668,17 +749,13 @@ class TelegramMonitorBot:
             await self._controller.set_shadow(True)
             await self._reply(update, "Mode: <b>SHADOW</b>. Orders are not sent.")
             return
-        cid = self._chat_id(update)
-        if cid:
-            venue = "testnet" if self._config.bybit_use_testnet else "configured live endpoint"
-            self._pending[cid] = (
-                f"switch execution to ACTIVE on {venue}",
-                lambda: self._controller.set_shadow(False),
-            )
+        # "active" is blocked — requires env-var change
         await self._reply(
             update,
-            "<b>Active execution requested.</b>\n"
-            "Orders will be sent to the currently configured exchange endpoint after /confirm.",
+            "<b>CANARY_LIVE activation blocked.</b>\n"
+            "Live mode requires environment variable changes: "
+            "TRADING_MODE=CANARY_LIVE, LIVE_MODE=true, LIVE_ARMED=true.\n"
+            "Telegram cannot activate live trading.",
         )
 
     async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -799,7 +876,18 @@ class TelegramMonitorBot:
             "signals": self._cmd_signals,
             "symbols": self._cmd_symbols,
             "pnl": self._cmd_pnl,
+            "diagnostics": self._cmd_diagnostics,
         }
+        if action == "db_model":
+            await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]
+            return
+        if action == "control":
+            await self._button_reply(
+                update,
+                "<b>Управление системой</b>\n\nВыберите действие:",
+                reply_markup=self._control_menu(),
+            )
+            return
         handler = handlers.get(action)
         if handler is None:
             await self._button_reply(update, "Unknown view.", reply_markup=self._main_menu())
@@ -849,18 +937,14 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
+        # "active" / "shadow off" are BLOCKED — CANARY_LIVE activation requires env-var change only
         if action == "active":
-            cid = self._chat_id(update)
-            if cid:
-                venue = "testnet" if self._config.bybit_use_testnet else "configured live endpoint"
-                self._pending[cid] = (
-                    f"switch execution to ACTIVE on {venue}",
-                    lambda: self._controller.set_shadow(False),
-                )
             await self._button_reply(
                 update,
-                "<b>Active execution requested.</b>\n"
-                "Orders will be sent to the currently configured exchange endpoint after /confirm.",
+                "<b>CANARY_LIVE activation blocked.</b>\n"
+                "Live mode can only be enabled via environment variable change "
+                "(TRADING_MODE=CANARY_LIVE, LIVE_MODE=true, LIVE_ARMED=true).\n"
+                "Telegram cannot activate live trading.",
                 reply_markup=self._main_menu(),
             )
             return

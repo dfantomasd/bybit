@@ -2,7 +2,7 @@ services:
   - type: web
     name: bybit-monitor
     runtime: docker
-    plan: free
+    plan: starter
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: trader
@@ -14,14 +14,16 @@ services:
         value: CONSERVATIVE
       - key: LIVE_MODE
         value: "false"
+      - key: LIVE_ARMED
+        value: "false"
       - key: SHADOW_MODE
         value: "true"
+      - key: BYBIT_USE_TESTNET
+        value: "false"
       - key: TELEGRAM_ALLOW_RISK_INCREASE
         value: "false"
       - key: BYBIT_REGION
         value: GLOBAL
-      - key: BYBIT_USE_TESTNET
-        value: "false"
       - key: BYBIT_CONNECTIVITY_REQUIRED
         value: "false"
       - key: DEFAULT_MARKET_CATEGORY
@@ -34,6 +36,52 @@ services:
         value: INFO
       - key: LOG_FORMAT
         value: json
+      # Starter-optimized screener
+      - key: STARTER_OPTIMIZED_MODE
+        value: "true"
+      - key: SCREENER_WIDE_MAX_SYMBOLS
+        value: "50"
+      - key: SCREENER_FEATURE_MAX_SYMBOLS
+        value: "20"
+      - key: SCREENER_EXECUTION_CANDIDATES
+        value: "10"
+      - key: SCREENER_REFRESH_SECONDS
+        value: "300"
+      # Burst/rate limiting
+      - key: MAX_NEW_ENTRIES_PER_MINUTE
+        value: "1"
+      - key: MAX_CONCURRENT_PENDING_ENTRIES
+        value: "1"
+      - key: MAX_SAME_SIDE_POSITIONS
+        value: "2"
+      - key: STARTUP_WARMUP_SECONDS
+        value: "180"
+      # Adaptive load governor
+      - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
+        value: "true"
+      # Multi-timeframe
+      - key: MULTITIMEFRAME_ENABLED
+        value: "true"
+      - key: MULTITIMEFRAME_INTERVALS
+        value: "1,5,15,60"
+      # DB safety gates
+      - key: TRADE_JOURNAL_REQUIRED_FOR_ACTIVE
+        value: "true"
+      - key: DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE
+        value: "true"
+      # CANARY readiness (off by default)
+      - key: CANARY_MAX_OPEN_POSITIONS
+        value: "2"
+      - key: CANARY_MAX_TOTAL_EXPOSURE_PCT
+        value: "45"
+      # ML shadow model (shadow scoring only; no live influence)
+      - key: MODEL_ENABLED
+        value: "false"
+      - key: MODEL_SHADOW_SCORING_ENABLED
+        value: "true"
+      - key: MODEL_ALLOW_LIVE_DECISIONS
+        value: "false"
+      # Secrets (not synced — set via Render dashboard)
       - key: BYBIT_API_KEY
         sync: false
       - key: BYBIT_API_SECRET

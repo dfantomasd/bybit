@@ -223,29 +223,35 @@ async def test_engine_uses_adapter_public_price_wrapper():
 
 @pytest.mark.asyncio
 async def test_engine_uses_configured_min_notional_buffer():
-    """Engine uses the buffer_pct passed at construction, not a hardcoded 1.03."""
-    # With buffer=10%: min_notional=5, required=5.5; qty=0.001*5300=5.3 < 5.5 → blocked
+    """Execution engine last-moment guard uses raw exchange minimum (no double-buffer).
+
+    Buffer is applied once at sizing time (RiskManager). The execution engine
+    only rejects if below the raw exchange minimum to avoid code=110094.
+    A notional above the raw minimum but below the sizing target emits a warning
+    but allows the order through.
+    """
+    # 0.001 * 5300 = $5.30 > $5.00 (raw exchange min) → allowed even with buffer=10%
     engine_strict, adapter_strict = _make_engine(shadow=False, buffer_pct=10.0)
     adapter_strict.get_conservative_market_price = AsyncMock(return_value=Decimal("5300"))
 
-    result = await engine_strict.submit(
+    await engine_strict.submit(
         _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
         capital=Decimal("10000"),
         available_balance=Decimal("5000"),
     )
-    assert result is None
-    adapter_strict.place_order.assert_not_called()
+    # $5.30 > $5.00 raw minimum → ORDER ALLOWED (buffer consumed warning emitted)
+    adapter_strict.place_order.assert_called()
 
-    # With buffer=3%: same price 5300 → 5.3 > 5*1.03=5.15 → allowed
-    engine_loose, adapter_loose = _make_engine(shadow=False, buffer_pct=3.0)
-    adapter_loose.get_conservative_market_price = AsyncMock(return_value=Decimal("5300"))
+    # 0.001 * 4900 = $4.90 < $5.00 → REJECTED (below raw exchange minimum)
+    engine2, adapter2 = _make_engine(shadow=False, buffer_pct=3.0)
+    adapter2.get_conservative_market_price = AsyncMock(return_value=Decimal("4900"))
 
-    await engine_loose.submit(
+    await engine2.submit(
         _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
         capital=Decimal("10000"),
         available_balance=Decimal("5000"),
     )
-    adapter_loose.place_order.assert_called_once()
+    adapter2.place_order.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

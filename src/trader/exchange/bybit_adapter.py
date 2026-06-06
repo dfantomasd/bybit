@@ -13,6 +13,7 @@ from typing import Any
 
 import structlog
 
+from trader.domain.enums import OrderStatus
 from trader.domain.models import (
     Balance,
     InstrumentInfo,
@@ -51,6 +52,7 @@ class BybitAdapter:
         use_rsa: bool = False,
         rsa_private_key: str | None = None,
         default_category: str = "linear",
+        trade_journal: Any = None,
     ) -> None:
         from trader.domain.enums import BybitRegion
 
@@ -70,6 +72,7 @@ class BybitAdapter:
         self._idempotency = IdempotencyManager()
         self._default_category = default_category
         self._use_testnet = use_testnet
+        self._journal = trade_journal
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -165,15 +168,48 @@ class BybitAdapter:
     async def place_order(self, intent: OrderIntent) -> dict[str, Any]:
         """Submit an order to Bybit after idempotency and mapper processing.
 
+        Durable state lifecycle:
+          CREATED_LOCAL → SUBMITTING  (written before REST call)
+          REST_ACCEPTED               (written on REST success)
+          UNKNOWN_RECONCILIATION_REQUIRED (written on any exception — ambiguous)
+
         Returns the raw Bybit response dict.
         """
         # Check duplicate
         if await self._idempotency.check_duplicate(intent.order_link_id):
             raise ValueError(f"Duplicate order detected: {intent.order_link_id}")
 
+        # Write CREATED_LOCAL to durable state before touching the exchange
+        if self._journal is not None:
+            try:
+                await self._journal.upsert_durable_order_state(
+                    order_link_id=intent.order_link_id,
+                    symbol=intent.symbol,
+                    side=intent.side.value,
+                    qty=intent.qty,
+                    state="CREATED_LOCAL",
+                    proposal_id=intent.proposal_id,
+                    decision_id=intent.decision_id,
+                )
+            except Exception as _j_exc:
+                logger.debug("bybit_adapter.durable_created_local_failed", error=str(_j_exc))
+
         # Register in idempotency store
         await self._idempotency.register_intent(intent)
         await self._idempotency.mark_submitted(intent.order_link_id)
+
+        # Write SUBMITTING to durable state before REST
+        if self._journal is not None:
+            try:
+                await self._journal.upsert_durable_order_state(
+                    order_link_id=intent.order_link_id,
+                    symbol=intent.symbol,
+                    side=intent.side.value,
+                    qty=intent.qty,
+                    state="SUBMITTING",
+                )
+            except Exception as _j_exc:
+                logger.debug("bybit_adapter.durable_submitting_failed", error=str(_j_exc))
 
         # Map to params
         params = self._mapper.intent_to_params(intent, self._default_category)
@@ -182,6 +218,21 @@ class BybitAdapter:
             resp = await self._rest.place_order(**params)
             exchange_id = (resp.get("result") or {}).get("orderId", "")
             await self._idempotency.mark_confirmed(intent.order_link_id, exchange_id)
+
+            # Write REST_ACCEPTED after confirmed response
+            if self._journal is not None:
+                try:
+                    await self._journal.upsert_durable_order_state(
+                        order_link_id=intent.order_link_id,
+                        symbol=intent.symbol,
+                        side=intent.side.value,
+                        qty=intent.qty,
+                        state="REST_ACCEPTED",
+                        exchange_order_id=exchange_id,
+                    )
+                except Exception as _j_exc:
+                    logger.debug("bybit_adapter.durable_rest_accepted_failed", error=str(_j_exc))
+
             logger.info(
                 "bybit_adapter.order_placed",
                 order_link_id=intent.order_link_id,
@@ -190,6 +241,20 @@ class BybitAdapter:
             )
             return resp
         except Exception as exc:
+            # Any exception (timeout, network, API error) is ambiguous — mark UNKNOWN.
+            # Blind retry is forbidden; reconciliation must resolve this state.
+            if self._journal is not None:
+                try:
+                    await self._journal.upsert_durable_order_state(
+                        order_link_id=intent.order_link_id,
+                        symbol=intent.symbol,
+                        side=intent.side.value,
+                        qty=intent.qty,
+                        state="UNKNOWN_RECONCILIATION_REQUIRED",
+                        last_error=str(exc)[:200],
+                    )
+                except Exception as _j_exc:
+                    logger.debug("bybit_adapter.durable_unknown_failed", error=str(_j_exc))
             logger.error(
                 "bybit_adapter.order_failed",
                 order_link_id=intent.order_link_id,
@@ -288,23 +353,39 @@ class BybitAdapter:
     # ------------------------------------------------------------------
 
     async def reconcile(self) -> ReconciliationResult:
-        """Basic reconciliation pass — compare local idempotency store with exchange."""
-        local_pending = self._idempotency.pending_count()
+        """Reconcile only PENDING in-memory states against exchange open orders.
+
+        Terminal states (FILLED, CANCELLED, REJECTED, EXPIRED) are settled and
+        never compared against exchange open orders — comparing them would always
+        produce false mismatches.  Only pending states can legitimately appear on
+        the exchange at all.
+        """
+        _pending_states = {
+            OrderStatus.CREATED_LOCAL,
+            OrderStatus.SUBMITTING,
+            OrderStatus.REST_ACCEPTED,
+            OrderStatus.WS_CONFIRMED,
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.CANCEL_REQUESTED,
+            OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED,
+        }
 
         try:
             open_orders_resp = await self._rest.get_open_orders(category=self._default_category)
             exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
             exchange_ids = {o.get("orderLinkId") for o in exchange_open}
 
-            local_ids = set(self._idempotency.all_states().keys())
-            mismatched = list(local_ids - exchange_ids)
+            all_states = self._idempotency.all_states()
+            pending_ids = {lid for lid, status_str in all_states.items() if OrderStatus(status_str) in _pending_states}
+
+            mismatched = [lid for lid in pending_ids if lid not in exchange_ids]
 
             return ReconciliationResult(
-                orders_checked=local_pending,
+                orders_checked=len(pending_ids),
                 positions_checked=0,
                 discrepancies_found=len(mismatched),
                 mismatched_order_ids=mismatched,
-                summary=(f"Checked {local_pending} local pending orders; {len(mismatched)} not found on exchange"),
+                summary=(f"Checked {len(pending_ids)} pending orders; {len(mismatched)} not found on exchange"),
                 success=True,
             )
         except Exception as exc:
@@ -314,6 +395,106 @@ class BybitAdapter:
                 success=False,
                 summary=f"Reconciliation failed: {exc}",
             )
+
+    async def handle_order_update(self, event: Any) -> bool:
+        """Handle an OrderUpdateEvent: sync both idempotency and durable state.
+
+        Updates the in-memory idempotency store and persists to durable order state.
+        Returns True if the new status is terminal (caller should release pending count
+        exactly once via a guard set).
+        """
+        _terminal_states = {
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        }
+
+        order_link_id = getattr(event, "order_link_id", None) or getattr(event, "order_id", "")
+        order_status: OrderStatus | None = getattr(event, "status", None) or getattr(event, "order_status", None)
+
+        if not order_link_id or order_status is None:
+            return False
+
+        is_terminal = order_status in _terminal_states
+
+        # Update in-memory idempotency
+        try:
+            current = await self._idempotency.get_state(order_link_id)
+            if current is not None and current not in _terminal_states:
+                if order_status == OrderStatus.FILLED:
+                    await self._idempotency.mark_filled(order_link_id)
+                elif order_status == OrderStatus.CANCELLED:
+                    await self._idempotency.mark_cancelled(order_link_id)
+                elif order_status == OrderStatus.WS_CONFIRMED and current in {
+                    OrderStatus.REST_ACCEPTED,
+                    OrderStatus.SUBMITTING,
+                }:
+                    self._idempotency._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+                elif order_status == OrderStatus.PARTIALLY_FILLED and current in {
+                    OrderStatus.WS_CONFIRMED,
+                    OrderStatus.REST_ACCEPTED,
+                }:
+                    self._idempotency._store[order_link_id]["status"] = OrderStatus.PARTIALLY_FILLED
+        except Exception as exc:
+            logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
+
+        # Persist to durable state
+        if self._journal is not None:
+            try:
+                await self._journal.upsert_durable_order_state(
+                    order_link_id=order_link_id,
+                    symbol=getattr(event, "symbol", ""),
+                    side=event.side.value if getattr(event, "side", None) else "unknown",
+                    qty=getattr(event, "qty", Decimal("0")),
+                    state=order_status.value,
+                    exchange_order_id=getattr(event, "order_id", None),
+                )
+            except Exception as exc:
+                logger.debug("handle_order_update.durable_write_failed", error=str(exc))
+
+        return is_terminal
+
+    async def load_pending_from_db(self) -> int:
+        """Restore pending orders from PostgreSQL into the in-memory idempotency store.
+
+        Called once at startup to recover orders that were in-flight before restart.
+        Returns the count of orders loaded.
+        """
+        if self._journal is None:
+            return 0
+        _terminal_states = {
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        }
+        try:
+            pending_rows = await self._journal.get_pending_durable_orders()
+            loaded = 0
+            for row in pending_rows:
+                lid = str(row["order_link_id"])
+                if lid in self._idempotency._store:
+                    continue
+                status_str = str(row.get("state", "CREATED_LOCAL"))
+                try:
+                    status = OrderStatus(status_str)
+                except ValueError:
+                    status = OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED
+                if status in _terminal_states:
+                    continue
+                self._idempotency._store[lid] = {
+                    "status": status,
+                    "exchange_order_id": row.get("exchange_order_id"),
+                    "intent": None,
+                }
+                loaded += 1
+            if loaded:
+                logger.info("bybit_adapter.pending_restored_from_db", count=loaded)
+            return loaded
+        except Exception as exc:
+            logger.warning("bybit_adapter.load_pending_failed", error=str(exc))
+            return 0
 
     # ------------------------------------------------------------------
     # Health
