@@ -75,22 +75,23 @@ class RiskManager:
     """Central risk authority. Called for every TradeProposal.
 
     Decision flow (in order):
-    1. Check kill switch / safe mode
-    2. Check circuit breakers
-    3. Check regime (HIGH_VOLATILITY, LOW_LIQUIDITY, EVENT_RISK -> reduce/reject)
-    4. Check daily loss limit
-    5. Check drawdown
-    6. Check short/derivatives permissions
-    7. Check position count
-    8. Check total exposure
-    9. Check per-position cap
-    10. Check leverage
-    11. Validate stop distance
-    12. Calculate position size via PositionSizer
-    13. Apply LLM risk_multiplier (clamped [0,1], can only reduce)
-    14. Apply regime risk multiplier
-    15. Final hard cap check
-    16. Return RiskDecision
+    1.  Check kill switch / safe mode
+    2.  Check circuit breakers
+    3.  Check regime (HIGH_VOLATILITY, LOW_LIQUIDITY, EVENT_RISK -> reduce/reject)
+    4.  Check daily loss limit
+    5.  Check drawdown
+    6.  Check short/derivatives permissions
+    7.  Check position count
+    8.  Preliminary hard blocker: zero exposure budget remaining (skip if any budget left)
+    9.  Check leverage
+    10. Validate stop distance
+    11. Calculate position size via PositionSizer (may resize qty down to budget)
+    12. Apply LLM risk_multiplier (clamped [0,1], can only reduce)
+    13. Apply regime risk multiplier
+    14. Final hard cap check
+    15. Final exposure validation with actual approved_qty
+    16. Post-multiplier min-notional guard (with safety buffer)
+    17. Return RiskDecision
     """
 
     # CRITICAL: auto_resume_after_hard_stop is ALWAYS False regardless of config.
@@ -106,6 +107,7 @@ class RiskManager:
         metrics: Any = None,
         event_bus: Any = None,
         log: logging.Logger | None = None,
+        min_notional_safety_buffer_pct: float = 3.0,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -116,6 +118,7 @@ class RiskManager:
         self._metrics = metrics
         self._event_bus = event_bus
         self._log = log or logger
+        self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -270,30 +273,32 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 8-9. Exposure checks
+        # 8. Preliminary hard blocker: zero budget remaining
+        #
+        # We only reject here if there is literally NO room left in the
+        # portfolio. If there is any remaining budget, PositionSizer (step 11)
+        # will size down the qty to fit — we must NOT reject the full
+        # requested_qty just because it exceeds the remaining budget.
         # ----------------------------------------------------------------
-        estimated_entry = proposal.entry_price or Decimal("0")
-        estimated_notional = (
-            proposal.requested_qty * estimated_entry if estimated_entry > Decimal("0") else Decimal("0")
-        )
-
-        if estimated_notional > Decimal("0"):
-            can_add, reason = self._exposure.can_add_position(
-                proposal.symbol,
-                estimated_notional,
+        remaining_exposure_pct = self._limits.max_total_exposure_pct - self._exposure.total_exposure_pct
+        if remaining_exposure_pct <= Decimal("0"):
+            return self._reject(
+                proposal,
+                f"portfolio exposure cap fully reached "
+                f"({self._exposure.total_exposure_pct:.2f}% >= {self._limits.max_total_exposure_pct}%)",
+                ["exposure_cap_full"],
+                capital,
             )
-            if not can_add:
-                return self._reject(proposal, reason, ["exposure_cap"], capital)
 
         # ----------------------------------------------------------------
-        # 10. Leverage check (for derivatives)
+        # 9. Leverage check (for derivatives)
         # ----------------------------------------------------------------
         if instrument_info.max_leverage is not None:
             if instrument_info.max_leverage > self._limits.max_leverage:
                 triggered_rules.append("leverage_reduced")
 
         # ----------------------------------------------------------------
-        # 11. Validate stop distance
+        # 10. Validate stop distance
         # ----------------------------------------------------------------
         stop_distance_pct = Decimal("0")
         if proposal.stop_loss is not None and proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
@@ -313,7 +318,7 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 12. Calculate position size
+        # 11. Calculate position size
         # ----------------------------------------------------------------
         desired_risk_pct = self._limits.risk_per_trade_max_pct
         data_quality_score = 1.0
@@ -328,6 +333,7 @@ class RiskManager:
             elif regime_context.regime == MarketRegime.EVENT_RISK:
                 event_risk_score = 0.8
 
+        remaining_position_budget_usd = self._exposure.remaining_position_exposure_usd(proposal.symbol)
         sizer = PositionSizer(self._limits, instrument_info)
         approved_qty, rejection_reason = sizer.calculate(
             capital=capital,
@@ -341,6 +347,7 @@ class RiskManager:
             atr=atr,
             available_balance=available_balance,
             entry_price=proposal.entry_price,
+            remaining_position_budget_usd=remaining_position_budget_usd,
         )
 
         if approved_qty <= Decimal("0"):
@@ -381,13 +388,25 @@ class RiskManager:
         approved_qty = sizer.round_to_step(approved_qty, instrument_info.qty_step)
 
         # ----------------------------------------------------------------
-        # 15.5  Post-multiplier min-notional guard
+        # 15. Final exposure validation with actual approved_qty
+        #
+        # Now that sizing has determined the actual qty, do a final check
+        # that adding this position doesn't breach per-position or total cap.
+        # ----------------------------------------------------------------
+        if proposal.entry_price is not None and proposal.entry_price > Decimal("0") and approved_qty > Decimal("0"):
+            final_notional = approved_qty * proposal.entry_price
+            can_add, exposure_reason = self._exposure.can_add_position(proposal.symbol, final_notional)
+            if not can_add:
+                return self._reject(proposal, exposure_reason, ["exposure_cap"], capital)
+
+        # ----------------------------------------------------------------
+        # 16. Post-multiplier min-notional guard (with safety buffer)
         #
         # After confidence + regime multipliers reduce qty, the resulting
-        # notional may fall below Bybit's $5 minimum.  We attempt to bump
-        # qty to the min-notional floor — but ONLY if every risk constraint
-        # is still satisfied.  If any constraint is violated we reject here
-        # rather than let Bybit return code 110094.
+        # notional may fall below Bybit's minimum (e.g. $5).  We apply a
+        # configurable safety buffer (default +3%) to keep the order above
+        # the exchange threshold.  We attempt to bump qty — but ONLY if
+        # every risk constraint is still satisfied.
         # ----------------------------------------------------------------
         if (
             instrument_info.min_notional is not None
@@ -395,10 +414,14 @@ class RiskManager:
             and proposal.entry_price > Decimal("0")
             and approved_qty > Decimal("0")
         ):
+            # Apply safety buffer: e.g. $5 * 1.03 = $5.15
+            required_notional = instrument_info.min_notional * (
+                Decimal("1") + self._min_notional_safety_buffer_pct / Decimal("100")
+            )
             final_notional = approved_qty * proposal.entry_price
-            if final_notional < instrument_info.min_notional:
+            if final_notional < required_notional:
                 min_qty = _ceil_to_step(
-                    instrument_info.min_notional / proposal.entry_price,
+                    required_notional / proposal.entry_price,
                     instrument_info.qty_step,
                 )
                 min_notional_value = min_qty * proposal.entry_price
@@ -415,29 +438,41 @@ class RiskManager:
                 hard_cap_usd = capital * self._limits.risk_per_trade_hard_cap_pct / Decimal("100")
                 bumped_risk_usd = min_qty * proposal.entry_price * stop_distance_pct
 
+                # NOTE: removed min_qty <= proposal.requested_qty — the bump
+                # may exceed requested_qty when multipliers reduced qty below
+                # min-notional and the original request was correctly sized.
                 can_bump = (
                     min_qty <= instrument_info.max_order_qty
                     and min_qty >= instrument_info.min_order_qty
-                    and min_qty <= proposal.requested_qty
                     and min_notional_value <= available_balance
                     and min_notional_value <= remaining_exposure_usd
                     and bumped_risk_usd <= hard_cap_usd
                 )
                 if can_bump:
                     approved_qty = min_qty
-                    triggered_rules.append("min_notional_floor_applied")
-                    self._log.debug(
-                        "risk.min_notional_floor_applied symbol=%s bumped_to_qty=%s min_notional=%s",
+                    triggered_rules.append("min_notional_buffer_applied")
+                    self._log.info(
+                        "risk.min_notional_buffer_applied symbol=%s bumped_to_qty=%s"
+                        " required_notional=%s buffer_pct=%s",
                         proposal.symbol,
                         str(approved_qty),
-                        str(instrument_info.min_notional),
+                        str(required_notional),
+                        str(self._min_notional_safety_buffer_pct),
                     )
                 else:
+                    self._log.info(
+                        "risk.min_notional_buffer_rejected symbol=%s final_notional=%s"
+                        " required_notional=%s",
+                        proposal.symbol,
+                        str(final_notional),
+                        str(required_notional),
+                    )
                     return self._reject(
                         proposal,
                         (
                             f"post-multiplier notional {final_notional:.4f} < "
-                            f"min_notional {instrument_info.min_notional}; "
+                            f"required {required_notional:.4f} (min_notional "
+                            f"{instrument_info.min_notional} + {self._min_notional_safety_buffer_pct}% buffer); "
                             "cannot raise without violating risk limits"
                         ),
                         ["post_multiplier_min_notional_rejected"],
@@ -453,7 +488,7 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 16. Determine status: APPROVED or RESIZED
+        # 17. Determine status: APPROVED or RESIZED
         # ----------------------------------------------------------------
         if approved_qty < proposal.requested_qty:
             status = RiskDecisionStatus.RESIZED
