@@ -578,6 +578,97 @@ class TradeJournal:
             label,
         )
 
+    async def resolve_outcomes_from_candles(
+        self,
+        *,
+        horizon_minutes: int,
+        label_bps_threshold: float = 5.0,
+        limit: int = 200,
+    ) -> int:
+        """Resolve prediction outcomes using market_candles data.
+
+        For each prediction_event that has no outcome at ``horizon_minutes`` yet,
+        and whose candle_open_time + horizon has elapsed, look up entry and horizon
+        close prices in market_candles and insert the outcome.
+
+        Returns the number of outcomes resolved.
+        """
+        rows = await self._fetch(
+            """
+            SELECT
+                pe.prediction_id,
+                pe.symbol,
+                fs.candle_open_time AS entry_time
+            FROM prediction_events pe
+            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+            LEFT JOIN prediction_outcomes po
+                ON po.prediction_id = pe.prediction_id
+                AND po.horizon_minutes = $1
+            WHERE po.prediction_id IS NULL
+              AND pe.created_at < now() - ($1 * interval '1 minute')
+              AND pe.feature_snapshot_id IS NOT NULL
+            LIMIT $2
+            """,
+            horizon_minutes,
+            limit,
+        )
+
+        resolved = 0
+        for row in rows:
+            prediction_id = str(row["prediction_id"])
+            symbol = row["symbol"]
+            entry_time = row["entry_time"]
+
+            entry_rows = await self._fetch(
+                """
+                SELECT close FROM market_candles
+                WHERE symbol=$1 AND interval='1' AND open_time <= $2
+                ORDER BY open_time DESC LIMIT 1
+                """,
+                symbol,
+                entry_time,
+            )
+            if not entry_rows:
+                continue
+            entry_close = float(entry_rows[0]["close"])
+            if entry_close <= 0:
+                continue
+
+            from datetime import timedelta
+
+            horizon_time = entry_time + timedelta(minutes=horizon_minutes)
+            horizon_rows = await self._fetch(
+                """
+                SELECT close, high, low FROM market_candles
+                WHERE symbol=$1 AND interval='1' AND open_time <= $2
+                ORDER BY open_time DESC LIMIT 1
+                """,
+                symbol,
+                horizon_time,
+            )
+            if not horizon_rows:
+                continue
+            horizon_close = float(horizon_rows[0]["close"])
+            horizon_high = float(horizon_rows[0]["high"])
+            horizon_low = float(horizon_rows[0]["low"])
+
+            net_return_bps = (horizon_close - entry_close) / entry_close * 10_000
+            max_fav = (horizon_high - entry_close) / entry_close * 10_000
+            max_adv = (horizon_low - entry_close) / entry_close * 10_000
+            label = 1 if net_return_bps > label_bps_threshold else 0
+
+            await self.resolve_prediction_outcomes(
+                prediction_id=prediction_id,
+                horizon_minutes=horizon_minutes,
+                net_return_bps=net_return_bps,
+                max_favorable_excursion_bps=max_fav,
+                max_adverse_excursion_bps=max_adv,
+                label=label,
+            )
+            resolved += 1
+
+        return resolved
+
     async def record_order_update_event(
         self,
         *,

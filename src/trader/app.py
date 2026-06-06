@@ -657,8 +657,10 @@ class TradingApplication:
             event_queue=event_queue,
         )
 
-        # Event consumer: feeds CandleStore and updates health
+        # Event consumer: feeds CandleStore, triggers features, writes candle journal
         async def consume_events() -> None:
+            from decimal import Decimal as _D
+
             from trader.data.candles import candle_from_kline_event
             from trader.domain.events import KlineEvent
 
@@ -668,6 +670,48 @@ class TradingApplication:
                     if isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         self._candle_store.add(event.symbol, event.interval, candle)
+
+                        if event.confirm:
+                            # Event-driven feature recompute for this (symbol, interval)
+                            if self._feature_pipeline is not None:
+                                await self._feature_pipeline.on_confirmed_candle(
+                                    event.symbol, event.interval
+                                )
+
+                            # Persist confirmed candle to PostgreSQL (best-effort)
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                from datetime import timedelta
+                                _interval_ms = {
+                                    "1": 60_000, "3": 180_000, "5": 300_000,
+                                    "15": 900_000, "30": 1_800_000, "60": 3_600_000,
+                                }
+                                bar_ms = _interval_ms.get(event.interval, 60_000)
+                                close_time = datetime.fromtimestamp(
+                                    (event.open_time.timestamp() * 1000 + bar_ms - 1) / 1000,
+                                    tz=UTC,
+                                )
+                                try:
+                                    await self._trade_journal.upsert_market_candle(
+                                        symbol=event.symbol,
+                                        interval=event.interval,
+                                        open_time=event.open_time,
+                                        close_time=close_time,
+                                        open=event.open,
+                                        high=event.high,
+                                        low=event.low,
+                                        close=event.close,
+                                        volume=event.volume,
+                                        turnover=event.turnover,
+                                        confirmed=True,
+                                        source="ws",
+                                    )
+                                except Exception as _candle_exc:
+                                    log.debug(
+                                        "ws_consumer.candle_journal_failed",
+                                        symbol=event.symbol,
+                                        error=str(_candle_exc),
+                                    )
+
                     # Update WS health on any message
                     if self._health_checker:
                         self._health_checker.set_ws_status(
@@ -833,6 +877,36 @@ class TradingApplication:
         self._background_tasks.extend([ws_task, consumer_task])
         log.info("private_ws.started", endpoint=selector.ws_private_base)
 
+    async def _run_outcome_resolver(self) -> None:
+        """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
+        interval = 300.0  # every 5 minutes
+        horizons = [5, 15, 30]
+
+        while not self._shutdown_event.is_set():
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                for horizon in horizons:
+                    try:
+                        resolved = await self._trade_journal.resolve_outcomes_from_candles(
+                            horizon_minutes=horizon,
+                            label_bps_threshold=5.0,
+                        )
+                        if resolved > 0:
+                            log.info(
+                                "outcome_resolver.resolved",
+                                horizon_minutes=horizon,
+                                count=resolved,
+                            )
+                    except Exception as exc:
+                        log.debug("outcome_resolver.error", horizon=horizon, error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
+
     async def _run_risk_monitor(self) -> None:
         """Periodic risk monitor: update equity, check WS freshness, feed circuit breakers."""
         assert self._settings is not None
@@ -902,7 +976,7 @@ class TradingApplication:
                 pass
 
     async def _start_feature_pipeline(self) -> None:
-        """Start feature computation in background (parallel across symbols)."""
+        """Start event-driven feature pipeline with 60 s staleness watchdog."""
         from trader.features.pipeline import FeaturePipeline
         from trader.features.regime import RegimeClassifier
 
@@ -911,20 +985,21 @@ class TradingApplication:
         self._feature_pipeline = FeaturePipeline(
             candle_store=self._candle_store,
             health_checker=self._health_checker,
-            interval_s=_FEATURE_INTERVAL,
+            stale_threshold_s=90.0,
+            watchdog_interval_s=60.0,
         )
         self._regime_classifier = RegimeClassifier()
 
         task = asyncio.create_task(
             self._feature_pipeline.run(
-                symbols=_SYMBOLS,  # fallback; screener overrides at runtime
+                symbols=_SYMBOLS,  # fallback; screener overrides via symbol_source
                 intervals=[_WS_INTERVAL],
-                symbol_source=self._screener,  # dynamic symbol list
+                symbol_source=self._screener,
             ),
             name="feature-pipeline",
         )
         self._background_tasks.append(task)
-        log.info("feature_pipeline.started", parallel=True)
+        log.info("feature_pipeline.started", mode="event_driven", watchdog_interval_s=60.0)
 
     async def _refresh_closed_pnl_memory(self) -> None:
         """Import recent Bybit closed PnL and update performance symbol blocks."""
@@ -1365,6 +1440,28 @@ class TradingApplication:
                     regime_context=regime_ctx,
                 )
 
+            # Record feature snapshot for ML training (no lookahead — uses candle open_time)
+            if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
+                try:
+                    import hashlib
+                    import json as _json
+
+                    _schema_hash = hashlib.sha256(
+                        _json.dumps(sorted(vec.feature_names)).encode()
+                    ).hexdigest()[:16]
+                    _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
+                    _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
+                    await self._trade_journal.record_feature_snapshot(
+                        symbol=proposal.symbol,
+                        interval=_WS_INTERVAL,
+                        candle_open_time=_candle_open_time,
+                        feature_schema_hash=_schema_hash,
+                        feature_names=vec.feature_names,
+                        feature_values=vec.values,
+                    )
+                except Exception as _snap_exc:
+                    log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
+
             # Skip execution if operator paused trading
             if self._trading_paused:
                 log.debug("strategy_loop.paused", symbol=symbol)
@@ -1653,6 +1750,12 @@ class TradingApplication:
             # Risk monitor: updates equity/drawdown, checks WS staleness
             risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
             self._background_tasks.append(risk_monitor_task)
+
+            # Outcome resolver: labels prediction events with horizon returns (every 5 min)
+            outcome_resolver_task = asyncio.create_task(
+                self._run_outcome_resolver(), name="outcome-resolver"
+            )
+            self._background_tasks.append(outcome_resolver_task)
 
             try:
                 await self._main_loop()

@@ -1,7 +1,13 @@
 """Feature computation pipeline.
 
 Reads from CandleStore, computes technical indicators, and emits FeatureVectors.
-Updates the HealthChecker so the health endpoint reflects feature freshness.
+
+Primary mode: event-driven via ``on_confirmed_candle(symbol, interval)`` —
+called by the public WebSocket consumer whenever a confirmed (closed) kline arrives.
+
+Fallback: ``run()`` acts as a staleness watchdog that re-fires computation for any
+(symbol, interval) pair that has not been updated within ``stale_threshold_s``
+(default 90 s). This covers gaps when a WS message is missed.
 """
 
 from __future__ import annotations
@@ -38,12 +44,14 @@ _MIN_BARS = 30
 
 
 class FeaturePipeline:
-    """Computes FeatureVectors from CandleStore on a fixed interval.
+    """Computes FeatureVectors from CandleStore.
 
     Args:
-        candle_store:   Shared OHLCV store.
-        health_checker: HealthChecker to notify on each successful computation.
-        interval_s:     How often to recompute (seconds).
+        candle_store:       Shared OHLCV store.
+        health_checker:     HealthChecker to notify on each successful computation.
+        interval_s:         Legacy parameter (ignored by the watchdog loop; kept for API compat).
+        stale_threshold_s:  Seconds after which a (symbol, interval) pair is considered stale.
+        watchdog_interval_s: How often the staleness watchdog fires.
     """
 
     def __init__(
@@ -51,17 +59,49 @@ class FeaturePipeline:
         candle_store: CandleStore,
         health_checker: Any | None = None,
         interval_s: float = 5.0,
+        stale_threshold_s: float = 90.0,
+        watchdog_interval_s: float = 60.0,
     ) -> None:
         self._store = candle_store
         self._health = health_checker
-        self._interval = interval_s
+        self._stale_threshold_s = stale_threshold_s
+        self._watchdog_interval_s = watchdog_interval_s
         self._stop_event = asyncio.Event()
         # Last computed vector per (symbol, interval)
         self._latest: dict[tuple[str, str], FeatureVector] = {}
+        # Timestamp of last successful compute per (symbol, interval)
+        self._last_computed_at: dict[tuple[str, str], datetime] = {}
+        # Active symbol/interval sets (populated by run())
+        self._active_symbols: list[str] = []
+        self._active_intervals: list[str] = []
+        self._symbol_source: Any | None = None
 
     # ------------------------------------------------------------------
     # Public
     # ------------------------------------------------------------------
+
+    async def on_confirmed_candle(self, symbol: str, interval: str) -> FeatureVector | None:
+        """Compute features immediately for one (symbol, interval) pair.
+
+        Called by the WS consumer on every confirmed (closed) kline.
+        Returns the FeatureVector if enough data is available, else None.
+        """
+        try:
+            vec = self.compute(symbol, interval)
+            if vec is not None:
+                self._latest[(symbol, interval)] = vec
+                self._last_computed_at[(symbol, interval)] = datetime.now(tz=UTC)
+                if self._health is not None:
+                    self._health.set_feature_computed_at(datetime.now(tz=UTC))
+            return vec
+        except Exception as exc:
+            log.warning(
+                "feature_pipeline.compute_error",
+                symbol=symbol,
+                interval=interval,
+                error=str(exc),
+            )
+            return None
 
     async def run(
         self,
@@ -69,44 +109,47 @@ class FeaturePipeline:
         intervals: list[str],
         symbol_source: Any | None = None,
     ) -> None:
-        """Compute features in a loop until ``stop()`` is called.
+        """Staleness watchdog — re-fires compute for pairs not updated recently.
 
         Args:
             symbols:       Initial symbol list (used when symbol_source is None).
-            intervals:     Candle intervals to compute features for.
+            intervals:     Candle intervals to monitor.
             symbol_source: Optional object with an ``active_symbols`` property
-                           that returns the current dynamic symbol list (e.g.
-                           MarketScreener). When provided, the symbol list is
-                           refreshed on every iteration.
+                           (e.g. MarketScreener). When provided, the symbol list is
+                           refreshed on every watchdog iteration.
         """
-        log.info("feature_pipeline.started", symbols=symbols, intervals=intervals)
+        self._active_symbols = list(symbols)
+        self._active_intervals = list(intervals)
+        self._symbol_source = symbol_source
+
+        log.info(
+            "feature_pipeline.watchdog_started",
+            symbols=symbols,
+            intervals=intervals,
+            stale_threshold_s=self._stale_threshold_s,
+            watchdog_interval_s=self._watchdog_interval_s,
+        )
+
         while not self._stop_event.is_set():
             active = symbol_source.active_symbols if symbol_source is not None else symbols
+            now = datetime.now(tz=UTC)
 
-            # Compute all (symbol, interval) pairs concurrently
-            async def _compute_one(symbol: str, interval: str) -> None:
-                try:
-                    vec = self.compute(symbol, interval)
-                    if vec is not None:
-                        self._latest[(symbol, interval)] = vec
-                        if self._health is not None:
-                            self._health.set_feature_computed_at(datetime.now(tz=UTC))
-                except Exception as exc:
-                    log.warning(
-                        "feature_pipeline.compute_error",
-                        symbol=symbol,
-                        interval=interval,
-                        error=str(exc),
-                    )
+            stale_pairs: list[tuple[str, str]] = []
+            for symbol in active:
+                for interval in intervals:
+                    last = self._last_computed_at.get((symbol, interval))
+                    if last is None or (now - last).total_seconds() > self._stale_threshold_s:
+                        stale_pairs.append((symbol, interval))
 
-            tasks = [_compute_one(symbol, interval) for symbol in active for interval in intervals]
-            if tasks:
+            if stale_pairs:
+                log.debug("feature_pipeline.watchdog_recomputing", stale_count=len(stale_pairs))
+                tasks = [self.on_confirmed_candle(symbol, interval) for symbol, interval in stale_pairs]
                 await asyncio.gather(*tasks)
 
             try:
                 await asyncio.wait_for(
                     asyncio.shield(self._stop_event.wait()),
-                    timeout=self._interval,
+                    timeout=self._watchdog_interval_s,
                 )
             except TimeoutError:
                 pass
