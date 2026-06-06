@@ -619,8 +619,8 @@ class TelegramMonitorBot:
         if self._controller is not None and self._controller.diagnostics_provider is not None:
             try:
                 diag = self._controller.diagnostics_provider()
-            except Exception:
-                pass
+            except Exception as _diag_exc:
+                log.debug("telegram.diagnostics_provider_failed", error=str(_diag_exc))
 
         connected = db_diag.get("connected", False)
         db_icon = "🟢" if connected else "🔴"

@@ -31,6 +31,7 @@ log = logging.getLogger(__name__)
 try:
     from sklearn.linear_model import SGDClassifier
     from sklearn.preprocessing import StandardScaler
+
     _SKLEARN_AVAILABLE = True
 except ImportError:
     _SKLEARN_AVAILABLE = False
@@ -92,10 +93,10 @@ class ChallengerModel:
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
         try:
-            X = np.array(features, dtype=np.float32).reshape(1, -1)
+            x = np.array(features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
-                X = self._scaler.transform(X)
-            proba = self._clf.predict_proba(X)[0]
+                x = self._scaler.transform(x)
+            proba = self._clf.predict_proba(x)[0]
             label = int(np.argmax(proba))
             confidence = float(proba[label])
             return ModelPrediction(
@@ -113,12 +114,12 @@ class ChallengerModel:
         """Online update with a single labelled sample."""
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return
-        X = np.array(features, dtype=np.float32).reshape(1, -1)
+        x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
         try:
-            self._scaler.partial_fit(X)
-            X_scaled = self._scaler.transform(X)
-            self._clf.partial_fit(X_scaled, y, classes=[0, 1])
+            self._scaler.partial_fit(x)
+            x_scaled = self._scaler.transform(x)
+            self._clf.partial_fit(x_scaled, y, classes=[0, 1])
             self.training_samples += 1
         except Exception as exc:
             log.debug("challenger.partial_fit_failed", exc_info=exc)
@@ -126,15 +127,22 @@ class ChallengerModel:
     def to_bytes(self) -> bytes:
         """Serialize model to bytes for PostgreSQL storage."""
         buf = io.BytesIO()
-        joblib.dump({"clf": self._clf, "scaler": self._scaler, "meta": {
-            "version": self.version,
-            "feature_names": self.feature_names,
-            "training_samples": self.training_samples,
-        }}, buf)
+        joblib.dump(
+            {
+                "clf": self._clf,
+                "scaler": self._scaler,
+                "meta": {
+                    "version": self.version,
+                    "feature_names": self.feature_names,
+                    "training_samples": self.training_samples,
+                },
+            },
+            buf,
+        )
         return buf.getvalue()
 
     @classmethod
-    def from_bytes(cls, data: bytes, version: str) -> "ChallengerModel":
+    def from_bytes(cls, data: bytes, version: str) -> ChallengerModel:
         """Deserialize model from bytes."""
         buf = io.BytesIO(data)
         payload = joblib.load(buf)

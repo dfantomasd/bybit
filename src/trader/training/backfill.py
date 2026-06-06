@@ -75,9 +75,18 @@ async def _backfill(symbol: str, interval: str, days: int) -> None:
                             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
                             ON CONFLICT (symbol, interval, open_time) DO NOTHING
                             """,
-                            symbol, interval, open_time, close_time,
-                            Decimal(c[1]), Decimal(c[2]), Decimal(c[3]), Decimal(c[4]),
-                            Decimal(c[5]), Decimal(c[6]), True, "rest_backfill",
+                            symbol,
+                            interval,
+                            open_time,
+                            close_time,
+                            Decimal(c[1]),
+                            Decimal(c[2]),
+                            Decimal(c[3]),
+                            Decimal(c[4]),
+                            Decimal(c[5]),
+                            Decimal(c[6]),
+                            True,
+                            "rest_backfill",
                         )
                     inserted += 1
 

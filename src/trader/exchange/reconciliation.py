@@ -270,7 +270,7 @@ class ReconciliationService:
         if self._rest is None or self._order_store is None:
             return diffs
 
-        _PENDING_STATES = {
+        _pending_states = {
             OrderStatus.CREATED_LOCAL,
             OrderStatus.SUBMITTING,
             OrderStatus.REST_ACCEPTED,
@@ -279,7 +279,7 @@ class ReconciliationService:
             OrderStatus.CANCEL_REQUESTED,
             OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED,
         }
-        _TERMINAL_STATES = {
+        _terminal_states = {
             OrderStatus.FILLED,
             OrderStatus.CANCELLED,
             OrderStatus.REJECTED,
@@ -309,7 +309,7 @@ class ReconciliationService:
         local_pending: dict[str, Any] = {}
         for lid, machine in local_active.items():
             status = getattr(machine, "status", None)
-            if status in _PENDING_STATES:
+            if status in _pending_states:
                 local_pending[lid] = machine
 
         local_pending_ids = set(local_pending.keys())

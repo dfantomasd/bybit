@@ -318,13 +318,9 @@ class Settings(BaseSettings):
 
         if self.TRADING_MODE == TradingMode.CANARY_LIVE:
             if not self.LIVE_MODE:
-                raise ValueError(
-                    "TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set."
-                )
+                raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set.")
             if not self.LIVE_ARMED:
-                raise ValueError(
-                    "TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set."
-                )
+                raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set.")
 
 
 # ---------------------------------------------------------------------------

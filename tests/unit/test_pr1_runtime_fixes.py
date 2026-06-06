@@ -17,7 +17,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,15 +26,14 @@ import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, OrderStatus, RiskDecisionStatus, RiskProfile
 from trader.domain.models import InstrumentInfo, TradeProposal
-from trader.execution.engine import ExecutionEngine
 from trader.exchange.reconciliation import ReconciliationService
+from trader.execution.engine import ExecutionEngine
 from trader.risk.circuit_breakers import CircuitBreakerManager
 from trader.risk.drawdown import DrawdownTracker
 from trader.risk.exposure import ExposureTracker
 from trader.risk.kill_switch import KillSwitch
 from trader.risk.manager import RiskManager
 from trader.risk.profiles import get_risk_limits
-
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -205,9 +204,9 @@ async def test_below_exchange_minimum_rejected() -> None:
     )
 
     # Inject the small qty directly into the intent by mocking _build_intent
-    from trader.domain.models import RiskDecision
-    from trader.domain.enums import RiskDecisionStatus
     import uuid as _uuid
+
+    from trader.domain.models import RiskDecision
 
     mock_decision = RiskDecision(
         decision_id=_uuid.uuid4(),
@@ -223,7 +222,7 @@ async def test_below_exchange_minimum_rejected() -> None:
     )
 
     with patch.object(rm, "evaluate", AsyncMock(return_value=mock_decision)):
-        result = await engine.submit(prop, capital=tiny_capital, available_balance=tiny_capital)
+        await engine.submit(prop, capital=tiny_capital, available_balance=tiny_capital)
 
     # 50 * 0.04999 = $2.499 < $5 exchange minimum → REJECTED
     assert not adapter.place_order.called, (
@@ -326,7 +325,7 @@ async def test_reconcile_ignores_terminal_orders() -> None:
         event_queue=event_queue,
     )
 
-    result = await svc.run_once()
+    await svc.run_once()
     # FILLED order should NOT cause a discrepancy
     assert mock_order_store.transition.call_count == 0, "Terminal order should not be marked UNKNOWN"
 
@@ -358,7 +357,7 @@ async def test_reconcile_checks_pending_orders() -> None:
         event_queue=event_queue,
     )
 
-    result = await svc.run_once()
+    await svc.run_once()
     # Pending order not on exchange → should be transitioned to UNKNOWN
     mock_order_store.transition.assert_called_once()
     args = mock_order_store.transition.call_args

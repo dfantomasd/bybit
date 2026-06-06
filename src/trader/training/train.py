@@ -66,14 +66,15 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             click.echo(msg, err=True)
             await pool.execute(
                 "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
-                msg, run_id,
+                msg,
+                run_id,
             )
             return
 
         click.echo(f"Training on {len(rows)} samples (horizon={horizon_minutes}m)")
 
         # Build arrays
-        X_list = []
+        x_list = []
         y_list = []
         feature_names: list[str] = []
 
@@ -83,28 +84,28 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             if vals is None:
                 continue
             v = json.loads(vals) if isinstance(vals, str) else list(vals)
-            X_list.append(v)
+            x_list.append(v)
             y_list.append(int(labels_raw))
             if not feature_names and row["feature_names"]:
                 fn = row["feature_names"]
                 feature_names = json.loads(fn) if isinstance(fn, str) else list(fn)
 
-        X = np.array(X_list, dtype=np.float32)
+        x_arr = np.array(x_list, dtype=np.float32)
         y = np.array(y_list, dtype=np.int32)
 
         # Shuffle
-        idx = np.random.permutation(len(X))
-        X, y = X[idx], y[idx]
+        idx = np.random.permutation(len(x_arr))
+        x_arr, y = x_arr[idx], y[idx]
 
         version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}"
         model = ChallengerModel(version=version, feature_names=feature_names)
 
         # Batch partial_fit (chunks of 32)
         chunk = 32
-        for i in range(0, len(X), chunk):
-            Xb = X[i:i+chunk]
-            yb = y[i:i+chunk]
-            for xi, yi in zip(Xb, yb):
+        for i in range(0, len(x_arr), chunk):
+            xb = x_arr[i : i + chunk]
+            yb = y[i : i + chunk]
+            for xi, yi in zip(xb, yb, strict=False):
                 model.partial_fit(xi.tolist(), int(yi))
 
         click.echo(f"Training complete: {model.training_samples} samples, version={version}")
@@ -132,7 +133,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         await pool.execute(
             "UPDATE training_runs SET status='COMPLETED', sample_count=$1, finished_at=now(), model_version=$2 WHERE run_id=$3",
-            model.training_samples, version, run_id,
+            model.training_samples,
+            version,
+            run_id,
         )
 
         click.echo(f"Checkpoint saved as version={version}, status=SHADOW_CHALLENGER")
@@ -142,7 +145,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         log.exception("Training failed")
         await pool.execute(
             "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
-            str(exc), run_id,
+            str(exc),
+            run_id,
         )
     finally:
         await pool.close()

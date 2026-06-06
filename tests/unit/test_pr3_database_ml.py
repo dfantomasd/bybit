@@ -17,17 +17,15 @@ Covers:
 
 from __future__ import annotations
 
-import io
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from trader.ml.challenger import ChallengerModel, ModelPrediction, ModelRegistry, ModelStatus
-
+from trader.ml.challenger import ChallengerModel, ModelRegistry, ModelStatus
 
 # ---------------------------------------------------------------------------
 # Challenger model: partial_fit and prediction
@@ -242,7 +240,7 @@ async def test_feature_snapshot_written() -> None:
     journal._pool = MagicMock()
     journal._enabled = True
 
-    snapshot_id = await journal.record_feature_snapshot(
+    await journal.record_feature_snapshot(
         symbol="DOGEUSDT",
         interval="1",
         candle_open_time=datetime(2026, 1, 1, tzinfo=UTC),

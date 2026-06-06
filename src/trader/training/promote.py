@@ -54,9 +54,7 @@ async def _promote(version: str, confirm: bool) -> None:
             return
 
         # Demote current champion
-        await pool.execute(
-            "UPDATE model_versions SET status='ROLLED_BACK' WHERE status='CHAMPION'"
-        )
+        await pool.execute("UPDATE model_versions SET status='ROLLED_BACK' WHERE status='CHAMPION'")
 
         # Promote challenger
         await pool.execute(

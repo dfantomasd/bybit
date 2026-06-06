@@ -234,7 +234,7 @@ async def test_engine_uses_configured_min_notional_buffer():
     engine_strict, adapter_strict = _make_engine(shadow=False, buffer_pct=10.0)
     adapter_strict.get_conservative_market_price = AsyncMock(return_value=Decimal("5300"))
 
-    result = await engine_strict.submit(
+    await engine_strict.submit(
         _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
         capital=Decimal("10000"),
         available_balance=Decimal("5000"),
@@ -246,7 +246,7 @@ async def test_engine_uses_configured_min_notional_buffer():
     engine2, adapter2 = _make_engine(shadow=False, buffer_pct=3.0)
     adapter2.get_conservative_market_price = AsyncMock(return_value=Decimal("4900"))
 
-    result2 = await engine2.submit(
+    await engine2.submit(
         _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
         capital=Decimal("10000"),
         available_balance=Decimal("5000"),

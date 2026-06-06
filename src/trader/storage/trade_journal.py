@@ -460,9 +460,7 @@ class TradeJournal:
 
     async def get_candle_counts(self) -> dict[str, int]:
         """Return {interval: count} for market_candles (diagnostics)."""
-        rows = await self._fetch(
-            "SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval"
-        )
+        rows = await self._fetch("SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval")
         return {str(r["interval"]): int(r["cnt"]) for r in rows}
 
     async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:

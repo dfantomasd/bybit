@@ -673,15 +673,17 @@ class TradingApplication:
                         if event.confirm:
                             # Event-driven feature recompute for this (symbol, interval)
                             if self._feature_pipeline is not None:
-                                await self._feature_pipeline.on_confirmed_candle(
-                                    event.symbol, event.interval
-                                )
+                                await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
 
                             # Persist confirmed candle to PostgreSQL (best-effort)
                             if self._trade_journal is not None and self._trade_journal.is_enabled:
                                 _interval_ms = {
-                                    "1": 60_000, "3": 180_000, "5": 300_000,
-                                    "15": 900_000, "30": 1_800_000, "60": 3_600_000,
+                                    "1": 60_000,
+                                    "3": 180_000,
+                                    "5": 300_000,
+                                    "15": 900_000,
+                                    "30": 1_800_000,
+                                    "60": 3_600_000,
                                 }
                                 bar_ms = _interval_ms.get(event.interval, 60_000)
                                 close_time = datetime.fromtimestamp(
@@ -912,10 +914,7 @@ class TradingApplication:
             # The event queue is local to _start_public_ws, so we track pressure
             # by checking if health checker reports recent WS staleness
             ws_stale = False
-            if (
-                self._health_checker is not None
-                and self._health_checker._last_ws_message_at is not None
-            ):
+            if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                 ws_stale = ws_age > 30.0
 
@@ -1513,9 +1512,7 @@ class TradingApplication:
                     import hashlib
                     import json as _json
 
-                    _schema_hash = hashlib.sha256(
-                        _json.dumps(sorted(vec.feature_names)).encode()
-                    ).hexdigest()[:16]
+                    _schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
                     _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
                     _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
                     await self._trade_journal.record_feature_snapshot(
@@ -1819,15 +1816,11 @@ class TradingApplication:
             self._background_tasks.append(risk_monitor_task)
 
             # Outcome resolver: labels prediction events with horizon returns (every 5 min)
-            outcome_resolver_task = asyncio.create_task(
-                self._run_outcome_resolver(), name="outcome-resolver"
-            )
+            outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")
             self._background_tasks.append(outcome_resolver_task)
 
             # Adaptive load governor: narrows feature universe under memory/lag pressure
-            load_governor_task = asyncio.create_task(
-                self._run_load_governor(), name="load-governor"
-            )
+            load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
             self._background_tasks.append(load_governor_task)
 
             try:
