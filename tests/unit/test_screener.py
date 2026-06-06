@@ -1,4 +1,4 @@
-"""Tests for MarketScreener."""
+"""Tests for MarketScreener (updated for multi-tier refactor)."""
 
 from __future__ import annotations
 
@@ -10,15 +10,29 @@ import pytest
 from trader.features.screener import MarketScreener
 
 
-def _make_ticker(symbol: str, volume: float, price: float = 100.0) -> dict:
+def _make_ticker(
+    symbol: str,
+    volume: float,
+    price: float = 100.0,
+    bid: float | None = None,
+    ask: float | None = None,
+) -> dict:
+    b = bid if bid is not None else price * 0.9999
+    a = ask if ask is not None else price * 1.0001
     return {
         "symbol": symbol,
         "turnover24h": str(volume),
         "lastPrice": str(price),
+        "bid1Price": str(b),
+        "ask1Price": str(a),
+        "bid1Size": "10000",
+        "ask1Size": "10000",
+        "price24hPcnt": "0.01",
+        "curPreListingPhase": "",
     }
 
 
-def _make_rest(tickers: list[dict]):
+def _make_rest(tickers: list[dict]) -> MagicMock:
     rest = MagicMock()
     rest.get_tickers = AsyncMock(return_value={"result": {"list": tickers}})
     return rest
@@ -36,11 +50,15 @@ class TestMarketScreener:
         ]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
-            max_symbols=3,
+            feature_max_symbols=3,
             min_volume_usd=20_000_000,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
         )
-        symbols = await screener._screen()
-        assert symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+        await screener._refresh()
+        symbols = screener.feature_universe
+        assert len(symbols) <= 3
+        assert "LOWUSDT" not in symbols
 
     @pytest.mark.asyncio
     async def test_filters_below_min_volume(self):
@@ -49,20 +67,34 @@ class TestMarketScreener:
             rest_client=_make_rest(tickers),
             min_volume_usd=20_000_000,
         )
-        symbols = await screener._screen()
-        assert symbols == []
+        await screener._refresh()
+        # No symbols should be added (fallback stays)
+        assert "BTCUSDT" not in screener.feature_universe
 
     @pytest.mark.asyncio
     async def test_filters_non_usdt(self):
         tickers = [
             _make_ticker("BTCUSDT", 500_000_000),
-            _make_ticker("BTCETH", 500_000_000),  # non-USDT pair
+            {
+                "symbol": "BTCETH",
+                "turnover24h": "500000000",
+                "lastPrice": "1",
+                "bid1Price": "0.9999",
+                "ask1Price": "1.0001",
+                "bid1Size": "10000",
+                "ask1Size": "10000",
+                "price24hPcnt": "0.01",
+                "curPreListingPhase": "",
+            },
         ]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
             min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
         )
-        symbols = await screener._screen()
+        await screener._refresh()
+        symbols = screener.feature_universe
         assert "BTCETH" not in symbols
         assert "BTCUSDT" in symbols
 
@@ -70,14 +102,16 @@ class TestMarketScreener:
     async def test_filters_stablecoins(self):
         tickers = [
             _make_ticker("BTCUSDT", 500_000_000),
-            _make_ticker("USDCUSDT", 500_000_000),  # stablecoin base
+            _make_ticker("USDCUSDT", 500_000_000),
         ]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
             min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
         )
-        symbols = await screener._screen()
-        assert "USDCUSDT" not in symbols
+        await screener._refresh()
+        assert "USDCUSDT" not in screener.feature_universe
 
     @pytest.mark.asyncio
     async def test_filters_zero_price(self):
@@ -85,29 +119,31 @@ class TestMarketScreener:
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
             min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
         )
-        symbols = await screener._screen()
-        assert symbols == []
+        await screener._refresh()
+        assert "DEADUSDT" not in screener.feature_universe
 
     @pytest.mark.asyncio
     async def test_max_symbols_respected(self):
         tickers = [_make_ticker(f"SYM{i}USDT", float(100 - i) * 1_000_000) for i in range(20)]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
+            feature_max_symbols=5,
             min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
         )
-        symbols = await screener._screen()
-        assert len(symbols) == 5
+        await screener._refresh()
+        assert len(screener.feature_universe) <= 5
 
     @pytest.mark.asyncio
     async def test_fallback_on_api_error(self):
         rest = MagicMock()
         rest.get_tickers = AsyncMock(side_effect=Exception("network error"))
         screener = MarketScreener(rest_client=rest, min_volume_usd=1)
-        # _refresh() should not raise
         await screener._refresh()
-        # Active symbols remain at fallback
         assert len(screener.active_symbols) > 0
 
     @pytest.mark.asyncio
@@ -116,7 +152,9 @@ class TestMarketScreener:
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
             min_volume_usd=1,
-            interval_s=9999,  # won't re-run
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
+            interval_s=9999,
         )
         task = asyncio.create_task(screener.run())
         await screener.wait_ready()

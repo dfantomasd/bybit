@@ -518,11 +518,17 @@ class TradingApplication:
 
         assert self._bybit_adapter is not None
 
+        assert self._settings is not None
         self._screener = MarketScreener(
             rest_client=self._bybit_adapter._rest,
-            max_symbols=10,
-            min_volume_usd=20_000_000,
-            interval_s=900,
+            wide_max_symbols=self._settings.SCREENER_WIDE_MAX_SYMBOLS,
+            feature_max_symbols=self._settings.SCREENER_FEATURE_MAX_SYMBOLS,
+            execution_candidates=self._settings.SCREENER_EXECUTION_CANDIDATES,
+            min_volume_usd=self._settings.SCREENER_MIN_VOLUME_USD,
+            max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+            min_top_book_depth_usd=self._settings.SCREENER_MIN_TOP_BOOK_DEPTH_USD,
+            interval_s=self._settings.SCREENER_REFRESH_SECONDS,
+            denylist=list(self._settings.SCREENER_DENYLIST),
             on_symbols_added=self._on_screener_symbols_added,
             on_symbols_removed=self._on_screener_symbols_removed,
             has_open_position=lambda symbol: (

@@ -47,6 +47,14 @@ class TestScreenerLazyLambda:
         settings = MagicMock()
         settings.BYBIT_REGION = BybitRegion.GLOBAL
         settings.BYBIT_USE_TESTNET = True
+        settings.SCREENER_WIDE_MAX_SYMBOLS = 10
+        settings.SCREENER_FEATURE_MAX_SYMBOLS = 5
+        settings.SCREENER_EXECUTION_CANDIDATES = 3
+        settings.SCREENER_MIN_VOLUME_USD = 1.0
+        settings.SCREENER_MAX_SPREAD_BPS = 100.0
+        settings.SCREENER_MIN_TOP_BOOK_DEPTH_USD = 0.0
+        settings.SCREENER_REFRESH_SECONDS = 9999
+        settings.SCREENER_DENYLIST = []
         app._settings = settings
 
         mock_adapter = MagicMock()
