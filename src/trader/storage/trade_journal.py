@@ -40,10 +40,29 @@ class TradeJournal:
         self._dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._enabled = enabled and bool(postgres_dsn)
         self._pool: asyncpg.Pool | None = None
+        self._last_successful_write_at: datetime | None = None
+        self._last_write_error_at: datetime | None = None
+        self._consecutive_write_errors: int = 0
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled and self._pool is not None
+
+    @property
+    def durable_state_healthy(self) -> bool:
+        """False after 3 consecutive write errors — used to fail-closed in CANARY_LIVE/LIVE."""
+        return self._consecutive_write_errors < 3
+
+    def write_health(self) -> dict[str, Any]:
+        """Return write-health snapshot for observability and safety gates."""
+        return {
+            "healthy": self.durable_state_healthy,
+            "consecutive_write_errors": self._consecutive_write_errors,
+            "last_successful_write_at": (
+                self._last_successful_write_at.isoformat() if self._last_successful_write_at else None
+            ),
+            "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
+        }
 
     async def connect(self) -> None:
         if not self._enabled:
@@ -769,8 +788,16 @@ class TradeJournal:
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute(query, *args)
+            self._last_successful_write_at = datetime.now(tz=UTC)
+            self._consecutive_write_errors = 0
         except Exception as exc:
-            log.debug("trade_journal.write_failed", error=str(exc))
+            self._last_write_error_at = datetime.now(tz=UTC)
+            self._consecutive_write_errors += 1
+            log.debug(
+                "trade_journal.write_failed",
+                error=str(exc),
+                consecutive_errors=self._consecutive_write_errors,
+            )
 
     async def _fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
         if not self.is_enabled:

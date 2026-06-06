@@ -225,7 +225,7 @@ class ModelRegistry:
             log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
-        """Load the latest CHAMPION model from PostgreSQL."""
+        """Load the latest CHAMPION model from PostgreSQL and set as active champion."""
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
@@ -243,6 +243,7 @@ class ModelRegistry:
             row = rows[0]
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = ModelStatus.CHAMPION
+            self._champion = model
             log.info("model_registry.champion_loaded", version=model.version, samples=model.training_samples)
             return model
         except Exception as exc:

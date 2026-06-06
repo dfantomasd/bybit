@@ -240,7 +240,7 @@ class Settings(BaseSettings):
     """When False, model only scores in shadow; rule-based strategy remains authoritative."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
-    MODEL_SHADOW_SCORING: bool = True
+    MODEL_SHADOW_SCORING_ENABLED: bool = True
     """Always run shadow scoring even when live decisions disabled."""
 
     # ------------------------------------------------------------------

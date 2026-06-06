@@ -48,7 +48,21 @@ _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
 _SUPERVISOR_HEARTBEAT_INTERVAL = 60.0  # seconds between heartbeat log lines
 _DIAG_WINDOW = timedelta(hours=1)  # sliding window for per-hour diagnostics
-_CRITICAL_TASK_NAMES = frozenset({"screener", "ws-public", "ws-consumer", "feature-pipeline", "strategy-loop"})
+_CRITICAL_TASK_NAMES = frozenset(
+    {
+        "screener",
+        "ws-public",
+        "ws-consumer",
+        "ws-private",
+        "ws-private-consumer",
+        "feature-pipeline",
+        "strategy-loop",
+        "risk-monitor",
+        "reconciliation",
+        "outcome-resolver",
+        "load-governor",
+    }
+)
 
 
 class TradingApplication:
@@ -93,6 +107,8 @@ class TradingApplication:
         self._last_strategy_loop_at: datetime | None = None
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
+        # ML shadow scoring
+        self._model_registry: Any | None = None
 
     # ------------------------------------------------------------------
     # Startup
@@ -217,6 +233,7 @@ class TradingApplication:
             region_code=self._settings.BYBIT_REGION.value,
             use_testnet=self._settings.BYBIT_USE_TESTNET,
             default_category=self._settings.DEFAULT_MARKET_CATEGORY,
+            trade_journal=self._trade_journal,
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
@@ -776,6 +793,10 @@ class TradingApplication:
             }
 
             seen_exec_ids: set[str] = set()
+            # Guard: track order_link_ids whose pending count has already been released
+            # to prevent double-release if multiple terminal events arrive for the same order.
+            _pending_released: set[str] = set()
+
             while not self._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
@@ -787,32 +808,45 @@ class TradingApplication:
                             available=str(event.available_balance),
                         )
                     elif isinstance(event, OrderUpdateEvent):
-                        # Wire OrderUpdateEvent → idempotency state → journal → reconciliation
+                        # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
                         order_link_id = event.order_link_id or event.order_id
+                        order_status = event.status  # OrderUpdateEvent.status is the correct field
                         log.info(
                             "private_ws.order_update",
                             order_link_id=order_link_id,
                             symbol=event.symbol,
-                            status=event.order_status.value if event.order_status else "unknown",
+                            status=order_status.value if order_status else "unknown",
                             side=event.side.value if event.side else "unknown",
                         )
-                        if self._trade_journal is not None:
+                        # Update both idempotency and durable state atomically via adapter
+                        if self._bybit_adapter is not None:
                             try:
-                                await self._trade_journal.record_order_update_event(
-                                    order_link_id=order_link_id,
-                                    exchange_order_id=event.order_id,
-                                    symbol=event.symbol,
-                                    side=event.side.value if event.side else "unknown",
-                                    qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
-                                    state=event.order_status.value if event.order_status else "UNKNOWN",
-                                )
-                            except Exception as _j_exc:
-                                log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
-                        # Release pending entry count when order reaches terminal state
-                        if event.order_status in _terminal_order_states and self._execution_engine is not None:
-                            self._execution_engine.mark_entry_resolved()
+                                is_terminal = await self._bybit_adapter.handle_order_update(event)
+                            except Exception as _h_exc:
+                                log.debug("private_ws.handle_order_update_failed", error=str(_h_exc))
+                                is_terminal = order_status in _terminal_order_states
+                        else:
+                            # Fallback: write directly to journal when adapter unavailable
+                            if self._trade_journal is not None:
+                                try:
+                                    await self._trade_journal.record_order_update_event(
+                                        order_link_id=order_link_id,
+                                        exchange_order_id=event.order_id,
+                                        symbol=event.symbol,
+                                        side=event.side.value if event.side else "unknown",
+                                        qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
+                                        state=order_status.value if order_status else "UNKNOWN",
+                                    )
+                                except Exception as _j_exc:
+                                    log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
+                            is_terminal = order_status in _terminal_order_states
+                        # Release pending entry count on terminal — exactly once per order
+                        if is_terminal and order_link_id not in _pending_released:
+                            if self._execution_engine is not None:
+                                self._execution_engine.mark_entry_resolved()
+                            _pending_released.add(order_link_id)
                         # Trigger position sync on fill
-                        if event.order_status == OrderStatus.FILLED and self._execution_engine is not None:
+                        if order_status == OrderStatus.FILLED and self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
                             except Exception as _sync_exc:
@@ -1403,6 +1437,18 @@ class TradingApplication:
         )
         await self._refresh_closed_pnl_memory()
 
+        # Initialise ML shadow scoring registry (shadow only; never influences decisions)
+        if self._settings.MODEL_SHADOW_SCORING_ENABLED:
+            try:
+                from trader.ml.challenger import ModelRegistry
+
+                self._model_registry = ModelRegistry(trade_journal=self._trade_journal)
+                if self._trade_journal is not None and self._trade_journal.is_enabled:
+                    await self._model_registry.load_champion()
+                log.info("model_registry.initialized")
+            except Exception as _mr_exc:
+                log.warning("model_registry.init_failed", error=str(_mr_exc))
+
         _balance_tick: int = 0
         _effective_blocked_symbols: set[str] = set()
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
@@ -1507,6 +1553,7 @@ class TradingApplication:
                 )
 
             # Record feature snapshot for ML training (no lookahead — uses candle open_time)
+            snapshot_id = ""
             if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
                 try:
                     import hashlib
@@ -1515,7 +1562,7 @@ class TradingApplication:
                     _schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
                     _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
                     _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
-                    await self._trade_journal.record_feature_snapshot(
+                    snapshot_id = await self._trade_journal.record_feature_snapshot(
                         symbol=proposal.symbol,
                         interval=_WS_INTERVAL,
                         candle_open_time=_candle_open_time,
@@ -1525,6 +1572,25 @@ class TradingApplication:
                     )
                 except Exception as _snap_exc:
                     log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
+
+            # ML shadow scoring — only records metadata, never influences trade decisions
+            if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+                try:
+                    prediction = self._model_registry.score(vec.values)
+                    if prediction is not None:
+                        if self._trade_journal is not None and self._trade_journal.is_enabled:
+                            await self._trade_journal.record_prediction_event(
+                                symbol=proposal.symbol,
+                                interval=_WS_INTERVAL,
+                                model_version=prediction.model_version,
+                                score=prediction.score,
+                                strategy_signal=proposal.side.value,
+                                feature_snapshot_id=snapshot_id,
+                            )
+                    else:
+                        log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
+                except Exception as _ml_exc:
+                    log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
 
             # Skip execution if operator paused trading
             if self._trading_paused:
@@ -1539,6 +1605,17 @@ class TradingApplication:
                             "strategy_loop.blocked_no_journal",
                             symbol=symbol,
                             mode=self._settings.TRADING_MODE,
+                        )
+                        return
+                if self._settings.DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE:
+                    if self._trade_journal is None or not self._trade_journal.durable_state_healthy:
+                        log.warning(
+                            "strategy_loop.blocked_durable_store_unhealthy",
+                            symbol=symbol,
+                            mode=self._settings.TRADING_MODE,
+                            write_health=(
+                                self._trade_journal.write_health() if self._trade_journal is not None else {}
+                            ),
                         )
                         return
 
@@ -1623,16 +1700,18 @@ class TradingApplication:
                 balance = self._cached_balance
                 capital = balance
 
-                # Get current active symbols from screener (dynamic)
-                active_symbols = self._screener.active_symbols if self._screener is not None else _SYMBOLS
+                # Feature pipeline runs on full active_symbols universe (set at startup)
+                active_symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
                 _effective_blocked_symbols = self._effective_performance_blocks(active_symbols)
 
-                # Analyse ALL symbols in parallel
+                # Strategy evaluation uses execution_candidates only (Starter-optimized subset)
+                exec_symbols = self._screener.execution_candidates if self._screener is not None else list(_SYMBOLS)
+
                 results = await asyncio.gather(
-                    *[process_symbol(symbol, balance, capital) for symbol in active_symbols],
+                    *[process_symbol(symbol, balance, capital) for symbol in exec_symbols],
                     return_exceptions=True,
                 )
-                for symbol, result in zip(active_symbols, results, strict=False):
+                for symbol, result in zip(exec_symbols, results, strict=False):
                     if isinstance(result, Exception):
                         log.warning(
                             "strategy_loop.symbol_task_failed",
@@ -1727,7 +1806,7 @@ class TradingApplication:
                     pos_list = ", ".join(status["open_positions"].keys())
                     await self._telegram_bot.notify(
                         f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
-                        "Stop-losses remain active on the exchange."
+                        "Open positions remain on exchange. Verify SL manually."
                     )
                 except Exception as exc:
                     log.debug("graceful_shutdown.telegram_failed", error=str(exc))
@@ -1776,8 +1855,8 @@ class TradingApplication:
             await self._run_preflight()
 
             await self._start_http_server()
-            await self._start_bybit_adapter()
             await self._start_trade_journal()
+            await self._start_bybit_adapter()
             await self._start_telegram_bot()
 
             # Start private WebSocket for real-time order/position/balance events

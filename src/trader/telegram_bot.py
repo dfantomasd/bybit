@@ -143,9 +143,9 @@ class TelegramMonitorBot:
         self._controller = controller
         self._app: Application[Any, Any, Any, Any, Any, Any] | None = None
 
-        # Subscribed chat IDs for push notifications (union of allowed_chat_ids
-        # that have typed /start in this session)
-        self._subscribed: set[int] = set()
+        # Pre-populate subscribed set so allowed chats receive push notifications
+        # immediately after restart without requiring /start.
+        self._subscribed: set[int] = set(config.allowed_chat_ids)
 
         # Pending confirmations: chat_id → (action_name, coroutine_factory)
         self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
