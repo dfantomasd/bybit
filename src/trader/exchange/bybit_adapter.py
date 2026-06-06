@@ -8,6 +8,7 @@ Provides typed, domain-level methods.
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -212,6 +213,31 @@ class BybitAdapter:
                 error=str(exc),
             )
         return resp
+
+    # ------------------------------------------------------------------
+    # Market data
+    # ------------------------------------------------------------------
+
+    async def get_best_price(self, symbol: str) -> tuple[Decimal, Decimal]:
+        """Return (bid, ask) for *symbol* using the current best prices.
+
+        Fetches the V5 tickers endpoint for the adapter's default category.
+        Returns ``(Decimal("0"), Decimal("0"))`` on any parse failure so the
+        caller can decide how to handle degraded data.
+        """
+        resp = await self._rest.get_tickers(category=self._default_category, symbol=symbol)
+        items = (resp.get("result") or {}).get("list", [])
+        if not items:
+            logger.warning("bybit_adapter.get_best_price_empty", symbol=symbol)
+            return Decimal("0"), Decimal("0")
+        item = items[0]
+        try:
+            bid = Decimal(str(item["bid1Price"]))
+            ask = Decimal(str(item["ask1Price"]))
+        except (KeyError, Exception) as exc:
+            logger.warning("bybit_adapter.get_best_price_parse_error", symbol=symbol, error=str(exc))
+            return Decimal("0"), Decimal("0")
+        return bid, ask
 
     # ------------------------------------------------------------------
     # Instruments

@@ -40,6 +40,10 @@ _DEFAULT_COOLDOWN_S = 300  # 5 minutes
 _DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
 # Instrument info TTL: re-fetch after this many seconds (tick_size can change)
 _INSTRUMENT_CACHE_TTL_S = 3600  # 1 hour
+# Safety buffer applied on top of Bybit's min_notional when using live prices.
+# 3 % ensures we never send a borderline order that would pass at proposal-price
+# but fail at the real-time execution price.
+_MIN_NOTIONAL_BUFFER = Decimal("1.03")
 
 
 class ExecutionEngine:
@@ -333,6 +337,21 @@ class ExecutionEngine:
         if not approved:
             return decision
 
+        # 4b. Live-price min-notional post-check ───────────────────────
+        # Use real-time bid/ask (live mode) to catch orders that passed the
+        # stale-price RiskManager check but would be rejected by Bybit
+        # (error 110094: order cost not meet min. purchase amount).
+        if instrument_info.min_notional is not None:
+            assert decision.approved_qty is not None
+            decision = await self._live_notional_check(
+                proposal=proposal,
+                decision=decision,
+                instrument_info=instrument_info,
+                available_balance=available_balance,
+            )
+            if decision is None:
+                return None
+
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
@@ -437,6 +456,87 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
+
+    async def _live_notional_check(
+        self,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+        instrument_info: InstrumentInfo,
+        available_balance: Decimal,
+    ) -> RiskDecision | None:
+        """Re-validate notional against live bid/ask; bump qty by one step if needed.
+
+        Returns an updated ``RiskDecision`` (same or bumped qty), or ``None``
+        when the order must be rejected to avoid sending a borderline order.
+        """
+        assert decision.approved_qty is not None
+        assert instrument_info.min_notional is not None
+
+        if self._shadow_mode:
+            # No exchange call in shadow mode — use proposal.entry_price as proxy.
+            fallback = proposal.entry_price or Decimal("0")
+            bid, ask = fallback, fallback
+        else:
+            try:
+                bid, ask = await self._adapter.get_best_price(proposal.symbol)
+            except Exception as exc:
+                # Network error — be permissive; Bybit will validate on its side.
+                log.warning(
+                    "execution.live_price_fetch_failed",
+                    symbol=proposal.symbol,
+                    error=str(exc),
+                )
+                return decision
+
+        live_price = ask if proposal.side == OrderSide.BUY else bid
+        if live_price <= Decimal("0"):
+            log.warning(
+                "execution.live_price_zero",
+                symbol=proposal.symbol,
+                side=proposal.side.value,
+            )
+            return decision  # Cannot validate; allow through
+
+        required_notional = instrument_info.min_notional * _MIN_NOTIONAL_BUFFER
+        current_notional = decision.approved_qty * live_price
+
+        if current_notional >= required_notional:
+            return decision  # Already satisfies the buffered minimum
+
+        # Attempt a one-step bump
+        bumped_qty = decision.approved_qty + instrument_info.qty_step
+        bumped_notional = bumped_qty * live_price
+
+        can_bump = (
+            bumped_qty <= instrument_info.max_order_qty
+            and bumped_notional <= available_balance
+            and bumped_notional >= required_notional
+        )
+
+        if can_bump:
+            new_rules = list(decision.triggered_rules) + ["live_price_notional_bump"]
+            log.info(
+                "execution.live_notional_bump",
+                symbol=proposal.symbol,
+                side=proposal.side.value,
+                from_qty=str(decision.approved_qty),
+                to_qty=str(bumped_qty),
+                live_price=str(live_price),
+                current_notional=str(current_notional),
+                required_notional=str(required_notional),
+            )
+            return decision.model_copy(update={"approved_qty": bumped_qty, "triggered_rules": new_rules})
+
+        log.warning(
+            "execution.live_notional_rejected",
+            symbol=proposal.symbol,
+            side=proposal.side.value,
+            approved_qty=str(decision.approved_qty),
+            live_price=str(live_price),
+            current_notional=str(current_notional),
+            required_notional=str(required_notional),
+        )
+        return None
 
     def _build_intent(
         self,
