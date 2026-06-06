@@ -3,6 +3,7 @@
 Separate queues for different event categories with backpressure handling,
 dead letter queue for critical events, and graceful shutdown support.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -45,10 +46,7 @@ class EventBus:
         self._metrics = metrics
 
         # Main queues
-        self._queues: dict[str, asyncio.Queue] = {
-            name: asyncio.Queue(maxsize=maxsize)
-            for name in self.QUEUE_NAMES
-        }
+        self._queues: dict[str, asyncio.Queue] = {name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES}
 
         # Dead letter queue for critical dropped events (unbounded)
         self._dead_letter: asyncio.Queue = asyncio.Queue()

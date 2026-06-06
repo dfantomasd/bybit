@@ -1,4 +1,5 @@
 """Tests for RateLimiter."""
+
 from __future__ import annotations
 
 import asyncio

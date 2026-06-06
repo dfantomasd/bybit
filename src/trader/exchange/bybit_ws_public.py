@@ -3,6 +3,7 @@
 Manages subscriptions for orderbook, trades, ticker, kline, liquidations.
 Uses the ``websockets`` library for native asyncio integration.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,9 +29,9 @@ from trader.domain.events import (
 
 logger = structlog.get_logger(__name__)
 
-_HEARTBEAT_INTERVAL = 20.0   # send ping every 20 s
-_PONG_TIMEOUT = 5.0          # expect pong within 5 s
-_WATCHDOG_TIMEOUT = 30.0     # reconnect if no message for 30 s
+_HEARTBEAT_INTERVAL = 20.0  # send ping every 20 s
+_PONG_TIMEOUT = 5.0  # expect pong within 5 s
+_WATCHDOG_TIMEOUT = 30.0  # reconnect if no message for 30 s
 
 
 class BybitPublicWebSocket:
@@ -265,11 +266,13 @@ class BybitPublicWebSocket:
         elif topic.startswith("kline."):
             await self._handle_kline(topic, data)
         else:
-            await self._emit(MarketDataEvent(
-                symbol=data.get("s", topic),
-                market_type=MarketType.LINEAR,
-                raw_payload=msg,
-            ))
+            await self._emit(
+                MarketDataEvent(
+                    symbol=data.get("s", topic),
+                    market_type=MarketType.LINEAR,
+                    raw_payload=msg,
+                )
+            )
 
     async def _handle_op_response(self, msg: dict) -> None:
         op = msg.get("op", "")
@@ -372,6 +375,7 @@ class BybitPublicWebSocket:
     async def _handle_kline(self, topic: str, data: Any) -> None:
         """Emit KlineEvent(s)."""
         from datetime import datetime
+
         parts = topic.split(".")
         interval = parts[1] if len(parts) >= 3 else "1"
         symbol = parts[2] if len(parts) >= 3 else ""

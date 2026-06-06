@@ -8,6 +8,7 @@ Manages the full reconnect lifecycle:
 - Alerts on excessive reconnects (>3 in 5 min)
 - Prometheus metrics: ws_reconnect_total, ws_downtime_seconds
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -41,9 +42,9 @@ def calc_backoff(
 # ReconnectSupervisor
 # ---------------------------------------------------------------------------
 
-_ALERT_WINDOW_SECONDS = 300   # 5 min
-_ALERT_THRESHOLD = 3          # >3 reconnects in 5 min triggers alert
-_SETTLE_SECONDS = 10.0        # block entries for 10 s after reconnect
+_ALERT_WINDOW_SECONDS = 300  # 5 min
+_ALERT_THRESHOLD = 3  # >3 reconnects in 5 min triggers alert
+_SETTLE_SECONDS = 10.0  # block entries for 10 s after reconnect
 _MAX_ATTEMPTS_PER_HOUR = 20
 
 

@@ -3,6 +3,7 @@
 Handles authenticated subscriptions: order, execution, position, wallet.
 Uses HMAC-SHA256 for authentication on connect.
 """
+
 from __future__ import annotations
 
 import asyncio
