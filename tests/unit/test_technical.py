@@ -6,9 +6,7 @@ import math
 import pytest
 
 from trader.features.technical import (
-    adx,
     atr,
-    bb_bandwidth,
     bb_percent_b,
     bollinger_bands,
     candle_body_ratio,
@@ -198,8 +196,8 @@ class TestATR:
         return highs, lows, closes
 
     def test_atr_positive(self):
-        h, l, c = self._ohlcv(20)
-        val = atr(h, l, c, 14)
+        h, lo, c = self._ohlcv(20)
+        val = atr(h, lo, c, 14)
         assert val is not None
         assert val > 0
 
@@ -214,8 +212,8 @@ class TestATR:
         assert val == pytest.approx(10.0, rel=0.01)
 
     def test_atr_insufficient(self):
-        h, l, c = self._ohlcv(10)
-        assert atr(h, l, c, 14) is None
+        h, lo, c = self._ohlcv(10)
+        assert atr(h, lo, c, 14) is None
 
 
 # ---------------------------------------------------------------------------

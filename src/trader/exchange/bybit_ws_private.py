@@ -94,7 +94,7 @@ class BybitPrivateWebSocket:
             if self._metrics is not None:
                 try:
                     self._metrics.ws_reconnect_total.labels(name="private").inc()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
             await asyncio.sleep(1.0)
         self._running = False
@@ -105,7 +105,7 @@ class BybitPrivateWebSocket:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
     # ------------------------------------------------------------------
@@ -172,7 +172,7 @@ class BybitPrivateWebSocket:
                     wd_task.cancel()
                     try:
                         await asyncio.gather(hb_task, wd_task, return_exceptions=True)
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
 
         except asyncio.CancelledError:
@@ -209,7 +209,7 @@ class BybitPrivateWebSocket:
                     self._last_message_ts = time.monotonic()
                     try:
                         msg = json.loads(raw)
-                    except Exception:
+                    except Exception:  # noqa: S112
                         continue
                     if msg.get("op") == "auth":
                         if msg.get("success"):
@@ -220,8 +220,6 @@ class BybitPrivateWebSocket:
                             self._log.error("ws_private.auth_rejected", msg=msg)
                             return False
         except TimeoutError:
-            self._log.error("ws_private.auth_timeout")
-        except asyncio.TimeoutError:
             self._log.error("ws_private.auth_timeout")
         return False
 
@@ -248,7 +246,7 @@ class BybitPrivateWebSocket:
                 self._log.warning("ws_private.watchdog_timeout")
                 try:
                     await ws.close()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
                 break
 

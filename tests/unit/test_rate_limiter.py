@@ -4,17 +4,14 @@ from __future__ import annotations
 import asyncio
 import math
 import time
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from trader.exchange.rate_limiter import (
-    RateLimiter,
-    _BASE_BACKOFF_SECONDS,
     _BACKOFF_MULTIPLIER,
-    _DEFAULT_CAPACITY,
-    _DEFAULT_REFILL_RATE,
+    _BASE_BACKOFF_SECONDS,
     _WARN_THRESHOLDS,
+    RateLimiter,
     _EndpointState,
 )
 
@@ -22,7 +19,7 @@ from trader.exchange.rate_limiter import (
 class TestTokenBucket:
     """Test token bucket allow/block behaviour."""
 
-    async def test_allows_N_requests_immediately(self) -> None:
+    async def test_allows_n_requests_immediately(self) -> None:
         rl = RateLimiter(default_capacity=10, default_refill_rate=1.0)
         for _ in range(10):
             await rl.acquire("/test", "GET")
@@ -159,8 +156,8 @@ class TestExponentialBackoff:
 
     def test_backoff_increases_with_consecutive_hits(self) -> None:
         rl = RateLimiter()
-        w1 = rl.handle_rate_limit_error("/ep2", method="GET")
-        w2 = rl.handle_rate_limit_error("/ep2", method="GET")
+        rl.handle_rate_limit_error("/ep2", method="GET")
+        rl.handle_rate_limit_error("/ep2", method="GET")
         # w2 should generally be larger (2^1 vs 2^0), allowing for jitter
         # We check the raw expected values before jitter
         assert _BASE_BACKOFF_SECONDS * math.pow(_BACKOFF_MULTIPLIER, 1) > _BASE_BACKOFF_SECONDS

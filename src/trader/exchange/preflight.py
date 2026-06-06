@@ -86,7 +86,7 @@ class PreflightChecker:
                 result = await check_fn()
             except Exception as exc:  # pragma: no cover
                 result = CheckResult(
-                    name=check_fn.__name__.lstrip("_check_"),
+                    name=check_fn.__name__.removeprefix("_check_"),
                     passed=False,
                     critical=True,
                     message=f"Check raised unexpected exception: {exc}",
@@ -303,7 +303,7 @@ class PreflightChecker:
                 resp = await self._rest.get_instruments_info(cat, symbol=None)
                 if resp.get("retCode", -1) == 0:
                     accessible.append(cat)
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
         passed = bool(accessible)

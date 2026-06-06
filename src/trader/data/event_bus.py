@@ -7,7 +7,8 @@ from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from typing import AsyncGenerator, Any
+from collections.abc import AsyncGenerator
+from typing import Any
 
 import structlog
 
@@ -102,7 +103,7 @@ class EventBus:
             if self._metrics is not None:
                 try:
                     self._metrics.events_dropped_total.labels(queue=queue_name).inc()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
             if critical:
@@ -143,7 +144,7 @@ class EventBus:
                 event = await asyncio.wait_for(queue.get(), timeout=1.0)
                 yield event
                 queue.task_done()
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -157,7 +158,7 @@ class EventBus:
             if timeout is not None:
                 return await asyncio.wait_for(queue.get(), timeout=timeout)
             return await queue.get()
-        except asyncio.TimeoutError:
+        except TimeoutError:
             return None
 
     # ------------------------------------------------------------------
@@ -167,13 +168,13 @@ class EventBus:
     async def drain(self, timeout: float = 5.0) -> None:
         """Wait for all queues to be processed, with a timeout."""
         tasks = []
-        for name, queue in self._queues.items():
+        for _name, queue in self._queues.items():
             if queue.qsize() > 0:
                 tasks.append(asyncio.wait_for(queue.join(), timeout=timeout))
         if tasks:
             try:
                 await asyncio.gather(*tasks, return_exceptions=True)
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
     async def shutdown(self) -> None:

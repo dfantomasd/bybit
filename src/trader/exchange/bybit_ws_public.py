@@ -8,12 +8,14 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from datetime import UTC
 from decimal import Decimal
 from typing import Any
 
 import structlog
 
 from trader.data.orderbook import LocalOrderBook
+from trader.domain.enums import OrderSide
 from trader.domain.events import (
     BaseEvent,
     KlineEvent,
@@ -23,7 +25,6 @@ from trader.domain.events import (
     TickerEvent,
     TradeEvent,
 )
-from trader.domain.enums import OrderSide
 
 logger = structlog.get_logger(__name__)
 
@@ -94,7 +95,7 @@ class BybitPublicWebSocket:
             if self._metrics is not None:
                 try:
                     self._metrics.ws_reconnect_total.labels(name="public").inc()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
             # Small backoff before reconnecting (supervisor manages larger backoff)
             await asyncio.sleep(1.0)
@@ -106,7 +107,7 @@ class BybitPublicWebSocket:
         if self._ws is not None:
             try:
                 await self._ws.close()
-            except Exception:
+            except Exception:  # noqa: S110
                 pass
 
     async def subscribe(self, topics: list[str]) -> None:
@@ -182,7 +183,7 @@ class BybitPublicWebSocket:
                     watchdog_task.cancel()
                     try:
                         await asyncio.gather(heartbeat_task, watchdog_task, return_exceptions=True)
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
 
         except asyncio.CancelledError:
@@ -228,7 +229,7 @@ class BybitPublicWebSocket:
                 if self._ws is not None:
                     try:
                         await self._ws.close()
-                    except Exception:
+                    except Exception:  # noqa: S110
                         pass
                 break
 
@@ -370,7 +371,7 @@ class BybitPublicWebSocket:
 
     async def _handle_kline(self, topic: str, data: Any) -> None:
         """Emit KlineEvent(s)."""
-        from datetime import datetime, timezone
+        from datetime import datetime
         parts = topic.split(".")
         interval = parts[1] if len(parts) >= 3 else "1"
         symbol = parts[2] if len(parts) >= 3 else ""
@@ -382,7 +383,7 @@ class BybitPublicWebSocket:
                 symbol=symbol,
                 market_type=MarketType.LINEAR,
                 interval=interval,
-                open_time=datetime.fromtimestamp(start_ms / 1000, tz=timezone.utc),
+                open_time=datetime.fromtimestamp(start_ms / 1000, tz=UTC),
                 open=Decimal(str(item.get("open", "0"))),
                 high=Decimal(str(item.get("high", "0"))),
                 low=Decimal(str(item.get("low", "0"))),
