@@ -193,6 +193,25 @@ class BalanceUpdateEvent(BaseEvent):
     unrealised_pnl: Decimal = Decimal(0)
 
 
+class ExecutionUpdateEvent(BaseEvent):
+    """Trade execution (fill) event from private WebSocket."""
+
+    topic: str = "account.execution"
+    symbol: str
+    market_type: MarketType
+    order_id: str
+    order_link_id: str = ""
+    exec_id: str
+    side: OrderSide
+    order_type: OrderType
+    exec_price: Decimal
+    exec_qty: Decimal
+    exec_fee: Decimal = Decimal(0)
+    exec_value: Decimal = Decimal(0)
+    is_maker: bool = False
+    closed_size: Decimal = Decimal(0)
+
+
 # ---------------------------------------------------------------------------
 # Strategy / risk pipeline events
 # ---------------------------------------------------------------------------

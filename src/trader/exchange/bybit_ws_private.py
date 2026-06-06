@@ -20,6 +20,7 @@ from trader.domain.enums import MarketType, OrderSide, OrderStatus, OrderType
 from trader.domain.events import (
     BalanceUpdateEvent,
     BaseEvent,
+    ExecutionUpdateEvent,
     OrderUpdateEvent,
     PositionUpdateEvent,
 )
@@ -331,7 +332,7 @@ class BybitPrivateWebSocket:
             await self._emit(event)
 
     async def _handle_execution(self, data: Any) -> None:
-        """Parse execution (fill) messages."""
+        """Parse execution (fill) messages and emit ExecutionUpdateEvent."""
         items = data if isinstance(data, list) else [data]
         for item in items:
             exec_id = item.get("execId", "")
@@ -340,13 +341,47 @@ class BybitPrivateWebSocket:
             if dedup_key in self._seen_events:
                 continue
             self._seen_events.add(dedup_key)
-            # Emit as generic MarketDataEvent (execution stream)
-            # In production you'd emit a FillEvent
+
+            try:
+                side = OrderSide(item.get("side", "Buy"))
+            except ValueError:
+                side = OrderSide.BUY
+            try:
+                order_type = OrderType(item.get("orderType", "Market"))
+            except ValueError:
+                order_type = OrderType.MARKET
+            try:
+                market_type = MarketType(item.get("category", "linear"))
+            except ValueError:
+                market_type = MarketType.LINEAR
+
+            exec_price = _d(item.get("execPrice", "0"))
+            exec_qty = _d(item.get("execQty", "0"))
+            exec_value = exec_price * exec_qty
+
+            event = ExecutionUpdateEvent(
+                symbol=item.get("symbol", ""),
+                market_type=market_type,
+                order_id=order_id,
+                order_link_id=item.get("orderLinkId", ""),
+                exec_id=exec_id,
+                side=side,
+                order_type=order_type,
+                exec_price=exec_price,
+                exec_qty=exec_qty,
+                exec_fee=_d(item.get("execFee", "0")),
+                exec_value=exec_value,
+                is_maker=item.get("isMaker", False),
+                closed_size=_d(item.get("closedSize", "0")),
+            )
             self._log.info(
                 "ws_private.execution",
                 exec_id=exec_id,
-                symbol=item.get("symbol", ""),
+                symbol=event.symbol,
+                exec_price=str(exec_price),
+                exec_qty=str(exec_qty),
             )
+            await self._emit(event)
 
     async def _handle_position(self, data: Any) -> None:
         """Parse position update messages."""
