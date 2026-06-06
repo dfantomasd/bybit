@@ -41,6 +41,10 @@ _DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
 # Instrument info TTL: re-fetch after this many seconds (tick_size can change)
 _INSTRUMENT_CACHE_TTL_S = 3600  # 1 hour
 
+# P0.6: Canary mode hard caps — cannot be overridden by any profile
+CANARY_MAX_OPEN_POSITIONS: int = 2
+CANARY_MAX_TOTAL_EXPOSURE_PCT: Decimal = Decimal("45")
+
 
 class ExecutionEngine:
     """Orchestrates risk checks and order submission for trade proposals.
@@ -70,6 +74,7 @@ class ExecutionEngine:
         max_concurrent_pending_entries: int = 10,
         max_same_side_positions: int = 10,
         startup_warmup_seconds: int = 0,
+        is_canary: bool = False,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -80,6 +85,7 @@ class ExecutionEngine:
         self._category = category
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
+        self._is_canary = is_canary
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -89,7 +95,9 @@ class ExecutionEngine:
         self._started_at: datetime = datetime.now(tz=UTC)
         # Rolling window of entry timestamps for per-minute rate limiting
         self._recent_entries: list[datetime] = []
-        # Pending entry count (orders in SUBMITTING / REST_ACCEPTED state)
+        # P0.3: Pending entry limiter keyed by order_link_id (not integer).
+        self._pending_entry_order_link_ids: set[str] = set()
+        # Legacy count — kept for compatibility with rate-limit check
         self._pending_entry_count: int = 0
 
         # symbol → last *successful* entry timestamp
@@ -147,15 +155,36 @@ class ExecutionEngine:
 
         return None
 
-    def mark_entry_submitted(self) -> None:
-        """Call when a live entry order is submitted (SUBMITTING state)."""
+    def mark_entry_submitted(self, order_link_id: str = "") -> None:
+        """Register order_link_id as pending and bump rate-limit counters."""
+        if order_link_id:
+            self._pending_entry_order_link_ids.add(order_link_id)
         if not self._shadow_mode:
             self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
 
-    def mark_entry_resolved(self) -> None:
-        """Call when a pending entry reaches a terminal or confirmed state."""
+    def mark_entry_resolved(self, order_link_id: str = "") -> None:
+        """Remove order_link_id from pending set (idempotent).
+
+        Only removes the exact ID — never releases an unrelated slot.
+        """
+        if order_link_id:
+            self._pending_entry_order_link_ids.discard(order_link_id)
         self._pending_entry_count = max(0, self._pending_entry_count - 1)
+
+    def restore_pending_entries(self, order_link_ids: list[str]) -> None:
+        """Restore pending entry IDs from durable storage at startup."""
+        for oid in order_link_ids:
+            self._pending_entry_order_link_ids.add(oid)
+        if order_link_ids:
+            log.info(
+                "execution.pending_entries_restored",
+                count=len(order_link_ids),
+                ids=order_link_ids,
+            )
+
+    def has_pending_entries(self) -> bool:
+        return bool(self._pending_entry_order_link_ids)
 
     # ------------------------------------------------------------------
     # Position awareness
@@ -292,6 +321,34 @@ class ExecutionEngine:
             log.debug("execution.skipped_open_position", symbol=symbol)
             return None
 
+        # P0.2/P0.3: Block new entries while pending ones await resolution
+        if self.has_pending_entries():
+            log.debug(
+                "execution.skipped_pending_entries",
+                symbol=symbol,
+                pending=list(self._pending_entry_order_link_ids),
+            )
+            return None
+
+        # P0.6: CANARY hard caps — checked before RiskManager (cannot be overridden)
+        if self._is_canary:
+            if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
+                log.warning(
+                    "canary.blocked_max_positions",
+                    symbol=symbol,
+                    open_positions=len(self._open_positions),
+                    cap=CANARY_MAX_OPEN_POSITIONS,
+                )
+                return None
+            if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
+                log.warning(
+                    "canary.blocked_max_exposure",
+                    symbol=symbol,
+                    exposure_pct=str(self._exposure.total_exposure_pct),
+                    cap=str(CANARY_MAX_TOTAL_EXPOSURE_PCT),
+                )
+                return None
+
         # 1b. Startup warmup + burst rate limits ───────────────────────
         reject_reason = self._check_rate_limits(symbol, proposal.side.value)
         if reject_reason:
@@ -405,6 +462,20 @@ class ExecutionEngine:
         if self._trade_journal is not None:
             await self._trade_journal.record_risk_decision(symbol, decision)
 
+        # P0.8: Write baseline prediction event for every evaluated proposal
+        if self._trade_journal is not None:
+            try:
+                await self._trade_journal.record_prediction_event(
+                    symbol=symbol,
+                    interval="1",
+                    model_version="RULE_BASELINE_V1",
+                    score=proposal.confidence,
+                    strategy_signal=proposal.side.value,
+                    decision="SHADOW_BASELINE" if self._shadow_mode else decision.status.value,
+                )
+            except Exception as _pred_exc:
+                log.debug("execution.prediction_event_failed", error=str(_pred_exc))
+
         if not approved:
             return decision
 
@@ -427,15 +498,18 @@ class ExecutionEngine:
                 mode="SHADOW_NO_EXECUTION",
             )
             if self._trade_journal is not None:
-                await self._trade_journal.record_order_event(
-                    order_link_id=intent.order_link_id,
-                    proposal_id=intent.proposal_id,
-                    decision_id=intent.decision_id,
-                    symbol=symbol,
-                    side=proposal.side.value,
-                    qty=decision.approved_qty,
-                    status="SHADOW",
-                )
+                try:
+                    await self._trade_journal.record_order_event(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="SHADOW",
+                    )
+                except Exception as _shadow_journal_exc:
+                    log.debug("execution.shadow_journal_write_failed", error=str(_shadow_journal_exc))
         else:
             # Last-moment exchange guard: only the raw exchange minimum matters here.
             # The buffer is applied once at sizing time (RiskManager). Applying it
@@ -491,7 +565,63 @@ class ExecutionEngine:
                         except Exception as _journal_exc:  # noqa: BLE001
                             log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
                     return None
-            self.mark_entry_submitted()
+            # P0.1: Durable write CREATED_LOCAL before any REST call.
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_event_required(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="CREATED_LOCAL",
+                    )
+                except Exception as _durable_exc:
+                    log.error(
+                        "execution.durable_created_local_failed_aborting",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(_durable_exc),
+                    )
+                    return None
+
+            # P0.3: Register pending entry slot
+            self.mark_entry_submitted(intent.order_link_id)
+
+            # P0.6: Second canary gate immediately before REST
+            if self._is_canary:
+                if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
+                    self.mark_entry_resolved(intent.order_link_id)
+                    log.warning("canary.blocked_max_positions_pre_rest", symbol=symbol)
+                    return None
+                if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
+                    self.mark_entry_resolved(intent.order_link_id)
+                    log.warning("canary.blocked_max_exposure_pre_rest", symbol=symbol)
+                    return None
+
+            # P0.1: Durable write SUBMITTING immediately before REST call.
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_event_required(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="SUBMITTING",
+                    )
+                except Exception as _durable_exc:
+                    log.error(
+                        "execution.durable_submitting_failed_aborting",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(_durable_exc),
+                    )
+                    self.mark_entry_resolved(intent.order_link_id)
+                    return None
+
             try:
                 resp = await self._adapter.place_order(intent)
                 exchange_order_id = resp.get("result", {}).get("orderId", "?")
@@ -515,7 +645,7 @@ class ExecutionEngine:
                         exchange_order_id=exchange_order_id,
                     )
             except Exception as exc:
-                self.mark_entry_resolved()
+                self.mark_entry_resolved(intent.order_link_id)
                 # Record failure timestamp (NOT an entry cooldown — separate state)
                 self._last_failure_at[symbol] = datetime.now(tz=UTC)
                 log.error(

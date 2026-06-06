@@ -262,6 +262,28 @@ class TradeJournal:
                 error text,
                 metrics jsonb
             );
+
+            -- P0.5: execution-level fill events (exec_id is the exchange fill ID)
+            CREATE TABLE IF NOT EXISTS execution_events (
+                exec_id text PRIMARY KEY,
+                order_link_id text,
+                exchange_order_id text,
+                symbol text NOT NULL,
+                side text NOT NULL,
+                exec_price numeric NOT NULL,
+                exec_qty numeric NOT NULL,
+                exec_fee numeric,
+                exec_value numeric,
+                is_maker boolean,
+                closed_size numeric,
+                proposal_id uuid,
+                decision_id uuid,
+                created_at timestamptz NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_execution_events_symbol
+                ON execution_events (symbol, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_execution_events_order_link
+                ON execution_events (order_link_id);
             """
             )
 
@@ -370,6 +392,111 @@ class TradeJournal:
             exchange_order_id,
             error,
         )
+
+    async def record_order_event_required(
+        self,
+        *,
+        order_link_id: str,
+        proposal_id: Any,
+        decision_id: Any,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        status: str,
+        exchange_order_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        """Durable (fail-closed) order event write. Raises on DB failure.
+
+        Use for CREATED_LOCAL and SUBMITTING states in active modes.
+        Caller must not proceed to REST if this raises.
+        """
+        await self._execute_required(
+            """
+            INSERT INTO order_events (
+                order_link_id, proposal_id, decision_id, created_at, symbol, side,
+                qty, status, exchange_order_id, error
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+            ON CONFLICT (order_link_id) DO UPDATE SET
+                status = EXCLUDED.status,
+                exchange_order_id = EXCLUDED.exchange_order_id,
+                error = EXCLUDED.error,
+                created_at = EXCLUDED.created_at
+            """,
+            order_link_id,
+            proposal_id,
+            decision_id,
+            datetime.now(tz=UTC),
+            symbol,
+            side,
+            qty,
+            status,
+            exchange_order_id,
+            error,
+        )
+
+    async def record_execution_event(
+        self,
+        *,
+        exec_id: str,
+        order_link_id: str | None,
+        exchange_order_id: str | None,
+        symbol: str,
+        side: str,
+        exec_price: Decimal,
+        exec_qty: Decimal,
+        exec_fee: Decimal | None = None,
+        exec_value: Decimal | None = None,
+        is_maker: bool | None = None,
+        closed_size: Decimal | None = None,
+        proposal_id: Any = None,
+        decision_id: Any = None,
+    ) -> None:
+        """Persist a fill event. Idempotent on exec_id. Never raises."""
+        await self._execute(
+            """
+            INSERT INTO execution_events (
+                exec_id, order_link_id, exchange_order_id, symbol, side,
+                exec_price, exec_qty, exec_fee, exec_value, is_maker,
+                closed_size, proposal_id, decision_id, created_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
+            ON CONFLICT (exec_id) DO NOTHING
+            """,
+            exec_id,
+            order_link_id,
+            exchange_order_id,
+            symbol,
+            side,
+            exec_price,
+            exec_qty,
+            exec_fee,
+            exec_value,
+            is_maker,
+            closed_size,
+            proposal_id,
+            decision_id,
+            datetime.now(tz=UTC),
+        )
+
+    async def load_pending_from_db(self) -> list[str]:
+        """Return order_link_ids with non-terminal status (CREATED_LOCAL or SUBMITTING).
+
+        Called at startup to restore in-flight entry slots.
+        """
+        rows = await self._fetch(
+            """
+            SELECT order_link_id
+            FROM order_events
+            WHERE status IN ('CREATED_LOCAL', 'SUBMITTING')
+            ORDER BY created_at ASC
+            """
+        )
+        ids = [str(row["order_link_id"]) for row in rows]
+        if ids:
+            log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
+        return ids
 
     async def upsert_durable_order_state(
         self,
@@ -798,6 +925,18 @@ class TradeJournal:
                 error=str(exc),
                 consecutive_errors=self._consecutive_write_errors,
             )
+
+    async def _execute_required(self, query: str, *args: Any) -> None:
+        """Fail-closed execute — raises on DB error.
+
+        Use only for writes that MUST succeed before a REST call is made.
+        If the journal is disabled, this is a no-op.
+        """
+        if not self.is_enabled:
+            return
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.execute(query, *args)
 
     async def _fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
         if not self.is_enabled:
