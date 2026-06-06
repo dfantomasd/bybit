@@ -247,7 +247,15 @@ class TradingApplication:
             except SystemExit:
                 raise
             except Exception as exc:
-                log.warning("bybit_preflight_exception", error=str(exc))
+                # P0.7: exception during preflight is fatal for CANARY_LIVE / LIVE
+                is_active = self._settings.LIVE_MODE and self._settings.TRADING_MODE in (
+                    TradingMode.LIVE,
+                    TradingMode.CANARY_LIVE,
+                )
+                if is_active:
+                    log.critical("bybit_preflight_exception_blocking_live", error=str(exc))
+                    raise SystemExit(1) from exc
+                log.warning("bybit_preflight_exception_continuing_shadow", error=str(exc))
         else:
             log.info("bybit_adapter_skipped_preflight", reason="no_api_key_configured")
 
@@ -483,6 +491,7 @@ class TradingApplication:
         profile_cfg = get_risk_profile_config(self._settings.RISK_PROFILE)
 
         shadow = self._initial_shadow_mode()
+        is_canary = self._settings.TRADING_MODE == TradingMode.CANARY_LIVE
         self._execution_engine = ExecutionEngine(
             adapter=self._bybit_adapter,
             risk_manager=self._risk_manager,
@@ -492,11 +501,22 @@ class TradingApplication:
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
             min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
+            is_canary=is_canary,
         )
+
+        # P0.2: Restore pending entry IDs from durable storage before any new entries
+        if self._trade_journal is not None:
+            try:
+                pending_ids = await self._trade_journal.load_pending_from_db()
+                if pending_ids:
+                    self._execution_engine.restore_pending_entries(pending_ids)
+                    log.info("execution_engine.pending_restored", count=len(pending_ids))
+            except Exception as exc:
+                log.warning("execution_engine.pending_restore_failed", error=str(exc))
 
         # Sync open positions from exchange so we don't double-enter on restart
         await self._execution_engine.sync_positions()
-        log.info("execution_engine.initialized", shadow_mode=shadow)
+        log.info("execution_engine.initialized", shadow_mode=shadow, is_canary=is_canary)
 
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
@@ -738,6 +758,17 @@ class TradingApplication:
                         )
                         if self._trade_journal is not None:
                             try:
+                                # P0.5: persist to execution_events (nullable proposal/decision)
+                                await self._trade_journal.record_execution_event(
+                                    exec_id=event.exec_id,
+                                    order_link_id=event.order_link_id or None,
+                                    exchange_order_id=event.order_id,
+                                    symbol=event.symbol,
+                                    side=event.side.value,
+                                    exec_price=event.exec_price,
+                                    exec_qty=event.exec_qty,
+                                )
+                                # Best-effort order_events update for terminal fill
                                 await self._trade_journal.record_order_event(
                                     order_link_id=event.order_link_id or event.exec_id,
                                     proposal_id=None,
@@ -754,6 +785,9 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
+                        # P0.3: Release pending entry slot for this order_link_id only
+                        if self._execution_engine is not None and event.order_link_id:
+                            self._execution_engine.mark_entry_resolved(event.order_link_id)
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()

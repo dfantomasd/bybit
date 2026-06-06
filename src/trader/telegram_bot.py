@@ -343,8 +343,21 @@ class TelegramMonitorBot:
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
+        # P1.1: prefer in-place card edit; fall back to new reply on BadRequest
+        from telegram.error import BadRequest
+
         query = update.callback_query
         if query is not None and query.message is not None:
+            try:
+                await query.edit_message_text(
+                    text,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=reply_markup,
+                )
+                return
+            except BadRequest:
+                pass
             await query.message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,

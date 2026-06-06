@@ -168,8 +168,12 @@ async def test_conservative_price_fetch_failure_records_journal_event():
     engine, adapter = _make_engine(shadow=False)
 
     journal = MagicMock()
+    journal.is_enabled = True
     journal.record_order_event = AsyncMock()
     journal.record_risk_decision = AsyncMock()
+    journal.record_prediction_event = AsyncMock()
+    # P0.1: durable writes must succeed so price check is reached
+    journal.record_order_event_required = AsyncMock()
     engine._trade_journal = journal
 
     adapter.get_conservative_market_price = AsyncMock(side_effect=Exception("network error"))

@@ -41,6 +41,10 @@ _DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
 # Instrument info TTL: re-fetch after this many seconds (tick_size can change)
 _INSTRUMENT_CACHE_TTL_S = 3600  # 1 hour
 
+# Canary mode hard caps — cannot be overridden by any profile
+CANARY_MAX_OPEN_POSITIONS: int = 2
+CANARY_MAX_TOTAL_EXPOSURE_PCT: Decimal = Decimal("45")
+
 
 class ExecutionEngine:
     """Orchestrates risk checks and order submission for trade proposals.
@@ -53,6 +57,7 @@ class ExecutionEngine:
         shadow_mode:      When True, orders are logged but never submitted.
         cooldown_s:       Minimum seconds between entries on the same symbol.
         category:         Bybit market category (e.g. "linear").
+        is_canary:        When True, CANARY_MAX_* caps are enforced before risk eval.
     """
 
     def __init__(
@@ -66,6 +71,7 @@ class ExecutionEngine:
         category: str = "linear",
         trade_journal: Any | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
+        is_canary: bool = False,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -76,6 +82,7 @@ class ExecutionEngine:
         self._category = category
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
+        self._is_canary = is_canary
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -90,6 +97,10 @@ class ExecutionEngine:
         # Serialises risk evaluation + local exposure updates across symbols.
         self._submit_lock = asyncio.Lock()
 
+        # P0.3: Pending entry limiter keyed by order_link_id (not integer).
+        # Tracks submitted-but-unresolved entry orders to prevent double-entry.
+        self._pending_entry_order_link_ids: set[str] = set()
+
     # ------------------------------------------------------------------
     # Position awareness
     # ------------------------------------------------------------------
@@ -101,11 +112,7 @@ class ExecutionEngine:
         return len(self._open_positions)
 
     async def sync_positions(self) -> list[Any] | None:
-        """Sync open positions from the exchange into the local registry.
-
-        Call once at startup (after seeding candles) so the engine doesn't
-        open duplicate positions on restart.
-        """
+        """Sync open positions from the exchange into the local registry."""
         try:
             positions = await self._adapter.get_positions(self._category)
             previous_symbols = set(self._open_positions)
@@ -142,6 +149,38 @@ class ExecutionEngine:
         self._open_positions.pop(symbol, None)
         self._last_entry_at.pop(symbol, None)
         await self._exposure.remove_position(symbol)
+
+    # ------------------------------------------------------------------
+    # Pending entry limiter (P0.3)
+    # ------------------------------------------------------------------
+
+    def mark_entry_submitted(self, order_link_id: str) -> None:
+        """Register an order_link_id as pending (submitted, awaiting terminal event)."""
+        self._pending_entry_order_link_ids.add(order_link_id)
+        log.debug("execution.pending_entry_added", order_link_id=order_link_id)
+
+    def mark_entry_resolved(self, order_link_id: str) -> None:
+        """Remove order_link_id from the pending set (terminal event received).
+
+        No-op if the ID is not in the pending set (idempotent).
+        Only removes the exact ID — never releases an unrelated slot.
+        """
+        self._pending_entry_order_link_ids.discard(order_link_id)
+        log.debug("execution.pending_entry_resolved", order_link_id=order_link_id)
+
+    def restore_pending_entries(self, order_link_ids: list[str]) -> None:
+        """Restore pending entry IDs from durable storage at startup."""
+        for oid in order_link_ids:
+            self._pending_entry_order_link_ids.add(oid)
+        if order_link_ids:
+            log.info(
+                "execution.pending_entries_restored",
+                count=len(order_link_ids),
+                ids=order_link_ids,
+            )
+
+    def has_pending_entries(self) -> bool:
+        return bool(self._pending_entry_order_link_ids)
 
     # ------------------------------------------------------------------
     # Instrument info
@@ -225,6 +264,34 @@ class ExecutionEngine:
             log.debug("execution.skipped_open_position", symbol=symbol)
             return None
 
+        # P0.2/P0.3: Block new entries while pending ones await resolution
+        if self.has_pending_entries():
+            log.debug(
+                "execution.skipped_pending_entries",
+                symbol=symbol,
+                pending=list(self._pending_entry_order_link_ids),
+            )
+            return None
+
+        # P0.6: CANARY hard caps — checked before RiskManager (cannot be overridden)
+        if self._is_canary:
+            if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
+                log.warning(
+                    "canary.blocked_max_positions",
+                    symbol=symbol,
+                    open_positions=len(self._open_positions),
+                    cap=CANARY_MAX_OPEN_POSITIONS,
+                )
+                return None
+            if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
+                log.warning(
+                    "canary.blocked_max_exposure",
+                    symbol=symbol,
+                    exposure_pct=str(self._exposure.total_exposure_pct),
+                    cap=str(CANARY_MAX_TOTAL_EXPOSURE_PCT),
+                )
+                return None
+
         # 2a. Entry cooldown (successful entries only) ────────────────
         last_entry = self._last_entry_at.get(symbol)
         if last_entry is not None:
@@ -263,8 +330,6 @@ class ExecutionEngine:
             return None
 
         # 3b. SL validation (live mode only) ─────────────────────────
-        # In shadow mode we allow proposals without explicit SL for simulation.
-        # In live mode, we never enter without a validated stop-loss.
         if not self._shadow_mode:
             if proposal.stop_loss is None:
                 log.warning(
@@ -273,10 +338,7 @@ class ExecutionEngine:
                     side=proposal.side.value,
                 )
                 return None
-            # Verify SL is on the correct side of entry
             if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
-                from trader.domain.enums import OrderSide
-
                 sl_valid = (proposal.side == OrderSide.BUY and proposal.stop_loss < proposal.entry_price) or (
                     proposal.side == OrderSide.SELL and proposal.stop_loss > proposal.entry_price
                 )
@@ -332,6 +394,20 @@ class ExecutionEngine:
         if self._trade_journal is not None:
             await self._trade_journal.record_risk_decision(symbol, decision)
 
+        # P0.8: Write baseline prediction event for every evaluated proposal
+        if self._trade_journal is not None:
+            try:
+                await self._trade_journal.record_prediction_event(
+                    proposal_id=proposal.proposal_id,
+                    symbol=symbol,
+                    model_version="RULE_BASELINE_V1",
+                    score=proposal.confidence,
+                    strategy_signal=proposal.side.value,
+                    decision="SHADOW_BASELINE" if self._shadow_mode else decision.status.value,
+                )
+            except Exception as _pred_exc:
+                log.debug("execution.prediction_event_failed", error=str(_pred_exc))
+
         if not approved:
             return decision
 
@@ -354,17 +430,59 @@ class ExecutionEngine:
                 mode="SHADOW_NO_EXECUTION",
             )
             if self._trade_journal is not None:
-                await self._trade_journal.record_order_event(
-                    order_link_id=intent.order_link_id,
-                    proposal_id=intent.proposal_id,
-                    decision_id=intent.decision_id,
-                    symbol=symbol,
-                    side=proposal.side.value,
-                    qty=decision.approved_qty,
-                    status="SHADOW",
-                )
+                try:
+                    await self._trade_journal.record_order_event(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="SHADOW",
+                    )
+                except Exception as _shadow_journal_exc:
+                    log.debug(
+                        "execution.shadow_journal_write_failed",
+                        error=str(_shadow_journal_exc),
+                    )
         else:
-            # Conservative-price guard: fail-closed — reject if price unavailable or notional too low
+            # P0.1: Durable write CREATED_LOCAL before any REST call.
+            # Fail-closed: if write fails, abort — never call REST.
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_event_required(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="CREATED_LOCAL",
+                    )
+                except Exception as _durable_exc:
+                    log.error(
+                        "execution.durable_created_local_failed_aborting",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(_durable_exc),
+                    )
+                    return None
+
+            # P0.3: Register pending entry slot
+            self.mark_entry_submitted(intent.order_link_id)
+
+            # P0.6: Second canary gate immediately before REST (post lock)
+            if self._is_canary:
+                if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
+                    self.mark_entry_resolved(intent.order_link_id)
+                    log.warning("canary.blocked_max_positions_pre_rest", symbol=symbol)
+                    return None
+                if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
+                    self.mark_entry_resolved(intent.order_link_id)
+                    log.warning("canary.blocked_max_exposure_pre_rest", symbol=symbol)
+                    return None
+
+            # Conservative-price guard: fail-closed
             if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
                 try:
                     conservative_price = await self._adapter.get_conservative_market_price(
@@ -375,6 +493,7 @@ class ExecutionEngine:
                         Decimal("1") + self._min_notional_buffer / Decimal("100")
                     )
                     if executable_notional < min_notional_required:
+                        self.mark_entry_resolved(intent.order_link_id)
                         log.warning(
                             "execution.below_min_notional_at_market",
                             symbol=symbol,
@@ -383,6 +502,7 @@ class ExecutionEngine:
                         )
                         return None
                 except Exception as _price_exc:
+                    self.mark_entry_resolved(intent.order_link_id)
                     self._last_failure_at[symbol] = datetime.now(tz=UTC)
                     log.warning(
                         "execution.conservative_price_check_failed",
@@ -404,6 +524,29 @@ class ExecutionEngine:
                         except Exception as _journal_exc:  # noqa: BLE001
                             log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
                     return None
+
+            # P0.1: Durable write SUBMITTING immediately before REST call.
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_event_required(
+                        order_link_id=intent.order_link_id,
+                        proposal_id=intent.proposal_id,
+                        decision_id=intent.decision_id,
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        qty=decision.approved_qty,
+                        status="SUBMITTING",
+                    )
+                except Exception as _durable_exc:
+                    log.error(
+                        "execution.durable_submitting_failed_aborting",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(_durable_exc),
+                    )
+                    self.mark_entry_resolved(intent.order_link_id)
+                    return None
+
             try:
                 resp = await self._adapter.place_order(intent)
                 exchange_order_id = resp.get("result", {}).get("orderId", "?")
@@ -429,6 +572,7 @@ class ExecutionEngine:
             except Exception as exc:
                 # Record failure timestamp (NOT an entry cooldown — separate state)
                 self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                self.mark_entry_resolved(intent.order_link_id)
                 log.error(
                     "execution.order_failed",
                     symbol=symbol,
@@ -553,4 +697,6 @@ class ExecutionEngine:
             "failure_cooldown_s": int(self._failure_cooldown.total_seconds()),
             "last_entries": {sym: ts.isoformat() for sym, ts in self._last_entry_at.items()},
             "last_failures": {sym: ts.isoformat() for sym, ts in self._last_failure_at.items()},
+            "pending_entry_ids": list(self._pending_entry_order_link_ids),
+            "is_canary": self._is_canary,
         }
