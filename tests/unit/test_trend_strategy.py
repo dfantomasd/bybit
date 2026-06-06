@@ -1,4 +1,5 @@
 """Tests for EMA crossover strategy edge cases."""
+
 from __future__ import annotations
 
 from trader.domain.enums import OrderSide

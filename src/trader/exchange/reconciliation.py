@@ -19,12 +19,12 @@ Actions on mismatch
 - If unknown position: alert + safe mode.
 - If severe mismatch: trigger repair or safe mode.
 """
+
 from __future__ import annotations
 
 import asyncio
-import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -45,7 +45,7 @@ logger = structlog.get_logger(__name__)
 class ReconciliationDiff:
     """Structured diff from a single reconciliation pass."""
 
-    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=timezone.utc))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     category: str = "linear"
     unknown_exchange_orders: list[str] = field(default_factory=list)
     missing_local_orders: list[str] = field(default_factory=list)
@@ -199,7 +199,7 @@ class ReconciliationService:
                     timeout=float(interval_seconds),
                 )
                 break  # stop_event fired
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass  # normal interval expiry
         self._running = False
 
@@ -231,7 +231,11 @@ class ReconciliationService:
         # Build exchange position map {symbol: position}
         exchange_map: dict[str, Any] = {}
         for pos in exchange_positions:
-            symbol = getattr(pos, "symbol", None) or pos.get("symbol", "") if isinstance(pos, dict) else getattr(pos, "symbol", "")
+            symbol = (
+                getattr(pos, "symbol", None) or pos.get("symbol", "")
+                if isinstance(pos, dict)
+                else getattr(pos, "symbol", "")
+            )
             if symbol:
                 exchange_map[symbol] = pos
 
@@ -243,11 +247,11 @@ class ReconciliationService:
             else:
                 exch_pos = exchange_map[symbol]
                 local_size = getattr(local_pos, "size", None)
-                exch_size_str = exch_pos.get("size", "0") if isinstance(exch_pos, dict) else str(getattr(exch_pos, "size", "0"))
+                exch_size_str = (
+                    exch_pos.get("size", "0") if isinstance(exch_pos, dict) else str(getattr(exch_pos, "size", "0"))
+                )
                 if local_size is not None and str(local_size) != exch_size_str:
-                    diffs.append(
-                        f"Position {symbol} size mismatch: local={local_size} exchange={exch_size_str}"
-                    )
+                    diffs.append(f"Position {symbol} size mismatch: local={local_size} exchange={exch_size_str}")
 
         for symbol in exchange_map:
             if symbol not in local_positions:

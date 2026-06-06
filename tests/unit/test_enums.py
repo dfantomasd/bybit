@@ -1,7 +1,6 @@
 """Unit tests for all domain enumerations."""
-from __future__ import annotations
 
-import pytest
+from __future__ import annotations
 
 from trader.domain.enums import (
     BybitRegion,
@@ -41,8 +40,15 @@ class TestTradingMode:
 class TestSystemStatus:
     def test_all_values_exist(self) -> None:
         expected = {
-            "STARTING", "PREFLIGHT", "RUNNING", "SAFE_MODE",
-            "PAUSED", "STOPPING", "STOPPED", "BLOCKED", "ERROR",
+            "STARTING",
+            "PREFLIGHT",
+            "RUNNING",
+            "SAFE_MODE",
+            "PAUSED",
+            "STOPPING",
+            "STOPPED",
+            "BLOCKED",
+            "ERROR",
         }
         actual = {s.value for s in SystemStatus}
         assert actual == expected
@@ -65,8 +71,13 @@ class TestRiskProfile:
 class TestMarketRegime:
     def test_all_values_exist(self) -> None:
         expected = {
-            "BULL_TREND", "BEAR_TREND", "SIDEWAYS",
-            "HIGH_VOLATILITY", "LOW_LIQUIDITY", "EVENT_RISK", "UNCERTAIN",
+            "BULL_TREND",
+            "BEAR_TREND",
+            "SIDEWAYS",
+            "HIGH_VOLATILITY",
+            "LOW_LIQUIDITY",
+            "EVENT_RISK",
+            "UNCERTAIN",
         }
         actual = {r.value for r in MarketRegime}
         assert actual == expected
@@ -78,9 +89,17 @@ class TestMarketRegime:
 class TestOrderStatus:
     def test_all_values_exist(self) -> None:
         expected = {
-            "CREATED_LOCAL", "SUBMITTING", "REST_ACCEPTED", "WS_CONFIRMED",
-            "PARTIALLY_FILLED", "FILLED", "CANCEL_REQUESTED", "CANCELLED",
-            "REJECTED", "EXPIRED", "UNKNOWN_RECONCILIATION_REQUIRED",
+            "CREATED_LOCAL",
+            "SUBMITTING",
+            "REST_ACCEPTED",
+            "WS_CONFIRMED",
+            "PARTIALLY_FILLED",
+            "FILLED",
+            "CANCEL_REQUESTED",
+            "CANCELLED",
+            "REJECTED",
+            "EXPIRED",
+            "UNKNOWN_RECONCILIATION_REQUIRED",
         }
         actual = {s.value for s in OrderStatus}
         assert actual == expected

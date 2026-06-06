@@ -1,10 +1,11 @@
 """Domain enumerations for the Bybit AI trading system."""
+
 from __future__ import annotations
 
-from enum import Enum
+from enum import StrEnum
 
 
-class TradingMode(str, Enum):
+class TradingMode(StrEnum):
     """Trading execution mode — controls whether orders hit real markets."""
 
     TESTNET = "TESTNET"
@@ -20,7 +21,7 @@ class TradingMode(str, Enum):
     """Full live trading — requires explicit operator activation."""
 
 
-class SystemStatus(str, Enum):
+class SystemStatus(StrEnum):
     """High-level lifecycle status of the trading system."""
 
     STARTING = "STARTING"
@@ -51,7 +52,7 @@ class SystemStatus(str, Enum):
     """Unrecoverable error state requiring operator intervention."""
 
 
-class RiskProfile(str, Enum):
+class RiskProfile(StrEnum):
     """Pre-defined risk appetite configurations."""
 
     CONSERVATIVE = "CONSERVATIVE"
@@ -60,7 +61,7 @@ class RiskProfile(str, Enum):
     SCALP = "SCALP"
 
 
-class MarketRegime(str, Enum):
+class MarketRegime(StrEnum):
     """Detected market regime used to gate strategy behaviour."""
 
     BULL_TREND = "BULL_TREND"
@@ -72,7 +73,7 @@ class MarketRegime(str, Enum):
     UNCERTAIN = "UNCERTAIN"
 
 
-class OrderStatus(str, Enum):
+class OrderStatus(StrEnum):
     """Fine-grained order lifecycle state (local + exchange)."""
 
     CREATED_LOCAL = "CREATED_LOCAL"
@@ -109,7 +110,7 @@ class OrderStatus(str, Enum):
     """State is unknown; reconciliation loop must resolve."""
 
 
-class RiskDecisionStatus(str, Enum):
+class RiskDecisionStatus(StrEnum):
     """Outcome of the Risk Manager's evaluation of a trade proposal."""
 
     APPROVED = "APPROVED"
@@ -128,7 +129,7 @@ class RiskDecisionStatus(str, Enum):
     """Risk manager is paused; no new entries allowed."""
 
 
-class MarketType(str, Enum):
+class MarketType(StrEnum):
     """Bybit market category."""
 
     SPOT = "spot"
@@ -137,21 +138,21 @@ class MarketType(str, Enum):
     OPTION = "option"
 
 
-class OrderSide(str, Enum):
+class OrderSide(StrEnum):
     """Order direction as expected by Bybit v5 API."""
 
     BUY = "Buy"
     SELL = "Sell"
 
 
-class OrderType(str, Enum):
+class OrderType(StrEnum):
     """Order execution type."""
 
     MARKET = "Market"
     LIMIT = "Limit"
 
 
-class BybitRegion(str, Enum):
+class BybitRegion(StrEnum):
     """Bybit regional entity for regulatory compliance."""
 
     GLOBAL = "GLOBAL"
@@ -164,7 +165,7 @@ class BybitRegion(str, Enum):
     ID = "ID"
 
 
-class VolatilityLevel(str, Enum):
+class VolatilityLevel(StrEnum):
     """Discretised volatility level used in regime classification."""
 
     LOW = "LOW"
@@ -173,7 +174,7 @@ class VolatilityLevel(str, Enum):
     EXTREME = "EXTREME"
 
 
-class KillSwitchMode(str, Enum):
+class KillSwitchMode(StrEnum):
     """Escalating kill-switch severities."""
 
     PAUSE_NEW_ENTRIES = "PAUSE_NEW_ENTRIES"

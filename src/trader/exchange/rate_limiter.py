@@ -1,4 +1,5 @@
 """Centralized adaptive token-bucket rate limiter with per-endpoint tracking."""
+
 from __future__ import annotations
 
 import asyncio
@@ -137,7 +138,7 @@ class RateLimiter:
         try:
             _RATE_LIMIT_REMAINING.labels(endpoint=key).set(state.remaining_capacity)
             _RATE_LIMIT_USAGE_PCT.labels(endpoint=key).set(state.usage_pct)
-        except Exception:  # pragma: no cover
+        except Exception:  # pragma: no cover  # noqa: S110
             pass
 
     def _check_thresholds(self, key: str, state: _EndpointState) -> None:

@@ -1,4 +1,5 @@
 """Maps BybitRegion enum to correct REST/WS endpoints."""
+
 from __future__ import annotations
 
 from trader.domain.enums import BybitRegion

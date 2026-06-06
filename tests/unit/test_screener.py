@@ -1,4 +1,5 @@
 """Tests for MarketScreener."""
+
 from __future__ import annotations
 
 import asyncio
@@ -19,9 +20,7 @@ def _make_ticker(symbol: str, volume: float, price: float = 100.0) -> dict:
 
 def _make_rest(tickers: list[dict]):
     rest = MagicMock()
-    rest.get_tickers = AsyncMock(
-        return_value={"result": {"list": tickers}}
-    )
+    rest.get_tickers = AsyncMock(return_value={"result": {"list": tickers}})
     return rest
 
 
@@ -32,8 +31,8 @@ class TestMarketScreener:
             _make_ticker("BTCUSDT", 500_000_000),
             _make_ticker("ETHUSDT", 300_000_000),
             _make_ticker("SOLUSDT", 100_000_000),
-            _make_ticker("XRPUSDT",  25_000_000),
-            _make_ticker("LOWUSDT",   1_000_000),  # below min volume
+            _make_ticker("XRPUSDT", 25_000_000),
+            _make_ticker("LOWUSDT", 1_000_000),  # below min volume
         ]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),
@@ -57,7 +56,7 @@ class TestMarketScreener:
     async def test_filters_non_usdt(self):
         tickers = [
             _make_ticker("BTCUSDT", 500_000_000),
-            _make_ticker("BTCETH",  500_000_000),   # non-USDT pair
+            _make_ticker("BTCETH", 500_000_000),  # non-USDT pair
         ]
         screener = MarketScreener(
             rest_client=_make_rest(tickers),

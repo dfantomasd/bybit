@@ -2,11 +2,12 @@
 
 All models use Pydantic v2.  Immutable models use ``frozen=True``.
 """
+
 from __future__ import annotations
 
 import re
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -19,11 +20,9 @@ from pydantic import (
 )
 
 from trader.domain.enums import (
-    KillSwitchMode,
     MarketRegime,
     MarketType,
     OrderSide,
-    OrderStatus,
     OrderType,
     RiskDecisionStatus,
     SystemStatus,
@@ -39,7 +38,7 @@ _ORDER_LINK_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,36}$")
 
 
 def _now_utc() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -119,11 +118,10 @@ class FeatureVector(BaseModel):
     version: str = "v1"
 
     @model_validator(mode="after")
-    def names_length_matches(self) -> "FeatureVector":
+    def names_length_matches(self) -> FeatureVector:
         if self.feature_names and len(self.feature_names) != len(self.values):
             raise ValueError(
-                f"feature_names length ({len(self.feature_names)}) "
-                f"must match values length ({len(self.values)})"
+                f"feature_names length ({len(self.feature_names)}) must match values length ({len(self.values)})"
             )
         return self
 
@@ -200,7 +198,7 @@ class TradeProposal(BaseModel):
         return v.upper()
 
     @model_validator(mode="after")
-    def sl_on_correct_side(self) -> "TradeProposal":
+    def sl_on_correct_side(self) -> TradeProposal:
         if self.stop_loss is not None and self.entry_price is not None:
             if self.side == OrderSide.BUY and self.stop_loss >= self.entry_price:
                 raise ValueError("stop_loss must be below entry_price for BUY")
@@ -239,12 +237,10 @@ class RiskDecision(BaseModel):
     open_positions_count: int | None = None
 
     @model_validator(mode="after")
-    def approved_qty_required_when_approved(self) -> "RiskDecision":
+    def approved_qty_required_when_approved(self) -> RiskDecision:
         if self.status in (RiskDecisionStatus.APPROVED, RiskDecisionStatus.RESIZED):
             if self.approved_qty is None:
-                raise ValueError(
-                    "approved_qty is required when status is APPROVED or RESIZED"
-                )
+                raise ValueError("approved_qty is required when status is APPROVED or RESIZED")
             if self.approved_qty <= 0:
                 raise ValueError("approved_qty must be positive")
         return self
@@ -294,13 +290,11 @@ class OrderIntent(BaseModel):
     @classmethod
     def validate_order_link_id(cls, v: str) -> str:
         if not _ORDER_LINK_ID_RE.match(v):
-            raise ValueError(
-                "order_link_id must be 1-36 alphanumeric chars (plus _ and -)"
-            )
+            raise ValueError("order_link_id must be 1-36 alphanumeric chars (plus _ and -)")
         return v
 
     @model_validator(mode="after")
-    def price_required_for_limit(self) -> "OrderIntent":
+    def price_required_for_limit(self) -> OrderIntent:
         if self.order_type == OrderType.LIMIT and self.price is None:
             raise ValueError("price is required for LIMIT orders")
         return self

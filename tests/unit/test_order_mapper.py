@@ -1,4 +1,5 @@
 """Tests for OrderMapper — domain ↔ API dict translation."""
+
 from __future__ import annotations
 
 import uuid
@@ -11,6 +12,7 @@ from trader.exchange.order_mapper import OrderMapper, _round_to_step
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _make_intent(
     qty: str = "0.1",
@@ -46,6 +48,7 @@ def _make_intent(
 # _round_to_step tests
 # ---------------------------------------------------------------------------
 
+
 class TestRoundToStep:
     def test_rounds_down_to_step(self) -> None:
         result = _round_to_step(Decimal("0.123456"), Decimal("0.001"))
@@ -75,6 +78,7 @@ class TestRoundToStep:
 # ---------------------------------------------------------------------------
 # intent_to_params tests
 # ---------------------------------------------------------------------------
+
 
 class TestIntentToParams:
     def setup_method(self) -> None:
@@ -139,6 +143,7 @@ class TestIntentToParams:
 # round_price / round_qty tests
 # ---------------------------------------------------------------------------
 
+
 class TestRounding:
     def setup_method(self) -> None:
         self.mapper = OrderMapper()
@@ -167,6 +172,7 @@ class TestRounding:
 # ---------------------------------------------------------------------------
 # WS order update parser
 # ---------------------------------------------------------------------------
+
 
 class TestWsOrderToEvent:
     def setup_method(self) -> None:
@@ -226,6 +232,7 @@ class TestWsOrderToEvent:
 # WS execution / fill parser
 # ---------------------------------------------------------------------------
 
+
 class TestWsExecutionToFill:
     def setup_method(self) -> None:
         self.mapper = OrderMapper()
@@ -274,6 +281,7 @@ class TestWsExecutionToFill:
 # ---------------------------------------------------------------------------
 # REST position parser
 # ---------------------------------------------------------------------------
+
 
 class TestRestPositionToModel:
     def setup_method(self) -> None:

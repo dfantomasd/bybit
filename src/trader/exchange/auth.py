@@ -1,10 +1,10 @@
 """Authentication helpers for Bybit V5 API — HMAC-SHA256 and RSA-SHA256."""
+
 from __future__ import annotations
 
 import hashlib
 import hmac
 import time
-
 
 # ---------------------------------------------------------------------------
 # HMAC-SHA256 Authenticator

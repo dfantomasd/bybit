@@ -14,6 +14,7 @@ Usage::
     log = get_logger(__name__)
     log.info("order_submitted", order_link_id="abc123", symbol="BTCUSDT")
 """
+
 from __future__ import annotations
 
 import logging
@@ -62,9 +63,7 @@ def _redact_secrets(
             redacted[key] = _REDACTED
         elif isinstance(value, dict):
             # Recursively redact nested dicts
-            redacted[key] = {
-                k: _REDACTED if _is_secret_field(k) else v for k, v in value.items()
-            }
+            redacted[key] = {k: _REDACTED if _is_secret_field(k) else v for k, v in value.items()}
         else:
             redacted[key] = value
     event_dict.clear()
@@ -145,7 +144,7 @@ def configure_logging(
         structlog.stdlib.add_log_level,
         _severity_from_level,
         structlog.processors.TimeStamper(fmt="iso", utc=True),
-        lambda _l, _m, ed: (ed.update(service=service_name, env=environment) or ed),
+        lambda _l, _m, ed: ed.update(service=service_name, env=environment) or ed,
         _redact_secrets,
         structlog.processors.StackInfoRenderer(),
         structlog.processors.format_exc_info,

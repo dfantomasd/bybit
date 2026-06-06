@@ -1,4 +1,5 @@
 """Unit tests for the Settings configuration class."""
+
 from __future__ import annotations
 
 import os

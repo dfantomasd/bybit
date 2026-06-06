@@ -1,14 +1,12 @@
 """Tests for the EventBus."""
+
 from __future__ import annotations
 
 import asyncio
 
-import pytest
-
 from trader.data.event_bus import EventBus
-from trader.domain.events import BaseEvent, MarketDataEvent, SystemEvent
-from trader.domain.enums import MarketType, SystemStatus, TradingMode
-
+from trader.domain.enums import MarketType
+from trader.domain.events import BaseEvent, MarketDataEvent
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -33,6 +31,7 @@ def make_market_event(symbol: str = "BTCUSDT") -> MarketDataEvent:
 
 def test_publish_and_consume():
     """Publishing an event and consuming it via get() works correctly."""
+
     async def _run():
         bus = EventBus(maxsize=100)
         event = make_event("market_data")
@@ -131,10 +130,12 @@ async def test_dropped_counter():
 
 def test_unknown_queue_returns_false():
     """Publishing to unknown queue returns False."""
+
     async def _run():
         bus = EventBus()
         result = await bus.publish("nonexistent_queue", make_event())
         assert result is False
+
     asyncio.run(_run())
 
 

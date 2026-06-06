@@ -2,12 +2,12 @@
 
 Thread-safe for asyncio. Not thread-safe for multi-threading.
 """
+
 from __future__ import annotations
 
 import collections
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal
+from datetime import datetime
 
 
 @dataclass(frozen=True)

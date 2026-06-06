@@ -3,9 +3,9 @@
 Replaces the pybit-based implementation to give full control over request
 signing and eliminate pybit version incompatibilities.
 """
+
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import hmac
 import json
@@ -282,18 +282,14 @@ class BybitRestClient:
     # Instruments / market data
     # ------------------------------------------------------------------
 
-    async def get_instruments_info(
-        self, category: str, symbol: str | None = None
-    ) -> dict[str, Any]:
+    async def get_instruments_info(self, category: str, symbol: str | None = None) -> dict[str, Any]:
         return await self._get(
             "/v5/market/instruments-info",
             params={"category": category, "symbol": symbol},
             authenticated=False,
         )
 
-    async def get_tickers(
-        self, category: str, symbol: str | None = None
-    ) -> dict[str, Any]:
+    async def get_tickers(self, category: str, symbol: str | None = None) -> dict[str, Any]:
         return await self._get(
             "/v5/market/tickers",
             params={"category": category, "symbol": symbol},
@@ -322,27 +318,21 @@ class BybitRestClient:
             authenticated=False,
         )
 
-    async def get_orderbook(
-        self, category: str, symbol: str, limit: int = 50
-    ) -> dict[str, Any]:
+    async def get_orderbook(self, category: str, symbol: str, limit: int = 50) -> dict[str, Any]:
         return await self._get(
             "/v5/market/orderbook",
             params={"category": category, "symbol": symbol, "limit": limit},
             authenticated=False,
         )
 
-    async def get_recent_trades(
-        self, category: str, symbol: str, limit: int = 60
-    ) -> dict[str, Any]:
+    async def get_recent_trades(self, category: str, symbol: str, limit: int = 60) -> dict[str, Any]:
         return await self._get(
             "/v5/market/recent-trade",
             params={"category": category, "symbol": symbol, "limit": limit},
             authenticated=False,
         )
 
-    async def get_funding_rate_history(
-        self, category: str, symbol: str, limit: int = 200
-    ) -> dict[str, Any]:
+    async def get_funding_rate_history(self, category: str, symbol: str, limit: int = 200) -> dict[str, Any]:
         return await self._get(
             "/v5/market/funding/history",
             params={"category": category, "symbol": symbol, "limit": limit},
@@ -409,9 +399,7 @@ class BybitRestClient:
             body["orderLinkId"] = order_link_id
         return await self._post("/v5/order/cancel", body=body)
 
-    async def get_open_orders(
-        self, category: str, symbol: str | None = None
-    ) -> dict[str, Any]:
+    async def get_open_orders(self, category: str, symbol: str | None = None) -> dict[str, Any]:
         return await self._get(
             "/v5/order/realtime",
             params={"category": category, "symbol": symbol},
@@ -432,9 +420,7 @@ class BybitRestClient:
     # Positions
     # ------------------------------------------------------------------
 
-    async def get_positions(
-        self, category: str, symbol: str | None = None
-    ) -> dict[str, Any]:
+    async def get_positions(self, category: str, symbol: str | None = None) -> dict[str, Any]:
         # Bybit requires symbol OR settleCoin when listing all positions
         params: dict[str, Any] = {"category": category}
         if symbol:
@@ -462,9 +448,7 @@ class BybitRestClient:
             },
         )
 
-    async def set_trading_stop(
-        self, category: str, symbol: str, **kwargs: Any
-    ) -> dict[str, Any]:
+    async def set_trading_stop(self, category: str, symbol: str, **kwargs: Any) -> dict[str, Any]:
         return await self._post(
             "/v5/position/trading-stop",
             body={"category": category, "symbol": symbol, **kwargs},
@@ -496,9 +480,7 @@ class BybitRestClient:
             params={"category": category, "symbol": symbol, "limit": limit},
         )
 
-    async def get_fee_rate(
-        self, category: str, symbol: str | None = None
-    ) -> dict[str, Any]:
+    async def get_fee_rate(self, category: str, symbol: str | None = None) -> dict[str, Any]:
         return await self._get(
             "/v5/account/fee-rate",
             params={"category": category, "symbol": symbol},
@@ -508,7 +490,7 @@ class BybitRestClient:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    def close(self) -> None:
+    async def close(self) -> None:
         """Close the aiohttp session."""
         if self._session and not self._session.closed:
-            asyncio.create_task(self._session.close())
+            await self._session.close()

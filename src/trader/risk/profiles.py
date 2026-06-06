@@ -3,6 +3,7 @@
 Each profile defines strict limits that the RiskManager enforces.
 Profiles are immutable dataclasses; override nothing at runtime.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -94,15 +95,11 @@ class RiskLimits:
 
         # Sanity: hard cap must be >= soft max
         if self.risk_per_trade_hard_cap_pct < self.risk_per_trade_max_pct:
-            raise ValueError(
-                "risk_per_trade_hard_cap_pct must be >= risk_per_trade_max_pct"
-            )
+            raise ValueError("risk_per_trade_hard_cap_pct must be >= risk_per_trade_max_pct")
 
         # Sanity: hard stop drawdown >= soft warning
         if self.hard_stop_drawdown_pct < self.max_drawdown_pct:
-            raise ValueError(
-                "hard_stop_drawdown_pct must be >= max_drawdown_pct"
-            )
+            raise ValueError("hard_stop_drawdown_pct must be >= max_drawdown_pct")
 
 
 # ---------------------------------------------------------------------------

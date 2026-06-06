@@ -3,6 +3,7 @@
 LocalOrderBook maintains a real-time L2 book from Bybit V5 WS snapshots + deltas.
 The analytics functions operate on raw bid/ask level lists.
 """
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -217,7 +218,7 @@ def compute_weighted_midprice(
     total_weight = Decimal(0)
     weighted_sum = Decimal(0)
 
-    for (bp, bq), (ap, aq) in zip(bid_slice, ask_slice):
+    for (bp, bq), (ap, aq) in zip(bid_slice, ask_slice, strict=False):
         mid = (bp + ap) / 2
         weight = bq + aq
         weighted_sum += mid * weight

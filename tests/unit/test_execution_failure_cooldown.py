@@ -1,4 +1,5 @@
 """Tests for execution engine failure cooldown and sub-minimum notional guard."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -8,12 +9,12 @@ import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskDecisionStatus
 from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
-from trader.execution.engine import ExecutionEngine, _DEFAULT_FAILURE_COOLDOWN_S
-
+from trader.execution.engine import _DEFAULT_FAILURE_COOLDOWN_S, ExecutionEngine
 
 # ---------------------------------------------------------------------------
 # Helpers (mirrors test_execution_engine.py helpers)
 # ---------------------------------------------------------------------------
+
 
 def _instrument() -> InstrumentInfo:
     return InstrumentInfo(
@@ -76,7 +77,7 @@ def _make_engine(shadow_mode: bool = False, failure_cooldown_s: int = 30) -> Exe
         risk_manager=risk_manager,
         exposure_tracker=exposure,
         shadow_mode=shadow_mode,
-        cooldown_s=0,           # disable entry cooldown for these tests
+        cooldown_s=0,  # disable entry cooldown for these tests
         failure_cooldown_s=failure_cooldown_s,
     )
 
@@ -84,6 +85,7 @@ def _make_engine(shadow_mode: bool = False, failure_cooldown_s: int = 30) -> Exe
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestFailureCooldown:
     @pytest.mark.asyncio

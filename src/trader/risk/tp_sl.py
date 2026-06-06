@@ -2,6 +2,7 @@
 
 All arithmetic uses Decimal. Prices are rounded to tick_size.
 """
+
 from __future__ import annotations
 
 import logging

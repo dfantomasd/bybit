@@ -2,6 +2,7 @@
 
 Thread-safe via asyncio.Lock. All financial arithmetic uses Decimal.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -64,11 +65,7 @@ class DrawdownTracker:
             return Decimal("0")
         if self._current_equity >= self._peak_equity:
             return Decimal("0")
-        return (
-            (self._peak_equity - self._current_equity)
-            / self._peak_equity
-            * Decimal("100")
-        )
+        return (self._peak_equity - self._current_equity) / self._peak_equity * Decimal("100")
 
     @property
     def drawdown_amount(self) -> Decimal:

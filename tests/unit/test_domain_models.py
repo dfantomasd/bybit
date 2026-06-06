@@ -1,40 +1,30 @@
 """Unit tests for all Pydantic v2 domain models."""
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 import pytest
 from pydantic import ValidationError
 
 from trader.domain.enums import (
-    MarketRegime,
     MarketType,
     OrderSide,
-    OrderStatus,
     OrderType,
     RiskDecisionStatus,
-    VolatilityLevel,
 )
 from trader.domain.models import (
-    AuditEvent,
-    Balance,
     FeatureVector,
-    Fill,
-    HealthStatus,
-    InstrumentInfo,
     MarketEvent,
     ModelMetadata,
     OrderIntent,
     Position,
-    PreflightReport,
     ReconciliationResult,
-    RegimeContext,
     RiskDecision,
     TradeProposal,
 )
-
 
 # ---------------------------------------------------------------------------
 # MarketEvent
@@ -439,7 +429,7 @@ class TestReconciliationResult:
 
 class TestModelMetadata:
     def test_valid_creation(self) -> None:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         m = ModelMetadata(
             model_id="ppo-btcusdt-v1",
             version="1.0.0",
@@ -454,7 +444,7 @@ class TestModelMetadata:
         assert m.inference_count == 0
 
     def test_drift_score_optional(self) -> None:
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         m = ModelMetadata(
             model_id="m1",
             version="1",

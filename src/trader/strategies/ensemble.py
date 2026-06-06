@@ -7,6 +7,7 @@ Aggregation rules
 3. Always return at most one proposal per symbol (highest confidence).
 4. The Risk Manager has final authority.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -73,6 +74,7 @@ class StrategyEnsemble:
 
         # Group by direction (side)
         from trader.domain.enums import OrderSide
+
         buys = [p for p in proposals if p.side == OrderSide.BUY]
         sells = [p for p in proposals if p.side == OrderSide.SELL]
 

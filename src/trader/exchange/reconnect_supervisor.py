@@ -8,6 +8,7 @@ Manages the full reconnect lifecycle:
 - Alerts on excessive reconnects (>3 in 5 min)
 - Prometheus metrics: ws_reconnect_total, ws_downtime_seconds
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -33,7 +34,7 @@ def calc_backoff(
 ) -> float:
     """Return back-off wait time with ±20 % jitter."""
     wait = min(base * (2**attempt), max_wait)
-    jitter = wait * 0.2 * (random.random() * 2 - 1)  # ±20 %
+    jitter = wait * 0.2 * (random.random() * 2 - 1)  # ±20 %  # noqa: S311
     return max(0.1, wait + jitter)
 
 
@@ -41,9 +42,9 @@ def calc_backoff(
 # ReconnectSupervisor
 # ---------------------------------------------------------------------------
 
-_ALERT_WINDOW_SECONDS = 300   # 5 min
-_ALERT_THRESHOLD = 3          # >3 reconnects in 5 min triggers alert
-_SETTLE_SECONDS = 10.0        # block entries for 10 s after reconnect
+_ALERT_WINDOW_SECONDS = 300  # 5 min
+_ALERT_THRESHOLD = 3  # >3 reconnects in 5 min triggers alert
+_SETTLE_SECONDS = 10.0  # block entries for 10 s after reconnect
 _MAX_ATTEMPTS_PER_HOUR = 20
 
 
@@ -122,7 +123,7 @@ class ReconnectSupervisor:
             if self._metrics is not None:
                 try:
                     self._metrics.ws_reconnect_total.labels(name=self._name).inc()
-                except Exception:
+                except Exception:  # noqa: S110
                     pass
 
             # Alert on repeated reconnects
@@ -157,7 +158,7 @@ class ReconnectSupervisor:
                 )
                 # stop_event fired during wait
                 break
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
             attempt += 1

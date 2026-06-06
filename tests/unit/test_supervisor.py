@@ -1,14 +1,13 @@
 """Tests for the runtime supervisor in TradingApplication."""
+
 from __future__ import annotations
 
 import asyncio
-import sys
-from datetime import UTC, datetime
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from trader.app import TradingApplication, _CRITICAL_TASK_NAMES
+from trader.app import _CRITICAL_TASK_NAMES, TradingApplication
 
 
 class TestRuntimeSupervisor:

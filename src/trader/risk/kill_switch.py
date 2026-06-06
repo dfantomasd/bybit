@@ -6,12 +6,13 @@ command. Modes escalate from PAUSE_NEW_ENTRIES through FULL_STOP.
 CRITICAL: Once activated beyond PAUSE_NEW_ENTRIES, only manual operator
 action can deactivate the kill switch.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
 import os
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 from trader.domain.enums import KillSwitchMode
@@ -78,7 +79,7 @@ class KillSwitch:
 
             self._active = True
             self._mode = mode
-            self._activated_at = datetime.now(tz=timezone.utc)
+            self._activated_at = datetime.now(tz=UTC)
             self._activated_by = operator
             self._reason = reason
 

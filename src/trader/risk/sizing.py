@@ -3,6 +3,7 @@
 All arithmetic uses ``Decimal`` — no float is used for financial calculations.
 Quantities are ALWAYS rounded DOWN (ROUND_DOWN) to the nearest qty_step.
 """
+
 from __future__ import annotations
 
 import logging
@@ -96,10 +97,7 @@ class PositionSizer:
             stop_price_distance = stop_distance_pct * (entry_price or Decimal("1"))
             min_stop_distance = _DEFAULT_MIN_ATR_MULTIPLE * atr
             if stop_price_distance < min_stop_distance:
-                return Decimal("0"), (
-                    f"stop distance {stop_price_distance} < min ATR multiple "
-                    f"{min_stop_distance}"
-                )
+                return Decimal("0"), (f"stop distance {stop_price_distance} < min ATR multiple {min_stop_distance}")
 
         # ----------------------------------------------------------------
         # Clamp desired_risk_pct to profile range
@@ -157,9 +155,7 @@ class PositionSizer:
             return Decimal("0"), "portfolio exposure cap reached"
 
         if entry_price is not None and entry_price > Decimal("0"):
-            max_qty_from_exposure = (
-                capital * remaining_exposure_pct / Decimal("100")
-            ) / entry_price
+            max_qty_from_exposure = (capital * remaining_exposure_pct / Decimal("100")) / entry_price
             raw_qty = min(raw_qty, max_qty_from_exposure)
 
         # ----------------------------------------------------------------
@@ -184,9 +180,7 @@ class PositionSizer:
         # Exchange min/max qty constraints
         # ----------------------------------------------------------------
         if raw_qty < self._info.min_order_qty:
-            return Decimal("0"), (
-                f"calculated qty {raw_qty} < min_order_qty {self._info.min_order_qty}"
-            )
+            return Decimal("0"), (f"calculated qty {raw_qty} < min_order_qty {self._info.min_order_qty}")
 
         raw_qty = min(raw_qty, self._info.max_order_qty)
 
@@ -199,9 +193,7 @@ class PositionSizer:
             return Decimal("0"), "rounded qty is zero after step rounding"
 
         if approved_qty < self._info.min_order_qty:
-            return Decimal("0"), (
-                f"rounded qty {approved_qty} < min_order_qty {self._info.min_order_qty}"
-            )
+            return Decimal("0"), (f"rounded qty {approved_qty} < min_order_qty {self._info.min_order_qty}")
 
         # ----------------------------------------------------------------
         # Min notional check
@@ -209,9 +201,7 @@ class PositionSizer:
         if self._info.min_notional is not None and entry_price is not None:
             notional = approved_qty * entry_price
             if notional < self._info.min_notional:
-                return Decimal("0"), (
-                    f"notional {notional} < min_notional {self._info.min_notional}"
-                )
+                return Decimal("0"), (f"notional {notional} < min_notional {self._info.min_notional}")
 
         return approved_qty, ""
 

@@ -1,13 +1,12 @@
 """Tests for FeaturePipeline."""
+
 from __future__ import annotations
 
 import math
 from datetime import UTC, datetime
 
-import pytest
-
 from trader.data.candles import Candle, CandleStore
-from trader.features.pipeline import FeaturePipeline, _MIN_BARS
+from trader.features.pipeline import _MIN_BARS, FeaturePipeline
 
 
 def _make_store(n: int = 60, symbol: str = "BTCUSDT", interval: str = "1") -> CandleStore:
@@ -98,6 +97,7 @@ class TestFeaturePipeline:
         class FakeHealth:
             called = False
             last_dt = None
+
             def set_feature_computed_at(self, dt):
                 self.called = True
                 self.last_dt = dt

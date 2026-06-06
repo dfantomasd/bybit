@@ -28,6 +28,7 @@ Safety:
   - The bot can NEVER submit, cancel, amend, or close orders directly.
   - All financial operations still go through RiskManager + ExecutionEngine.
 """
+
 from __future__ import annotations
 
 from collections import deque
@@ -55,20 +56,29 @@ HealthProvider = Callable[[], Awaitable[HealthStatus]]
 # Signal log entry (lightweight — no circular import on TradeProposal)
 # ---------------------------------------------------------------------------
 
+
 @dataclass
 class SignalEntry:
     timestamp: datetime
     symbol: str
-    side: str            # "BUY" or "SELL"
+    side: str  # "BUY" or "SELL"
     confidence: float
-    regime: str          # MarketRegime.value
+    regime: str  # MarketRegime.value
     rationale: str
-    shadow: bool         # True = not executed
+    shadow: bool  # True = not executed
 
 
 # ---------------------------------------------------------------------------
 # Control interface (callbacks wired from app.py)
 # ---------------------------------------------------------------------------
+
+_RISK_LEVEL: dict[str, int] = {
+    "CONSERVATIVE": 0,
+    "MODERATE": 1,
+    "AGGRESSIVE": 2,
+    "SCALP": 3,
+}
+
 
 @dataclass
 class TradingController:
@@ -85,15 +95,18 @@ class TradingController:
     is_shadow: Callable[[], bool]
     current_profile: Callable[[], str]
     active_symbols: Callable[[], list[str]]
-    regime_for: Callable[[str], str | None]      # symbol → regime string
+    regime_for: Callable[[str], str | None]  # symbol → regime string
     signal_log: deque[SignalEntry] = field(default_factory=lambda: deque(maxlen=20))
     # Optional diagnostics provider (returns dict from TradingApplication.get_diagnostics)
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
+    # Safety gate: when False, Telegram cannot escalate to a riskier profile
+    allow_risk_increase: bool = False
 
 
 # ---------------------------------------------------------------------------
 # Config
 # ---------------------------------------------------------------------------
+
 
 @dataclass
 class TelegramBotConfig:
@@ -110,6 +123,7 @@ class TelegramBotConfig:
 # ---------------------------------------------------------------------------
 # Bot
 # ---------------------------------------------------------------------------
+
 
 class TelegramMonitorBot:
     """Telegram bot with monitoring and operator control."""
@@ -199,6 +213,7 @@ class TelegramMonitorBot:
     def _polling_error_callback(self, error: Exception) -> None:
         """Suppress Conflict errors during rolling redeploys; log the rest."""
         from telegram.error import Conflict, NetworkError
+
         if isinstance(error, Conflict):
             # Expected during Render rolling deploys — old instance displaced
             log.debug("telegram_polling_conflict_suppressed")
@@ -238,36 +253,19 @@ class TelegramMonitorBot:
         )
         await self.notify(text)
 
-    async def notify_position_opened(
-        self, symbol: str, side: str, qty: Decimal, price: Decimal
-    ) -> None:
+    async def notify_position_opened(self, symbol: str, side: str, qty: Decimal, price: Decimal) -> None:
         icon = "🟢" if side == "BUY" else "🔴"
-        await self.notify(
-            f"{icon} <b>Position opened</b>\n"
-            f"{symbol} {side} {qty} @ {price}"
-        )
+        await self.notify(f"{icon} <b>Position opened</b>\n{symbol} {side} {qty} @ {price}")
 
-    async def notify_position_closed(
-        self, symbol: str, realized_pnl: Decimal
-    ) -> None:
+    async def notify_position_closed(self, symbol: str, realized_pnl: Decimal) -> None:
         icon = "✅" if realized_pnl >= 0 else "❌"
-        await self.notify(
-            f"{icon} <b>Position closed</b>\n"
-            f"{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>"
-        )
+        await self.notify(f"{icon} <b>Position closed</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>")
 
     async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
-        await self.notify(
-            f"⚠️ <b>Circuit breaker</b>\n"
-            f"Type: <code>{breaker_type}</code>\n"
-            f"Reason: {reason}"
-        )
+        await self.notify(f"⚠️ <b>Circuit breaker</b>\nType: <code>{breaker_type}</code>\nReason: {reason}")
 
     async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
-        await self.notify(
-            f"⚙️ <b>Risk profile changed</b>\n"
-            f"{old_profile} → <code>{new_profile}</code>"
-        )
+        await self.notify(f"⚙️ <b>Risk profile changed</b>\n{old_profile} → <code>{new_profile}</code>")
 
     # ------------------------------------------------------------------
     # Auth helpers
@@ -507,9 +505,13 @@ class TelegramMonitorBot:
             await self._reply(update, "<b>Regime</b>\nNo active symbols.")
             return
         regime_icons = {
-            "BULL_TREND": "+", "BEAR_TREND": "-",
-            "SIDEWAYS": "=", "HIGH_VOLATILITY": "!",
-            "LOW_LIQUIDITY": ".", "EVENT_RISK": "!", "UNCERTAIN": "?",
+            "BULL_TREND": "+",
+            "BEAR_TREND": "-",
+            "SIDEWAYS": "=",
+            "HIGH_VOLATILITY": "!",
+            "LOW_LIQUIDITY": ".",
+            "EVENT_RISK": "!",
+            "UNCERTAIN": "?",
         }
         lines = ["<b>Market Regime</b>"]
         for sym in symbols:
@@ -542,9 +544,7 @@ class TelegramMonitorBot:
             await self._reply(update, "Adapter not ready.")
             return
         try:
-            resp = await adapter._rest.get_closed_pnl(
-                category=self._config.default_category, limit=20
-            )
+            resp = await adapter._rest.get_closed_pnl(category=self._config.default_category, limit=20)
             records = resp.get("result", {}).get("list", [])
         except Exception as exc:
             await self._reply(update, f"<b>PnL</b>\nFailed: <code>{exc}</code>")
@@ -640,9 +640,7 @@ class TelegramMonitorBot:
         if not args or args[0].lower() not in ("on", "off"):
             current = "on" if self._controller.is_shadow() else "off"
             await self._reply(
-                update,
-                f"Shadow mode is currently <code>{current}</code>.\n"
-                "Use: /shadow on  or  /shadow off"
+                update, f"Shadow mode is currently <code>{current}</code>.\nUse: /shadow on  or  /shadow off"
             )
             return
         enable = args[0].lower() == "on"
@@ -663,7 +661,7 @@ class TelegramMonitorBot:
             await self._reply(
                 update,
                 f"Current execution mode: <code>{current}</code> on <code>{venue}</code>.\n"
-                "Use: /mode shadow  or  /mode active"
+                "Use: /mode shadow  or  /mode active",
             )
             return
         if args[0].lower() == "shadow":
@@ -693,17 +691,30 @@ class TelegramMonitorBot:
         valid = [p.value.lower() for p in RiskProfile]
         if not args or args[0].lower() not in valid:
             current = self._controller.current_profile()
-            await self._reply(
-                update,
-                f"Current risk profile: <code>{current}</code>\n"
-                f"Usage: /risk {' | '.join(valid)}"
-            )
+            await self._reply(update, f"Current risk profile: <code>{current}</code>\nUsage: /risk {' | '.join(valid)}")
             return
         new_profile_str = args[0].upper()
         new_profile = RiskProfile(new_profile_str)
         old_profile = self._controller.current_profile()
         if new_profile_str == old_profile:
             await self._reply(update, f"Risk profile is already <code>{old_profile}</code>.")
+            return
+
+        # Block escalation to a riskier profile unless explicitly allowed.
+        old_level = _RISK_LEVEL.get(old_profile, 0)
+        new_level = _RISK_LEVEL.get(new_profile_str, 0)
+        if new_level > old_level and not self._controller.allow_risk_increase:
+            await self._reply(
+                update,
+                f"🚫 <b>Risk escalation blocked</b>: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
+                "Set <code>TELEGRAM_ALLOW_RISK_INCREASE=true</code> in environment to enable.\n"
+                "A service restart is required after changing this env var.",
+            )
+            log.warning(
+                "telegram.risk_escalation_blocked",
+                old=old_profile,
+                new=new_profile_str,
+            )
             return
 
         cid = self._chat_id(update)
@@ -715,7 +726,7 @@ class TelegramMonitorBot:
         await self._reply(
             update,
             f"⚠️ Change risk profile: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
-            "Send /confirm to apply, or ignore to cancel."
+            "Send /confirm to apply, or ignore to cancel.",
         )
 
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -735,7 +746,7 @@ class TelegramMonitorBot:
             update,
             "🚨 <b>Emergency stop</b> requested.\n"
             "This will halt ALL new entries and require a manual restart.\n"
-            "Send /confirm to execute, or ignore to cancel."
+            "Send /confirm to execute, or ignore to cancel.",
         )
 
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -914,8 +925,7 @@ class TelegramMonitorBot:
             "/symbols     — active symbols\n"
             "/pnl         — closed PnL history\n"
             "/diagnostics — counters & loop timing\n"
-            "/help        — this message\n"
-            + ctrl_section
+            "/help        — this message\n" + ctrl_section
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:

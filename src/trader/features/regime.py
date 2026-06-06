@@ -18,9 +18,8 @@ Regime hierarchy (checked in order):
 The returned ``RegimeContext`` is consumed by the RiskManager, which applies
 per-regime risk multipliers and may block entries entirely.
 """
-from __future__ import annotations
 
-from datetime import UTC, datetime
+from __future__ import annotations
 
 import structlog
 
@@ -33,19 +32,19 @@ log = structlog.get_logger(__name__)
 # Threshold constants (tuned for 1-min bars, perpetual futures)
 # ------------------------------------------------------------------
 
-_ADX_TRENDING = 25.0        # ADX (normalised ÷100) = 0.25 → strong trend
-_ADX_RANGING = 20.0         # ADX below this = sideways
+_ADX_TRENDING = 25.0  # ADX (normalised ÷100) = 0.25 → strong trend
+_ADX_RANGING = 20.0  # ADX below this = sideways
 
-_BB_BW_HIGH_VOL = 0.06      # BB bandwidth > 6% → high volatility
-_BB_BW_EXTREME = 0.12       # > 12% → extreme (still HIGH_VOLATILITY)
+_BB_BW_HIGH_VOL = 0.06  # BB bandwidth > 6% → high volatility
+_BB_BW_EXTREME = 0.12  # > 12% → extreme (still HIGH_VOLATILITY)
 
-_EMA_SLOPE_BULL = 0.00015   # EMA9 slope (normalised) positive threshold
+_EMA_SLOPE_BULL = 0.00015  # EMA9 slope (normalised) positive threshold
 _EMA_SLOPE_BEAR = -0.00015
 
-_RSI_BULL_MIN = 0.48        # RSI14 [0,1] — must have upward momentum
-_RSI_BEAR_MAX = 0.52        # RSI14 below this for bear regime
+_RSI_BULL_MIN = 0.48  # RSI14 [0,1] — must have upward momentum
+_RSI_BEAR_MAX = 0.52  # RSI14 below this for bear regime
 
-_VOL_ZSCORE_LOW = -1.5      # Volume Z-score below this = drying up
+_VOL_ZSCORE_LOW = -1.5  # Volume Z-score below this = drying up
 
 
 class RegimeClassifier:
@@ -57,18 +56,16 @@ class RegimeClassifier:
     def classify(self, feature_vector: FeatureVector) -> RegimeContext:
         """Return a RegimeContext derived from the feature vector."""
         symbol = feature_vector.symbol
-        f = dict(zip(feature_vector.feature_names, feature_vector.values))
+        f = dict(zip(feature_vector.feature_names, feature_vector.values, strict=False))
 
         # Extract features (all optional — graceful degradation)
-        adx: float = f.get("adx_14", 0.0) * 100       # denormalise [0,1] → [0,100]
+        adx: float = f.get("adx_14", 0.0) * 100  # denormalise [0,1] → [0,100]
         bb_bw: float = f.get("bb_bandwidth", 0.0)
-        rsi14: float = f.get("rsi_14", 0.5)            # [0,1]
+        rsi14: float = f.get("rsi_14", 0.5)  # [0,1]
         ema9_slope: float = f.get("ema_slope_9", 0.0)
         ema21_slope: float = f.get("ema_slope_21", 0.0)
         vol_z: float = f.get("volume_zscore", 0.0)
         realized_vol: float = f.get("realized_vol_20", 0.0)
-
-        quality = feature_vector.quality_score
 
         # ------------------------------------------------------------------
         # 1. LOW_LIQUIDITY — volume drying up
@@ -91,10 +88,7 @@ class RegimeClassifier:
         # ------------------------------------------------------------------
         if bb_bw > _BB_BW_HIGH_VOL:
             confidence = min(0.55 + (bb_bw - _BB_BW_HIGH_VOL) * 5, 0.90)
-            vol_level = (
-                VolatilityLevel.EXTREME if bb_bw > _BB_BW_EXTREME
-                else VolatilityLevel.HIGH
-            )
+            vol_level = VolatilityLevel.EXTREME if bb_bw > _BB_BW_EXTREME else VolatilityLevel.HIGH
             return self._make_context(
                 symbol=symbol,
                 regime=MarketRegime.HIGH_VOLATILITY,

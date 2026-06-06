@@ -1,4 +1,5 @@
 """Tests for ExecutionEngine."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -23,6 +24,7 @@ from trader.execution.engine import ExecutionEngine
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
 # ---------------------------------------------------------------------------
+
 
 def _instrument_info(symbol: str = "BTCUSDT") -> InstrumentInfo:
     return InstrumentInfo(
@@ -118,6 +120,7 @@ def _make_engine(
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestExecutionEngine:
     def test_no_open_position_initially(self):
@@ -245,7 +248,9 @@ class TestExecutionEngine:
     @pytest.mark.asyncio
     async def test_different_symbols_independent(self):
         engine = _make_engine(approved=True)
-        engine._instrument_cache["ETHUSDT"] = _instrument_info("ETHUSDT")
+        from datetime import UTC, datetime
+
+        engine._instrument_cache["ETHUSDT"] = (_instrument_info("ETHUSDT"), datetime.now(tz=UTC))
 
         btc = _proposal("BTCUSDT")
         eth = _proposal("ETHUSDT")

@@ -19,6 +19,7 @@ Short signal (only if shorting enabled):
 Stop loss: 1.5 × ATR below entry
 Take profit: 3 × ATR above entry (2:1 R/R minimum)
 """
+
 from __future__ import annotations
 
 import uuid
@@ -35,19 +36,19 @@ log = structlog.get_logger(__name__)
 _STRATEGY_ID = "ema_crossover_v1"
 
 # Signal thresholds
-_EMA_SLOPE_MIN = 0.0001      # EMA9 must be rising at least this fast (normalised)
-_RSI_LONG_MIN = 0.45         # RSI14 in [0,1] scale
+_EMA_SLOPE_MIN = 0.0001  # EMA9 must be rising at least this fast (normalised)
+_RSI_LONG_MIN = 0.45  # RSI14 in [0,1] scale
 _RSI_LONG_MAX = 0.70
 _RSI_SHORT_MIN = 0.30
 _RSI_SHORT_MAX = 0.55
-_VOLUME_ZSCORE_MIN = -0.5    # reject low-volume entries
+_VOLUME_ZSCORE_MIN = -0.5  # reject low-volume entries
 
 _ATR_STOP_MULTIPLIER = 1.5
 _ATR_TP_MULTIPLIER = 3.0
-_MIN_ATR_PCT = 0.001         # skip if ATR is basically zero
-_MAX_ATR_PCT = 0.05          # skip if market is too volatile
+_MIN_ATR_PCT = 0.001  # skip if ATR is basically zero
+_MAX_ATR_PCT = 0.05  # skip if market is too volatile
 
-_BASE_CONFIDENCE = 0.55      # starting confidence if all conditions met
+_BASE_CONFIDENCE = 0.55  # starting confidence if all conditions met
 _CONFIDENCE_PER_CONDITION = 0.05  # bonus per extra confirmed condition
 
 _PRICE_DECIMALS = Decimal("0.00000001")
@@ -98,10 +99,10 @@ class EMAcrossoverStrategy(BaseStrategy):
         f = dict(zip(feature_vector.feature_names, feature_vector.values, strict=True))
 
         # Extract required features
-        ema9_dist = f.get("ema_9")       # normalised distance: ema/price - 1
+        ema9_dist = f.get("ema_9")  # normalised distance: ema/price - 1
         ema21_dist = f.get("ema_21")
         ema9_slope = f.get("ema_slope_9")
-        rsi14 = f.get("rsi_14")          # [0, 1]
+        rsi14 = f.get("rsi_14")  # [0, 1]
         macd_hist = f.get("macd_hist")
         volume_z = f.get("volume_zscore")
         atr_pct = f.get("atr_14_pct")
@@ -136,11 +137,13 @@ class EMAcrossoverStrategy(BaseStrategy):
         # --- Long signal ---
         if ema9_above_ema21 and ema9_slope > _EMA_SLOPE_MIN:
             if _RSI_LONG_MIN <= rsi14 <= _RSI_LONG_MAX and macd_hist > 0:
-                bonus_conditions = sum([
-                    ema9_slope > _EMA_SLOPE_MIN * 3,
-                    rsi14 > 0.50,
-                    (volume_z or 0) > 0.5,
-                ])
+                bonus_conditions = sum(
+                    [
+                        ema9_slope > _EMA_SLOPE_MIN * 3,
+                        rsi14 > 0.50,
+                        (volume_z or 0) > 0.5,
+                    ]
+                )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION
 
                 stop_dist = atr_pct * _ATR_STOP_MULTIPLIER
@@ -176,20 +179,19 @@ class EMAcrossoverStrategy(BaseStrategy):
                     take_profit=_price(entry_price * (1 + tp_dist)),
                     confidence=min(confidence, 0.95),
                     regime=MarketRegime.BULL_TREND,
-                    rationale=(
-                        f"EMA9>EMA21, slope={ema9_slope:.4f}, "
-                        f"RSI14={rsi14:.2f}, MACDhist={macd_hist:.4f}"
-                    ),
+                    rationale=(f"EMA9>EMA21, slope={ema9_slope:.4f}, RSI14={rsi14:.2f}, MACDhist={macd_hist:.4f}"),
                 )
 
         # --- Short signal ---
         if self._allow_short and not ema9_above_ema21 and ema9_slope < -_EMA_SLOPE_MIN:
             if _RSI_SHORT_MIN <= rsi14 <= _RSI_SHORT_MAX and macd_hist < 0:
-                bonus_conditions = sum([
-                    ema9_slope < -_EMA_SLOPE_MIN * 3,
-                    rsi14 < 0.45,
-                    (volume_z or 0) > 0.5,
-                ])
+                bonus_conditions = sum(
+                    [
+                        ema9_slope < -_EMA_SLOPE_MIN * 3,
+                        rsi14 < 0.45,
+                        (volume_z or 0) > 0.5,
+                    ]
+                )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION
 
                 stop_dist = atr_pct * _ATR_STOP_MULTIPLIER
@@ -221,10 +223,7 @@ class EMAcrossoverStrategy(BaseStrategy):
                     take_profit=_price(entry_price * (1 - tp_dist)),
                     confidence=min(confidence, 0.95),
                     regime=MarketRegime.BEAR_TREND,
-                    rationale=(
-                        f"EMA9<EMA21, slope={ema9_slope:.4f}, "
-                        f"RSI14={rsi14:.2f}, MACDhist={macd_hist:.4f}"
-                    ),
+                    rationale=(f"EMA9<EMA21, slope={ema9_slope:.4f}, RSI14={rsi14:.2f}, MACDhist={macd_hist:.4f}"),
                 )
 
         return None

@@ -1,4 +1,5 @@
 """Tests for the order state machine (state_machine.py)."""
+
 from __future__ import annotations
 
 import asyncio
@@ -8,12 +9,11 @@ import pytest
 
 from trader.domain.enums import OrderStatus
 from trader.exchange.state_machine import (
-    InvalidStateTransitionError,
-    OrderStateStore,
-    OrderStateMachine,
     VALID_TRANSITIONS,
+    InvalidStateTransitionError,
+    OrderStateMachine,
+    OrderStateStore,
 )
-
 
 # ---------------------------------------------------------------------------
 # OrderStateMachine — valid transition tests
@@ -183,16 +183,19 @@ def test_valid_transitions_dict_complete():
 
 def test_order_store_create():
     """Creating a machine registers it in the store."""
+
     async def _run():
         store = OrderStateStore()
         m = await store.create("order-A")
         assert m.current_status == OrderStatus.CREATED_LOCAL
         assert len(store) == 1
+
     asyncio.run(_run())
 
 
 def test_order_store_get():
     """Getting a machine by ID returns the same instance."""
+
     async def _run():
         store = OrderStateStore()
         created = await store.create("order-B")
@@ -200,22 +203,26 @@ def test_order_store_get():
         assert fetched is created
         missing = await store.get("nonexistent")
         assert missing is None
+
     asyncio.run(_run())
 
 
 def test_order_store_transition():
     """store.transition updates machine status."""
+
     async def _run():
         store = OrderStateStore()
         await store.create("order-C")
         await store.transition("order-C", OrderStatus.SUBMITTING, "test")
         m = await store.get("order-C")
         assert m.current_status == OrderStatus.SUBMITTING
+
     asyncio.run(_run())
 
 
 def test_order_store_get_active_excludes_terminal():
     """get_all_active excludes terminal-state machines."""
+
     async def _run():
         store = OrderStateStore()
         await store.create("active-1")
@@ -229,11 +236,13 @@ def test_order_store_get_active_excludes_terminal():
         active = await store.get_all_active()
         assert "active-1" in active
         assert "done-1" not in active
+
     asyncio.run(_run())
 
 
 def test_order_store_get_by_status():
     """get_by_status returns only machines with matching status."""
+
     async def _run():
         store = OrderStateStore()
         await store.create("s-1")
@@ -246,13 +255,16 @@ def test_order_store_get_by_status():
         assert len(submitting) == 1
         assert submitting[0].order_link_id == "s-1"
         assert len(created_local) == 1
+
     asyncio.run(_run())
 
 
 def test_order_store_transition_unknown_raises():
     """Transitioning unknown order_link_id raises KeyError."""
+
     async def _run():
         store = OrderStateStore()
         with pytest.raises(KeyError):
             await store.transition("nonexistent", OrderStatus.SUBMITTING)
+
     asyncio.run(_run())

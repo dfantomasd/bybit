@@ -1,4 +1,5 @@
 """Tests for technical indicators."""
+
 from __future__ import annotations
 
 import math
@@ -6,9 +7,7 @@ import math
 import pytest
 
 from trader.features.technical import (
-    adx,
     atr,
-    bb_bandwidth,
     bb_percent_b,
     bollinger_bands,
     candle_body_ratio,
@@ -43,6 +42,7 @@ def _sine(n: int = 100, amplitude: float = 10.0, base: float = 100.0) -> list[fl
 # Returns
 # ---------------------------------------------------------------------------
 
+
 class TestReturns:
     def test_simple_return_positive(self):
         closes = [100.0, 110.0]
@@ -67,6 +67,7 @@ class TestReturns:
 # ---------------------------------------------------------------------------
 # EMA & SMA
 # ---------------------------------------------------------------------------
+
 
 class TestMovingAverages:
     def test_ema_length(self):
@@ -99,6 +100,7 @@ class TestMovingAverages:
 # ---------------------------------------------------------------------------
 # RSI
 # ---------------------------------------------------------------------------
+
 
 class TestRSI:
     def test_rsi_flat_returns_50_ish(self):
@@ -138,6 +140,7 @@ class TestRSI:
 # MACD
 # ---------------------------------------------------------------------------
 
+
 class TestMACD:
     def test_macd_returns_tuple(self):
         closes = _prices(50, 100, 0.5)
@@ -162,6 +165,7 @@ class TestMACD:
 # ---------------------------------------------------------------------------
 # Bollinger Bands
 # ---------------------------------------------------------------------------
+
 
 class TestBollingerBands:
     def test_upper_middle_lower_ordering(self):
@@ -190,6 +194,7 @@ class TestBollingerBands:
 # ATR
 # ---------------------------------------------------------------------------
 
+
 class TestATR:
     def _ohlcv(self, n: int = 20) -> tuple[list[float], list[float], list[float]]:
         closes = _prices(n, 100, 1.0)
@@ -198,8 +203,8 @@ class TestATR:
         return highs, lows, closes
 
     def test_atr_positive(self):
-        h, l, c = self._ohlcv(20)
-        val = atr(h, l, c, 14)
+        h, lo, c = self._ohlcv(20)
+        val = atr(h, lo, c, 14)
         assert val is not None
         assert val > 0
 
@@ -214,13 +219,14 @@ class TestATR:
         assert val == pytest.approx(10.0, rel=0.01)
 
     def test_atr_insufficient(self):
-        h, l, c = self._ohlcv(10)
-        assert atr(h, l, c, 14) is None
+        h, lo, c = self._ohlcv(10)
+        assert atr(h, lo, c, 14) is None
 
 
 # ---------------------------------------------------------------------------
 # Volume Z-score
 # ---------------------------------------------------------------------------
+
 
 class TestVolumeZscore:
     def test_zero_for_mean_volume(self):
@@ -241,6 +247,7 @@ class TestVolumeZscore:
 # Candle patterns
 # ---------------------------------------------------------------------------
 
+
 class TestCandlePatterns:
     def test_doji(self):
         # Open == close → body ratio = 0
@@ -260,6 +267,7 @@ class TestCandlePatterns:
 # ---------------------------------------------------------------------------
 # EMA slope
 # ---------------------------------------------------------------------------
+
 
 class TestEMASlope:
     def test_uptrend_positive_slope(self):
@@ -282,6 +290,7 @@ class TestEMASlope:
 # ---------------------------------------------------------------------------
 # Realised volatility
 # ---------------------------------------------------------------------------
+
 
 class TestRealisedVol:
     def test_flat_series_zero_vol(self):

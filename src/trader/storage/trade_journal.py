@@ -1,4 +1,5 @@
 """Postgres-backed trading memory for signals, decisions, orders, and PnL."""
+
 from __future__ import annotations
 
 import hashlib
@@ -65,7 +66,7 @@ class TradeJournal:
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             await conn.execute(
-            """
+                """
             CREATE TABLE IF NOT EXISTS trade_signals (
                 proposal_id uuid PRIMARY KEY,
                 created_at timestamptz NOT NULL,
@@ -314,7 +315,6 @@ class TradeJournal:
 
     def _closed_pnl_id(self, record: dict[str, Any]) -> str:
         stable = "|".join(
-            str(record.get(key, ""))
-            for key in ("symbol", "orderId", "updatedTime", "createdTime", "closedPnl")
+            str(record.get(key, "")) for key in ("symbol", "orderId", "updatedTime", "createdTime", "closedPnl")
         )
         return hashlib.sha256(stable.encode("utf-8")).hexdigest()

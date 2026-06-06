@@ -1,16 +1,13 @@
 """Tests for ReconnectSupervisor."""
+
 from __future__ import annotations
 
 import asyncio
-import time
-
-import pytest
 
 from trader.exchange.reconnect_supervisor import (
     ReconnectSupervisor,
     calc_backoff,
 )
-
 
 # ---------------------------------------------------------------------------
 # calc_backoff tests
@@ -23,7 +20,7 @@ def test_backoff_sequence():
     for attempt in range(7):
         # Use random.seed-like approach: test center value (0 jitter case)
         # We can't control jitter, so just verify the base trend
-        expected_base = min(1.0 * (2 ** attempt), 60.0)
+        expected_base = min(1.0 * (2**attempt), 60.0)
         wait = calc_backoff(attempt, base=1.0, max_wait=60.0)
         # Allow ±20% jitter plus a tiny floating point buffer
         assert expected_base * 0.79 <= wait <= expected_base * 1.21, (
@@ -39,15 +36,13 @@ def test_backoff_sequence():
 def test_jitter_within_bounds():
     """Jitter is within ±20% of the un-jittered wait time."""
     for attempt in range(6):
-        expected_base = min(1.0 * (2 ** attempt), 60.0)
+        expected_base = min(1.0 * (2**attempt), 60.0)
         # Run many samples to verify distribution
         for _ in range(50):
             wait = calc_backoff(attempt, base=1.0, max_wait=60.0)
             lower = max(0.1, expected_base * 0.80)
             upper = expected_base * 1.20
-            assert lower <= wait <= upper, (
-                f"wait {wait} outside [{lower}, {upper}] for attempt={attempt}"
-            )
+            assert lower <= wait <= upper, f"wait {wait} outside [{lower}, {upper}] for attempt={attempt}"
 
 
 def test_backoff_max_cap():
@@ -59,6 +54,7 @@ def test_backoff_max_cap():
 
 def test_entries_blocked_after_reconnect():
     """entries_blocked is True immediately after construction (before run)."""
+
     async def connect_fn():
         # Simulate immediate connection failure
         raise ConnectionError("test failure")
@@ -75,6 +71,7 @@ def test_entries_blocked_after_reconnect():
 
 def test_stable_after_no_reconnects():
     """is_stable is False when not running."""
+
     async def connect_fn():
         await asyncio.sleep(0.01)
 
@@ -89,6 +86,7 @@ def test_stable_after_no_reconnects():
 
 def test_downtime_tracking():
     """downtime_seconds accumulates when downtime_start is set."""
+
     async def connect_fn():
         # Fail immediately
         raise ConnectionError("test")
@@ -103,7 +101,7 @@ def test_downtime_tracking():
         # Start with a short timeout
         try:
             await asyncio.wait_for(supervisor.run(), timeout=0.5)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             await supervisor.request_stop()
 
         # Some downtime should have accumulated
@@ -167,12 +165,12 @@ def test_request_stop_terminates_run():
         # Wait for first connection
         try:
             await asyncio.wait_for(connected.wait(), timeout=2.0)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             pass
         await supervisor.request_stop()
         try:
             await asyncio.wait_for(task, timeout=2.0)
-        except (asyncio.TimeoutError, asyncio.CancelledError):
+        except (TimeoutError, asyncio.CancelledError):
             task.cancel()
 
     asyncio.run(_run())

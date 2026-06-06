@@ -6,6 +6,7 @@ method that returns a ``HealthStatus`` domain model.
 Designed to be instantiated once and called periodically or on HTTP /health
 requests.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -287,9 +288,5 @@ class HealthChecker:
             "redis": redis_ok,
             "bybit_connectivity": bybit_ok,
         }
-        passed = (
-            pg_ok
-            and (redis_ok or not self._redis_required)
-            and (bybit_ok or not self._bybit_required)
-        )
+        passed = pg_ok and (redis_ok or not self._redis_required) and (bybit_ok or not self._bybit_required)
         return {"passed": passed, "checks": checks}

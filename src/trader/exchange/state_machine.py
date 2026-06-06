@@ -3,12 +3,12 @@
 Every order is tracked by an OrderStateMachine instance.
 The OrderStateStore holds all machines in memory (asyncio-safe via Lock).
 """
+
 from __future__ import annotations
 
 import asyncio
 import time
-from datetime import datetime, timezone
-from typing import Any
+from datetime import UTC, datetime
 
 from trader.domain.enums import OrderStatus
 from trader.domain.errors import TradingSystemError
@@ -28,8 +28,7 @@ class InvalidStateTransitionError(TradingSystemError):
         to_status: OrderStatus,
     ) -> None:
         super().__init__(
-            f"Invalid transition {from_status.value} → {to_status.value} "
-            f"for order {order_link_id!r}",
+            f"Invalid transition {from_status.value} → {to_status.value} for order {order_link_id!r}",
             code="INVALID_STATE_TRANSITION",
             retryable=False,
         )
@@ -74,10 +73,10 @@ VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.FILLED,
         OrderStatus.PARTIALLY_FILLED,
     },
-    OrderStatus.FILLED: set(),           # terminal
-    OrderStatus.CANCELLED: set(),        # terminal
-    OrderStatus.REJECTED: set(),         # terminal
-    OrderStatus.EXPIRED: set(),          # terminal
+    OrderStatus.FILLED: set(),  # terminal
+    OrderStatus.CANCELLED: set(),  # terminal
+    OrderStatus.REJECTED: set(),  # terminal
+    OrderStatus.EXPIRED: set(),  # terminal
     OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED: {
         OrderStatus.WS_CONFIRMED,
         OrderStatus.FILLED,
@@ -112,9 +111,7 @@ class OrderStateMachine:
     ) -> None:
         self._order_link_id = order_link_id
         self._current: OrderStatus = initial_status
-        self._history: list[tuple[OrderStatus, datetime, str]] = [
-            (initial_status, datetime.now(tz=timezone.utc), "initial")
-        ]
+        self._history: list[tuple[OrderStatus, datetime, str]] = [(initial_status, datetime.now(tz=UTC), "initial")]
         self._entered_at: float = time.monotonic()
 
     # ------------------------------------------------------------------
@@ -125,14 +122,10 @@ class OrderStateMachine:
         """Transition to *new_status*, raising InvalidStateTransitionError on bad path."""
         allowed = VALID_TRANSITIONS.get(self._current, set())
         if new_status not in allowed:
-            raise InvalidStateTransitionError(
-                self._order_link_id, self._current, new_status
-            )
+            raise InvalidStateTransitionError(self._order_link_id, self._current, new_status)
         self._current = new_status
         self._entered_at = time.monotonic()
-        self._history.append(
-            (new_status, datetime.now(tz=timezone.utc), reason)
-        )
+        self._history.append((new_status, datetime.now(tz=UTC), reason))
 
     # ------------------------------------------------------------------
     # Queries
@@ -161,10 +154,7 @@ class OrderStateMachine:
         return time.monotonic() - self._entered_at
 
     def __repr__(self) -> str:
-        return (
-            f"OrderStateMachine(order_link_id={self._order_link_id!r}, "
-            f"status={self._current.value})"
-        )
+        return f"OrderStateMachine(order_link_id={self._order_link_id!r}, status={self._current.value})"
 
 
 # ---------------------------------------------------------------------------
@@ -195,9 +185,7 @@ class OrderStateStore:
         async with self._lock:
             return self._machines.get(order_link_id)
 
-    async def transition(
-        self, order_link_id: str, new_status: OrderStatus, reason: str = ""
-    ) -> None:
+    async def transition(self, order_link_id: str, new_status: OrderStatus, reason: str = "") -> None:
         """Apply a state transition to the machine identified by *order_link_id*."""
         async with self._lock:
             machine = self._machines.get(order_link_id)
@@ -208,11 +196,7 @@ class OrderStateStore:
     async def get_all_active(self) -> dict[str, OrderStateMachine]:
         """Return all non-terminal machines."""
         async with self._lock:
-            return {
-                k: v
-                for k, v in self._machines.items()
-                if not v.is_terminal()
-            }
+            return {k: v for k, v in self._machines.items() if not v.is_terminal()}
 
     async def get_by_status(self, status: OrderStatus) -> list[OrderStateMachine]:
         """Return all machines in the given status."""
