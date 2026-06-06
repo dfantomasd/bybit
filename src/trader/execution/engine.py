@@ -362,6 +362,28 @@ class ExecutionEngine:
                     status="SHADOW",
                 )
         else:
+            # Conservative-price guard: skip order if notional is below min_notional at market
+            if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
+                try:
+                    conservative_price = await self._adapter._rest.get_conservative_market_price(
+                        self._category, symbol, proposal.side.value
+                    )
+                    executable_notional = intent.qty * conservative_price
+                    min_notional_required = instrument_info.min_notional * Decimal("1.03")
+                    if executable_notional < min_notional_required:
+                        log.warning(
+                            "execution.below_min_notional_at_market",
+                            symbol=symbol,
+                            executable_notional=str(executable_notional),
+                            required=str(min_notional_required),
+                        )
+                        return None
+                except Exception as _price_exc:
+                    log.warning(
+                        "execution.conservative_price_failed",
+                        symbol=symbol,
+                        error=str(_price_exc),
+                    )
             try:
                 resp = await self._adapter.place_order(intent)
                 exchange_order_id = resp.get("result", {}).get("orderId", "?")

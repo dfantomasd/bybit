@@ -450,6 +450,19 @@ class RiskManager:
                 )
                 if can_bump:
                     approved_qty = min_qty
+                    # Re-validate: bump must not violate per-position exposure cap
+                    bumped_notional = approved_qty * proposal.entry_price
+                    remaining_pos_budget = self._exposure.remaining_position_exposure_usd(proposal.symbol)
+                    if bumped_notional > remaining_pos_budget:
+                        return self._reject(
+                            proposal,
+                            f"bumped notional {bumped_notional:.4f} exceeds remaining per-position budget {remaining_pos_budget:.4f}",
+                            ["exposure_cap_post_bump"],
+                            capital,
+                        )
+                    can_add_bumped, bump_exp_reason = self._exposure.can_add_position(proposal.symbol, bumped_notional)
+                    if not can_add_bumped:
+                        return self._reject(proposal, bump_exp_reason, ["exposure_cap_post_bump"], capital)
                     triggered_rules.append("min_notional_buffer_applied")
                     self._log.info(
                         "risk.min_notional_buffer_applied symbol=%s bumped_to_qty=%s"
