@@ -56,6 +56,7 @@ class TestSettingsDefaults:
         settings = self._make_settings()
         assert settings.TRADE_JOURNAL_ENABLED is True  # type: ignore[union-attr]
         assert settings.PERFORMANCE_FILTER_ENABLED is True  # type: ignore[union-attr]
+        assert settings.PERFORMANCE_MIN_TRADABLE_SYMBOLS == 2  # type: ignore[union-attr]
 
     def test_profit_manager_defaults_enabled(self) -> None:
         settings = self._make_settings()

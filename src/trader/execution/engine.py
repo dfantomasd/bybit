@@ -87,7 +87,7 @@ class ExecutionEngine:
     def open_position_count(self) -> int:
         return len(self._open_positions)
 
-    async def sync_positions(self) -> None:
+    async def sync_positions(self) -> list[Any] | None:
         """Sync open positions from the exchange into the local registry.
 
         Call once at startup (after seeding candles) so the engine doesn't
@@ -121,8 +121,10 @@ class ExecutionEngine:
                 symbols=list(self._open_positions.keys()),
                 closed_symbols=sorted(closed_symbols),
             )
+            return positions
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
+            return None
 
     async def record_position_closed(self, symbol: str) -> None:
         """Call when a position is closed (e.g. TP/SL hit)."""
@@ -319,7 +321,7 @@ class ExecutionEngine:
                         status="FAILED",
                         error=str(exc),
                     )
-                return decision
+                return None
 
         # 7. Update local state ────────────────────────────────────────
         self._last_entry_at[symbol] = datetime.now(tz=UTC)

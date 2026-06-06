@@ -80,6 +80,8 @@ class TradingApplication:
         self._closed_pnl_refreshed_at: datetime | None = None
         self._positions_managed_at: datetime | None = None
         self._positions_synced_at: datetime | None = None
+        self._latest_exchange_positions: list[Any] = []
+        self._latest_exchange_positions_at: datetime | None = None
         self._trailing_stop_keys: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -680,13 +682,16 @@ class TradingApplication:
                 return
         self._positions_managed_at = now
 
-        try:
-            positions = await self._bybit_adapter.get_positions(
-                self._settings.DEFAULT_MARKET_CATEGORY
-            )
-        except Exception as exc:
-            log.debug("profit_manager.positions_fetch_failed", error=str(exc))
-            return
+        positions = self._recent_exchange_positions()
+        if positions is None:
+            try:
+                positions = await self._bybit_adapter.get_positions(
+                    self._settings.DEFAULT_MARKET_CATEGORY
+                )
+                self._cache_exchange_positions(positions)
+            except Exception as exc:
+                log.debug("profit_manager.positions_fetch_failed", error=str(exc))
+                return
 
         for pos in positions:
             if pos.size <= Decimal("0") or pos.entry_price <= Decimal("0"):
@@ -775,8 +780,48 @@ class TradingApplication:
             elapsed = (now - self._positions_synced_at).total_seconds()
             if elapsed < self._settings.POSITION_SYNC_INTERVAL_SECONDS:
                 return
-        self._positions_synced_at = now
-        await self._execution_engine.sync_positions()
+        positions = await self._execution_engine.sync_positions()
+        if positions is not None:
+            self._positions_synced_at = now
+            self._cache_exchange_positions(positions)
+
+    def _cache_exchange_positions(self, positions: list[Any]) -> None:
+        self._latest_exchange_positions = positions
+        self._latest_exchange_positions_at = datetime.now(tz=UTC)
+
+    def _recent_exchange_positions(self) -> list[Any] | None:
+        assert self._settings is not None
+        if self._latest_exchange_positions_at is None:
+            return None
+        age = (
+            datetime.now(tz=UTC) - self._latest_exchange_positions_at
+        ).total_seconds()
+        if age <= max(
+            self._settings.POSITION_SYNC_INTERVAL_SECONDS,
+            self._settings.POSITION_MANAGEMENT_INTERVAL_SECONDS,
+        ):
+            return self._latest_exchange_positions
+        return None
+
+    def _effective_performance_blocks(self, active_symbols: list[str]) -> set[str]:
+        assert self._settings is not None
+        blocked = {
+            symbol
+            for symbol in self._performance_blocked_symbols
+            if symbol in active_symbols
+        }
+        tradable_count = len(active_symbols) - len(blocked)
+        min_tradable = max(0, self._settings.PERFORMANCE_MIN_TRADABLE_SYMBOLS)
+        if blocked and tradable_count < min_tradable:
+            log.warning(
+                "performance_filter.relaxed",
+                reason="too_few_tradable_symbols",
+                blocked_symbols=sorted(blocked),
+                active_symbols=active_symbols,
+                min_tradable=min_tradable,
+            )
+            return set()
+        return blocked
 
     def _activation_price(self, entry_price: Decimal, side: str) -> Decimal:
         assert self._settings is not None
@@ -842,6 +887,7 @@ class TradingApplication:
         await self._refresh_closed_pnl_memory()
 
         _balance_tick: int = 0
+        _effective_blocked_symbols: set[str] = set()
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
         _shadow_positions: dict[str, dict[str, Any]] = {}
 
@@ -895,7 +941,7 @@ class TradingApplication:
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
-            if symbol in self._performance_blocked_symbols:
+            if symbol in _effective_blocked_symbols:
                 log.debug("performance_filter.symbol_blocked", symbol=symbol)
                 return
 
@@ -1007,7 +1053,7 @@ class TradingApplication:
                 }
 
         async def strategy_loop() -> None:
-            nonlocal _balance_tick
+            nonlocal _balance_tick, _effective_blocked_symbols
 
             while not self._shutdown_event.is_set():
                 # Refresh balance every N iterations
@@ -1028,15 +1074,26 @@ class TradingApplication:
                     if self._screener is not None
                     else _SYMBOLS
                 )
+                _effective_blocked_symbols = self._effective_performance_blocks(
+                    active_symbols
+                )
 
                 # Analyse ALL symbols in parallel
-                await asyncio.gather(
+                results = await asyncio.gather(
                     *[
                         process_symbol(symbol, balance, capital)
                         for symbol in active_symbols
                     ],
                     return_exceptions=True,
                 )
+                for symbol, result in zip(active_symbols, results, strict=False):
+                    if isinstance(result, Exception):
+                        log.warning(
+                            "strategy_loop.symbol_task_failed",
+                            symbol=symbol,
+                            error=str(result),
+                            error_type=type(result).__name__,
+                        )
 
                 try:
                     await asyncio.wait_for(

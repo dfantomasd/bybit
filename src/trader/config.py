@@ -69,6 +69,8 @@ class Settings(BaseSettings):
     PERFORMANCE_MIN_CLOSED_TRADES: int = 5
     PERFORMANCE_MAX_SYMBOL_LOSS_USD: float = -2.0
     PERFORMANCE_LOOKBACK_DAYS: int = 7
+    PERFORMANCE_MIN_TRADABLE_SYMBOLS: int = 2
+    """Relax performance blocks if they would leave too few symbols tradable."""
     CLOSED_PNL_REFRESH_INTERVAL_SECONDS: int = 300
     PROFIT_MANAGER_ENABLED: bool = True
     TRAILING_STOP_ENABLED: bool = True

@@ -160,6 +160,7 @@ Key settings:
 | `PERFORMANCE_MIN_CLOSED_TRADES` | `5` | Minimum closed trades before a symbol can be performance-blocked |
 | `PERFORMANCE_MAX_SYMBOL_LOSS_USD` | `-2.0` | Loss threshold for blocking a symbol over the lookback window |
 | `PERFORMANCE_LOOKBACK_DAYS` | `7` | Closed PnL lookback window for symbol performance |
+| `PERFORMANCE_MIN_TRADABLE_SYMBOLS` | `2` | Relax performance blocks if too few symbols would remain tradable |
 | `CLOSED_PNL_REFRESH_INTERVAL_SECONDS` | `300` | How often recent Bybit closed PnL is imported |
 | `PROFIT_MANAGER_ENABLED` | `true` | Manage open positions after entry |
 | `TRAILING_STOP_ENABLED` | `true` | Move profitable positions to breakeven and enable Bybit trailing stop |

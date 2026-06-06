@@ -217,7 +217,7 @@ class TestExecutionEngine:
 
         decision = await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
 
-        assert decision is not None
+        assert decision is None
         assert engine._last_entry_at["BTCUSDT"] is not None
 
     @pytest.mark.asyncio
@@ -267,8 +267,9 @@ class TestExecutionEngine:
         engine = _make_engine()
         engine._adapter.get_positions = AsyncMock(return_value=[pos])
 
-        await engine.sync_positions()
+        positions = await engine.sync_positions()
         assert engine.has_open_position("BTCUSDT")
+        assert positions == [pos]
 
     @pytest.mark.asyncio
     async def test_sync_positions_removes_closed_positions_from_exposure(self):
