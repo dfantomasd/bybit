@@ -87,6 +87,8 @@ class TradingController:
     active_symbols: Callable[[], list[str]]
     regime_for: Callable[[str], str | None]      # symbol → regime string
     signal_log: deque[SignalEntry] = field(default_factory=lambda: deque(maxlen=20))
+    # Optional diagnostics provider (returns dict from TradingApplication.get_diagnostics)
+    diagnostics_provider: Callable[[], dict[str, Any]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -157,6 +159,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("regime", self._cmd_regime))
         app.add_handler(CommandHandler("symbols", self._cmd_symbols))
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+        app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -561,6 +564,45 @@ class TelegramMonitorBot:
         lines.append(f"\n{total_icon} <b>Total (shown):</b> <code>{total:+.4f} USDT</code>")
         await self._reply(update, "\n".join(lines))
 
+    async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.diagnostics_provider is None:
+            await self._reply(update, "<b>Diagnostics</b>\nNot available.")
+            return
+        try:
+            diag = self._controller.diagnostics_provider()
+        except Exception as exc:
+            await self._reply(update, f"<b>Diagnostics</b>\nFailed: <code>{exc}</code>")
+            return
+
+        loop_at = diag.get("last_strategy_loop_at") or "never"
+        ws_age = diag.get("last_ws_message_age_s")
+        ws_str = f"{ws_age:.0f}s ago" if ws_age is not None else "unknown"
+        symbols = diag.get("active_symbols") or []
+        positions = diag.get("open_positions") or []
+        heat = diag.get("portfolio_heat_pct")
+        heat_str = f"{heat:.1f}%" if heat is not None else "n/a"
+
+        lines = [
+            "<b>Diagnostics (last hour)</b>",
+            f"Strategy loop: <code>{loop_at}</code>",
+            f"Last WS msg:   <code>{ws_str}</code>",
+            f"Active symbols: <code>{len(symbols)}</code>  {' '.join(symbols[:5])}{'…' if len(symbols) > 5 else ''}",
+            f"Open positions: <code>{len(positions)}</code>  {' '.join(positions[:5])}{'…' if len(positions) > 5 else ''}",
+            f"Portfolio heat: <code>{heat_str}</code>",
+            "",
+            f"Signals emitted:    <code>{diag.get('hour_signals_emitted', 0)}</code>",
+            f"Risk rejected:      <code>{diag.get('hour_risk_rejected', 0)}</code>",
+            f"API rejected:       <code>{diag.get('hour_api_rejected', 0)}</code>",
+            f"Min-notional rej:   <code>{diag.get('hour_min_notional_rejected', 0)}</code>",
+            f"Skipped open pos:   <code>{diag.get('hour_skipped_open_position', 0)}</code>",
+            f"Skipped entry cd:   <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
+            f"Skipped fail cd:    <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
+        ]
+        await self._reply(update, "\n".join(lines))
+
     # ------------------------------------------------------------------
     # Control commands
     # ------------------------------------------------------------------
@@ -864,14 +906,15 @@ class TelegramMonitorBot:
         return (
             "<b>Bybit AI Trader</b>\n\n"
             "<b>Monitoring</b>\n"
-            "/status   — system health\n"
-            "/balance  — wallet balance\n"
-            "/positions — open positions\n"
-            "/signals  — recent strategy signals\n"
-            "/regime   — market regime per symbol\n"
-            "/symbols  — active symbols\n"
-            "/pnl      — closed PnL history\n"
-            "/help     — this message\n"
+            "/status      — system health\n"
+            "/balance     — wallet balance\n"
+            "/positions   — open positions\n"
+            "/signals     — recent strategy signals\n"
+            "/regime      — market regime per symbol\n"
+            "/symbols     — active symbols\n"
+            "/pnl         — closed PnL history\n"
+            "/diagnostics — counters & loop timing\n"
+            "/help        — this message\n"
             + ctrl_section
         )
 
