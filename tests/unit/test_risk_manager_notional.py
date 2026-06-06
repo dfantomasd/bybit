@@ -67,6 +67,9 @@ def _make_manager(profile: RiskProfile = RiskProfile.MODERATE) -> tuple[RiskMana
     exposure.position_count = 0
     exposure.total_exposure_pct = Decimal("0")
     exposure.can_add_position = MagicMock(return_value=(True, ""))
+    # New methods added by P0.2/P0.3 fix
+    exposure.remaining_position_exposure_usd = MagicMock(return_value=Decimal("1000"))
+    exposure.remaining_total_exposure_usd = MagicMock(return_value=Decimal("1000"))
 
     breakers = MagicMock()
     breakers.should_emergency = MagicMock(return_value=False)
@@ -122,7 +125,7 @@ class TestPostMultiplierMinNotional:
         assert decision.approved_qty * Decimal("0.20") >= Decimal("5"), (
             f"notional {decision.approved_qty * Decimal('0.20')} should be >= 5"
         )
-        assert "min_notional_floor_applied" in (decision.triggered_rules or [])
+        assert "min_notional_buffer_applied" in (decision.triggered_rules or [])
 
     @pytest.mark.asyncio
     async def test_ceil_to_step_rounds_up_correctly(self):
@@ -213,5 +216,5 @@ class TestPostMultiplierMinNotional:
         )
 
         assert decision.status in (RiskDecisionStatus.APPROVED, RiskDecisionStatus.RESIZED)
-        assert "min_notional_floor_applied" not in (decision.triggered_rules or [])
+        assert "min_notional_buffer_applied" not in (decision.triggered_rules or [])
         assert "post_multiplier_min_notional_rejected" not in (decision.triggered_rules or [])
