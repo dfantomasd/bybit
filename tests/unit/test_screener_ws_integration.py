@@ -10,13 +10,36 @@ from trader.features.screener import MarketScreener
 
 
 def _make_ticker(symbol: str, volume: float, price: float = 1.0) -> dict:
-    return {"symbol": symbol, "turnover24h": str(volume), "lastPrice": str(price)}
+    b = price * 0.9999
+    a = price * 1.0001
+    return {
+        "symbol": symbol,
+        "turnover24h": str(volume),
+        "lastPrice": str(price),
+        "bid1Price": str(b),
+        "ask1Price": str(a),
+        "bid1Size": "100000",
+        "ask1Size": "100000",
+        "price24hPcnt": "0.01",
+        "curPreListingPhase": "",
+    }
 
 
 def _make_rest(tickers: list[dict]) -> MagicMock:
     rest = MagicMock()
     rest.get_tickers = AsyncMock(return_value={"result": {"list": tickers}})
     return rest
+
+
+def _loose_screener(**kw) -> MarketScreener:
+    """Build a screener with relaxed filters so all tickers pass."""
+    defaults = {
+        "min_volume_usd": 1,
+        "max_spread_bps": 9999.0,
+        "min_top_book_depth_usd": 0.0,
+    }
+    defaults.update(kw)
+    return MarketScreener(**defaults)
 
 
 class TestScreenerWSIntegration:
@@ -29,14 +52,13 @@ class TestScreenerWSIntegration:
             added_calls.append(symbols)
 
         tickers = [_make_ticker("BTCUSDT", 500_000_000), _make_ticker("ETHUSDT", 300_000_000)]
-        screener = MarketScreener(
+        screener = _loose_screener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
-            min_volume_usd=1,
+            feature_max_symbols=5,
             on_symbols_added=on_added,
         )
-        # Override initial active list so everything looks "new"
-        screener._active_symbols = []
+        # Override initial feature list so everything looks "new"
+        screener._feature_universe = []
 
         await screener._refresh()
 
@@ -45,21 +67,19 @@ class TestScreenerWSIntegration:
 
     @pytest.mark.asyncio
     async def test_on_symbols_removed_callback_called_for_dropped_symbols(self):
-        """Callback fires for symbols that leave the active list."""
+        """Callback fires for symbols that leave the feature universe."""
         removed_calls: list[list[str]] = []
 
         async def on_removed(symbols: list[str]) -> None:
             removed_calls.append(symbols)
 
-        # Start with SOLUSDT in list, but new screen doesn't include it
         tickers = [_make_ticker("BTCUSDT", 500_000_000)]
-        screener = MarketScreener(
+        screener = _loose_screener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
-            min_volume_usd=1,
+            feature_max_symbols=5,
             on_symbols_removed=on_removed,
         )
-        screener._active_symbols = ["SOLUSDT", "BTCUSDT"]
+        screener._feature_universe = ["SOLUSDT", "BTCUSDT"]
 
         await screener._refresh()
 
@@ -72,13 +92,12 @@ class TestScreenerWSIntegration:
         has_pos = {"SOLUSDT"}
 
         tickers = [_make_ticker("BTCUSDT", 500_000_000)]
-        screener = MarketScreener(
+        screener = _loose_screener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
-            min_volume_usd=1,
+            feature_max_symbols=5,
             has_open_position=lambda s: s in has_pos,
         )
-        screener._active_symbols = ["SOLUSDT", "BTCUSDT"]
+        screener._feature_universe = ["SOLUSDT", "BTCUSDT"]
 
         await screener._refresh()
 
@@ -88,13 +107,12 @@ class TestScreenerWSIntegration:
     async def test_symbol_without_open_position_removed_normally(self):
         """Symbol without open position is removed when screener drops it."""
         tickers = [_make_ticker("BTCUSDT", 500_000_000)]
-        screener = MarketScreener(
+        screener = _loose_screener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
-            min_volume_usd=1,
+            feature_max_symbols=5,
             has_open_position=lambda s: False,
         )
-        screener._active_symbols = ["XRPUSDT", "BTCUSDT"]
+        screener._feature_universe = ["XRPUSDT", "BTCUSDT"]
 
         await screener._refresh()
 
@@ -113,16 +131,14 @@ class TestScreenerWSIntegration:
             _make_ticker("BTCUSDT", 500_000_000),  # already in list
             _make_ticker("ETHUSDT", 300_000_000),  # new
         ]
-        screener = MarketScreener(
+        screener = _loose_screener(
             rest_client=_make_rest(tickers),
-            max_symbols=5,
-            min_volume_usd=1,
+            feature_max_symbols=5,
             on_symbols_added=on_added,
         )
-        screener._active_symbols = ["BTCUSDT"]
+        screener._feature_universe = ["BTCUSDT"]
 
         await screener._refresh()
 
-        # Only ETHUSDT is new
         assert len(added_calls) == 1
         assert added_calls[0] == ["ETHUSDT"]

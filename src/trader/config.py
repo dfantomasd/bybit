@@ -145,6 +145,36 @@ class Settings(BaseSettings):
     Prevents near-limit orders from being rejected by code=110094."""
 
     # ------------------------------------------------------------------
+    # Screener
+    # ------------------------------------------------------------------
+    SCREENER_WIDE_MAX_SYMBOLS: int = 80
+    """Maximum symbols in the wide universe (volume + spread + depth filter pass)."""
+
+    SCREENER_FEATURE_MAX_SYMBOLS: int = 30
+    """Symbols that receive WS subscriptions and have features computed."""
+
+    SCREENER_EXECUTION_CANDIDATES: int = 15
+    """Top symbols passed to the strategy for signal generation each cycle."""
+
+    SCREENER_MIN_VOLUME_USD: float = 20_000_000.0
+    """Minimum 24h turnover in USD to enter the wide universe."""
+
+    SCREENER_MAX_SPREAD_BPS: float = 8.0
+    """Maximum bid-ask spread in basis points (wider → excluded)."""
+
+    SCREENER_MIN_TOP_BOOK_DEPTH_USD: float = 5_000.0
+    """Minimum top-of-book depth in USD (bid1 + ask1 notional)."""
+
+    SCREENER_REFRESH_SECONDS: int = 900
+    """How often to refresh the screener universe (seconds)."""
+
+    SCREENER_SUBSCRIBE_TIMEOUT_SECONDS: int = 10
+    """Timeout for WS subscribe acknowledgement per symbol (seconds)."""
+
+    SCREENER_DENYLIST: list[str] = []
+    """Symbols explicitly excluded (pre-market, innovation zone, etc.)."""
+
+    # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------
     RECONCILIATION_INTERVAL_SECONDS: int = 30
