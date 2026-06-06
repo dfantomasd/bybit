@@ -491,6 +491,7 @@ class TradingApplication:
             cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
+            min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
         )
 
         # Sync open positions from exchange so we don't double-enter on restart

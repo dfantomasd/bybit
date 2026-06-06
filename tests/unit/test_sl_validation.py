@@ -67,6 +67,7 @@ def _make_engine(shadow_mode: bool = True) -> ExecutionEngine:
     adapter.get_positions = AsyncMock(return_value=[])
     adapter.get_instrument_info = AsyncMock(return_value=_instrument())
     adapter.place_order = AsyncMock(return_value={"result": {"orderId": "x"}})
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("50000"))
     adapter._rest = MagicMock()
     adapter._rest.set_leverage = AsyncMock()
 

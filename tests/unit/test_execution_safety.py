@@ -1,7 +1,9 @@
 """Tests for execution-engine safety guards and private-WS ExecutionUpdateEvent handling.
 
 Covers:
-  - Conservative market-price guard before place_order (live mode)
+  - Conservative market-price guard before place_order (live mode, fail-closed)
+  - Engine uses BybitAdapter public wrapper (not _rest directly)
+  - Engine uses configured min-notional safety buffer (not hardcoded 1.03)
   - Min-notional bump exposure re-check in RiskManager
   - ExecutionUpdateEvent idempotency and sync_positions trigger
 """
@@ -66,7 +68,7 @@ def _make_proposal(
     )
 
 
-def _make_engine(shadow: bool = False) -> Any:
+def _make_engine(shadow: bool = False, buffer_pct: float = 3.0) -> Any:
     """Build a minimal ExecutionEngine with mocked adapter and risk manager."""
     from trader.execution.engine import ExecutionEngine
 
@@ -74,6 +76,7 @@ def _make_engine(shadow: bool = False) -> Any:
     adapter._rest = MagicMock()
     adapter.place_order = AsyncMock(return_value={"result": {"orderId": "EX001"}})
     adapter.get_instrument_info = AsyncMock(return_value=_make_instrument())
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("6000"))
 
     risk_manager = MagicMock()
     from trader.domain.models import RiskDecision
@@ -101,22 +104,23 @@ def _make_engine(shadow: bool = False) -> Any:
         exposure_tracker=exposure,
         shadow_mode=shadow,
         category="linear",
+        min_notional_safety_buffer_pct=buffer_pct,
     )
     return engine, adapter
 
 
 # ---------------------------------------------------------------------------
-# Change 1: conservative-price guard
+# Change 1: conservative-price guard (fail-closed)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
 async def test_conservative_price_guard_blocks_below_min_notional():
-    """Live mode: executable notional < min_notional * 1.03 → None, place_order not called."""
+    """Live mode: executable notional < min_notional * buffer → None, place_order not called."""
     engine, adapter = _make_engine(shadow=False)
 
     # qty=0.001 * conservative_price=4000 = 4.0, min_notional=5 * 1.03 = 5.15 → blocked
-    adapter._rest.get_conservative_market_price = AsyncMock(return_value=Decimal("4000"))
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("4000"))
 
     proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
 
@@ -128,11 +132,11 @@ async def test_conservative_price_guard_blocks_below_min_notional():
 
 @pytest.mark.asyncio
 async def test_conservative_price_guard_passes_above_min_notional():
-    """Live mode: executable notional >= min_notional * 1.03 → place_order called."""
+    """Live mode: executable notional >= min_notional * buffer → place_order called."""
     engine, adapter = _make_engine(shadow=False)
 
     # qty=0.001 * 6000 = 6.0 > 5 * 1.03 = 5.15 → allowed
-    adapter._rest.get_conservative_market_price = AsyncMock(return_value=Decimal("6000"))
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("6000"))
 
     proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
 
@@ -142,18 +146,42 @@ async def test_conservative_price_guard_passes_above_min_notional():
 
 
 @pytest.mark.asyncio
-async def test_conservative_price_fetch_failure_does_not_block():
-    """If get_conservative_market_price raises, place_order is still attempted."""
+async def test_conservative_price_fetch_failure_blocks_order():
+    """Fail-closed: if get_conservative_market_price raises, place_order must NOT be called."""
     engine, adapter = _make_engine(shadow=False)
 
-    adapter._rest.get_conservative_market_price = AsyncMock(side_effect=Exception("timeout"))
+    adapter.get_conservative_market_price = AsyncMock(side_effect=Exception("timeout"))
 
     proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
 
-    # Should not raise; place_order should be called
+    result = await engine.submit(proposal, capital=Decimal("10000"), available_balance=Decimal("5000"))
+
+    assert result is None
+    adapter.place_order.assert_not_called()
+    # Failure timestamp must be recorded
+    assert "BTCUSDT" in engine._last_failure_at
+
+
+@pytest.mark.asyncio
+async def test_conservative_price_fetch_failure_records_journal_event():
+    """Fail-closed: price-check failure writes REJECTED_PRICE_CHECK_FAILED to the journal."""
+    engine, adapter = _make_engine(shadow=False)
+
+    journal = MagicMock()
+    journal.record_order_event = AsyncMock()
+    journal.record_risk_decision = AsyncMock()
+    engine._trade_journal = journal
+
+    adapter.get_conservative_market_price = AsyncMock(side_effect=Exception("network error"))
+
+    proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
+
     await engine.submit(proposal, capital=Decimal("10000"), available_balance=Decimal("5000"))
 
-    adapter.place_order.assert_called_once()
+    journal.record_order_event.assert_called_once()
+    call_kwargs = journal.record_order_event.call_args.kwargs
+    assert call_kwargs["status"] == "REJECTED_PRICE_CHECK_FAILED"
+    assert "network error" in call_kwargs["error"]
 
 
 @pytest.mark.asyncio
@@ -161,8 +189,7 @@ async def test_conservative_price_guard_shadow_mode_skips_check():
     """In shadow mode the conservative-price guard is not executed."""
     engine, adapter = _make_engine(shadow=True)
 
-    # Even if conservative price would block (4 < 5.15), shadow mode should not call place_order anyway
-    adapter._rest.get_conservative_market_price = AsyncMock(return_value=Decimal("4000"))
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("4000"))
 
     proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
 
@@ -170,8 +197,55 @@ async def test_conservative_price_guard_shadow_mode_skips_check():
 
     # In shadow mode: place_order never called regardless
     adapter.place_order.assert_not_called()
-    # get_conservative_market_price should not be called in shadow mode
+    # get_conservative_market_price must not be called in shadow mode
+    adapter.get_conservative_market_price.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Public adapter wrapper and configurable buffer
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_engine_uses_adapter_public_price_wrapper():
+    """Engine calls adapter.get_conservative_market_price, never adapter._rest directly."""
+    engine, adapter = _make_engine(shadow=False)
+
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("6000"))
+    adapter._rest.get_conservative_market_price = AsyncMock(return_value=Decimal("6000"))
+
+    proposal = _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000"))
+    await engine.submit(proposal, capital=Decimal("10000"), available_balance=Decimal("5000"))
+
+    adapter.get_conservative_market_price.assert_called_once()
     adapter._rest.get_conservative_market_price.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_engine_uses_configured_min_notional_buffer():
+    """Engine uses the buffer_pct passed at construction, not a hardcoded 1.03."""
+    # With buffer=10%: min_notional=5, required=5.5; qty=0.001*5300=5.3 < 5.5 → blocked
+    engine_strict, adapter_strict = _make_engine(shadow=False, buffer_pct=10.0)
+    adapter_strict.get_conservative_market_price = AsyncMock(return_value=Decimal("5300"))
+
+    result = await engine_strict.submit(
+        _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
+        capital=Decimal("10000"),
+        available_balance=Decimal("5000"),
+    )
+    assert result is None
+    adapter_strict.place_order.assert_not_called()
+
+    # With buffer=3%: same price 5300 → 5.3 > 5*1.03=5.15 → allowed
+    engine_loose, adapter_loose = _make_engine(shadow=False, buffer_pct=3.0)
+    adapter_loose.get_conservative_market_price = AsyncMock(return_value=Decimal("5300"))
+
+    await engine_loose.submit(
+        _make_proposal(qty=Decimal("0.001"), entry_price=Decimal("50000")),
+        capital=Decimal("10000"),
+        available_balance=Decimal("5000"),
+    )
+    adapter_loose.place_order.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
@@ -295,7 +369,6 @@ async def test_execution_event_triggers_sync():
     execution_engine.sync_positions = sync_mock
     bybit_adapter = MagicMock()
     bybit_adapter.reconcile = reconcile_mock
-    # Simulate initial_shadow_mode returning False (live path)
     initial_shadow_mode = lambda: False  # noqa: E731
 
     async def consume():

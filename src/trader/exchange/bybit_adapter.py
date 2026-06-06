@@ -8,6 +8,7 @@ Provides typed, domain-level methods.
 from __future__ import annotations
 
 import time
+from decimal import Decimal
 from typing import Any
 
 import structlog
@@ -212,6 +213,27 @@ class BybitAdapter:
                 error=str(exc),
             )
         return resp
+
+    # ------------------------------------------------------------------
+    # Market data
+    # ------------------------------------------------------------------
+
+    async def get_conservative_market_price(
+        self,
+        category: str,
+        symbol: str,
+        side: str,
+    ) -> Decimal:
+        """Return a conservative market price for pre-order notional checks.
+
+        Delegates to the REST client (ask1Price for buys, bid1Price for sells).
+        Raises TradingSystemError if ticker data is unavailable.
+        """
+        return await self._rest.get_conservative_market_price(
+            category=category,
+            symbol=symbol,
+            side=side,
+        )
 
     # ------------------------------------------------------------------
     # Instruments

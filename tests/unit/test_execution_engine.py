@@ -93,6 +93,7 @@ def _make_engine(
     adapter.get_positions = AsyncMock(return_value=[])
     adapter.get_instrument_info = AsyncMock(return_value=_instrument_info())
     adapter.place_order = AsyncMock(return_value={"result": {"orderId": "test-123"}})
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("50000"))
 
     risk_manager = MagicMock()
     exposure = MagicMock()
