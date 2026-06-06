@@ -397,7 +397,6 @@ class TradeJournal:
 
     async def get_pending_durable_orders(self) -> list[dict[str, Any]]:
         """Return all non-terminal durable order states (for restart recovery)."""
-        _TERMINAL = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED", "SHADOW")
         rows = await self._fetch(
             """
             SELECT order_link_id, proposal_id, decision_id, symbol, side, qty,

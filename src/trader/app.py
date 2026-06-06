@@ -659,7 +659,6 @@ class TradingApplication:
 
         # Event consumer: feeds CandleStore, triggers features, writes candle journal
         async def consume_events() -> None:
-            from decimal import Decimal as _D
 
             from trader.data.candles import candle_from_kline_event
             from trader.domain.events import KlineEvent
@@ -680,7 +679,6 @@ class TradingApplication:
 
                             # Persist confirmed candle to PostgreSQL (best-effort)
                             if self._trade_journal is not None and self._trade_journal.is_enabled:
-                                from datetime import timedelta
                                 _interval_ms = {
                                     "1": 60_000, "3": 180_000, "5": 300_000,
                                     "15": 900_000, "30": 1_800_000, "60": 3_600_000,
@@ -768,7 +766,7 @@ class TradingApplication:
             from trader.domain.enums import OrderStatus
             from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent, OrderUpdateEvent
 
-            _TERMINAL_ORDER_STATES = {
+            _terminal_order_states = {
                 OrderStatus.FILLED,
                 OrderStatus.CANCELLED,
                 OrderStatus.REJECTED,
@@ -809,7 +807,7 @@ class TradingApplication:
                             except Exception as _j_exc:
                                 log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                         # Release pending entry count when order reaches terminal state
-                        if event.order_status in _TERMINAL_ORDER_STATES and self._execution_engine is not None:
+                        if event.order_status in _terminal_order_states and self._execution_engine is not None:
                             self._execution_engine.mark_entry_resolved()
                         # Trigger position sync on fill
                         if event.order_status == OrderStatus.FILLED and self._execution_engine is not None:
@@ -876,6 +874,75 @@ class TradingApplication:
         consumer_task = asyncio.create_task(consume_private_events(), name="ws-private-consumer")
         self._background_tasks.extend([ws_task, consumer_task])
         log.info("private_ws.started", endpoint=selector.ws_private_base)
+
+    async def _run_load_governor(self) -> None:
+        """Adaptive load governor: reduce feature symbols when system is under pressure.
+
+        Monitors event-loop lag and WS queue utilisation every
+        LOAD_GOVERNOR_CHECK_SECONDS. When any metric exceeds its threshold,
+        the screener's feature universe is narrowed by one symbol (down to the
+        configured minimum). When all metrics are healthy the universe is
+        gradually restored toward the original maximum.
+        """
+        assert self._settings is not None
+        if not self._settings.ADAPTIVE_LOAD_GOVERNOR_ENABLED:
+            return
+
+        check_interval = float(self._settings.LOAD_GOVERNOR_CHECK_SECONDS)
+        max_lag_ms = float(self._settings.MAX_EVENT_LOOP_LAG_MS)
+        min_symbols = int(self._settings.LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS)
+
+        # Original feature_max from screener (set at startup)
+        original_max: int | None = None
+
+        while not self._shutdown_event.is_set():
+            await asyncio.sleep(check_interval)
+            if self._screener is None:
+                continue
+
+            if original_max is None:
+                original_max = self._screener._feature_max
+
+            # --- Measure event-loop lag ---
+            t0 = asyncio.get_event_loop().time()
+            await asyncio.sleep(0)  # yield and immediately return
+            lag_ms = (asyncio.get_event_loop().time() - t0) * 1000
+
+            # --- Measure WS queue utilisation (if accessible) ---
+            # The event queue is local to _start_public_ws, so we track pressure
+            # by checking if health checker reports recent WS staleness
+            ws_stale = False
+            if (
+                self._health_checker is not None
+                and self._health_checker._last_ws_message_at is not None
+            ):
+                ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
+                ws_stale = ws_age > 30.0
+
+            overloaded = lag_ms > max_lag_ms or ws_stale
+            current = self._screener._feature_max
+
+            if overloaded and current > min_symbols:
+                new_max = max(min_symbols, current - 1)
+                self._screener._feature_max = new_max
+                log.warning(
+                    "load_governor.reducing_symbols",
+                    lag_ms=round(lag_ms, 1),
+                    ws_stale=ws_stale,
+                    from_max=current,
+                    to_max=new_max,
+                    min_symbols=min_symbols,
+                )
+            elif not overloaded and current < original_max:
+                # Restore one symbol at a time
+                new_max = min(original_max, current + 1)
+                self._screener._feature_max = new_max
+                log.info(
+                    "load_governor.restoring_symbols",
+                    lag_ms=round(lag_ms, 1),
+                    from_max=current,
+                    to_max=new_max,
+                )
 
     async def _run_outcome_resolver(self) -> None:
         """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
@@ -1756,6 +1823,12 @@ class TradingApplication:
                 self._run_outcome_resolver(), name="outcome-resolver"
             )
             self._background_tasks.append(outcome_resolver_task)
+
+            # Adaptive load governor: narrows feature universe under memory/lag pressure
+            load_governor_task = asyncio.create_task(
+                self._run_load_governor(), name="load-governor"
+            )
+            self._background_tasks.append(load_governor_task)
 
             try:
                 await self._main_loop()
