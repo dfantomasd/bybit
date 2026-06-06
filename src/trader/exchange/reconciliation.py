@@ -260,10 +260,31 @@ class ReconciliationService:
         return diffs
 
     async def _check_orders(self, category: str) -> list[str]:
-        """Compare local active orders vs exchange active orders."""
+        """Compare local PENDING orders vs exchange open orders.
+
+        Terminal states (FILLED, CANCELLED, REJECTED, EXPIRED) are never
+        compared with exchange open orders — they are already settled.
+        Only pending states are eligible to be on the exchange at all.
+        """
         diffs: list[str] = []
         if self._rest is None or self._order_store is None:
             return diffs
+
+        _PENDING_STATES = {
+            OrderStatus.CREATED_LOCAL,
+            OrderStatus.SUBMITTING,
+            OrderStatus.REST_ACCEPTED,
+            OrderStatus.WS_CONFIRMED,
+            OrderStatus.PARTIALLY_FILLED,
+            OrderStatus.CANCEL_REQUESTED,
+            OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED,
+        }
+        _TERMINAL_STATES = {
+            OrderStatus.FILLED,
+            OrderStatus.CANCELLED,
+            OrderStatus.REJECTED,
+            OrderStatus.EXPIRED,
+        }
 
         try:
             exchange_orders = await self._rest.get_open_orders(category=category)
@@ -284,26 +305,32 @@ class ReconciliationService:
         except Exception:
             local_active = {}
 
-        local_link_ids = set(local_active.keys())
+        # Only compare PENDING local orders against exchange open orders
+        local_pending: dict[str, Any] = {}
+        for lid, machine in local_active.items():
+            status = getattr(machine, "status", None)
+            if status in _PENDING_STATES:
+                local_pending[lid] = machine
 
-        # Unknown orders on exchange
-        for lid in exchange_link_ids - local_link_ids:
+        local_pending_ids = set(local_pending.keys())
+
+        # Unknown orders on exchange (not tracked locally at all)
+        for lid in exchange_link_ids - set(local_active.keys()):
             diffs.append(f"Order {lid} on exchange but not in local store")
 
-        # Local orders missing from exchange
-        for lid in local_link_ids - exchange_link_ids:
-            machine = local_active.get(lid)
-            if machine and not machine.is_terminal():
-                # Mark as needing reconciliation
+        # Local PENDING orders missing from exchange → mark for reconciliation
+        for lid in local_pending_ids - exchange_link_ids:
+            machine = local_pending.get(lid)
+            if machine is not None:
                 try:
                     await self._order_store.transition(
                         lid,
                         OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED,
                         "not found on exchange during reconciliation",
                     )
-                    diffs.append(f"Order {lid} in local store but not on exchange (marked UNKNOWN)")
+                    diffs.append(f"Order {lid} pending locally but not on exchange (marked UNKNOWN)")
                 except Exception:
-                    diffs.append(f"Order {lid} in local store but not on exchange")
+                    diffs.append(f"Order {lid} pending locally but not on exchange")
 
         return diffs
 

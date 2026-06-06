@@ -1,0 +1,138 @@
+"""PR 4 Telegram dashboard tests.
+
+Covers:
+- test_shadow_off_blocked (Telegram cannot disable shadow)
+- test_live_activation_blocked (mode:active blocked)
+- test_control_menu_has_no_dangerous_controls
+- test_main_menu_structure (expected buttons present)
+"""
+
+from __future__ import annotations
+
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot, TradingController
+
+
+def _make_bot() -> TelegramMonitorBot:
+    controller = TradingController(
+        pause=AsyncMock(),
+        resume=AsyncMock(),
+        set_shadow=AsyncMock(),
+        set_risk_profile=AsyncMock(),
+        emergency_stop=AsyncMock(),
+        is_paused=lambda: False,
+        is_shadow=lambda: True,
+        current_profile=lambda: "CONSERVATIVE",
+        active_symbols=lambda: [],
+        regime_for=lambda s: None,
+        diagnostics_provider=lambda: {},
+        db_diagnostics_provider=None,
+    )
+
+    config = TelegramBotConfig(
+        token="fake:TOKEN",
+        allowed_chat_ids={12345},
+        trading_mode="SHADOW",
+        risk_profile="CONSERVATIVE",
+        bybit_use_testnet=True,
+    )
+
+    return TelegramMonitorBot(
+        config=config,
+        health_provider=AsyncMock(return_value=MagicMock(ok=True)),
+        adapter_factory=lambda: None,
+        controller=controller,
+    )
+
+
+def _fake_update(chat_id: int = 12345) -> MagicMock:
+    u = MagicMock()
+    u.effective_chat = MagicMock()
+    u.effective_chat.id = chat_id
+    u.callback_query = None
+    # Use effective_message (what _reply() uses) with AsyncMock
+    fake_msg = MagicMock()
+    fake_msg.reply_text = AsyncMock()
+    u.effective_message = fake_msg
+    u.message = fake_msg
+    return u
+
+
+def _fake_context() -> MagicMock:
+    return type("_Ctx", (), {"args": ["off"]})()  # type: ignore[return-value]
+
+
+@pytest.mark.asyncio
+async def test_shadow_off_blocked() -> None:
+    """Telegram cannot turn shadow mode OFF."""
+    bot = _make_bot()
+    update = _fake_update()
+    ctx = _fake_context()
+
+    await bot._cmd_shadow(update, ctx)  # type: ignore[arg-type]
+
+    # set_shadow should NOT be called with False
+    for call in bot._controller.set_shadow.call_args_list:  # type: ignore[union-attr]
+        assert call.args[0] is not False, "Shadow OFF was allowed via Telegram"
+
+    # Reply should contain "blocked" text
+    assert update.effective_message.reply_text.called
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "blocked" in reply_text.lower() or "CANARY" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_live_activation_blocked_via_mode_button() -> None:
+    """mode:active button should return blocked message."""
+    bot = _make_bot()
+    update = _fake_update()
+
+    await bot._handle_mode_button(update, "active")
+
+    assert update.effective_message.reply_text.called
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "blocked" in reply_text.lower() or "CANARY" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_live_activation_blocked_via_cmd_mode() -> None:
+    """/mode active command should return blocked message."""
+    bot = _make_bot()
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": ["active"]})()
+
+    await bot._cmd_mode(update, ctx)  # type: ignore[arg-type]
+
+    assert update.effective_message.reply_text.called
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "blocked" in reply_text.lower() or "CANARY" in reply_text
+
+
+def test_main_menu_has_db_model_button() -> None:
+    """Main menu should include 🗄 База и модель button."""
+    bot = _make_bot()
+    markup = bot._main_menu()
+    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert any("База" in t or "модель" in t or "🗄" in t for t in all_texts), (
+        f"No DB/model button found in menu: {all_texts}"
+    )
+
+
+def test_control_menu_no_active_button() -> None:
+    """Control menu should NOT have 'Active' execution button."""
+    bot = _make_bot()
+    markup = bot._control_menu()
+    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert "Active" not in all_texts, "Dangerous 'Active' button still present in control menu"
+
+
+def test_control_menu_no_risk_escalation() -> None:
+    """Control menu should NOT have risk escalation buttons."""
+    bot = _make_bot()
+    markup = bot._control_menu()
+    all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    risk_buttons = [c for c in all_callbacks if c and c.startswith("risk:")]
+    assert not risk_buttons, f"Risk escalation buttons found in control menu: {risk_buttons}"

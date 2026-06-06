@@ -170,11 +170,12 @@ class TestSettingsSafetyGates:
         assert settings.BYBIT_USE_TESTNET is False  # type: ignore[union-attr]
 
     def test_live_trading_mode_allowed_when_live_mode_true(self) -> None:
-        """LIVE mode is permitted only when LIVE_MODE=true is explicitly set."""
+        """LIVE mode is permitted only when LIVE_MODE=true and LIVE_ARMED=true are set."""
         settings = self._make_settings(
             TRADING_MODE="LIVE",
             BYBIT_USE_TESTNET="false",
             LIVE_MODE="true",
+            LIVE_ARMED="true",
         )
         assert settings.TRADING_MODE == TradingMode.LIVE  # type: ignore[union-attr]
 

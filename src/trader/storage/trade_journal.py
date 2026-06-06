@@ -67,6 +67,26 @@ class TradeJournal:
         async with self._pool.acquire() as conn:
             await conn.execute(
                 """
+            CREATE TABLE IF NOT EXISTS durable_order_state (
+                order_link_id text PRIMARY KEY,
+                proposal_id uuid,
+                decision_id uuid,
+                symbol text NOT NULL,
+                side text NOT NULL,
+                qty numeric NOT NULL,
+                state text NOT NULL,
+                exchange_order_id text,
+                payload_hash text,
+                retry_count integer NOT NULL DEFAULT 0,
+                last_error text,
+                created_at timestamptz NOT NULL DEFAULT now(),
+                updated_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_durable_order_state_state
+                ON durable_order_state (state, updated_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_durable_order_state_symbol
+                ON durable_order_state (symbol, created_at DESC);
+
             CREATE TABLE IF NOT EXISTS trade_signals (
                 proposal_id uuid PRIMARY KEY,
                 created_at timestamptz NOT NULL,
@@ -131,6 +151,98 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_closed_pnl_symbol_created
                 ON closed_pnl (symbol, created_at DESC);
+
+            -- Market candles with retention
+            CREATE TABLE IF NOT EXISTS market_candles (
+                symbol text NOT NULL,
+                interval text NOT NULL,
+                open_time timestamptz NOT NULL,
+                close_time timestamptz NOT NULL,
+                open numeric NOT NULL,
+                high numeric NOT NULL,
+                low numeric NOT NULL,
+                close numeric NOT NULL,
+                volume numeric NOT NULL,
+                turnover numeric NOT NULL,
+                confirmed boolean NOT NULL DEFAULT false,
+                source text NOT NULL DEFAULT 'ws',
+                created_at timestamptz NOT NULL DEFAULT now(),
+                PRIMARY KEY (symbol, interval, open_time)
+            );
+            CREATE INDEX IF NOT EXISTS idx_market_candles_interval_time
+                ON market_candles (interval, open_time DESC);
+            CREATE INDEX IF NOT EXISTS idx_market_candles_symbol_interval_time
+                ON market_candles (symbol, interval, open_time DESC);
+
+            -- Feature snapshots (one row per confirmed signal evaluation)
+            CREATE TABLE IF NOT EXISTS feature_snapshots (
+                snapshot_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at timestamptz NOT NULL DEFAULT now(),
+                symbol text NOT NULL,
+                interval text NOT NULL,
+                candle_open_time timestamptz NOT NULL,
+                feature_schema_hash text NOT NULL,
+                feature_names jsonb NOT NULL,
+                feature_values jsonb NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_feature_snapshots_symbol_time
+                ON feature_snapshots (symbol, created_at DESC);
+
+            -- ML prediction events (shadow scoring even when live decisions disabled)
+            CREATE TABLE IF NOT EXISTS prediction_events (
+                prediction_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                created_at timestamptz NOT NULL DEFAULT now(),
+                symbol text NOT NULL,
+                interval text NOT NULL,
+                model_version text NOT NULL,
+                feature_snapshot_id uuid,
+                score double precision NOT NULL,
+                strategy_signal text,
+                decision text
+            );
+            CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
+                ON prediction_events (symbol, created_at DESC);
+
+            -- Outcome labels for training (resolved after horizon_minutes)
+            CREATE TABLE IF NOT EXISTS prediction_outcomes (
+                prediction_id uuid NOT NULL REFERENCES prediction_events(prediction_id),
+                horizon_minutes integer NOT NULL,
+                net_return_bps double precision,
+                max_favorable_excursion_bps double precision,
+                max_adverse_excursion_bps double precision,
+                label integer,
+                resolved_at timestamptz,
+                PRIMARY KEY (prediction_id, horizon_minutes)
+            );
+
+            -- ML model registry
+            CREATE TABLE IF NOT EXISTS model_versions (
+                model_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                version text NOT NULL UNIQUE,
+                status text NOT NULL DEFAULT 'SHADOW_CHALLENGER',
+                training_started_at timestamptz,
+                training_finished_at timestamptz,
+                training_samples integer,
+                feature_schema_hash text,
+                artifact bytea,
+                metrics jsonb,
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+            CREATE INDEX IF NOT EXISTS idx_model_versions_status
+                ON model_versions (status, created_at DESC);
+
+            -- Training run history
+            CREATE TABLE IF NOT EXISTS training_runs (
+                run_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                model_version text,
+                mode text NOT NULL DEFAULT 'offline',
+                started_at timestamptz NOT NULL DEFAULT now(),
+                finished_at timestamptz,
+                status text NOT NULL DEFAULT 'RUNNING',
+                sample_count integer,
+                error text,
+                metrics jsonb
+            );
             """
             )
 
@@ -239,6 +351,276 @@ class TradeJournal:
             exchange_order_id,
             error,
         )
+
+    async def upsert_durable_order_state(
+        self,
+        *,
+        order_link_id: str,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        state: str,
+        proposal_id: Any = None,
+        decision_id: Any = None,
+        exchange_order_id: str | None = None,
+        payload_hash: str | None = None,
+        retry_count: int = 0,
+        last_error: str | None = None,
+    ) -> None:
+        """Upsert durable order state before/after REST submission."""
+        await self._execute(
+            """
+            INSERT INTO durable_order_state (
+                order_link_id, proposal_id, decision_id, symbol, side, qty,
+                state, exchange_order_id, payload_hash, retry_count, last_error, updated_at
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
+            ON CONFLICT (order_link_id) DO UPDATE SET
+                state = EXCLUDED.state,
+                exchange_order_id = COALESCE(EXCLUDED.exchange_order_id, durable_order_state.exchange_order_id),
+                retry_count = EXCLUDED.retry_count,
+                last_error = EXCLUDED.last_error,
+                updated_at = now()
+            """,
+            order_link_id,
+            proposal_id,
+            decision_id,
+            symbol,
+            side,
+            qty,
+            state,
+            exchange_order_id,
+            payload_hash,
+            retry_count,
+            last_error,
+        )
+
+    async def get_pending_durable_orders(self) -> list[dict[str, Any]]:
+        """Return all non-terminal durable order states (for restart recovery)."""
+        _TERMINAL = ("FILLED", "CANCELLED", "REJECTED", "EXPIRED", "SHADOW")
+        rows = await self._fetch(
+            """
+            SELECT order_link_id, proposal_id, decision_id, symbol, side, qty,
+                   state, exchange_order_id, retry_count, last_error, created_at, updated_at
+            FROM durable_order_state
+            WHERE state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
+              AND updated_at > now() - interval '24 hours'
+            ORDER BY created_at DESC
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def upsert_market_candle(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        open_time: datetime,
+        close_time: datetime,
+        open: Decimal,
+        high: Decimal,
+        low: Decimal,
+        close: Decimal,
+        volume: Decimal,
+        turnover: Decimal,
+        confirmed: bool,
+        source: str = "ws",
+    ) -> None:
+        """UPSERT a single confirmed candle (no duplicates)."""
+        await self._execute(
+            """
+            INSERT INTO market_candles (
+                symbol, interval, open_time, close_time, open, high, low, close,
+                volume, turnover, confirmed, source
+            )
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+            ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
+                close_time = EXCLUDED.close_time,
+                open = EXCLUDED.open,
+                high = EXCLUDED.high,
+                low = EXCLUDED.low,
+                close = EXCLUDED.close,
+                volume = EXCLUDED.volume,
+                turnover = EXCLUDED.turnover,
+                confirmed = EXCLUDED.confirmed
+            WHERE NOT market_candles.confirmed OR EXCLUDED.confirmed
+            """,
+            symbol,
+            interval,
+            open_time,
+            close_time,
+            open,
+            high,
+            low,
+            close,
+            volume,
+            turnover,
+            confirmed,
+            source,
+        )
+
+    async def get_candle_counts(self) -> dict[str, int]:
+        """Return {interval: count} for market_candles (diagnostics)."""
+        rows = await self._fetch(
+            "SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval"
+        )
+        return {str(r["interval"]): int(r["cnt"]) for r in rows}
+
+    async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
+        """Return the most recent open_time for the given interval."""
+        rows = await self._fetch(
+            "SELECT MAX(open_time) AS ts FROM market_candles WHERE interval = $1",
+            interval,
+        )
+        if rows and rows[0]["ts"]:
+            return rows[0]["ts"]
+        return None
+
+    async def apply_candle_retention(self) -> None:
+        """Delete old candles according to retention policy."""
+        retention = {"1": 30, "5": 180, "15": 365, "60": 730}
+        for interval, days in retention.items():
+            await self._execute(
+                "DELETE FROM market_candles WHERE interval = $1 AND open_time < now() - ($2::text || ' days')::interval",
+                interval,
+                str(days),
+            )
+
+    async def record_feature_snapshot(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        candle_open_time: datetime,
+        feature_schema_hash: str,
+        feature_names: list[str],
+        feature_values: list[float],
+    ) -> str:
+        """Write feature vector snapshot; return snapshot_id."""
+        rows = await self._fetch(
+            """
+            INSERT INTO feature_snapshots (
+                symbol, interval, candle_open_time,
+                feature_schema_hash, feature_names, feature_values
+            )
+            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+            RETURNING snapshot_id
+            """,
+            symbol,
+            interval,
+            candle_open_time,
+            feature_schema_hash,
+            json.dumps(feature_names),
+            json.dumps(feature_values),
+        )
+        return str(rows[0]["snapshot_id"]) if rows else ""
+
+    async def record_prediction_event(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        model_version: str,
+        score: float,
+        strategy_signal: str | None = None,
+        decision: str | None = None,
+        feature_snapshot_id: str | None = None,
+    ) -> str:
+        """Write a shadow-mode prediction event; return prediction_id."""
+        rows = await self._fetch(
+            """
+            INSERT INTO prediction_events (
+                symbol, interval, model_version, feature_snapshot_id,
+                score, strategy_signal, decision
+            )
+            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7)
+            RETURNING prediction_id
+            """,
+            symbol,
+            interval,
+            model_version,
+            feature_snapshot_id if feature_snapshot_id else None,
+            score,
+            strategy_signal,
+            decision,
+        )
+        return str(rows[0]["prediction_id"]) if rows else ""
+
+    async def resolve_prediction_outcomes(
+        self,
+        *,
+        prediction_id: str,
+        horizon_minutes: int,
+        net_return_bps: float,
+        max_favorable_excursion_bps: float,
+        max_adverse_excursion_bps: float,
+        label: int,
+    ) -> None:
+        """Write or update outcome label for a prediction."""
+        await self._execute(
+            """
+            INSERT INTO prediction_outcomes (
+                prediction_id, horizon_minutes, net_return_bps,
+                max_favorable_excursion_bps, max_adverse_excursion_bps,
+                label, resolved_at
+            )
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, now())
+            ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
+                net_return_bps = EXCLUDED.net_return_bps,
+                label = EXCLUDED.label,
+                resolved_at = now()
+            """,
+            prediction_id,
+            horizon_minutes,
+            net_return_bps,
+            max_favorable_excursion_bps,
+            max_adverse_excursion_bps,
+            label,
+        )
+
+    async def record_order_update_event(
+        self,
+        *,
+        order_link_id: str,
+        exchange_order_id: str | None,
+        symbol: str,
+        side: str,
+        qty: Decimal,
+        state: str,
+        error: str | None = None,
+    ) -> None:
+        """Record an OrderUpdateEvent from private WS (updates durable state)."""
+        await self.upsert_durable_order_state(
+            order_link_id=order_link_id,
+            symbol=symbol,
+            side=side,
+            qty=qty,
+            state=state,
+            exchange_order_id=exchange_order_id,
+            last_error=error,
+        )
+
+    async def get_db_diagnostics(self) -> dict[str, Any]:
+        """Return read-only diagnostics for Telegram 🗄 screen."""
+        result: dict[str, Any] = {
+            "connected": self.is_enabled,
+            "candles_by_interval": {},
+            "latest_candle_1m": None,
+            "feature_snapshots": 0,
+            "prediction_outcomes": 0,
+        }
+        if not self.is_enabled:
+            return result
+        try:
+            result["candles_by_interval"] = await self.get_candle_counts()
+            result["latest_candle_1m"] = await self.get_latest_candle_time("1")
+            rows = await self._fetch("SELECT count(*) AS cnt FROM feature_snapshots")
+            result["feature_snapshots"] = int(rows[0]["cnt"]) if rows else 0
+            rows = await self._fetch("SELECT count(*) AS cnt FROM prediction_outcomes")
+            result["prediction_outcomes"] = int(rows[0]["cnt"]) if rows else 0
+        except Exception as exc:
+            log.debug("trade_journal.diagnostics_failed", error=str(exc))
+        return result
 
     async def record_closed_pnl_records(self, records: Iterable[dict[str, Any]]) -> int:
         inserted = 0

@@ -66,6 +66,10 @@ class ExecutionEngine:
         category: str = "linear",
         trade_journal: Any | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
+        max_new_entries_per_minute: int = 60,
+        max_concurrent_pending_entries: int = 10,
+        max_same_side_positions: int = 10,
+        startup_warmup_seconds: int = 0,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -76,6 +80,17 @@ class ExecutionEngine:
         self._category = category
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
+
+        # Burst / rate limiting
+        self._max_entries_per_minute = max_new_entries_per_minute
+        self._max_concurrent_pending = max_concurrent_pending_entries
+        self._max_same_side = max_same_side_positions
+        self._startup_warmup = timedelta(seconds=startup_warmup_seconds)
+        self._started_at: datetime = datetime.now(tz=UTC)
+        # Rolling window of entry timestamps for per-minute rate limiting
+        self._recent_entries: list[datetime] = []
+        # Pending entry count (orders in SUBMITTING / REST_ACCEPTED state)
+        self._pending_entry_count: int = 0
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -89,6 +104,58 @@ class ExecutionEngine:
         self._leverage_confirmed: dict[str, Decimal] = {}
         # Serialises risk evaluation + local exposure updates across symbols.
         self._submit_lock = asyncio.Lock()
+
+    # ------------------------------------------------------------------
+    # Startup warmup / burst guards
+    # ------------------------------------------------------------------
+
+    def is_in_warmup(self) -> bool:
+        """True if still in the post-startup monitoring-only phase."""
+        return datetime.now(tz=UTC) - self._started_at < self._startup_warmup
+
+    def warmup_seconds_remaining(self) -> float:
+        elapsed = (datetime.now(tz=UTC) - self._started_at).total_seconds()
+        return max(0.0, self._startup_warmup.total_seconds() - elapsed)
+
+    def _prune_recent_entries(self) -> None:
+        cutoff = datetime.now(tz=UTC) - timedelta(seconds=60)
+        self._recent_entries = [t for t in self._recent_entries if t > cutoff]
+
+    def _check_rate_limits(self, symbol: str, side: str) -> str | None:
+        """Return a rejection reason string if burst limits are exceeded, else None.
+
+        Rate limits are enforced only in live mode (non-shadow). In shadow mode
+        we simulate freely so tests and monitoring remain unaffected.
+        """
+        if self.is_in_warmup():
+            return f"startup_warmup_active ({self.warmup_seconds_remaining():.0f}s remaining)"
+
+        # Rate / burst limits only apply to live execution
+        if not self._shadow_mode:
+            self._prune_recent_entries()
+            if len(self._recent_entries) >= self._max_entries_per_minute:
+                return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
+
+            if self._pending_entry_count >= self._max_concurrent_pending:
+                return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
+
+        same_side_count = sum(
+            1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
+        )
+        if same_side_count >= self._max_same_side:
+            return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
+
+        return None
+
+    def mark_entry_submitted(self) -> None:
+        """Call when a live entry order is submitted (SUBMITTING state)."""
+        if not self._shadow_mode:
+            self._pending_entry_count += 1
+            self._recent_entries.append(datetime.now(tz=UTC))
+
+    def mark_entry_resolved(self) -> None:
+        """Call when a pending entry reaches a terminal or confirmed state."""
+        self._pending_entry_count = max(0, self._pending_entry_count - 1)
 
     # ------------------------------------------------------------------
     # Position awareness
@@ -223,6 +290,12 @@ class ExecutionEngine:
         # 1. Deduplication ─────────────────────────────────────────────
         if self.has_open_position(symbol):
             log.debug("execution.skipped_open_position", symbol=symbol)
+            return None
+
+        # 1b. Startup warmup + burst rate limits ───────────────────────
+        reject_reason = self._check_rate_limits(symbol, proposal.side.value)
+        if reject_reason:
+            log.info("execution.skipped_rate_limit", symbol=symbol, reason=reject_reason)
             return None
 
         # 2a. Entry cooldown (successful entries only) ────────────────
@@ -364,24 +437,38 @@ class ExecutionEngine:
                     status="SHADOW",
                 )
         else:
-            # Conservative-price guard: fail-closed — reject if price unavailable or notional too low
+            # Last-moment exchange guard: only the raw exchange minimum matters here.
+            # The buffer is applied once at sizing time (RiskManager). Applying it
+            # again here caused valid orders to be blocked when price moved slightly.
+            # Rule: reject only if below raw exchange minimum; warn if buffer consumed.
             if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
                 try:
                     conservative_price = await self._adapter.get_conservative_market_price(
                         self._category, symbol, proposal.side.value
                     )
                     executable_notional = intent.qty * conservative_price
-                    min_notional_required = instrument_info.min_notional * (
-                        Decimal("1") + self._min_notional_buffer / Decimal("100")
-                    )
-                    if executable_notional < min_notional_required:
+                    exchange_min = instrument_info.min_notional  # raw exchange minimum — NO buffer
+                    sizing_target = exchange_min * (Decimal("1") + self._min_notional_buffer / Decimal("100"))
+
+                    if executable_notional < exchange_min:
+                        # Below raw exchange minimum → hard reject (would trigger code=110094)
                         log.warning(
-                            "execution.below_min_notional_at_market",
+                            "execution.below_exchange_minimum_rejected",
                             symbol=symbol,
                             executable_notional=str(executable_notional),
-                            required=str(min_notional_required),
+                            exchange_min=str(exchange_min),
                         )
                         return None
+
+                    if executable_notional < sizing_target:
+                        # Buffer consumed by price movement but still above exchange minimum → allow
+                        log.warning(
+                            "execution.buffer_consumed_before_submit",
+                            symbol=symbol,
+                            executable_notional=str(executable_notional),
+                            sizing_target=str(sizing_target),
+                            exchange_min=str(exchange_min),
+                        )
                 except Exception as _price_exc:
                     self._last_failure_at[symbol] = datetime.now(tz=UTC)
                     log.warning(
@@ -404,6 +491,7 @@ class ExecutionEngine:
                         except Exception as _journal_exc:  # noqa: BLE001
                             log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
                     return None
+            self.mark_entry_submitted()
             try:
                 resp = await self._adapter.place_order(intent)
                 exchange_order_id = resp.get("result", {}).get("orderId", "?")
@@ -427,6 +515,7 @@ class ExecutionEngine:
                         exchange_order_id=exchange_order_id,
                     )
             except Exception as exc:
+                self.mark_entry_resolved()
                 # Record failure timestamp (NOT an entry cooldown — separate state)
                 self._last_failure_at[symbol] = datetime.now(tz=UTC)
                 log.error(

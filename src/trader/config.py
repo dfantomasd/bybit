@@ -175,6 +175,83 @@ class Settings(BaseSettings):
     """Symbols explicitly excluded (pre-market, innovation zone, etc.)."""
 
     # ------------------------------------------------------------------
+    # Screener tuning for Render Starter
+    # ------------------------------------------------------------------
+    STARTER_OPTIMIZED_MODE: bool = True
+    """Apply Render Starter memory/CPU conservative defaults."""
+
+    # ------------------------------------------------------------------
+    # Burst / entry rate limiting
+    # ------------------------------------------------------------------
+    MAX_NEW_ENTRIES_PER_MINUTE: int = 1
+    """Maximum new position entries allowed per minute (burst guard)."""
+    MAX_CONCURRENT_PENDING_ENTRIES: int = 1
+    """Maximum simultaneous positions in SUBMITTING/REST_ACCEPTED state."""
+    MAX_SAME_SIDE_POSITIONS: int = 2
+    """Maximum open positions on the same side (Buy or Sell)."""
+    MAX_CORRELATED_POSITIONS: int = 2
+    """Maximum correlated (same-quote) open positions."""
+    STARTUP_WARMUP_SECONDS: int = 180
+    """Seconds after startup before new entries are allowed (monitoring-only phase)."""
+
+    # ------------------------------------------------------------------
+    # Database safety gates
+    # ------------------------------------------------------------------
+    TRADE_JOURNAL_REQUIRED_FOR_ACTIVE: bool = True
+    """In CANARY_LIVE/LIVE modes, block new entries if TradeJournal is unavailable."""
+    DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE: bool = True
+    """In CANARY_LIVE/LIVE modes, block new entries if durable order state is unavailable."""
+
+    # ------------------------------------------------------------------
+    # Multi-timeframe candle store
+    # ------------------------------------------------------------------
+    MULTITIMEFRAME_ENABLED: bool = True
+    MULTITIMEFRAME_INTERVALS: Annotated[list[str], NoDecode] = ["1", "5", "15", "60"]
+    CANDLE_STORE_MAX_BARS_1M: int = 250
+    CANDLE_STORE_MAX_BARS_5M: int = 250
+    CANDLE_STORE_MAX_BARS_15M: int = 200
+    CANDLE_STORE_MAX_BARS_1H: int = 120
+
+    # ------------------------------------------------------------------
+    # Orderbook mode
+    # ------------------------------------------------------------------
+    ORDERBOOK_MODE: str = "ON_DEMAND"
+    """ON_DEMAND = fetch only for top candidates; STREAMING = subscribe for all."""
+    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5
+
+    # ------------------------------------------------------------------
+    # Adaptive load governor
+    # ------------------------------------------------------------------
+    ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
+    LOAD_GOVERNOR_CHECK_SECONDS: int = 30
+    MAX_FEATURE_CYCLE_MS: int = 8000
+    MAX_STRATEGY_CYCLE_MS: int = 8000
+    MAX_EVENT_LOOP_LAG_MS: int = 500
+    MAX_QUEUE_UTILIZATION_PCT: int = 70
+    LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 5
+
+    # ------------------------------------------------------------------
+    # ML / model
+    # ------------------------------------------------------------------
+    MODEL_ENABLED: bool = False
+    """Enable lightweight supervised challenger model."""
+    MODEL_ALLOW_LIVE_DECISIONS: bool = False
+    """When False, model only scores in shadow; rule-based strategy remains authoritative."""
+    MODEL_MIN_TRAINING_SAMPLES: int = 500
+    MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
+    MODEL_SHADOW_SCORING: bool = True
+    """Always run shadow scoring even when live decisions disabled."""
+
+    # ------------------------------------------------------------------
+    # CANARY_LIVE safety
+    # ------------------------------------------------------------------
+    LIVE_ARMED: bool = False
+    """Secondary safety gate required alongside LIVE_MODE=true for live execution."""
+    CANARY_MAX_OPEN_POSITIONS: int = 2
+    CANARY_MAX_TOTAL_EXPOSURE_PCT: float = 45.0
+
+    # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------
     RECONCILIATION_INTERVAL_SECONDS: int = 30
@@ -184,6 +261,20 @@ class Settings(BaseSettings):
     DATA_STALENESS_THRESHOLD_SECONDS: int = 5
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
+
+    @field_validator("MULTITIMEFRAME_INTERVALS", mode="before")
+    @classmethod
+    def parse_intervals(cls, value: Any) -> list[str]:
+        if value is None or value == "":
+            return ["1", "5", "15", "60"]
+        if isinstance(value, list):
+            return [str(v) for v in value]
+        if isinstance(value, str):
+            stripped = value.strip().strip("[]")
+            if not stripped:
+                return ["1", "5", "15", "60"]
+            return [v.strip() for v in stripped.split(",") if v.strip()]
+        raise TypeError("MULTITIMEFRAME_INTERVALS must be a list or comma-separated string")
 
     @field_validator("TELEGRAM_ALLOWED_CHAT_IDS", mode="before")
     @classmethod
@@ -219,6 +310,20 @@ class Settings(BaseSettings):
             if not self.LIVE_MODE:
                 raise ValueError(
                     "TRADING_MODE=LIVE requires LIVE_MODE=true to be explicitly set. This is a deliberate safety gate."
+                )
+            if not self.LIVE_ARMED:
+                raise ValueError(
+                    "TRADING_MODE=LIVE requires LIVE_ARMED=true to be explicitly set. This is a deliberate safety gate."
+                )
+
+        if self.TRADING_MODE == TradingMode.CANARY_LIVE:
+            if not self.LIVE_MODE:
+                raise ValueError(
+                    "TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set."
+                )
+            if not self.LIVE_ARMED:
+                raise ValueError(
+                    "TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set."
                 )
 
 

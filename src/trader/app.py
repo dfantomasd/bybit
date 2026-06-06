@@ -372,6 +372,11 @@ class TradingApplication:
             except Exception:
                 return None
 
+        async def _db_diagnostics_provider() -> dict:
+            if self._trade_journal is None:
+                return {"connected": False}
+            return await self._trade_journal.get_db_diagnostics()
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -385,6 +390,7 @@ class TradingApplication:
             regime_for=_regime_for,
             signal_log=self._signal_log,  # type: ignore[arg-type]
             diagnostics_provider=self.get_diagnostics,
+            db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
         )
 
@@ -492,6 +498,10 @@ class TradingApplication:
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
             min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
+            max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
+            max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
+            max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
+            startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
         )
 
         # Sync open positions from exchange so we don't double-enter on restart
@@ -711,7 +721,15 @@ class TradingApplication:
         )
 
         async def consume_private_events() -> None:
-            from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent
+            from trader.domain.enums import OrderStatus
+            from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent, OrderUpdateEvent
+
+            _TERMINAL_ORDER_STATES = {
+                OrderStatus.FILLED,
+                OrderStatus.CANCELLED,
+                OrderStatus.REJECTED,
+                OrderStatus.EXPIRED,
+            }
 
             seen_exec_ids: set[str] = set()
             while not self._shutdown_event.is_set():
@@ -724,6 +742,37 @@ class TradingApplication:
                             "private_ws.balance_update",
                             available=str(event.available_balance),
                         )
+                    elif isinstance(event, OrderUpdateEvent):
+                        # Wire OrderUpdateEvent → idempotency state → journal → reconciliation
+                        order_link_id = event.order_link_id or event.order_id
+                        log.info(
+                            "private_ws.order_update",
+                            order_link_id=order_link_id,
+                            symbol=event.symbol,
+                            status=event.order_status.value if event.order_status else "unknown",
+                            side=event.side.value if event.side else "unknown",
+                        )
+                        if self._trade_journal is not None:
+                            try:
+                                await self._trade_journal.record_order_update_event(
+                                    order_link_id=order_link_id,
+                                    exchange_order_id=event.order_id,
+                                    symbol=event.symbol,
+                                    side=event.side.value if event.side else "unknown",
+                                    qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
+                                    state=event.order_status.value if event.order_status else "UNKNOWN",
+                                )
+                            except Exception as _j_exc:
+                                log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
+                        # Release pending entry count when order reaches terminal state
+                        if event.order_status in _TERMINAL_ORDER_STATES and self._execution_engine is not None:
+                            self._execution_engine.mark_entry_resolved()
+                        # Trigger position sync on fill
+                        if event.order_status == OrderStatus.FILLED and self._execution_engine is not None:
+                            try:
+                                await self._execution_engine.sync_positions()
+                            except Exception as _sync_exc:
+                                log.debug("private_ws.order_fill_sync_failed", error=str(_sync_exc))
                     elif isinstance(event, ExecutionUpdateEvent):
                         if event.exec_id in seen_exec_ids:
                             continue
@@ -1320,6 +1369,17 @@ class TradingApplication:
             if self._trading_paused:
                 log.debug("strategy_loop.paused", symbol=symbol)
                 return
+
+            # DB availability guard for CANARY_LIVE / LIVE
+            if self._settings.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+                if self._settings.TRADE_JOURNAL_REQUIRED_FOR_ACTIVE:
+                    if self._trade_journal is None or not self._trade_journal.is_enabled:
+                        log.warning(
+                            "strategy_loop.blocked_no_journal",
+                            symbol=symbol,
+                            mode=self._settings.TRADING_MODE,
+                        )
+                        return
 
             # ExecutionEngine: dedup/cooldown/risk → order (or shadow log)
             # Notification fires only when execution engine actually approves
