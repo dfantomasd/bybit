@@ -139,6 +139,8 @@ class Settings(BaseSettings):
     # Operational
     # ------------------------------------------------------------------
     RECONCILIATION_INTERVAL_SECONDS: int = 30
+    POSITION_SYNC_INTERVAL_SECONDS: int = 30
+    """How often to sync exchange positions into the local execution/risk state."""
     HEALTH_CHECK_INTERVAL_SECONDS: int = 15
     DATA_STALENESS_THRESHOLD_SECONDS: int = 5
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10

@@ -234,8 +234,9 @@ class TestExecutionEngine:
         await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
         assert engine.has_open_position("BTCUSDT")
 
-        engine.record_position_closed("BTCUSDT")
+        await engine.record_position_closed("BTCUSDT")
         assert not engine.has_open_position("BTCUSDT")
+        engine._exposure.remove_position.assert_awaited_once_with("BTCUSDT")
 
     @pytest.mark.asyncio
     async def test_different_symbols_independent(self):
@@ -268,6 +269,20 @@ class TestExecutionEngine:
 
         await engine.sync_positions()
         assert engine.has_open_position("BTCUSDT")
+
+    @pytest.mark.asyncio
+    async def test_sync_positions_removes_closed_positions_from_exposure(self):
+        engine = _make_engine(approved=True, shadow_mode=True)
+        proposal = _proposal()
+        await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
+        assert engine.has_open_position("BTCUSDT")
+        engine._adapter.get_positions = AsyncMock(return_value=[])
+
+        await engine.sync_positions()
+
+        assert not engine.has_open_position("BTCUSDT")
+        assert "BTCUSDT" not in engine._last_entry_at
+        engine._exposure.remove_position.assert_awaited_with("BTCUSDT")
 
     def test_get_status_returns_dict(self):
         engine = _make_engine()

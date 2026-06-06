@@ -166,6 +166,7 @@ Key settings:
 | `TRAILING_ACTIVATION_PCT` | `0.45` | Unrealised profit percent before trailing stop is enabled |
 | `TRAILING_DISTANCE_PCT` | `0.30` | Trailing stop distance as percent of current mark price |
 | `BREAKEVEN_STOP_OFFSET_PCT` | `0.03` | Small offset beyond entry when moving SL to breakeven |
+| `POSITION_SYNC_INTERVAL_SECONDS` | `30` | How often exchange positions are synced after TP/SL closures |
 
 Risk profiles:
 
@@ -213,6 +214,11 @@ The entry order sets full-position TP/SL immediately. Separately, when
 open positions. Once unrealised PnL reaches `TRAILING_ACTIVATION_PCT`, it moves
 the stop near breakeven and asks Bybit to manage an exchange-side trailing stop
 using `/v5/position/trading-stop`.
+
+The same strategy loop also syncs exchange positions every
+`POSITION_SYNC_INTERVAL_SECONDS`. This clears local risk/execution state after
+Bybit closes a position by TP/SL, so the bot can open the next valid signal
+without requiring a restart.
 
 ---
 

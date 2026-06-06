@@ -79,6 +79,7 @@ class TradingApplication:
         self._performance_blocked_symbols: set[str] = set()
         self._closed_pnl_refreshed_at: datetime | None = None
         self._positions_managed_at: datetime | None = None
+        self._positions_synced_at: datetime | None = None
         self._trailing_stop_keys: set[str] = set()
 
     # ------------------------------------------------------------------
@@ -761,6 +762,22 @@ class TradingApplication:
                     error=str(exc),
                 )
 
+    async def _sync_execution_positions(self) -> None:
+        """Keep local execution/risk state aligned with Bybit TP/SL closures."""
+        assert self._settings is not None
+        if self._execution_engine is None or self._bybit_adapter is None:
+            return
+        if self._execution_engine._shadow_mode:
+            return
+
+        now = datetime.now(tz=UTC)
+        if self._positions_synced_at is not None:
+            elapsed = (now - self._positions_synced_at).total_seconds()
+            if elapsed < self._settings.POSITION_SYNC_INTERVAL_SECONDS:
+                return
+        self._positions_synced_at = now
+        await self._execution_engine.sync_positions()
+
     def _activation_price(self, entry_price: Decimal, side: str) -> Decimal:
         assert self._settings is not None
         delta = entry_price * Decimal(str(self._settings.TRAILING_ACTIVATION_PCT)) / Decimal("100")
@@ -863,7 +880,7 @@ class TradingApplication:
                 )
                 del _shadow_positions[symbol]
                 if self._execution_engine is not None:
-                    self._execution_engine.record_position_closed(symbol)
+                    await self._execution_engine.record_position_closed(symbol)
                 if self._telegram_bot is not None:
                     try:
                         label = "✅ TP" if hit == "TP" else "🛑 SL"
@@ -999,6 +1016,7 @@ class TradingApplication:
                 if _balance_tick % refresh_every == 0:
                     await self._refresh_balance()
                     await self._refresh_closed_pnl_memory()
+                await self._sync_execution_positions()
                 await self._manage_open_positions()
 
                 balance = self._cached_balance

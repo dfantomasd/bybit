@@ -95,10 +95,13 @@ class ExecutionEngine:
         """
         try:
             positions = await self._adapter.get_positions(self._category)
-            self._open_positions.clear()
+            previous_symbols = set(self._open_positions)
+            exchange_symbols: set[str] = set()
+            refreshed_positions: dict[str, dict[str, Any]] = {}
             for pos in positions:
                 if pos.size > Decimal("0"):
-                    self._open_positions[pos.symbol] = {
+                    exchange_symbols.add(pos.symbol)
+                    refreshed_positions[pos.symbol] = {
                         "side": pos.side,
                         "size": pos.size,
                         "entry_price": pos.entry_price,
@@ -107,17 +110,25 @@ class ExecutionEngine:
                     await self._exposure.update_position(
                         pos.symbol, pos.side.value, notional
                     )
+            closed_symbols = previous_symbols - exchange_symbols
+            for symbol in closed_symbols:
+                await self._exposure.remove_position(symbol)
+                self._last_entry_at.pop(symbol, None)
+            self._open_positions = refreshed_positions
             log.info(
                 "execution.positions_synced",
                 count=len(self._open_positions),
                 symbols=list(self._open_positions.keys()),
+                closed_symbols=sorted(closed_symbols),
             )
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
 
-    def record_position_closed(self, symbol: str) -> None:
+    async def record_position_closed(self, symbol: str) -> None:
         """Call when a position is closed (e.g. TP/SL hit)."""
         self._open_positions.pop(symbol, None)
+        self._last_entry_at.pop(symbol, None)
+        await self._exposure.remove_position(symbol)
 
     # ------------------------------------------------------------------
     # Instrument info
