@@ -10,6 +10,7 @@ import hashlib
 import hmac
 import json
 import time
+from decimal import Decimal
 from typing import Any
 from urllib.parse import urlencode
 
@@ -106,8 +107,7 @@ class BybitRestClient:
             logger.info(
                 "bybit_rest_client_init",
                 base_url=self._base_url,
-                key_prefix=self._api_key[:6] + "…",
-                key_length=len(self._api_key),
+                credentials_configured=True,
                 recv_window=self._recv_window,
             )
 
@@ -296,6 +296,38 @@ class BybitRestClient:
             authenticated=False,
         )
 
+    async def get_conservative_market_price(
+        self,
+        category: str,
+        symbol: str,
+        side: str,
+    ) -> Decimal:
+        """Return a conservative market price for pre-order notional checks.
+
+        Buy  → ask1Price (we'll pay at least this much)
+        Sell → bid1Price (we'll receive at most this much)
+        Falls back to lastPrice if ask/bid temporarily unavailable.
+        """
+        resp = await self.get_tickers(category=category, symbol=symbol)
+        items = resp.get("result", {}).get("list", [])
+        if not items:
+            raise TradingSystemError(f"No ticker data for {symbol}", code="NO_TICKER")
+
+        ticker = items[0]
+        side_upper = side.upper()
+        if side_upper in ("BUY", "LONG"):
+            price_str = ticker.get("ask1Price") or ticker.get("lastPrice", "0")
+        else:
+            price_str = ticker.get("bid1Price") or ticker.get("lastPrice", "0")
+
+        price = Decimal(str(price_str))
+        if price <= Decimal("0"):
+            raise TradingSystemError(
+                f"Conservative market price is zero for {symbol} side={side}",
+                code="ZERO_PRICE",
+            )
+        return price
+
     async def get_kline(
         self,
         category: str,
@@ -399,11 +431,27 @@ class BybitRestClient:
             body["orderLinkId"] = order_link_id
         return await self._post("/v5/order/cancel", body=body)
 
-    async def get_open_orders(self, category: str, symbol: str | None = None) -> dict[str, Any]:
-        return await self._get(
-            "/v5/order/realtime",
-            params={"category": category, "symbol": symbol},
-        )
+    async def get_open_orders(
+        self,
+        category: str,
+        symbol: str | None = None,
+        settle_coin: str | None = None,
+        base_coin: str | None = None,
+    ) -> dict[str, Any]:
+        # Bybit /v5/order/realtime requires symbol, settleCoin, or baseCoin
+        # when listing all orders (not filtered by a specific symbol).
+        params: dict[str, Any] = {"category": category}
+        if symbol:
+            params["symbol"] = symbol
+        elif settle_coin:
+            params["settleCoin"] = settle_coin
+        elif base_coin:
+            params["baseCoin"] = base_coin
+        elif category == "linear":
+            params["settleCoin"] = "USDT"
+        elif category == "inverse":
+            params["settleCoin"] = "BTC"
+        return await self._get("/v5/order/realtime", params=params)
 
     async def get_order_history(
         self,
