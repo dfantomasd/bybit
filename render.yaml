@@ -74,6 +74,13 @@ services:
         value: "2"
       - key: CANARY_MAX_TOTAL_EXPOSURE_PCT
         value: "45"
+      # ML shadow model (shadow scoring only; no live influence)
+      - key: MODEL_ENABLED
+        value: "false"
+      - key: MODEL_SHADOW_SCORING_ENABLED
+        value: "true"
+      - key: MODEL_ALLOW_LIVE_DECISIONS
+        value: "false"
       # Secrets (not synced — set via Render dashboard)
       - key: BYBIT_API_KEY
         sync: false
