@@ -491,6 +491,7 @@ class TradingApplication:
             cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
+            min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
         )
 
         # Sync open positions from exchange so we don't double-enter on restart
@@ -704,8 +705,9 @@ class TradingApplication:
         )
 
         async def consume_private_events() -> None:
-            from trader.domain.events import BalanceUpdateEvent
+            from trader.domain.events import BalanceUpdateEvent, ExecutionUpdateEvent
 
+            seen_exec_ids: set[str] = set()
             while not self._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
@@ -716,6 +718,54 @@ class TradingApplication:
                             "private_ws.balance_update",
                             available=str(event.available_balance),
                         )
+                    elif isinstance(event, ExecutionUpdateEvent):
+                        if event.exec_id in seen_exec_ids:
+                            continue
+                        seen_exec_ids.add(event.exec_id)
+                        log.info(
+                            "private_ws.execution_fill",
+                            exec_id=event.exec_id,
+                            symbol=event.symbol,
+                            exec_price=str(event.exec_price),
+                            exec_qty=str(event.exec_qty),
+                            side=event.side.value,
+                        )
+                        if self._trade_journal is not None:
+                            try:
+                                await self._trade_journal.record_order_event(
+                                    order_link_id=event.order_link_id or event.exec_id,
+                                    proposal_id=None,
+                                    decision_id=None,
+                                    symbol=event.symbol,
+                                    side=event.side.value,
+                                    qty=event.exec_qty,
+                                    status="FILLED",
+                                    exchange_order_id=event.order_id,
+                                )
+                            except Exception as _journal_exc:
+                                log.warning(
+                                    "private_ws.execution_journal_failed",
+                                    exec_id=event.exec_id,
+                                    error=str(_journal_exc),
+                                )
+                        if self._execution_engine is not None:
+                            try:
+                                await self._execution_engine.sync_positions()
+                            except Exception as _sync_exc:
+                                log.warning(
+                                    "private_ws.execution_sync_failed",
+                                    exec_id=event.exec_id,
+                                    error=str(_sync_exc),
+                                )
+                        if self._bybit_adapter is not None and not self._initial_shadow_mode():
+                            try:
+                                await self._bybit_adapter.reconcile()
+                            except Exception as _rec_exc:
+                                log.debug(
+                                    "private_ws.execution_reconcile_failed",
+                                    exec_id=event.exec_id,
+                                    error=str(_rec_exc),
+                                )
                 except TimeoutError:
                     pass
                 except asyncio.CancelledError:

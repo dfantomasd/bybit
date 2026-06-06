@@ -9,17 +9,19 @@ services:
     healthCheckPath: /livez
     envVars:
       - key: TRADING_MODE
-        value: TESTNET
+        value: SHADOW
       - key: RISK_PROFILE
         value: CONSERVATIVE
       - key: LIVE_MODE
         value: "false"
       - key: SHADOW_MODE
         value: "true"
+      - key: TELEGRAM_ALLOW_RISK_INCREASE
+        value: "false"
       - key: BYBIT_REGION
         value: GLOBAL
       - key: BYBIT_USE_TESTNET
-        value: "true"
+        value: "false"
       - key: BYBIT_CONNECTIVITY_REQUIRED
         value: "false"
       - key: DEFAULT_MARKET_CATEGORY

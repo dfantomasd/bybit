@@ -1,0 +1,11 @@
+# Gitleaks configuration – allowlist for known false positives only.
+# This file does NOT disable secret scanning; it allowlists one test file
+# that intentionally contains placeholder credential strings to verify they
+# are NOT logged by the production code (P0.7 test suite).
+title = "bybit-trader gitleaks config"
+
+[allowlist]
+  description = "Placeholder credential strings in P0.7 logging-safety tests"
+  paths = [
+    '''tests/unit/test_sensitive_logging\.py''',
+  ]

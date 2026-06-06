@@ -140,6 +140,10 @@ class Settings(BaseSettings):
     """When False (default), Telegram /risk command cannot escalate to a riskier profile.
     Risk escalation requires explicit env-var opt-in to prevent accidental leverage bumps."""
 
+    MIN_NOTIONAL_SAFETY_BUFFER_PCT: float = 3.0
+    """Safety buffer applied on top of exchange min-notional (e.g. 3% → $5 min becomes $5.15).
+    Prevents near-limit orders from being rejected by code=110094."""
+
     # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------

@@ -95,8 +95,30 @@ class ExposureTracker:
             return Decimal("0")
         if self._capital <= Decimal("0"):
             return Decimal("0")
-        notional = self._positions[symbol]["notional"]
+        notional = Decimal(str(self._positions[symbol]["notional"]))
         return notional / self._capital * Decimal("100")
+
+    def get_position_notional(self, symbol: str) -> Decimal:
+        """Return the current notional value of an existing position (0 if none)."""
+        if symbol not in self._positions:
+            return Decimal("0")
+        return Decimal(str(self._positions[symbol]["notional"]))
+
+    def remaining_total_exposure_usd(self) -> Decimal:
+        """Remaining portfolio budget in USD before hitting max_total_exposure_pct."""
+        if self._capital <= Decimal("0"):
+            return Decimal("0")
+        current_total = Decimal(str(sum(p["notional"] for p in self._positions.values())))
+        max_total = self._capital * self._limits.max_total_exposure_pct / Decimal("100")
+        return max(Decimal("0"), max_total - current_total)
+
+    def remaining_position_exposure_usd(self, symbol: str) -> Decimal:
+        """Remaining per-symbol budget in USD before hitting max_capital_per_position_pct."""
+        if self._capital <= Decimal("0"):
+            return Decimal("0")
+        existing = self.get_position_notional(symbol)
+        max_per_position = self._capital * self._limits.max_capital_per_position_pct / Decimal("100")
+        return max(Decimal("0"), max_per_position - existing)
 
     # ------------------------------------------------------------------
     # Decision helpers

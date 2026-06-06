@@ -65,6 +65,7 @@ class ExecutionEngine:
         failure_cooldown_s: int = _DEFAULT_FAILURE_COOLDOWN_S,
         category: str = "linear",
         trade_journal: Any | None = None,
+        min_notional_safety_buffer_pct: float = 3.0,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -74,6 +75,7 @@ class ExecutionEngine:
         self._failure_cooldown = timedelta(seconds=failure_cooldown_s)
         self._category = category
         self._trade_journal = trade_journal
+        self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -362,6 +364,46 @@ class ExecutionEngine:
                     status="SHADOW",
                 )
         else:
+            # Conservative-price guard: fail-closed — reject if price unavailable or notional too low
+            if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
+                try:
+                    conservative_price = await self._adapter.get_conservative_market_price(
+                        self._category, symbol, proposal.side.value
+                    )
+                    executable_notional = intent.qty * conservative_price
+                    min_notional_required = instrument_info.min_notional * (
+                        Decimal("1") + self._min_notional_buffer / Decimal("100")
+                    )
+                    if executable_notional < min_notional_required:
+                        log.warning(
+                            "execution.below_min_notional_at_market",
+                            symbol=symbol,
+                            executable_notional=str(executable_notional),
+                            required=str(min_notional_required),
+                        )
+                        return None
+                except Exception as _price_exc:
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.warning(
+                        "execution.conservative_price_check_failed",
+                        symbol=symbol,
+                        error=str(_price_exc),
+                    )
+                    if self._trade_journal is not None:
+                        try:
+                            await self._trade_journal.record_order_event(
+                                order_link_id=intent.order_link_id,
+                                proposal_id=intent.proposal_id,
+                                decision_id=intent.decision_id,
+                                symbol=symbol,
+                                side=proposal.side.value,
+                                qty=decision.approved_qty,
+                                status="REJECTED_PRICE_CHECK_FAILED",
+                                error=str(_price_exc),
+                            )
+                        except Exception as _journal_exc:  # noqa: BLE001
+                            log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
+                    return None
             try:
                 resp = await self._adapter.place_order(intent)
                 exchange_order_id = resp.get("result", {}).get("orderId", "?")

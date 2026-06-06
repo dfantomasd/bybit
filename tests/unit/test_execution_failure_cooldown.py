@@ -61,6 +61,7 @@ def _make_engine(shadow_mode: bool = False, failure_cooldown_s: int = 30) -> Exe
     adapter.get_positions = AsyncMock(return_value=[])
     adapter.get_instrument_info = AsyncMock(return_value=_instrument())
     adapter.place_order = AsyncMock(return_value={"result": {"orderId": "live-001"}})
+    adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("10"))
 
     risk_manager = MagicMock()
     exposure = MagicMock()

@@ -65,6 +65,7 @@ class PositionSizer:
         atr: Decimal | None,
         available_balance: Decimal,
         entry_price: Decimal | None = None,
+        remaining_position_budget_usd: Decimal | None = None,
     ) -> tuple[Decimal, str]:
         """Compute approved quantity.
 
@@ -157,6 +158,20 @@ class PositionSizer:
         if entry_price is not None and entry_price > Decimal("0"):
             max_qty_from_exposure = (capital * remaining_exposure_pct / Decimal("100")) / entry_price
             raw_qty = min(raw_qty, max_qty_from_exposure)
+
+        # ----------------------------------------------------------------
+        # Per-position cap — cap this single position's notional
+        # ----------------------------------------------------------------
+        if (
+            remaining_position_budget_usd is not None
+            and remaining_position_budget_usd >= Decimal("0")
+            and entry_price is not None
+            and entry_price > Decimal("0")
+        ):
+            if remaining_position_budget_usd <= Decimal("0"):
+                return Decimal("0"), "per-position exposure cap fully reached"
+            max_qty_from_position_cap = remaining_position_budget_usd / entry_price
+            raw_qty = min(raw_qty, max_qty_from_position_cap)
 
         # ----------------------------------------------------------------
         # Available balance cap
