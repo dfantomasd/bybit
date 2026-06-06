@@ -461,8 +461,7 @@ class RiskManager:
                     )
                 else:
                     self._log.info(
-                        "risk.min_notional_buffer_rejected symbol=%s final_notional=%s"
-                        " required_notional=%s",
+                        "risk.min_notional_buffer_rejected symbol=%s final_notional=%s required_notional=%s",
                         proposal.symbol,
                         str(final_notional),
                         str(required_notional),

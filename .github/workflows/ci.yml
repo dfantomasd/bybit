@@ -105,10 +105,15 @@ jobs:
 
       - name: Run pip-audit
         run: |
-          pip-audit --requirement <(uv pip compile pyproject.toml 2>/dev/null || echo "") \
-            --format json \
-            --output pip-audit-report.json || true
-          pip-audit --format cyclonedx-json 2>/dev/null || pip-audit
+          uv pip compile pyproject.toml --all-extras 2>/dev/null > /tmp/audit-reqs.txt || true
+          if [ -s /tmp/audit-reqs.txt ]; then
+            pip-audit --requirement /tmp/audit-reqs.txt \
+              --format json \
+              --output pip-audit-report.json || true
+            pip-audit --requirement /tmp/audit-reqs.txt
+          else
+            echo "No compiled requirements; skipping pip-audit"
+          fi
 
       - name: Check for secrets with gitleaks
         uses: gitleaks/gitleaks-action@v2
@@ -152,7 +157,7 @@ jobs:
       - name: Run unit tests
         run: |
           pytest tests/unit/ \
-            --cov=src/trader \
+            --cov=trader \
             --cov-report=xml:coverage.xml \
             --cov-report=term-missing \
             -v \
