@@ -152,15 +152,15 @@ class ExecutionEngine:
             age = (datetime.now(tz=UTC) - cached_at).total_seconds()
             if age < _INSTRUMENT_CACHE_TTL_S:
                 return info
-        info = await self._adapter.get_instrument_info(self._category, symbol)
-        self._instrument_cache[symbol] = (info, datetime.now(tz=UTC))
+        raw: InstrumentInfo = await self._adapter.get_instrument_info(self._category, symbol)
+        self._instrument_cache[symbol] = (raw, datetime.now(tz=UTC))
         log.debug(
             "execution.instrument_info_cached",
             symbol=symbol,
-            min_qty=str(info.min_order_qty),
-            qty_step=str(info.qty_step),
+            min_qty=str(raw.min_order_qty),
+            qty_step=str(raw.qty_step),
         )
-        return info
+        return raw
 
     async def _ensure_leverage(self, symbol: str, max_leverage: Decimal) -> None:
         """Set exchange leverage to match profile max, if not already confirmed."""

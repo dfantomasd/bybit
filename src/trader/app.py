@@ -694,7 +694,7 @@ class TradingApplication:
             self._settings.BYBIT_USE_TESTNET,
         )
 
-        private_event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        private_event_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
 
         self._ws_private = BybitPrivateWebSocket(
             endpoint=selector.ws_private_base,
