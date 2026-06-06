@@ -76,12 +76,12 @@ class TestPrivateWSStartup:
         )
 
         async def fake_consumer() -> None:
-            from trader.domain.events import BalanceUpdateEvent as BAE
+            from trader.domain.events import BalanceUpdateEvent as BalEvt
 
             while not shutdown.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                    if isinstance(event, BAE) and event.available_balance > Decimal("0"):
+                    if isinstance(event, BalEvt) and event.available_balance > Decimal("0"):
                         app._cached_balance = event.available_balance
                 except TimeoutError:
                     pass
@@ -107,12 +107,12 @@ class TestPrivateWSStartup:
         queue: asyncio.Queue = asyncio.Queue()
 
         async def fake_consumer() -> None:
-            from trader.domain.events import BalanceUpdateEvent as BAE
+            from trader.domain.events import BalanceUpdateEvent as BalEvt
 
             while not shutdown.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.1)
-                    if isinstance(event, BAE) and event.available_balance > Decimal("0"):
+                    if isinstance(event, BalEvt) and event.available_balance > Decimal("0"):
                         app._cached_balance = event.available_balance
                 except TimeoutError:
                     pass

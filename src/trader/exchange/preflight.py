@@ -2,7 +2,6 @@
 
 Returns a PreflightReport; blocks in BLOCKED state if critical checks fail.
 """
-
 from __future__ import annotations
 
 import time
@@ -162,7 +161,10 @@ class PreflightChecker:
         try:
             local_ms = int(time.time() * 1000)
             resp = await self._rest.get_server_time()
-            server_ms_str = resp.get("result", {}).get("timeSecond") or resp.get("result", {}).get("timeNano", "0")
+            server_ms_str = (
+                resp.get("result", {}).get("timeSecond")
+                or resp.get("result", {}).get("timeNano", "0")
+            )
             # timeSecond is a string of seconds since epoch
             server_ms = int(float(server_ms_str)) * 1000
             drift_seconds = abs(local_ms - server_ms) / 1000.0
@@ -245,7 +247,8 @@ class PreflightChecker:
                 )
             elif any(p.lower() in ("withdraw", "withdrawal") for p in all_perm_values):
                 warning = (
-                    "API key has WITHDRAWAL permission — this is dangerous for a trading bot. Revoke it immediately."
+                    "API key has WITHDRAWAL permission — this is dangerous for a trading bot. "
+                    "Revoke it immediately."
                 )
 
             return CheckResult(
@@ -352,7 +355,8 @@ class PreflightChecker:
                 passed=True,
                 critical=True,
                 message=(
-                    f"Region {self._endpoint_selector.region.value} is compatible with testnet={self._use_testnet}"
+                    f"Region {self._endpoint_selector.region.value} is compatible "
+                    f"with testnet={self._use_testnet}"
                 ),
                 details={
                     "region": self._endpoint_selector.region.value,
@@ -377,7 +381,11 @@ class PreflightChecker:
             critical=True,
             message=f"Running in {mode_label} mode — configuration consistent",
             details={"use_testnet": self._use_testnet},
-            warning=("Running in LIVE mode — real money at risk!" if not self._use_testnet else None),
+            warning=(
+                "Running in LIVE mode — real money at risk!"
+                if not self._use_testnet
+                else None
+            ),
         )
 
     async def _check_leverage_settings(self) -> CheckResult:

@@ -3,7 +3,6 @@
 Handles authenticated subscriptions: order, execution, position, wallet.
 Uses HMAC-SHA256 for authentication on connect.
 """
-
 from __future__ import annotations
 
 import asyncio
@@ -222,7 +221,7 @@ class BybitPrivateWebSocket:
                             return False
         except TimeoutError:
             self._log.error("ws_private.auth_timeout")
-        except TimeoutError:
+        except asyncio.TimeoutError:
             self._log.error("ws_private.auth_timeout")
         return False
 

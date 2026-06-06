@@ -3,13 +3,11 @@
 Separate queues for different event categories with backpressure handling,
 dead letter queue for critical events, and graceful shutdown support.
 """
-
 from __future__ import annotations
 
 import asyncio
 from collections import defaultdict
-from collections.abc import AsyncGenerator
-from typing import Any
+from typing import AsyncGenerator, Any
 
 import structlog
 
@@ -46,7 +44,10 @@ class EventBus:
         self._metrics = metrics
 
         # Main queues
-        self._queues: dict[str, asyncio.Queue] = {name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES}
+        self._queues: dict[str, asyncio.Queue] = {
+            name: asyncio.Queue(maxsize=maxsize)
+            for name in self.QUEUE_NAMES
+        }
 
         # Dead letter queue for critical dropped events (unbounded)
         self._dead_letter: asyncio.Queue = asyncio.Queue()
@@ -142,7 +143,7 @@ class EventBus:
                 event = await asyncio.wait_for(queue.get(), timeout=1.0)
                 yield event
                 queue.task_done()
-            except TimeoutError:
+            except asyncio.TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
@@ -156,7 +157,7 @@ class EventBus:
             if timeout is not None:
                 return await asyncio.wait_for(queue.get(), timeout=timeout)
             return await queue.get()
-        except TimeoutError:
+        except asyncio.TimeoutError:
             return None
 
     # ------------------------------------------------------------------
@@ -166,7 +167,7 @@ class EventBus:
     async def drain(self, timeout: float = 5.0) -> None:
         """Wait for all queues to be processed, with a timeout."""
         tasks = []
-        for _name, queue in self._queues.items():
+        for name, queue in self._queues.items():
             if queue.qsize() > 0:
                 tasks.append(asyncio.wait_for(queue.join(), timeout=timeout))
         if tasks:

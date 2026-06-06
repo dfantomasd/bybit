@@ -1,5 +1,4 @@
 """Centralized adaptive token-bucket rate limiter with per-endpoint tracking."""
-
 from __future__ import annotations
 
 import asyncio
