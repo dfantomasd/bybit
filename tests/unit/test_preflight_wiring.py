@@ -1,7 +1,7 @@
 """Tests for P0.1: bybit_adapter.initialize() wired in _start_bybit_adapter."""
+
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -43,7 +43,7 @@ class TestPreflightWiring:
         mock_adapter = MagicMock()
         mock_adapter.initialize = AsyncMock(return_value=_report(passed=True))
 
-        with patch("trader.app.TradingApplication._start_bybit_adapter", new=AsyncMock()) as patched:
+        with patch("trader.app.TradingApplication._start_bybit_adapter", new=AsyncMock()):
             # Build real _start_bybit_adapter logic by calling the method directly
             pass
 
@@ -59,9 +59,7 @@ class TestPreflightWiring:
         app = _make_app(trading_mode=TradingMode.SHADOW, live_mode=False)
 
         mock_adapter = MagicMock()
-        mock_adapter.initialize = AsyncMock(return_value=_report(
-            passed=False, errors=["API key invalid"]
-        ))
+        mock_adapter.initialize = AsyncMock(return_value=_report(passed=False, errors=["API key invalid"]))
 
         with patch("trader.exchange.bybit_adapter.BybitAdapter", return_value=mock_adapter):
             # Should NOT raise SystemExit in shadow mode
@@ -75,9 +73,7 @@ class TestPreflightWiring:
         app = _make_app(trading_mode=TradingMode.LIVE, live_mode=True)
 
         mock_adapter = MagicMock()
-        mock_adapter.initialize = AsyncMock(return_value=_report(
-            passed=False, errors=["balance too low"]
-        ))
+        mock_adapter.initialize = AsyncMock(return_value=_report(passed=False, errors=["balance too low"]))
 
         with patch("trader.exchange.bybit_adapter.BybitAdapter", return_value=mock_adapter):
             with pytest.raises(SystemExit) as exc_info:

@@ -2,6 +2,7 @@
 
 Thread-safe via asyncio.Lock. All financial arithmetic uses Decimal.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -141,8 +142,7 @@ class ExposureTracker:
         if new_total_pct > self._limits.max_total_exposure_pct:
             return (
                 False,
-                f"total exposure {new_total_pct:.2f}% would exceed cap "
-                f"{self._limits.max_total_exposure_pct}%",
+                f"total exposure {new_total_pct:.2f}% would exceed cap {self._limits.max_total_exposure_pct}%",
             )
 
         return True, ""
@@ -168,9 +168,7 @@ class ExposureTracker:
             return Decimal("1")
 
         # Count existing positions in the same family
-        same_family_count = sum(
-            1 for s in existing_symbols if _get_family(s) == new_family
-        )
+        same_family_count = sum(1 for s in existing_symbols if _get_family(s) == new_family)
 
         if same_family_count == 0:
             return Decimal("1")

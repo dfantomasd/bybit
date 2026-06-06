@@ -10,6 +10,7 @@ Design
 - Subsequent runs update ``active_symbols`` without blocking the caller.
 - Falls back to ``_FALLBACK_SYMBOLS`` if the exchange call fails.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -28,8 +29,16 @@ _ACCEPTED_QUOTE = "USDT"
 
 # Coins we explicitly skip (stablecoins, wrapped assets, etc.)
 _SKIP_BASE = {
-    "USDC", "BUSD", "DAI", "TUSD", "USDP", "FRAX",
-    "USDD", "GUSD", "USDJ", "USDN",
+    "USDC",
+    "BUSD",
+    "DAI",
+    "TUSD",
+    "USDP",
+    "FRAX",
+    "USDD",
+    "GUSD",
+    "USDJ",
+    "USDN",
 }
 
 # Always exclude — reserved for venue-specific problem symbols if needed.
@@ -51,7 +60,7 @@ class MarketScreener:
         rest_client: Any,
         max_symbols: int = 10,
         min_volume_usd: float = 20_000_000.0,  # 20M USD/day minimum
-        max_price_usd: float = 0.0,            # 0 disables price cap
+        max_price_usd: float = 0.0,  # 0 disables price cap
         interval_s: int = 900,  # 15 min
         on_symbols_added: Callable[[list[str]], Awaitable[None]] | None = None,
         on_symbols_removed: Callable[[list[str]], Awaitable[None]] | None = None,

@@ -4,6 +4,7 @@ Primary interface between the trading system and Bybit.
 Composes: EndpointSelector, RateLimiter, BybitRestClient, OrderMapper.
 Provides typed, domain-level methods.
 """
+
 from __future__ import annotations
 
 import time
@@ -95,6 +96,7 @@ class BybitAdapter:
     async def _check_clock_skew(self) -> None:
         """Fetch Bybit server time and log clock offset; warn if > 2 s."""
         import time as _time
+
         try:
             resp = await self._rest.get_server_time()
             server_ms = int((resp.get("result") or {}).get("timeSecond", 0)) * 1000
@@ -154,9 +156,7 @@ class BybitAdapter:
     # Orders
     # ------------------------------------------------------------------
 
-    async def get_open_orders(
-        self, category: str, symbol: str | None = None
-    ) -> list[dict[str, Any]]:
+    async def get_open_orders(self, category: str, symbol: str | None = None) -> list[dict[str, Any]]:
         """Return open orders as raw dicts (mapper can be applied later)."""
         resp = await self._rest.get_open_orders(category=category, symbol=symbol)
         return (resp.get("result") or {}).get("list", [])
@@ -168,9 +168,7 @@ class BybitAdapter:
         """
         # Check duplicate
         if await self._idempotency.check_duplicate(intent.order_link_id):
-            raise ValueError(
-                f"Duplicate order detected: {intent.order_link_id}"
-            )
+            raise ValueError(f"Duplicate order detected: {intent.order_link_id}")
 
         # Register in idempotency store
         await self._idempotency.register_intent(intent)
@@ -198,9 +196,7 @@ class BybitAdapter:
             )
             raise
 
-    async def cancel_order(
-        self, category: str, symbol: str, order_link_id: str
-    ) -> dict[str, Any]:
+    async def cancel_order(self, category: str, symbol: str, order_link_id: str) -> dict[str, Any]:
         """Cancel an open order by order_link_id."""
         resp = await self._rest.cancel_order(
             category=category,
@@ -221,9 +217,7 @@ class BybitAdapter:
     # Instruments
     # ------------------------------------------------------------------
 
-    async def get_instrument_info(
-        self, category: str, symbol: str
-    ) -> InstrumentInfo:
+    async def get_instrument_info(self, category: str, symbol: str) -> InstrumentInfo:
         """Fetch and return parsed InstrumentInfo for a symbol."""
         resp = await self._rest.get_instruments_info(category=category, symbol=symbol)
         items = (resp.get("result") or {}).get("list", [])
@@ -276,9 +270,7 @@ class BybitAdapter:
         local_pending = self._idempotency.pending_count()
 
         try:
-            open_orders_resp = await self._rest.get_open_orders(
-                category=self._default_category
-            )
+            open_orders_resp = await self._rest.get_open_orders(category=self._default_category)
             exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
             exchange_ids = {o.get("orderLinkId") for o in exchange_open}
 
@@ -290,10 +282,7 @@ class BybitAdapter:
                 positions_checked=0,
                 discrepancies_found=len(mismatched),
                 mismatched_order_ids=mismatched,
-                summary=(
-                    f"Checked {local_pending} local pending orders; "
-                    f"{len(mismatched)} not found on exchange"
-                ),
+                summary=(f"Checked {local_pending} local pending orders; {len(mismatched)} not found on exchange"),
                 success=True,
             )
         except Exception as exc:

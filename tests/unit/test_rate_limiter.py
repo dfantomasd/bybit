@@ -1,20 +1,18 @@
 """Tests for RateLimiter."""
+
 from __future__ import annotations
 
 import asyncio
 import math
 import time
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from trader.exchange.rate_limiter import (
-    RateLimiter,
-    _BASE_BACKOFF_SECONDS,
     _BACKOFF_MULTIPLIER,
-    _DEFAULT_CAPACITY,
-    _DEFAULT_REFILL_RATE,
+    _BASE_BACKOFF_SECONDS,
     _WARN_THRESHOLDS,
+    RateLimiter,
     _EndpointState,
 )
 
@@ -159,8 +157,8 @@ class TestExponentialBackoff:
 
     def test_backoff_increases_with_consecutive_hits(self) -> None:
         rl = RateLimiter()
-        w1 = rl.handle_rate_limit_error("/ep2", method="GET")
-        w2 = rl.handle_rate_limit_error("/ep2", method="GET")
+        rl.handle_rate_limit_error("/ep2", method="GET")
+        rl.handle_rate_limit_error("/ep2", method="GET")
         # w2 should generally be larger (2^1 vs 2^0), allowing for jitter
         # We check the raw expected values before jitter
         assert _BASE_BACKOFF_SECONDS * math.pow(_BACKOFF_MULTIPLIER, 1) > _BASE_BACKOFF_SECONDS

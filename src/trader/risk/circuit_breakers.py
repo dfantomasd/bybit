@@ -3,14 +3,15 @@
 Implements all circuit breakers from spec section 11.4.
 Thread-safe via asyncio.Lock.
 """
+
 from __future__ import annotations
 
 import asyncio
 import logging
-from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 from trader.risk.profiles import RiskLimits
@@ -18,7 +19,7 @@ from trader.risk.profiles import RiskLimits
 logger = logging.getLogger(__name__)
 
 
-class CircuitBreakerType(str, Enum):
+class CircuitBreakerType(StrEnum):
     """All supported circuit breaker types."""
 
     DAILY_LOSS_LIMIT = "daily_loss_limit"
@@ -330,7 +331,7 @@ class CircuitBreakerManager:
                 self._breakers[breaker_type] = CircuitBreakerState(
                     breaker_type=breaker_type,
                     triggered=True,
-                    triggered_at=datetime.now(tz=timezone.utc),
+                    triggered_at=datetime.now(tz=UTC),
                     reason=reason,
                     severity=state.severity,
                     auto_reset_after_seconds=state.auto_reset_after_seconds,
@@ -363,16 +364,12 @@ class CircuitBreakerManager:
 
     async def reset_all_auto(self) -> None:
         """Reset all circuit breakers that have auto_reset_after_seconds configured."""
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         to_reset: list[CircuitBreakerType] = []
 
         async with self._lock:
             for bt, state in self._breakers.items():
-                if (
-                    state.triggered
-                    and state.auto_reset_after_seconds is not None
-                    and state.triggered_at is not None
-                ):
+                if state.triggered and state.auto_reset_after_seconds is not None and state.triggered_at is not None:
                     age = (now - state.triggered_at).total_seconds()
                     if age >= state.auto_reset_after_seconds:
                         to_reset.append(bt)
@@ -399,25 +396,16 @@ class CircuitBreakerManager:
     def should_block_entries(self) -> bool:
         """Return True if any STOP_ENTRIES or higher breaker is triggered."""
         block_severities = {"STOP_ENTRIES", "SAFE_MODE", "EMERGENCY"}
-        return any(
-            state.triggered and state.severity in block_severities
-            for state in self._breakers.values()
-        )
+        return any(state.triggered and state.severity in block_severities for state in self._breakers.values())
 
     def should_safe_mode(self) -> bool:
         """Return True if any SAFE_MODE or higher breaker is triggered."""
         safe_severities = {"SAFE_MODE", "EMERGENCY"}
-        return any(
-            state.triggered and state.severity in safe_severities
-            for state in self._breakers.values()
-        )
+        return any(state.triggered and state.severity in safe_severities for state in self._breakers.values())
 
     def should_emergency(self) -> bool:
         """Return True if any EMERGENCY breaker is triggered."""
-        return any(
-            state.triggered and state.severity == "EMERGENCY"
-            for state in self._breakers.values()
-        )
+        return any(state.triggered and state.severity == "EMERGENCY" for state in self._breakers.values())
 
     def to_dict(self) -> dict[str, Any]:
         """Serialise all breaker states."""

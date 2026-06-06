@@ -12,6 +12,7 @@ Flow for each TradeProposal:
 SAFETY: In SHADOW mode no order ever reaches the exchange.
 Live execution requires LIVE_MODE=true AND TRADING_MODE=LIVE.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -37,6 +38,8 @@ log = structlog.get_logger(__name__)
 _DEFAULT_COOLDOWN_S = 300  # 5 minutes
 # Separate shorter cooldown after an API-level order failure
 _DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
+# Instrument info TTL: re-fetch after this many seconds (tick_size can change)
+_INSTRUMENT_CACHE_TTL_S = 3600  # 1 hour
 
 
 class ExecutionEngine:
@@ -78,8 +81,10 @@ class ExecutionEngine:
         self._last_failure_at: dict[str, datetime] = {}
         # symbol → open position metadata (size, entry_price, side)
         self._open_positions: dict[str, dict[str, Any]] = {}
-        # symbol → InstrumentInfo (fetched once, cached forever)
-        self._instrument_cache: dict[str, InstrumentInfo] = {}
+        # symbol → (InstrumentInfo, cached_at) — TTL enforced
+        self._instrument_cache: dict[str, tuple[InstrumentInfo, datetime]] = {}
+        # symbol → leverage already confirmed on exchange for this session
+        self._leverage_confirmed: dict[str, Decimal] = {}
         # Serialises risk evaluation + local exposure updates across symbols.
         self._submit_lock = asyncio.Lock()
 
@@ -113,9 +118,7 @@ class ExecutionEngine:
                         "entry_price": pos.entry_price,
                     }
                     notional = pos.size * pos.entry_price
-                    await self._exposure.update_position(
-                        pos.symbol, pos.side.value, notional
-                    )
+                    await self._exposure.update_position(pos.symbol, pos.side.value, notional)
             closed_symbols = previous_symbols - exchange_symbols
             for symbol in closed_symbols:
                 await self._exposure.remove_position(symbol)
@@ -143,16 +146,39 @@ class ExecutionEngine:
     # ------------------------------------------------------------------
 
     async def get_instrument_info(self, symbol: str) -> InstrumentInfo:
-        if symbol not in self._instrument_cache:
-            info = await self._adapter.get_instrument_info(self._category, symbol)
-            self._instrument_cache[symbol] = info
-            log.debug(
-                "execution.instrument_info_cached",
+        cached = self._instrument_cache.get(symbol)
+        if cached is not None:
+            info, cached_at = cached
+            age = (datetime.now(tz=UTC) - cached_at).total_seconds()
+            if age < _INSTRUMENT_CACHE_TTL_S:
+                return info
+        info = await self._adapter.get_instrument_info(self._category, symbol)
+        self._instrument_cache[symbol] = (info, datetime.now(tz=UTC))
+        log.debug(
+            "execution.instrument_info_cached",
+            symbol=symbol,
+            min_qty=str(info.min_order_qty),
+            qty_step=str(info.qty_step),
+        )
+        return info
+
+    async def _ensure_leverage(self, symbol: str, max_leverage: Decimal) -> None:
+        """Set exchange leverage to match profile max, if not already confirmed."""
+        confirmed = self._leverage_confirmed.get(symbol)
+        if confirmed is not None and confirmed <= max_leverage:
+            return
+        try:
+            lev_str = str(int(max_leverage)) if max_leverage == max_leverage.to_integral_value() else str(max_leverage)
+            await self._adapter._rest.set_leverage(
+                category=self._category,
                 symbol=symbol,
-                min_qty=str(info.min_order_qty),
-                qty_step=str(info.qty_step),
+                buy_leverage=lev_str,
+                sell_leverage=lev_str,
             )
-        return self._instrument_cache[symbol]
+            self._leverage_confirmed[symbol] = max_leverage
+            log.info("execution.leverage_set", symbol=symbol, leverage=lev_str)
+        except Exception as exc:
+            log.warning("execution.leverage_set_failed", symbol=symbol, error=str(exc))
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -233,6 +259,42 @@ class ExecutionEngine:
                 error=str(exc),
             )
             return None
+
+        # 3b. SL validation (live mode only) ─────────────────────────
+        # In shadow mode we allow proposals without explicit SL for simulation.
+        # In live mode, we never enter without a validated stop-loss.
+        if not self._shadow_mode:
+            if proposal.stop_loss is None:
+                log.warning(
+                    "execution.rejected_no_stop_loss",
+                    symbol=symbol,
+                    side=proposal.side.value,
+                )
+                return None
+            # Verify SL is on the correct side of entry
+            if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
+                from trader.domain.enums import OrderSide
+
+                sl_valid = (proposal.side == OrderSide.BUY and proposal.stop_loss < proposal.entry_price) or (
+                    proposal.side == OrderSide.SELL and proposal.stop_loss > proposal.entry_price
+                )
+                if not sl_valid:
+                    log.warning(
+                        "execution.rejected_invalid_stop_loss_side",
+                        symbol=symbol,
+                        side=proposal.side.value,
+                        entry=str(proposal.entry_price),
+                        stop_loss=str(proposal.stop_loss),
+                    )
+                    return None
+
+        # 3c. Leverage enforcement (live mode only) ───────────────────
+        if not self._shadow_mode:
+            try:
+                max_lev = self._risk_manager._limits.max_leverage
+                await self._ensure_leverage(symbol, max_lev)
+            except Exception as exc:
+                log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
 
         # 4. Risk evaluation ───────────────────────────────────────────
         try:
@@ -368,9 +430,7 @@ class ExecutionEngine:
         }
 
         if notional > Decimal("0"):
-            await self._exposure.update_position(
-                symbol, proposal.side.value, notional
-            )
+            await self._exposure.update_position(symbol, proposal.side.value, notional)
 
         return decision
 
@@ -449,12 +509,6 @@ class ExecutionEngine:
             },
             "cooldown_s": int(self._cooldown.total_seconds()),
             "failure_cooldown_s": int(self._failure_cooldown.total_seconds()),
-            "last_entries": {
-                sym: ts.isoformat()
-                for sym, ts in self._last_entry_at.items()
-            },
-            "last_failures": {
-                sym: ts.isoformat()
-                for sym, ts in self._last_failure_at.items()
-            },
+            "last_entries": {sym: ts.isoformat() for sym, ts in self._last_entry_at.items()},
+            "last_failures": {sym: ts.isoformat() for sym, ts in self._last_failure_at.items()},
         }

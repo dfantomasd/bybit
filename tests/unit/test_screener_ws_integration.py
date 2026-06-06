@@ -1,7 +1,7 @@
 """Tests for screener dynamic WS subscription and open-position protection."""
+
 from __future__ import annotations
 
-import asyncio
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest

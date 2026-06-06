@@ -4,10 +4,11 @@ All events inherit from ``BaseEvent`` which provides a unique ``event_id``,
 ``timestamp``, and optional ``correlation_id`` for request tracing.
 Events are immutable (frozen Pydantic models) and JSON-serialisable.
 """
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -23,12 +24,11 @@ from trader.domain.enums import (
     RiskDecisionStatus,
     SystemStatus,
     TradingMode,
-    VolatilityLevel,
 )
 
 
 def _now_utc() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # ---------------------------------------------------------------------------

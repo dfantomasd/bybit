@@ -18,6 +18,7 @@ CRITICAL SAFETY RULES:
 - The Risk Manager is always the final authority; it cannot be bypassed here.
 - In SHADOW mode no orders are ever submitted to the exchange.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -38,18 +39,16 @@ log = get_logger(__name__)
 
 # Fallback symbols (used only if screener fails); prefer cheap coins for small balance
 _SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
-_WS_INTERVAL = "1"   # 1-minute klines over WS
+_WS_INTERVAL = "1"  # 1-minute klines over WS
 _MIN_SEED_BARS = 60  # bars to fetch from REST at startup
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
-_FEATURE_INTERVAL = 5.0         # seconds between feature recomputation
-_BALANCE_REFRESH_INTERVAL = 60.0   # seconds between balance refreshes
+_FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
+_BALANCE_REFRESH_INTERVAL = 60.0  # seconds between balance refreshes
 _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
 _SUPERVISOR_HEARTBEAT_INTERVAL = 60.0  # seconds between heartbeat log lines
 _DIAG_WINDOW = timedelta(hours=1)  # sliding window for per-hour diagnostics
-_CRITICAL_TASK_NAMES = frozenset(
-    {"screener", "ws-public", "ws-consumer", "feature-pipeline", "strategy-loop"}
-)
+_CRITICAL_TASK_NAMES = frozenset({"screener", "ws-public", "ws-consumer", "feature-pipeline", "strategy-loop"})
 
 
 class TradingApplication:
@@ -226,10 +225,9 @@ class TradingApplication:
         if has_key:
             try:
                 report = await self._bybit_adapter.initialize()
-                is_live = (
-                    self._settings.LIVE_MODE
-                    and self._settings.TRADING_MODE
-                    in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+                is_live = self._settings.LIVE_MODE and self._settings.TRADING_MODE in (
+                    TradingMode.LIVE,
+                    TradingMode.CANARY_LIVE,
                 )
                 if not report.passed:
                     if is_live:
@@ -283,10 +281,7 @@ class TradingApplication:
             return False
         if self._settings.BYBIT_USE_TESTNET:
             return True
-        return (
-            self._settings.LIVE_MODE
-            and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
-        )
+        return self._settings.LIVE_MODE and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
 
     def _initial_shadow_mode(self) -> bool:
         """Compute startup execution mode from settings and safety gates."""
@@ -296,23 +291,38 @@ class TradingApplication:
         return not self._active_execution_allowed()
 
     async def _change_risk_profile(self, profile: Any) -> None:
-        """Hot-swap the risk profile without restarting — preserves drawdown history."""
+        """Hot-swap the risk profile without restarting — preserves all risk state.
+
+        SAFETY: Blocked in LIVE and CANARY_LIVE modes because a profile change
+        alters leverage limits, position caps, and daily-loss thresholds while
+        real positions are open — an unsafe combination requiring a clean restart.
+        """
+        assert self._settings is not None
+        if self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE):
+            raise RuntimeError(
+                "Risk profile hot-swap is not permitted in LIVE / CANARY_LIVE mode. "
+                "Restart the service to apply a new profile."
+            )
+
         old = self._current_risk_profile_str
         capital = await self._refresh_balance()
 
-        # Preserve the existing DrawdownTracker so accumulated drawdown is not erased.
+        # Preserve ALL risk state that spans profile boundaries.
         # Reinitialising would silently reset peak equity → new hard-stop baseline
-        # that ignores any losses already taken — a critical safety hole.
-        old_drawdown = (
-            self._risk_manager._drawdown if self._risk_manager is not None else None
-        )
+        # that ignores losses already taken — a critical safety hole.
+        old_drawdown = self._risk_manager._drawdown if self._risk_manager is not None else None
+        old_daily_pnl = self._risk_manager.daily_pnl if self._risk_manager is not None else Decimal("0")
 
         if self._settings is not None:
             self._settings.RISK_PROFILE = profile
         await self._init_risk_manager(capital)
 
-        if old_drawdown is not None and self._risk_manager is not None:
-            self._risk_manager._drawdown = old_drawdown
+        if self._risk_manager is not None:
+            if old_drawdown is not None:
+                self._risk_manager._drawdown = old_drawdown
+            # Restore daily PnL so daily loss limit is not reset mid-day
+            if old_daily_pnl != Decimal("0"):
+                self._risk_manager._daily_pnl = old_daily_pnl
 
         # Rewire execution engine to the new risk manager
         if self._execution_engine is not None:
@@ -326,6 +336,7 @@ class TradingApplication:
         self._trading_paused = True
         if self._kill_switch is not None:
             from trader.domain.enums import KillSwitchMode
+
             await self._kill_switch.activate(
                 KillSwitchMode.FULL_STOP,
                 reason="operator emergency stop via Telegram",
@@ -368,20 +379,13 @@ class TradingApplication:
             set_risk_profile=self._change_risk_profile,
             emergency_stop=self._emergency_stop,
             is_paused=lambda: self._trading_paused,
-            is_shadow=lambda: (
-                self._execution_engine._shadow_mode
-                if self._execution_engine is not None
-                else True
-            ),
+            is_shadow=lambda: self._execution_engine._shadow_mode if self._execution_engine is not None else True,
             current_profile=lambda: self._current_risk_profile_str,
-            active_symbols=lambda: (
-                self._screener.active_symbols
-                if self._screener is not None
-                else list(_SYMBOLS)
-            ),
+            active_symbols=lambda: self._screener.active_symbols if self._screener is not None else list(_SYMBOLS),
             regime_for=_regime_for,
             signal_log=self._signal_log,  # type: ignore[arg-type]
             diagnostics_provider=self.get_diagnostics,
+            allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
         )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
@@ -520,10 +524,8 @@ class TradingApplication:
             interval_s=900,
             on_symbols_added=self._on_screener_symbols_added,
             on_symbols_removed=self._on_screener_symbols_removed,
-            has_open_position=(
-                self._execution_engine.has_open_position
-                if self._execution_engine is not None
-                else None
+            has_open_position=lambda symbol: (
+                self._execution_engine is not None and self._execution_engine.has_open_position(symbol)
             ),
         )
 
@@ -722,11 +724,48 @@ class TradingApplication:
                     log.warning("private_ws_consumer.error", error=str(exc))
 
         ws_task = asyncio.create_task(self._ws_private.start(), name="ws-private")
-        consumer_task = asyncio.create_task(
-            consume_private_events(), name="ws-private-consumer"
-        )
+        consumer_task = asyncio.create_task(consume_private_events(), name="ws-private-consumer")
         self._background_tasks.extend([ws_task, consumer_task])
         log.info("private_ws.started", endpoint=selector.ws_private_base)
+
+    async def _run_risk_monitor(self) -> None:
+        """Periodic risk monitor: update equity, check WS freshness, feed circuit breakers."""
+        assert self._settings is not None
+        interval = 15.0
+
+        while not self._shutdown_event.is_set():
+            try:
+                # Refresh balance and update DrawdownTracker with current equity
+                if (
+                    self._bybit_adapter is not None
+                    and self._risk_manager is not None
+                    and bool(self._settings.BYBIT_API_KEY.get_secret_value())
+                ):
+                    try:
+                        balance = await self._bybit_adapter.get_balance()
+                        wallet = balance.wallet_balance
+                        if wallet > Decimal("0"):
+                            await self._risk_manager._drawdown.update(wallet)
+                    except Exception as exc:
+                        log.debug("risk_monitor.balance_update_failed", error=str(exc))
+
+                # Check WS freshness and alert if stale
+                if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
+                    age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
+                    if age > 60.0:
+                        log.warning("risk_monitor.ws_stale", age_s=age)
+                        self._record_diag("ws_stale")
+
+            except Exception as exc:
+                log.warning("risk_monitor.error", error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
 
     async def _run_reconciliation(self) -> None:
         """Periodic reconciliation: compare local order state with exchange."""
@@ -844,9 +883,7 @@ class TradingApplication:
         positions = self._recent_exchange_positions()
         if positions is None:
             try:
-                positions = await self._bybit_adapter.get_positions(
-                    self._settings.DEFAULT_MARKET_CATEGORY
-                )
+                positions = await self._bybit_adapter.get_positions(self._settings.DEFAULT_MARKET_CATEGORY)
                 self._cache_exchange_positions(positions)
             except Exception as exc:
                 log.debug("profit_manager.positions_fetch_failed", error=str(exc))
@@ -886,9 +923,7 @@ class TradingApplication:
                     round_up=pos.side.value == "Buy",
                 )
                 trailing_distance = self._round_to_tick(
-                    mark_price
-                    * Decimal(str(self._settings.TRAILING_DISTANCE_PCT))
-                    / Decimal("100"),
+                    mark_price * Decimal(str(self._settings.TRAILING_DISTANCE_PCT)) / Decimal("100"),
                     info.tick_size,
                     round_up=True,
                 )
@@ -952,9 +987,7 @@ class TradingApplication:
         assert self._settings is not None
         if self._latest_exchange_positions_at is None:
             return None
-        age = (
-            datetime.now(tz=UTC) - self._latest_exchange_positions_at
-        ).total_seconds()
+        age = (datetime.now(tz=UTC) - self._latest_exchange_positions_at).total_seconds()
         if age <= max(
             self._settings.POSITION_SYNC_INTERVAL_SECONDS,
             self._settings.POSITION_MANAGEMENT_INTERVAL_SECONDS,
@@ -964,11 +997,7 @@ class TradingApplication:
 
     def _effective_performance_blocks(self, active_symbols: list[str]) -> set[str]:
         assert self._settings is not None
-        blocked = {
-            symbol
-            for symbol in self._performance_blocked_symbols
-            if symbol in active_symbols
-        }
+        blocked = {symbol for symbol in self._performance_blocked_symbols if symbol in active_symbols}
         tradable_count = len(active_symbols) - len(blocked)
         min_tradable = max(0, self._settings.PERFORMANCE_MIN_TRADABLE_SYMBOLS)
         if blocked and tradable_count < min_tradable:
@@ -1027,18 +1056,12 @@ class TradingApplication:
         return {
             "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
             "last_ws_message_age_s": ws_age,
-            "active_symbols": (
-                self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
-            ),
+            "active_symbols": (self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)),
             "open_positions": (
-                list(self._execution_engine._open_positions.keys())
-                if self._execution_engine is not None
-                else []
+                list(self._execution_engine._open_positions.keys()) if self._execution_engine is not None else []
             ),
             "portfolio_heat_pct": (
-                float(self._exposure_tracker.total_exposure_pct)
-                if self._exposure_tracker is not None
-                else None
+                float(self._exposure_tracker.total_exposure_pct) if self._exposure_tracker is not None else None
             ),
             "hour_signals_emitted": hour_counts.get("signals_emitted", 0),
             "hour_risk_rejected": hour_counts.get("risk_rejected", 0),
@@ -1120,10 +1143,10 @@ class TradingApplication:
         # One symbol-agnostic strategy instance handles ALL screener symbols
         strategies = [
             EMAcrossoverStrategy(
-                symbol=None,       # None = evaluate any symbol passed in
+                symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
-                min_qty_usd=5.0,   # Bybit minimum notional is $5
-                max_risk_pct=0.01, # 1% of balance per trade
+                min_qty_usd=5.0,  # Bybit minimum notional is $5
+                max_risk_pct=0.01,  # 1% of balance per trade
             )
         ]
 
@@ -1139,9 +1162,7 @@ class TradingApplication:
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
         _shadow_positions: dict[str, dict[str, Any]] = {}
 
-        async def _check_shadow_exits(
-            symbol: str, current_price: float
-        ) -> None:
+        async def _check_shadow_exits(symbol: str, current_price: float) -> None:
             """Close shadow positions that hit TP or SL."""
             pos = _shadow_positions.get(symbol)
             if pos is None:
@@ -1200,11 +1221,7 @@ class TradingApplication:
             if vec is None:
                 return
 
-            closes = (
-                self._candle_store.closes(symbol, _WS_INTERVAL, 1)
-                if self._candle_store
-                else []
-            )
+            closes = self._candle_store.closes(symbol, _WS_INTERVAL, 1) if self._candle_store else []
             if not closes:
                 return
             current_price = closes[-1]
@@ -1266,6 +1283,7 @@ class TradingApplication:
                 return
 
             from trader.domain.enums import RiskDecisionStatus
+
             if decision is None:
                 return
             if decision.status == RiskDecisionStatus.REJECTED:
@@ -1284,6 +1302,7 @@ class TradingApplication:
             is_shadow = self._execution_engine._shadow_mode
             regime_str = regime_ctx.regime.value if regime_ctx is not None else "UNKNOWN"
             from trader.telegram_bot import SignalEntry
+
             entry = SignalEntry(
                 timestamp=datetime.now(tz=UTC),
                 symbol=proposal.symbol,
@@ -1328,21 +1347,12 @@ class TradingApplication:
                 capital = balance
 
                 # Get current active symbols from screener (dynamic)
-                active_symbols = (
-                    self._screener.active_symbols
-                    if self._screener is not None
-                    else _SYMBOLS
-                )
-                _effective_blocked_symbols = self._effective_performance_blocks(
-                    active_symbols
-                )
+                active_symbols = self._screener.active_symbols if self._screener is not None else _SYMBOLS
+                _effective_blocked_symbols = self._effective_performance_blocks(active_symbols)
 
                 # Analyse ALL symbols in parallel
                 results = await asyncio.gather(
-                    *[
-                        process_symbol(symbol, balance, capital)
-                        for symbol in active_symbols
-                    ],
+                    *[process_symbol(symbol, balance, capital) for symbol in active_symbols],
                     return_exceptions=True,
                 )
                 for symbol, result in zip(active_symbols, results, strict=False):
@@ -1405,6 +1415,7 @@ class TradingApplication:
     async def _graceful_shutdown(self) -> None:
         log.info("graceful_shutdown_starting")
         self._status = SystemStatus.STOPPING
+        self._trading_paused = True  # pause new entries immediately
 
         if self._health_checker:
             self._health_checker.set_system_status(self._status)
@@ -1412,7 +1423,20 @@ class TradingApplication:
         if self._feature_pipeline:
             self._feature_pipeline.stop()
 
-        # Log final execution state before shutdown
+        # Run reconciliation before stopping to catch any order state mismatches
+        _is_shadow = self._settings is None or self._initial_shadow_mode()
+        if self._bybit_adapter is not None and not _is_shadow:
+            try:
+                result = await asyncio.wait_for(self._bybit_adapter.reconcile(), timeout=10.0)
+                log.info(
+                    "graceful_shutdown.reconciliation",
+                    discrepancies=result.discrepancies_found,
+                    summary=result.summary,
+                )
+            except Exception as exc:
+                log.warning("graceful_shutdown.reconciliation_failed", error=str(exc))
+
+        # Log final execution state and open positions before shutdown
         if self._execution_engine is not None:
             status = self._execution_engine.get_status()
             log.info(
@@ -1420,6 +1444,16 @@ class TradingApplication:
                 open_positions=len(status["open_positions"]),
                 shadow_mode=status["shadow_mode"],
             )
+            # Alert via Telegram about shutdown with open positions
+            if status["open_positions"] and self._telegram_bot is not None:
+                try:
+                    pos_list = ", ".join(status["open_positions"].keys())
+                    await self._telegram_bot.notify(
+                        f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
+                        "Stop-losses remain active on the exchange."
+                    )
+                except Exception as exc:
+                    log.debug("graceful_shutdown.telegram_failed", error=str(exc))
 
         if self._telegram_bot:
             await self._telegram_bot.stop()
@@ -1497,10 +1531,12 @@ class TradingApplication:
             self._background_tasks.append(supervisor_task)
 
             # Periodic order/position reconciliation (non-critical, shadow skipped)
-            reconciliation_task = asyncio.create_task(
-                self._run_reconciliation(), name="reconciliation"
-            )
+            reconciliation_task = asyncio.create_task(self._run_reconciliation(), name="reconciliation")
             self._background_tasks.append(reconciliation_task)
+
+            # Risk monitor: updates equity/drawdown, checks WS staleness
+            risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
+            self._background_tasks.append(risk_monitor_task)
 
             try:
                 await self._main_loop()

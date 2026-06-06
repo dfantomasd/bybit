@@ -1,14 +1,12 @@
 """Tests for HMAC and RSA authenticators, and webhook signature verifier."""
+
 from __future__ import annotations
 
 import base64
 import hashlib
 import hmac
 
-import pytest
-
 from trader.exchange.auth import HMACAuthenticator, RSAAuthenticator, verify_bybit_signature
-
 
 # ---------------------------------------------------------------------------
 # HMAC tests
@@ -92,6 +90,7 @@ class TestHMACAuthenticator:
 # ---------------------------------------------------------------------------
 # RSA tests
 # ---------------------------------------------------------------------------
+
 
 # Generate a throwaway RSA key for testing (2048-bit)
 def _generate_test_rsa_pem() -> str:

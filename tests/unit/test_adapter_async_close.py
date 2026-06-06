@@ -1,9 +1,9 @@
 """Tests for P1.9: bybit_adapter.close() and bybit_rest.close() are now async."""
+
 from __future__ import annotations
 
 import asyncio
-import inspect
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -12,24 +12,22 @@ class TestAdapterAsyncClose:
     def test_bybit_rest_close_is_coroutine(self):
         """BybitRestClient.close() must be a coroutine function (async def)."""
         from trader.exchange.bybit_rest import BybitRestClient
-        assert asyncio.iscoroutinefunction(BybitRestClient.close), (
-            "BybitRestClient.close must be async def"
-        )
+
+        assert asyncio.iscoroutinefunction(BybitRestClient.close), "BybitRestClient.close must be async def"
 
     def test_bybit_adapter_close_is_coroutine(self):
         """BybitAdapter.close() must be a coroutine function (async def)."""
         from trader.exchange.bybit_adapter import BybitAdapter
-        assert asyncio.iscoroutinefunction(BybitAdapter.close), (
-            "BybitAdapter.close must be async def"
-        )
+
+        assert asyncio.iscoroutinefunction(BybitAdapter.close), "BybitAdapter.close must be async def"
 
     @pytest.mark.asyncio
     async def test_rest_close_awaits_session(self):
         """BybitRestClient.close() awaits aiohttp session.close()."""
+        from trader.domain.enums import BybitRegion
         from trader.exchange.bybit_rest import BybitRestClient
         from trader.exchange.endpoint_selector import EndpointSelector
         from trader.exchange.rate_limiter import RateLimiter
-        from trader.domain.enums import BybitRegion
 
         client = BybitRestClient(
             api_key="",
@@ -51,10 +49,10 @@ class TestAdapterAsyncClose:
     @pytest.mark.asyncio
     async def test_rest_close_noop_when_session_already_closed(self):
         """BybitRestClient.close() does nothing when session is already closed."""
+        from trader.domain.enums import BybitRegion
         from trader.exchange.bybit_rest import BybitRestClient
         from trader.exchange.endpoint_selector import EndpointSelector
         from trader.exchange.rate_limiter import RateLimiter
-        from trader.domain.enums import BybitRegion
 
         client = BybitRestClient(
             api_key="",

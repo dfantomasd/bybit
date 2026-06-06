@@ -1,9 +1,9 @@
 """Tests for P0.11: Private WebSocket startup and event routing."""
+
 from __future__ import annotations
 
 import asyncio
 from decimal import Decimal
-from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -14,6 +14,7 @@ from trader.domain.enums import TradingMode
 
 def _make_app(api_key: str = "key123", api_secret: str = "secret456") -> TradingApplication:
     from trader.domain.enums import BybitRegion
+
     app = TradingApplication()
     settings = MagicMock()
     settings.BYBIT_API_KEY.get_secret_value.return_value = api_key
@@ -35,9 +36,7 @@ class TestPrivateWSStartup:
 
         assert app._ws_private is None
         # No background tasks added
-        assert not any(
-            t.get_name().startswith("ws-private") for t in app._background_tasks
-        )
+        assert not any(t.get_name().startswith("ws-private") for t in app._background_tasks)
 
     @pytest.mark.asyncio
     async def test_private_ws_created_when_credentials_present(self):
@@ -78,6 +77,7 @@ class TestPrivateWSStartup:
 
         async def fake_consumer() -> None:
             from trader.domain.events import BalanceUpdateEvent as BAE
+
             while not shutdown.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.1)
@@ -108,6 +108,7 @@ class TestPrivateWSStartup:
 
         async def fake_consumer() -> None:
             from trader.domain.events import BalanceUpdateEvent as BAE
+
             while not shutdown.is_set():
                 try:
                     event = await asyncio.wait_for(queue.get(), timeout=0.1)

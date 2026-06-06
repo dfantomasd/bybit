@@ -1,11 +1,10 @@
 """Tests for CandleStore."""
+
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 
-import pytest
-
-from trader.data.candles import Candle, CandleStore, candle_from_kline_event
+from trader.data.candles import Candle, CandleStore
 
 
 def _make_candle(offset_min: int = 0, close: float = 100.0, confirm: bool = True) -> Candle:

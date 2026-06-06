@@ -1,19 +1,18 @@
 """Tests for PreflightChecker — all mocked, no real API calls."""
+
 from __future__ import annotations
 
-from unittest.mock import AsyncMock, MagicMock
-
-import pytest
+from unittest.mock import AsyncMock
 
 from trader.domain.enums import BybitRegion
 from trader.domain.models import PreflightReport
 from trader.exchange.endpoint_selector import EndpointSelector
-from trader.exchange.preflight import CheckResult, PreflightChecker, _DRIFT_FAIL_SECONDS
-
+from trader.exchange.preflight import CheckResult, PreflightChecker
 
 # ---------------------------------------------------------------------------
 # Helpers / fixtures
 # ---------------------------------------------------------------------------
+
 
 def _make_rest_mock(
     server_time_ret_code: int = 0,
@@ -94,6 +93,7 @@ def _make_checker(
 # Full run tests
 # ---------------------------------------------------------------------------
 
+
 class TestPreflightCheckerRun:
     async def test_all_green_passes(self) -> None:
         checker = _make_checker()
@@ -153,6 +153,7 @@ class TestPreflightCheckerRun:
 # Individual check tests
 # ---------------------------------------------------------------------------
 
+
 class TestIndividualChecks:
     async def test_rest_connectivity_ok(self) -> None:
         checker = _make_checker()
@@ -170,6 +171,7 @@ class TestIndividualChecks:
 
     async def test_time_drift_small_passes(self) -> None:
         import time
+
         server_seconds = str(int(time.time()))  # Current time — near-zero drift
         rest = _make_rest_mock(server_time_seconds=server_seconds)
         checker = _make_checker(rest=rest)
@@ -178,6 +180,7 @@ class TestIndividualChecks:
 
     async def test_time_drift_over_30s_fails(self) -> None:
         import time as _time
+
         # Server time 60 seconds in the past → drift = 60s
         past_seconds = str(int(_time.time()) - 60)
         rest = _make_rest_mock(server_time_seconds=past_seconds)
@@ -189,6 +192,7 @@ class TestIndividualChecks:
 
     async def test_time_drift_between_5_and_30_warns(self) -> None:
         import time as _time
+
         # 10-second drift — should warn but pass
         slightly_off = str(int(_time.time()) - 10)
         rest = _make_rest_mock(server_time_seconds=slightly_off)
@@ -211,18 +215,14 @@ class TestIndividualChecks:
         assert result.passed is False
 
     async def test_withdrawal_permission_warns(self) -> None:
-        rest = _make_rest_mock(
-            api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]}
-        )
+        rest = _make_rest_mock(api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]})
         checker = _make_checker(rest=rest)
         result = await checker._check_api_key_permissions()
         assert result.warning is not None
         assert "WITHDRAWAL" in result.warning.upper() or "Wallet" in result.warning
 
     async def test_no_withdrawal_permission_no_warning(self) -> None:
-        rest = _make_rest_mock(
-            api_key_permissions={"ContractTrade": ["Order", "Position"]}
-        )
+        rest = _make_rest_mock(api_key_permissions={"ContractTrade": ["Order", "Position"]})
         checker = _make_checker(rest=rest)
         result = await checker._check_api_key_permissions()
         assert result.warning is None

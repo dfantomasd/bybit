@@ -1,9 +1,6 @@
 """Tests for RegimeClassifier."""
+
 from __future__ import annotations
-
-import math
-
-import pytest
 
 from trader.domain.enums import MarketRegime, VolatilityLevel
 from trader.domain.models import FeatureVector
@@ -24,12 +21,12 @@ def _vec(features: dict[str, float], symbol: str = "BTCUSDT") -> FeatureVector:
 
 def _bull_features() -> dict[str, float]:
     return {
-        "adx_14": 0.30,          # 30 > 25 threshold
-        "bb_bandwidth": 0.03,    # below high-vol threshold
-        "rsi_14": 0.62,          # above RSI_BULL_MIN
-        "ema_slope_9": 0.0003,   # positive, above threshold
+        "adx_14": 0.30,  # 30 > 25 threshold
+        "bb_bandwidth": 0.03,  # below high-vol threshold
+        "rsi_14": 0.62,  # above RSI_BULL_MIN
+        "ema_slope_9": 0.0003,  # positive, above threshold
         "ema_slope_21": 0.0001,  # positive
-        "volume_zscore": 0.5,    # normal volume
+        "volume_zscore": 0.5,  # normal volume
         "realized_vol_20": 0.02,
     }
 
@@ -38,7 +35,7 @@ def _bear_features() -> dict[str, float]:
     return {
         "adx_14": 0.30,
         "bb_bandwidth": 0.03,
-        "rsi_14": 0.38,           # below RSI_BEAR_MAX
+        "rsi_14": 0.38,  # below RSI_BEAR_MAX
         "ema_slope_9": -0.0003,
         "ema_slope_21": -0.0001,
         "volume_zscore": 0.2,
@@ -48,7 +45,7 @@ def _bear_features() -> dict[str, float]:
 
 def _sideways_features() -> dict[str, float]:
     return {
-        "adx_14": 0.12,          # 12 < 20 threshold
+        "adx_14": 0.12,  # 12 < 20 threshold
         "bb_bandwidth": 0.02,
         "rsi_14": 0.50,
         "ema_slope_9": 0.00001,
@@ -61,7 +58,7 @@ def _sideways_features() -> dict[str, float]:
 def _high_vol_features() -> dict[str, float]:
     return {
         "adx_14": 0.25,
-        "bb_bandwidth": 0.09,    # above 0.06 threshold
+        "bb_bandwidth": 0.09,  # above 0.06 threshold
         "rsi_14": 0.55,
         "ema_slope_9": 0.0001,
         "ema_slope_21": 0.00005,
@@ -77,7 +74,7 @@ def _low_liquidity_features() -> dict[str, float]:
         "rsi_14": 0.50,
         "ema_slope_9": 0.0001,
         "ema_slope_21": 0.00005,
-        "volume_zscore": -2.0,   # below -1.5 threshold
+        "volume_zscore": -2.0,  # below -1.5 threshold
         "realized_vol_20": 0.01,
     }
 
@@ -119,8 +116,13 @@ class TestRegimeClassifier:
         assert ctx.symbol == "ETHUSDT"
 
     def test_confidence_in_range(self):
-        for feat_fn in [_bull_features, _bear_features, _sideways_features,
-                        _high_vol_features, _low_liquidity_features]:
+        for feat_fn in [
+            _bull_features,
+            _bear_features,
+            _sideways_features,
+            _high_vol_features,
+            _low_liquidity_features,
+        ]:
             ctx = self.clf.classify(_vec(feat_fn()))
             assert 0.0 <= ctx.confidence <= 1.0, f"confidence out of range: {ctx.confidence}"
 
@@ -135,7 +137,7 @@ class TestRegimeClassifier:
         features = {
             "adx_14": 0.30,
             "bb_bandwidth": 0.03,
-            "rsi_14": 0.50,      # in the middle, neither bull nor bear
+            "rsi_14": 0.50,  # in the middle, neither bull nor bear
             "ema_slope_9": 0.0003,
             "ema_slope_21": 0.0001,
             "volume_zscore": 0.2,

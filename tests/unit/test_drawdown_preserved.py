@@ -1,4 +1,5 @@
 """Tests for P0.5: DrawdownTracker state preserved on risk profile hot-swap."""
+
 from __future__ import annotations
 
 from decimal import Decimal
@@ -63,9 +64,7 @@ class TestDrawdownPreserved:
         await original_tracker.update(Decimal("90"))  # 10% drawdown from $100 peak
 
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr(
-                app, "_init_risk_manager", AsyncMock()
-            )
+            mp.setattr(app, "_init_risk_manager", AsyncMock())
             mp.setattr(app, "_refresh_balance", AsyncMock(return_value=Decimal("100")))
 
             await app._change_risk_profile(RiskProfile.MODERATE)

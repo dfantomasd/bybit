@@ -9,12 +9,12 @@ Design rules
 - Returns ``None`` when there is insufficient data (caller decides what to do).
 - Pure functions: no side effects, no state.
 """
+
 from __future__ import annotations
 
 import math
 import statistics
-from typing import Sequence
-
+from collections.abc import Sequence
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -154,7 +154,7 @@ def macd(
     # Align: ema_slow starts at index slow-1 of closes
     # ema_fast starts at index fast-1 of closes
     # We need the difference aligned to ema_slow length
-    offset = slow - fast  # ema_slow has `offset` fewer values than ema_fast (via ema)
+    slow - fast  # ema_slow has `offset` fewer values than ema_fast (via ema)
     # Both ema() results have len(closes) - period + 1 values... wait:
     # ema(closes, period) returns len(closes) - period + 1 values when len >= period
     # ema_fast: len(closes) - fast + 1
@@ -163,7 +163,7 @@ def macd(
     diff_count = len(ema_slow)
     ema_fast_aligned = ema_fast[-diff_count:]
 
-    macd_line = [f - s for f, s in zip(ema_fast_aligned, ema_slow)]
+    macd_line = [f - s for f, s in zip(ema_fast_aligned, ema_slow, strict=False)]
     if len(macd_line) < signal:
         return None
 
@@ -299,7 +299,7 @@ def adx(
     mdm_s = smooth(minus_dm, period)
 
     dx_vals: list[float] = []
-    for a, p, m in zip(atr_s, pdm_s, mdm_s):
+    for a, p, m in zip(atr_s, pdm_s, mdm_s, strict=False):
         if a == 0:
             continue
         pdi = 100 * p / a
@@ -376,12 +376,12 @@ def ema_slope(series: Sequence[float], period: int, lookback: int = 3) -> float 
     if len(ema_vals) < lookback + 1:
         return None
     # Simple linear slope over last lookback+1 points
-    y = ema_vals[-(lookback + 1):]
+    y = ema_vals[-(lookback + 1) :]
     n = len(y)
     x = list(range(n))
     x_mean = sum(x) / n
     y_mean = sum(y) / n
-    num = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y))
+    num = sum((xi - x_mean) * (yi - y_mean) for xi, yi in zip(x, y, strict=False))
     denom = sum((xi - x_mean) ** 2 for xi in x)
     if denom == 0 or y_mean == 0:
         return None

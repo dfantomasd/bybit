@@ -1,4 +1,5 @@
 """Tests for P0.13: ReconciliationService wired and running periodically."""
+
 from __future__ import annotations
 
 import asyncio
@@ -61,9 +62,7 @@ class TestReconciliation:
 
         mock_adapter = MagicMock()
         mock_adapter.reconcile = AsyncMock(
-            return_value=ReconciliationResult(
-                orders_checked=0, success=True, summary="clean"
-            )
+            return_value=ReconciliationResult(orders_checked=0, success=True, summary="clean")
         )
         app._bybit_adapter = mock_adapter
 
@@ -120,9 +119,7 @@ class TestReconciliation:
             call_count += 1
             if call_count == 1:
                 raise RuntimeError("transient network error")
-            return ReconciliationResult(
-                orders_checked=0, success=True, summary="clean"
-            )
+            return ReconciliationResult(orders_checked=0, success=True, summary="clean")
 
         mock_adapter = MagicMock()
         mock_adapter.reconcile = AsyncMock(side_effect=failing_reconcile)

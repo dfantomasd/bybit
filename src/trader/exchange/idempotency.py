@@ -6,10 +6,11 @@ Before submit: checks local log; can optionally check WS state or REST.
 orderLinkId format: {env_short}-{date}-{strategy_id[:4]}-{proposal_id[:8]}-{random_hex_6}
 Max 36 chars (Bybit limit).
 """
+
 from __future__ import annotations
 
 import secrets
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Any
 
 import structlog
@@ -98,7 +99,7 @@ class IdempotencyManager:
         Example: TN-260605-MOMO-12AB34CD-a1b2c3   (36 chars)
         """
         env_part = _env_short(env)  # 2 chars
-        date_part = datetime.now(tz=timezone.utc).strftime("%y%m%d")  # 6 chars
+        date_part = datetime.now(tz=UTC).strftime("%y%m%d")  # 6 chars
         strat_part = strategy_id[:4].upper().replace("-", "").replace("_", "")  # ≤4 chars
         prop_part = proposal_id.replace("-", "")[:8].upper()  # ≤8 chars
         rand_part = secrets.token_hex(3)  # 6 chars
@@ -153,8 +154,7 @@ class IdempotencyManager:
         if order_link_id in self._store:
             existing = self._store[order_link_id]
             raise OrderRejectedError(
-                f"orderLinkId {order_link_id!r} already registered with status "
-                f"{existing['status'].value}",
+                f"orderLinkId {order_link_id!r} already registered with status {existing['status'].value}",
                 order_link_id=order_link_id,
             )
 
@@ -177,8 +177,7 @@ class IdempotencyManager:
         allowed = _VALID_TRANSITIONS.get(current, set())
         if new_status not in allowed:
             raise OrderRejectedError(
-                f"Invalid transition {current.value} → {new_status.value} "
-                f"for orderLinkId={order_link_id!r}",
+                f"Invalid transition {current.value} → {new_status.value} for orderLinkId={order_link_id!r}",
                 order_link_id=order_link_id,
             )
         self._store[order_link_id]["status"] = new_status
@@ -193,9 +192,7 @@ class IdempotencyManager:
         """Mark order as in-flight (SUBMITTING)."""
         self._transition(order_link_id, OrderStatus.SUBMITTING)
 
-    async def mark_confirmed(
-        self, order_link_id: str, exchange_order_id: str
-    ) -> None:
+    async def mark_confirmed(self, order_link_id: str, exchange_order_id: str) -> None:
         """Mark order as REST-accepted and record exchange order ID."""
         self._transition(order_link_id, OrderStatus.REST_ACCEPTED)
         self._store[order_link_id]["exchange_order_id"] = exchange_order_id
@@ -239,6 +236,4 @@ class IdempotencyManager:
 
     def pending_count(self) -> int:
         """Count orders not yet in a terminal state."""
-        return sum(
-            1 for v in self._store.values() if v["status"] not in _TERMINAL_STATES
-        )
+        return sum(1 for v in self._store.values() if v["status"] not in _TERMINAL_STATES)

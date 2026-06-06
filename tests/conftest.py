@@ -1,8 +1,9 @@
 """Shared pytest fixtures for the test suite."""
+
 from __future__ import annotations
 
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import MagicMock
 
@@ -29,7 +30,7 @@ from trader.domain.models import (
 
 
 def _utcnow() -> datetime:
-    return datetime.now(tz=timezone.utc)
+    return datetime.now(tz=UTC)
 
 
 # ---------------------------------------------------------------------------

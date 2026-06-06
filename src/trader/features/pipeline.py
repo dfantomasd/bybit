@@ -3,11 +3,12 @@
 Reads from CandleStore, computes technical indicators, and emits FeatureVectors.
 Updates the HealthChecker so the health endpoint reflects feature freshness.
 """
+
 from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime
-from typing import Any, Sequence
+from typing import Any
 
 import structlog
 
@@ -18,7 +19,6 @@ from trader.features.technical import (
     atr,
     bb_bandwidth,
     bb_percent_b,
-    bollinger_bands,
     candle_body_ratio,
     ema_slope,
     ema_value,
@@ -81,11 +81,7 @@ class FeaturePipeline:
         """
         log.info("feature_pipeline.started", symbols=symbols, intervals=intervals)
         while not self._stop_event.is_set():
-            active = (
-                symbol_source.active_symbols
-                if symbol_source is not None
-                else symbols
-            )
+            active = symbol_source.active_symbols if symbol_source is not None else symbols
 
             # Compute all (symbol, interval) pairs concurrently
             async def _compute_one(symbol: str, interval: str) -> None:
@@ -103,11 +99,7 @@ class FeaturePipeline:
                         error=str(exc),
                     )
 
-            tasks = [
-                _compute_one(symbol, interval)
-                for symbol in active
-                for interval in intervals
-            ]
+            tasks = [_compute_one(symbol, interval) for symbol in active for interval in intervals]
             if tasks:
                 await asyncio.gather(*tasks)
 
@@ -116,7 +108,7 @@ class FeaturePipeline:
                     asyncio.shield(self._stop_event.wait()),
                     timeout=self._interval,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 pass
 
     def stop(self) -> None:
@@ -258,9 +250,7 @@ class FeaturePipeline:
         candles = self._store.confirmed(symbol, interval)
         if candles:
             last = candles[-1]
-            features["candle_body_ratio"] = candle_body_ratio(
-                last.open, last.high, last.low, last.close
-            )
+            features["candle_body_ratio"] = candle_body_ratio(last.open, last.high, last.low, last.close)
 
         # Quality score: fraction of features computed
         total = len(features) + len(missing)

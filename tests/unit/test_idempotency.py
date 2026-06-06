@@ -1,7 +1,9 @@
 """Tests for IdempotencyManager."""
+
 from __future__ import annotations
 
 import uuid
+from datetime import UTC
 from decimal import Decimal
 
 import pytest
@@ -11,10 +13,10 @@ from trader.domain.errors import OrderRejectedError
 from trader.domain.models import OrderIntent
 from trader.exchange.idempotency import IdempotencyManager
 
-
 # ---------------------------------------------------------------------------
 # Helper
 # ---------------------------------------------------------------------------
+
 
 def _make_intent(order_link_id: str) -> OrderIntent:
     return OrderIntent(
@@ -34,6 +36,7 @@ def _make_intent(order_link_id: str) -> OrderIntent:
 # ID generation
 # ---------------------------------------------------------------------------
 
+
 class TestGenerateOrderLinkId:
     def setup_method(self) -> None:
         self.mgr = IdempotencyManager()
@@ -43,10 +46,7 @@ class TestGenerateOrderLinkId:
         assert len(oid) <= 36, f"ID too long: {oid!r} (len={len(oid)})"
 
     def test_generated_id_is_unique(self) -> None:
-        ids = {
-            self.mgr.generate_order_link_id("TESTNET", "momentum", str(uuid.uuid4()))
-            for _ in range(100)
-        }
+        ids = {self.mgr.generate_order_link_id("TESTNET", "momentum", str(uuid.uuid4())) for _ in range(100)}
         assert len(ids) == 100, "Generated IDs are not unique"
 
     def test_id_contains_env_short(self) -> None:
@@ -54,8 +54,9 @@ class TestGenerateOrderLinkId:
         assert oid.startswith("TN-"), f"Expected TN prefix, got: {oid}"
 
     def test_id_contains_date(self) -> None:
-        from datetime import datetime, timezone
-        today = datetime.now(tz=timezone.utc).strftime("%y%m%d")
+        from datetime import datetime
+
+        today = datetime.now(tz=UTC).strftime("%y%m%d")
         oid = self.mgr.generate_order_link_id("TESTNET", "momentum", str(uuid.uuid4()))
         assert today in oid
 
@@ -76,6 +77,7 @@ class TestGenerateOrderLinkId:
 # ---------------------------------------------------------------------------
 # Duplicate detection
 # ---------------------------------------------------------------------------
+
 
 class TestDuplicateDetection:
     async def test_check_duplicate_false_for_new_id(self) -> None:
@@ -99,6 +101,7 @@ class TestDuplicateDetection:
 # ---------------------------------------------------------------------------
 # State transitions
 # ---------------------------------------------------------------------------
+
 
 class TestStateTransitions:
     async def _setup(self) -> tuple[IdempotencyManager, str]:

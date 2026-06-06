@@ -1,4 +1,5 @@
 """Tests for HealthChecker Redis behaviour with empty / optional URL."""
+
 from __future__ import annotations
 
 import pytest

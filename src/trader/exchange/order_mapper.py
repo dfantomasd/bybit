@@ -3,6 +3,7 @@
 All price / quantity rounding uses Decimal arithmetic; float is never used
 for financial calculations.
 """
+
 from __future__ import annotations
 
 from datetime import UTC, datetime
@@ -217,9 +218,7 @@ class OrderMapper:
             available_balance=_d(
                 # Bybit UNIFIED: prefer availableToWithdraw; if zero fall back
                 # to walletBalance so the bot doesn't use $1000 fallback capital
-                data.get("availableToWithdraw")
-                or data.get("availableBalance")
-                or data.get("walletBalance", "0")
+                data.get("availableToWithdraw") or data.get("availableBalance") or data.get("walletBalance", "0")
             ),
             unrealised_pnl=_d(data.get("unrealisedPnl", "0")),
             margin_balance=_d(data.get("equity")) if data.get("equity") else None,

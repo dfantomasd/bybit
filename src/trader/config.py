@@ -9,6 +9,7 @@ CRITICAL: SecretStr fields MUST NOT be logged or serialised in plaintext.
 The get_secret_value() method must only be called in the minimal execution
 context that requires the actual credential.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -59,9 +60,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Database
     # ------------------------------------------------------------------
-    POSTGRES_DSN: SecretStr = SecretStr(
-        "postgresql+asyncpg://trader:trader@postgres:5432/trader"
-    )
+    POSTGRES_DSN: SecretStr = SecretStr("postgresql+asyncpg://trader:trader@postgres:5432/trader")
     TRADE_JOURNAL_ENABLED: bool = True
     """Persist signals, risk decisions, order events, and closed PnL in Postgres."""
     PERFORMANCE_FILTER_ENABLED: bool = True
@@ -137,6 +136,10 @@ class Settings(BaseSettings):
     LIVE_MODE: bool = False
     """Explicit opt-in required to allow live order submission."""
 
+    TELEGRAM_ALLOW_RISK_INCREASE: bool = False
+    """When False (default), Telegram /risk command cannot escalate to a riskier profile.
+    Risk escalation requires explicit env-var opt-in to prevent accidental leverage bumps."""
+
     # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------
@@ -181,8 +184,7 @@ class Settings(BaseSettings):
         if self.TRADING_MODE == TradingMode.LIVE:
             if not self.LIVE_MODE:
                 raise ValueError(
-                    "TRADING_MODE=LIVE requires LIVE_MODE=true to be explicitly set. "
-                    "This is a deliberate safety gate."
+                    "TRADING_MODE=LIVE requires LIVE_MODE=true to be explicitly set. This is a deliberate safety gate."
                 )
 
 

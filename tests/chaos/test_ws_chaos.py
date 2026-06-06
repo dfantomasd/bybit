@@ -10,23 +10,18 @@ Tests resilience against:
 - Unknown orders
 - Reconnect behavior
 """
+
 from __future__ import annotations
 
 import asyncio
 import json
 from decimal import Decimal
-from typing import Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock
 
-import pytest
-
-from trader.data.event_bus import EventBus
 from trader.data.orderbook import LocalOrderBook
-from trader.domain.events import OrderBookEvent, ReconciliationEvent
-from trader.domain.enums import MarketType, OrderStatus
-from trader.exchange.state_machine import OrderStateStore, OrderStateMachine
-from trader.exchange.reconnect_supervisor import ReconnectSupervisor, calc_backoff
-
+from trader.domain.enums import MarketType
+from trader.domain.events import ReconciliationEvent
+from trader.exchange.reconnect_supervisor import ReconnectSupervisor
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -59,18 +54,22 @@ def delta_data(bids, asks, update_id, seq=None):
 async def test_snapshot_then_delta_valid():
     """After a snapshot, a sequential delta is applied correctly."""
     ob = LocalOrderBook("BTCUSDT")
-    ob.apply_snapshot(snapshot_data(
-        bids=[(30000, 1.0)],
-        asks=[(30001, 0.5)],
-        update_id=100,
-    ))
+    ob.apply_snapshot(
+        snapshot_data(
+            bids=[(30000, 1.0)],
+            asks=[(30001, 0.5)],
+            update_id=100,
+        )
+    )
     assert ob.is_valid()
 
-    result = ob.apply_delta(delta_data(
-        bids=[(30000, 2.0)],
-        asks=[],
-        update_id=101,
-    ))
+    result = ob.apply_delta(
+        delta_data(
+            bids=[(30000, 2.0)],
+            asks=[],
+            update_id=101,
+        )
+    )
     assert result is True
     assert ob.get_best_bid() == (Decimal("30000"), Decimal("2.0"))
 
@@ -78,18 +77,22 @@ async def test_snapshot_then_delta_valid():
 async def test_sequence_gap_invalidates_orderbook():
     """A sequence gap (non-contiguous update_id) invalidates the orderbook."""
     ob = LocalOrderBook("BTCUSDT")
-    ob.apply_snapshot(snapshot_data(
-        bids=[(30000, 1.0)],
-        asks=[(30001, 0.5)],
-        update_id=100,
-    ))
+    ob.apply_snapshot(
+        snapshot_data(
+            bids=[(30000, 1.0)],
+            asks=[(30001, 0.5)],
+            update_id=100,
+        )
+    )
 
     # Skip update_id 101, send 103 directly
-    result = ob.apply_delta(delta_data(
-        bids=[(30000, 3.0)],
-        asks=[],
-        update_id=103,
-    ))
+    result = ob.apply_delta(
+        delta_data(
+            bids=[(30000, 3.0)],
+            asks=[],
+            update_id=103,
+        )
+    )
     assert result is False
     assert not ob.is_valid()
 
@@ -99,22 +102,26 @@ async def test_reconnect_rebuilds_orderbook():
     ob = LocalOrderBook("BTCUSDT")
 
     # Initial snapshot
-    ob.apply_snapshot(snapshot_data(
-        bids=[(30000, 1.0)],
-        asks=[(30001, 0.5)],
-        update_id=100,
-    ))
+    ob.apply_snapshot(
+        snapshot_data(
+            bids=[(30000, 1.0)],
+            asks=[(30001, 0.5)],
+            update_id=100,
+        )
+    )
 
     # Sequence gap invalidates
     ob.apply_delta(delta_data(bids=[(30000, 5.0)], asks=[], update_id=200))
     assert not ob.is_valid()
 
     # New snapshot after reconnect
-    ob.apply_snapshot(snapshot_data(
-        bids=[(31000, 2.0), (30999, 1.0)],
-        asks=[(31001, 0.5)],
-        update_id=500,
-    ))
+    ob.apply_snapshot(
+        snapshot_data(
+            bids=[(31000, 2.0), (30999, 1.0)],
+            asks=[(31001, 0.5)],
+            update_id=500,
+        )
+    )
     assert ob.is_valid()
     assert ob.get_best_bid() == (Decimal("31000"), Decimal("2.0"))
 
@@ -124,11 +131,13 @@ async def test_repeated_snapshot_resets_book():
     ob = LocalOrderBook("BTCUSDT")
 
     for i, price in enumerate([30000, 31000, 32000], start=1):
-        ob.apply_snapshot(snapshot_data(
-            bids=[(price, float(i))],
-            asks=[(price + 1, 0.5)],
-            update_id=i * 100,
-        ))
+        ob.apply_snapshot(
+            snapshot_data(
+                bids=[(price, float(i))],
+                asks=[(price + 1, 0.5)],
+                update_id=i * 100,
+            )
+        )
         assert ob.is_valid()
         best = ob.get_best_bid()
         assert best is not None
@@ -160,7 +169,7 @@ async def test_stale_ws_triggers_reconnect():
     task.cancel()
     try:
         await asyncio.wait_for(task, timeout=1.0)
-    except (asyncio.CancelledError, asyncio.TimeoutError):
+    except (TimeoutError, asyncio.CancelledError):
         pass
 
     # Should have attempted at least once (first failure)
@@ -182,20 +191,22 @@ async def test_duplicate_event_is_idempotent():
     # Simulate two identical order messages
     order_msg = {
         "topic": "order",
-        "data": [{
-            "orderId": "order-123",
-            "orderLinkId": "link-456",
-            "symbol": "BTCUSDT",
-            "category": "linear",
-            "side": "Buy",
-            "orderType": "Limit",
-            "qty": "0.1",
-            "price": "30000",
-            "orderStatus": "New",
-            "cumExecQty": "0",
-            "cumExecFee": "0",
-            "updatedTime": "1700000000000",
-        }],
+        "data": [
+            {
+                "orderId": "order-123",
+                "orderLinkId": "link-456",
+                "symbol": "BTCUSDT",
+                "category": "linear",
+                "side": "Buy",
+                "orderType": "Limit",
+                "qty": "0.1",
+                "price": "30000",
+                "orderStatus": "New",
+                "cumExecQty": "0",
+                "cumExecFee": "0",
+                "updatedTime": "1700000000000",
+            }
+        ],
     }
 
     raw = json.dumps(order_msg)
@@ -212,11 +223,13 @@ async def test_queue_full_drops_market_data():
 
     # Fill the queue
     from trader.domain.events import MarketDataEvent
+
     queue.put_nowait(MarketDataEvent(symbol="BTCUSDT", market_type=MarketType.LINEAR))
     queue.put_nowait(MarketDataEvent(symbol="ETHUSDT", market_type=MarketType.LINEAR))
 
     # Now queue is full — emitting more should not raise
     from trader.exchange.bybit_ws_public import BybitPublicWebSocket
+
     ws_pub = BybitPublicWebSocket(
         endpoint="wss://test",
         subscriptions=["orderbook.50.BTCUSDT"],
@@ -294,7 +307,7 @@ async def test_position_without_sl_triggers_safe_mode():
         event_queue=queue,
     )
 
-    result = await svc.run_once()
+    await svc.run_once()
     # Safe mode should be activated
     assert svc.safe_mode is True
 
@@ -308,9 +321,7 @@ async def test_unknown_order_detected():
     # Exchange has an order that local store doesn't know about
     mock_rest = AsyncMock()
     mock_rest.get_positions = AsyncMock(return_value=[])
-    mock_rest.get_open_orders = AsyncMock(return_value=[
-        {"orderLinkId": "unknown-order-999", "orderStatus": "New"}
-    ])
+    mock_rest.get_open_orders = AsyncMock(return_value=[{"orderLinkId": "unknown-order-999", "orderStatus": "New"}])
     mock_rest.get_wallet_balance = AsyncMock(return_value={})
 
     mock_order_store = AsyncMock()

@@ -1,8 +1,9 @@
 """Tests for post-multiplier min-notional guard in RiskManager."""
+
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -11,10 +12,10 @@ from trader.domain.models import InstrumentInfo, TradeProposal
 from trader.risk.manager import RiskManager
 from trader.risk.profiles import RiskProfile, get_risk_limits
 
-
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
+
 
 def _instrument(
     min_notional: str = "5",
@@ -57,7 +58,7 @@ def _proposal(
 
 
 def _make_manager(profile: RiskProfile = RiskProfile.MODERATE) -> tuple[RiskManager, MagicMock, MagicMock]:
-    limits = get_risk_limits(profile)
+    get_risk_limits(profile)
     drawdown = MagicMock()
     drawdown.drawdown_pct = Decimal("0")
     drawdown.is_at_hard_stop = MagicMock(return_value=False)
@@ -88,6 +89,7 @@ def _make_manager(profile: RiskProfile = RiskProfile.MODERATE) -> tuple[RiskMana
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 class TestPostMultiplierMinNotional:
     @pytest.mark.asyncio
@@ -147,7 +149,7 @@ class TestPostMultiplierMinNotional:
 
         decision = await manager.evaluate(
             proposal=proposal,
-            capital=Decimal("1"),         # only $1 capital
+            capital=Decimal("1"),  # only $1 capital
             available_balance=Decimal("1"),
             instrument_info=info,
         )
@@ -188,7 +190,7 @@ class TestPostMultiplierMinNotional:
         decision = await manager.evaluate(
             proposal=proposal,
             capital=Decimal("100"),
-            available_balance=Decimal("4"),   # less than min_notional
+            available_balance=Decimal("4"),  # less than min_notional
             instrument_info=info,
         )
 

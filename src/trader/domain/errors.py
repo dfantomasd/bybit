@@ -3,6 +3,7 @@
 All exceptions derive from ``TradingSystemError`` so callers can catch the
 entire family with a single except clause when needed.
 """
+
 from __future__ import annotations
 
 
@@ -28,10 +29,7 @@ class TradingSystemError(Exception):
         self.retryable = retryable
 
     def __repr__(self) -> str:
-        return (
-            f"{type(self).__name__}(message={self.message!r}, "
-            f"code={self.code!r}, retryable={self.retryable})"
-        )
+        return f"{type(self).__name__}(message={self.message!r}, code={self.code!r}, retryable={self.retryable})"
 
 
 # ---------------------------------------------------------------------------

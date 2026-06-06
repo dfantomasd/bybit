@@ -18,6 +18,7 @@ Security:
 
 All endpoints are READ-ONLY. No trading actions can be triggered via this API.
 """
+
 from __future__ import annotations
 
 import time
@@ -133,6 +134,27 @@ def create_app(
     async def get_livez() -> dict[str, str]:
         """Return minimal unauthenticated liveness for container probes."""
         return {"status": "ok"}
+
+    @app.get(
+        "/readyz",
+        summary="Process readiness",
+        tags=["observability"],
+    )
+    async def get_readyz() -> JSONResponse:
+        """Return 200 when the system is healthy/degraded, 503 when unhealthy.
+
+        Use this for Kubernetes/Render readiness probes — the container should
+        not receive traffic when unhealthy (e.g. DB or WS feed is down).
+        """
+        if health_checker is None:
+            return JSONResponse(status_code=200, content={"status": "ok", "note": "no health checker"})
+        health: HealthStatus = await health_checker.overall_health()
+        if health.overall == "unhealthy":
+            return JSONResponse(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                content={"status": "not_ready", "messages": health.messages},
+            )
+        return JSONResponse(status_code=200, content={"status": "ready", "overall": health.overall})
 
     @app.get(
         "/health",

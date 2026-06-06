@@ -8,6 +8,7 @@ Usage::
     from trader.monitoring.metrics import METRICS
     METRICS.orders_submitted.labels(symbol="BTCUSDT", side="Buy", order_type="Market").inc()
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -18,7 +19,6 @@ from prometheus_client import (
     Counter,
     Gauge,
     Histogram,
-    Summary,
 )
 
 # ---------------------------------------------------------------------------
@@ -452,7 +452,7 @@ class TradingMetrics:
         )
 
     @classmethod
-    def get_instance(cls) -> "TradingMetrics":
+    def get_instance(cls) -> TradingMetrics:
         """Return the singleton instance, creating it on first call."""
         if cls._instance is None:
             cls._instance = cls()

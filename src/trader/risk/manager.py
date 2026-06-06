@@ -11,6 +11,7 @@ CRITICAL INVARIANTS:
 6. SHORT requires explicit short_allowed=True
 7. DERIVATIVES require explicit derivatives_allowed=True
 """
+
 from __future__ import annotations
 
 import logging
@@ -47,6 +48,7 @@ def _ceil_to_step(qty: Decimal, step: Decimal) -> Decimal:
         return qty
     steps = (qty / step).to_integral_value(rounding=ROUND_CEILING)
     return steps * step
+
 
 # Regime-based risk multipliers
 _REGIME_MULTIPLIERS: dict[MarketRegime, Decimal] = {
@@ -205,9 +207,7 @@ class RiskManager:
         # ----------------------------------------------------------------
         if capital > Decimal("0"):
             daily_loss_pct = (
-                abs(self._daily_pnl) / capital * Decimal("100")
-                if self._daily_pnl < Decimal("0")
-                else Decimal("0")
+                abs(self._daily_pnl) / capital * Decimal("100") if self._daily_pnl < Decimal("0") else Decimal("0")
             )
             if daily_loss_pct >= self._limits.daily_loss_limit_pct:
                 return self._reject(
@@ -242,10 +242,7 @@ class RiskManager:
                 capital,
             )
 
-        if (
-            proposal.market_type in _DERIVATIVES_TYPES
-            and not self._limits.derivatives_allowed
-        ):
+        if proposal.market_type in _DERIVATIVES_TYPES and not self._limits.derivatives_allowed:
             return self._reject(
                 proposal,
                 f"derivatives ({proposal.market_type.value}) not allowed in {self._profile.value} profile",
@@ -277,9 +274,7 @@ class RiskManager:
         # ----------------------------------------------------------------
         estimated_entry = proposal.entry_price or Decimal("0")
         estimated_notional = (
-            proposal.requested_qty * estimated_entry
-            if estimated_entry > Decimal("0")
-            else Decimal("0")
+            proposal.requested_qty * estimated_entry if estimated_entry > Decimal("0") else Decimal("0")
         )
 
         if estimated_notional > Decimal("0"):
@@ -301,14 +296,8 @@ class RiskManager:
         # 11. Validate stop distance
         # ----------------------------------------------------------------
         stop_distance_pct = Decimal("0")
-        if (
-            proposal.stop_loss is not None
-            and proposal.entry_price is not None
-            and proposal.entry_price > Decimal("0")
-        ):
-            stop_distance_pct = (
-                abs(proposal.entry_price - proposal.stop_loss) / proposal.entry_price
-            )
+        if proposal.stop_loss is not None and proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
+            stop_distance_pct = abs(proposal.entry_price - proposal.stop_loss) / proposal.entry_price
         elif proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
             # Default stop distance of 2% if no explicit SL
             stop_distance_pct = Decimal("0.02")
