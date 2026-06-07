@@ -189,10 +189,10 @@ def test_control_menu_has_training_and_limits() -> None:
 def test_model_help_is_russian_operator_text() -> None:
     bot = _make_bot()
     text = bot._model_help_text()
-    assert "Как пользоваться моделью" in text
-    assert "Trainable 15m" in text
-    assert "модель-кандидат" in text
-    assert "не открывает сделки сама" in text
+    assert "Precision" in text
+    assert "Walk-forward" in text
+    assert "CANARY" in text
+    assert "Промоутировать" in text
 
 
 @pytest.mark.asyncio
