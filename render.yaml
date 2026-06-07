@@ -91,6 +91,10 @@ services:
         value: "1000"
       - key: MODEL_AUTO_TRAIN_CHECK_SECONDS
         value: "300"
+      - key: MODEL_SHADOW_GATE_ENABLED
+        value: "true"
+      - key: MODEL_SHADOW_GATE_THRESHOLD
+        value: "0.55"
       # Secrets (not synced — set via Render dashboard)
       - key: BYBIT_API_KEY
         sync: false

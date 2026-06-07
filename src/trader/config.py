@@ -277,6 +277,9 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
+    MODEL_SHADOW_GATE_ENABLED: bool = True
+    """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
+    MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
 
     # ------------------------------------------------------------------
     # CANARY_LIVE safety

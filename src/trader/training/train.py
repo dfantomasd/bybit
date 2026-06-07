@@ -111,18 +111,26 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         # Load labelled samples oldest-first, then use the newest 20% as holdout.
         rows = await pool.fetch(
             """
-            SELECT fs.feature_names, fs.feature_values, po.net_return_bps, po.label
-            FROM feature_snapshots fs
-            JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-            WHERE po.horizon_minutes = $1
-              AND po.label IS NOT NULL
-              AND fs.feature_values IS NOT NULL
-            ORDER BY fs.created_at ASC
+            WITH labelled AS (
+                SELECT DISTINCT ON (fs.snapshot_id)
+                       fs.feature_names, fs.feature_values, po.net_return_bps, po.label, fs.created_at
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = $1
+                  AND po.label IS NOT NULL
+                  AND fs.feature_values IS NOT NULL
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                ORDER BY fs.snapshot_id, fs.created_at ASC
+            )
+            SELECT feature_names, feature_values, net_return_bps, label, created_at
+            FROM labelled
+            ORDER BY created_at ASC
             LIMIT 10000
             """,
             horizon_minutes,
         )
+        rows = sorted(rows, key=lambda row: row["created_at"])
 
         if len(rows) < min_samples:
             msg = f"Insufficient samples: {len(rows)} < {min_samples}"

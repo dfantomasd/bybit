@@ -919,6 +919,7 @@ class TradeJournal:
             "labelled_samples_15m": 0,
             "latest_training_run": {},
             "latest_model_version": {},
+            "shadow_gate_15m": {},
         }
         if not self.is_enabled:
             return result
@@ -941,13 +942,14 @@ class TradeJournal:
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
             rows = await self._fetch(
                 """
-                SELECT count(*) AS cnt
+                SELECT count(DISTINCT fs.snapshot_id) AS cnt
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                 WHERE po.horizon_minutes = 15
                   AND po.label IS NOT NULL
                   AND fs.feature_values IS NOT NULL
+                  AND pe.model_version = 'RULE_BASELINE_V1'
                 """
             )
             result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
@@ -972,6 +974,49 @@ class TradeJournal:
             )
             if rows:
                 result["latest_model_version"] = dict(rows[0])
+                latest_model_version = str(rows[0]["version"])
+                gate_rows = await self._fetch(
+                    """
+                    SELECT
+                        pe.decision,
+                        count(*) AS cnt,
+                        avg(po.net_return_bps) AS avg_net_return_bps,
+                        avg(po.label::double precision) AS precision
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                      AND po.horizon_minutes = 15
+                      AND po.label IS NOT NULL
+                    GROUP BY pe.decision
+                    """,
+                    latest_model_version,
+                )
+                gate: dict[str, Any] = {"model_version": latest_model_version}
+                total_count = 0
+                weighted_return = 0.0
+                for row in gate_rows:
+                    decision = str(row["decision"])
+                    count = int(row["cnt"])
+                    avg_return = float(row["avg_net_return_bps"] or 0.0)
+                    precision = float(row["precision"] or 0.0)
+                    total_count += count
+                    weighted_return += avg_return * count
+                    key = "pass" if decision == "GATE_PASS" else "block"
+                    gate[f"{key}_count"] = count
+                    gate[f"{key}_avg_net_return_bps"] = avg_return
+                    gate[f"{key}_precision"] = precision
+                if total_count:
+                    all_avg = weighted_return / total_count
+                    pass_avg = gate.get("pass_avg_net_return_bps")
+                    block_avg = gate.get("block_avg_net_return_bps")
+                    gate["total_count"] = total_count
+                    gate["all_avg_net_return_bps"] = all_avg
+                    gate["lift_vs_all_bps"] = (float(pass_avg) - all_avg) if pass_avg is not None else None
+                    gate["pass_vs_block_bps"] = (
+                        (float(pass_avg) - float(block_avg)) if pass_avg is not None and block_avg is not None else None
+                    )
+                result["shadow_gate_15m"] = gate
         except Exception as exc:
             log.debug("trade_journal.diagnostics_failed", error=str(exc))
         return result
