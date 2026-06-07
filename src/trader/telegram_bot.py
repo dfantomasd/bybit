@@ -101,6 +101,8 @@ class TradingController:
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
     # Optional async DB diagnostics provider
     db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    # Optional async provider for net P&L results (from TradeJournal)
+    net_results_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
     allow_risk_increase: bool = False
 
@@ -308,7 +310,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
             ],
             [
-                InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
+                InlineKeyboardButton("📈 Результаты", callback_data="view:net"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
             [
@@ -581,33 +583,49 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
-        # Delegate to health provider for stats
-        try:
-            stats = await self._health_provider() if callable(self._health_provider) else {}
-            net_stats = stats.get("net_results", {}) if stats else {}
-        except Exception:
-            net_stats = {}
 
-        gross = net_stats.get("gross_pnl_usd", 0.0)
-        fees = net_stats.get("total_fees_usd", 0.0)
-        funding = net_stats.get("total_funding_usd", 0.0)
-        slippage_est = net_stats.get("estimated_slippage_usd", 0.0)
-        net = net_stats.get("net_pnl_usd", gross - fees - funding)
-        maker_pct = net_stats.get("maker_fill_pct", 0.0)
-        taker_pct = net_stats.get("taker_fill_pct", 100.0)
-        fee_drag = abs(fees) + abs(funding) + abs(slippage_est)
+        if self._controller is None or self._controller.net_results_provider is None:
+            await self._reply(update, "📈 <b>NET RESULTS</b>\n\nNet results provider not available.")
+            return
+
+        try:
+            net_stats = await self._controller.net_results_provider()
+        except Exception as exc:
+            await self._reply(update, f"📈 <b>NET RESULTS</b>\n\nProvider error: <code>{exc}</code>")
+            return
+
+        if not net_stats.get("available", True):
+            reason = net_stats.get("reason", "unknown")
+            await self._reply(
+                update,
+                f"📈 <b>NET RESULTS — TODAY UTC</b>\n\n⚠️ Database unavailable: <code>{reason}</code>",
+            )
+            return
+
+        gross = float(net_stats.get("gross_pnl_usd", 0.0))
+        fees = float(net_stats.get("total_fees_usd", 0.0))
+        funding = float(net_stats.get("total_funding_usd", 0.0))
+        raw_change = float(net_stats.get("raw_change_usd", 0.0))
+        net = float(net_stats.get("net_pnl_usd", 0.0))
+        maker_pct = float(net_stats.get("maker_fill_pct", 0.0))
+        taker_pct = float(net_stats.get("taker_fill_pct", 0.0))
+        exec_count = int(net_stats.get("execution_count", 0))
+        tx_count = int(net_stats.get("transaction_count", 0))
+        fee_drag = abs(fees) + abs(funding)
 
         text = (
-            "📈 <b>NET RESULTS (today)</b>\n\n"
-            f"Gross PnL:        <code>{gross:+.4f} USDT</code>\n"
-            f"Trading fees:     <code>{fees:+.4f} USDT</code>\n"
-            f"Funding:          <code>{funding:+.4f} USDT</code>\n"
-            f"Est. slippage:    <code>{slippage_est:+.4f} USDT</code>\n"
+            "📈 <b>NET RESULTS — TODAY UTC</b>\n\n"
+            f"Gross PnL:          <code>{gross:+.4f} USDT</code>\n"
+            f"Trading fees:       <code>{-fees:.4f} USDT</code>\n"
+            f"Funding:            <code>{funding:+.4f} USDT</code>\n"
+            f"Raw balance change: <code>{raw_change:+.4f} USDT</code>\n"
             f"─────────────────────────────\n"
-            f"Net PnL:          <code>{net:+.4f} USDT</code>\n"
-            f"Fee drag:         <code>{fee_drag:.4f} USDT</code>\n\n"
-            f"Maker fills:      <code>{maker_pct:.1f}%</code>\n"
-            f"Taker fills:      <code>{taker_pct:.1f}%</code>"
+            f"Net PnL:            <code>{net:+.4f} USDT</code>\n"
+            f"Fee drag:           <code>{fee_drag:.4f} USDT</code>\n\n"
+            f"Maker fills:        <code>{maker_pct:.1f}%</code>\n"
+            f"Taker fills:        <code>{taker_pct:.1f}%</code>\n"
+            f"Executions:         <code>{exec_count}</code>\n"
+            f"Transactions:       <code>{tx_count}</code>"
         )
         await self._reply(update, text)
 
@@ -647,6 +665,10 @@ class TelegramMonitorBot:
             f"Skipped open pos:   <code>{diag.get('hour_skipped_open_position', 0)}</code>",
             f"Skipped entry cd:   <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
             f"Skipped fail cd:    <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
+            "",
+            f"Pending entries:    <code>{diag.get('pending_entry_count', 0)}</code>  {' '.join(diag.get('pending_entry_ids', [])[:3])}",
+            f"Entry mode:         <code>{diag.get('entry_order_mode', 'n/a')}</code>",
+            f"Fee provider:       <code>{'ok' if diag.get('fee_provider_available') else 'unavailable'}</code>",
         ]
         await self._reply(update, "\n".join(lines))
 
@@ -912,6 +934,7 @@ class TelegramMonitorBot:
             "signals": self._cmd_signals,
             "symbols": self._cmd_symbols,
             "pnl": self._cmd_pnl,
+            "net": self._cmd_net_results,
             "diagnostics": self._cmd_diagnostics,
         }
         if action == "db_model":

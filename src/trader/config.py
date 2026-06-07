@@ -95,7 +95,7 @@ class Settings(BaseSettings):
     """Estimated funding cost buffer per position."""
 
     ENTRY_ORDER_MODE: str = "MARKET"
-    """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
+    """MARKET only — POST_ONLY_LIMIT is not yet production-ready."""
     ENTRY_LIMIT_TTL_SECONDS: int = 5
     """Seconds to wait for a limit entry fill before cancelling."""
     ENTRY_REPRICE_ATTEMPTS: int = 1
@@ -276,6 +276,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------
+    STALE_PENDING_TTL_SECONDS: int = 600
+    """Seconds before a pending order absent from exchange is marked EXPIRED."""
+
     TRANSACTION_LOG_SYNC_INTERVAL_SECONDS: int = 60
     """How often to sync the Bybit transaction log to the database."""
     RECONCILIATION_INTERVAL_SECONDS: int = 30
@@ -285,6 +288,20 @@ class Settings(BaseSettings):
     DATA_STALENESS_THRESHOLD_SECONDS: int = 5
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
+
+    @field_validator("ENTRY_ORDER_MODE", mode="before")
+    @classmethod
+    def validate_entry_order_mode(cls, value: Any) -> str:
+        v = str(value).upper().strip() if value is not None else "MARKET"
+        if v == "POST_ONLY_LIMIT":
+            raise ValueError(
+                "ENTRY_ORDER_MODE=POST_ONLY_LIMIT is not production-ready: "
+                "maker price, PostOnly timeInForce, TTL cancel and reprice are not implemented. "
+                "Use ENTRY_ORDER_MODE=MARKET."
+            )
+        if v != "MARKET":
+            raise ValueError(f"ENTRY_ORDER_MODE must be MARKET (got {v!r})")
+        return v
 
     @field_validator("MULTITIMEFRAME_INTERVALS", mode="before")
     @classmethod

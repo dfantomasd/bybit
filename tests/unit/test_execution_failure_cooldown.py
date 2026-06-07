@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,7 +10,18 @@ import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskDecisionStatus
 from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
+from trader.exchange.fee_provider import FeeRates
 from trader.execution.engine import _DEFAULT_FAILURE_COOLDOWN_S, ExecutionEngine
+
+
+def _make_fee_provider(taker: float = 0.0006, maker: float = 0.0001) -> MagicMock:
+    fp = MagicMock()
+    _now = datetime.now(tz=UTC)
+    fp.get = AsyncMock(
+        return_value=FeeRates(maker_fee_rate=maker, taker_fee_rate=taker, source="stub", fetched_at=_now)
+    )
+    return fp
+
 
 # ---------------------------------------------------------------------------
 # Helpers (mirrors test_execution_engine.py helpers)
@@ -80,6 +92,7 @@ def _make_engine(shadow_mode: bool = False, failure_cooldown_s: int = 30) -> Exe
         shadow_mode=shadow_mode,
         cooldown_s=0,  # disable entry cooldown for these tests
         failure_cooldown_s=failure_cooldown_s,
+        fee_provider=None if shadow_mode else _make_fee_provider(),
     )
 
 

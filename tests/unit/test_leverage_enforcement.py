@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -9,7 +10,17 @@ import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskDecisionStatus
 from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
+from trader.exchange.fee_provider import FeeRates
 from trader.execution.engine import ExecutionEngine
+
+
+def _make_fee_provider(taker: float = 0.0006, maker: float = 0.0001) -> MagicMock:
+    fp = MagicMock()
+    _now = datetime.now(tz=UTC)
+    fp.get = AsyncMock(
+        return_value=FeeRates(maker_fee_rate=maker, taker_fee_rate=taker, source="stub", fetched_at=_now)
+    )
+    return fp
 
 
 def _instrument() -> InstrumentInfo:
@@ -77,6 +88,7 @@ def _make_engine(max_leverage: Decimal = Decimal("5")) -> ExecutionEngine:
         shadow_mode=False,
         cooldown_s=0,
         failure_cooldown_s=0,
+        fee_provider=_make_fee_provider(),
     )
 
 

@@ -27,10 +27,18 @@ def _decimal_or_none(value: Any) -> Decimal | None:
 
 
 def _parse_dec(v: Any) -> Decimal | None:
+    """Parse to Decimal; None only for absent/empty values. Zero stays Decimal("0")."""
+    if v in (None, ""):
+        return None
     try:
-        return Decimal(str(v)) if v not in (None, "", "0", 0) else None
+        return Decimal(str(v))
     except Exception:
         return None
+
+
+def _norm_key_part(value: Any) -> str:
+    """Return empty string for None, else str(value). Preserves 0 as '0'."""
+    return "" if value is None else str(value)
 
 
 def _parse_ts(v: Any) -> datetime | None:
@@ -323,6 +331,16 @@ class TradeJournal:
                 CREATE UNIQUE INDEX IF NOT EXISTS account_transaction_events_trade_id_idx
                     ON account_transaction_events (trade_id) WHERE trade_id IS NOT NULL;
             """)
+            # P1.1: idempotent migration — add event_key, transaction_type, raw columns
+            await conn.execute("""
+                ALTER TABLE account_transaction_events
+                    ADD COLUMN IF NOT EXISTS event_key text,
+                    ADD COLUMN IF NOT EXISTS transaction_type text,
+                    ADD COLUMN IF NOT EXISTS raw jsonb;
+                CREATE UNIQUE INDEX IF NOT EXISTS account_transaction_events_event_key_idx
+                    ON account_transaction_events (event_key)
+                    WHERE event_key IS NOT NULL;
+            """)
 
     async def record_signal(
         self,
@@ -518,38 +536,79 @@ class TradeJournal:
         )
 
     async def record_transaction_log_entries(self, entries: list[dict]) -> int:
-        """Persist Bybit transaction log entries. Returns count inserted."""
+        """Persist Bybit transaction log entries. Returns count actually inserted (not duplicates)."""
         if not self.is_enabled or not entries:
             return 0
         inserted = 0
         for entry in entries:
             try:
+                ts = _parse_ts(entry.get("transactionTime"))
+                if ts is None:
+                    log.debug(
+                        "trade_journal.transaction_log_invalid_timestamp",
+                        raw_time=entry.get("transactionTime"),
+                    )
+                    continue
+
                 trade_id = entry.get("tradeId") or None
-                await self._execute(
-                    """
-                    INSERT INTO account_transaction_events
-                        (transaction_time, symbol, side, funding, fee, fee_rate,
-                         cash_flow, change, cash_balance, trade_price,
-                         trade_id, order_id, order_link_id, created_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
-                    ON CONFLICT (trade_id) DO NOTHING
-                    """,
-                    _parse_ts(entry.get("transactionTime")),
-                    entry.get("symbol"),
-                    entry.get("side"),
-                    _parse_dec(entry.get("funding")),
-                    _parse_dec(entry.get("fee")),
-                    _parse_dec(entry.get("feeRate")),
-                    _parse_dec(entry.get("cashFlow")),
-                    _parse_dec(entry.get("change")),
-                    _parse_dec(entry.get("cashBalance")),
-                    _parse_dec(entry.get("tradePrice")),
-                    trade_id,
-                    entry.get("orderId"),
-                    entry.get("orderLinkId"),
+                transaction_type = entry.get("type") or entry.get("transactionType") or None
+
+                # Deterministic SHA-256 event_key for dedup even without trade_id
+                _key_src = "|".join(
+                    _norm_key_part(entry.get(k))
+                    for k in (
+                        "transactionTime",
+                        "type",
+                        "symbol",
+                        "side",
+                        "tradeId",
+                        "orderId",
+                        "orderLinkId",
+                        "change",
+                        "fee",
+                        "funding",
+                        "cashFlow",
+                    )
                 )
-                inserted += 1
+                event_key = hashlib.sha256(_key_src.encode()).hexdigest()
+
+                assert self._pool is not None
+                async with self._pool.acquire() as conn:
+                    rows = await conn.fetch(
+                        """
+                        INSERT INTO account_transaction_events
+                            (transaction_time, symbol, side, funding, fee, fee_rate,
+                             cash_flow, change, cash_balance, trade_price,
+                             trade_id, order_id, order_link_id,
+                             event_key, transaction_type, raw, created_at)
+                        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16::jsonb,now())
+                        ON CONFLICT (event_key) DO NOTHING
+                        RETURNING id
+                        """,
+                        ts,
+                        entry.get("symbol"),
+                        entry.get("side"),
+                        _parse_dec(entry.get("funding")),
+                        _parse_dec(entry.get("fee")),
+                        _parse_dec(entry.get("feeRate")),
+                        _parse_dec(entry.get("cashFlow")),
+                        _parse_dec(entry.get("change")),
+                        _parse_dec(entry.get("cashBalance")),
+                        _parse_dec(entry.get("tradePrice")),
+                        trade_id,
+                        entry.get("orderId"),
+                        entry.get("orderLinkId"),
+                        event_key,
+                        transaction_type,
+                        json.dumps(entry),
+                    )
+                    if rows:
+                        inserted += 1
+                self._last_successful_write_at = datetime.now(tz=UTC)
+                self._consecutive_write_errors = 0
             except Exception as exc:
+                self._last_write_error_at = datetime.now(tz=UTC)
+                self._consecutive_write_errors += 1
                 log.debug("trade_journal.transaction_log_insert_failed", error=str(exc))
         return inserted
 
@@ -570,6 +629,28 @@ class TradeJournal:
         if ids:
             log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
         return ids
+
+    async def load_pending_from_durable_state(self) -> list[str]:
+        """Return order_link_ids with unresolved durable state at startup."""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT order_link_id
+                FROM durable_order_state
+                WHERE state IN (
+                    'CREATED_LOCAL', 'SUBMITTING', 'REST_ACCEPTED',
+                    'WS_CONFIRMED', 'PARTIALLY_FILLED',
+                    'UNKNOWN_RECONCILIATION_REQUIRED'
+                )
+                AND order_link_id IS NOT NULL
+                AND order_link_id != ''
+                """
+            )
+            ids = [r["order_link_id"] for r in rows]
+            log.info("journal.pending_from_durable_state", count=len(ids))
+            return ids
 
     async def upsert_durable_order_state(
         self,
@@ -627,6 +708,167 @@ class TradeJournal:
             """
         )
         return [dict(r) for r in rows]
+
+    async def get_unresolved_durable_orders(self) -> list[dict[str, Any]]:
+        """Return all non-terminal durable orders with age_seconds for reconciliation."""
+        rows = await self._fetch(
+            """
+            SELECT order_link_id, symbol, side, qty, state, exchange_order_id,
+                   last_error, created_at, updated_at,
+                   EXTRACT(EPOCH FROM (now() - created_at))::int AS age_seconds
+            FROM durable_order_state
+            WHERE state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
+              AND updated_at > now() - interval '48 hours'
+            ORDER BY created_at ASC
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def mark_durable_order_terminal(
+        self,
+        order_link_id: str,
+        terminal_state: str,
+        last_error: str | None = None,
+    ) -> None:
+        """Move a durable order to a terminal state."""
+        await self._execute(
+            """
+            UPDATE durable_order_state
+            SET state = $1, last_error = COALESCE($2, last_error), updated_at = now()
+            WHERE order_link_id = $3
+            """,
+            terminal_state,
+            last_error,
+            order_link_id,
+        )
+
+    async def expire_stale_durable_order(self, order_link_id: str, reason: str = "stale") -> None:
+        """Mark a stale pending order as EXPIRED."""
+        await self.mark_durable_order_terminal(order_link_id, "EXPIRED", f"stale pending expired: {reason}")
+
+    async def get_durable_order_age_seconds(self, order_link_id: str) -> float | None:
+        """Return age in seconds of a durable order, or None if not found."""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) AS age_s "
+                "FROM durable_order_state WHERE order_link_id = $1",
+                order_link_id,
+            )
+            return float(row["age_s"]) if row else None
+
+    async def get_net_results_today(self) -> dict[str, Any]:
+        """Aggregate net P&L for the current UTC day from all available sources.
+
+        Separates trading PnL (closed_pnl + executions) from account balance changes
+        (deposits, withdrawals, transfers) so /net shows trading-only results.
+        """
+        if not self.is_enabled:
+            return {"available": False, "reason": "journal_disabled"}
+
+        result: dict[str, Any] = {
+            "available": True,
+            "gross_pnl_usdt": 0.0,
+            "total_fees_usdt": 0.0,
+            "funding_usdt": 0.0,
+            "net_pnl_usdt": 0.0,
+            "raw_wallet_change_usdt": 0.0,
+            "trading_net_pnl_usd": 0.0,
+            "transfer_change_usd": 0.0,
+            "deposit_withdrawal_change_usd": 0.0,
+            "closed_trades_count": 0,
+            "execution_events_count": 0,
+            "transaction_events_count": 0,
+            "maker_pct": 0.0,
+            "taker_pct": 0.0,
+            "period": "today",
+        }
+        try:
+            # Gross PnL from closed positions
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(closed_pnl), 0) AS total, COUNT(*) AS cnt FROM closed_pnl "
+                "WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')"
+            )
+            if rows:
+                result["gross_pnl_usdt"] = float(rows[0]["total"] or 0)
+                result["closed_trades_count"] = int(rows[0]["cnt"] or 0)
+
+            # Fees from execution events
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(ABS(exec_fee)), 0) AS total, COUNT(*) AS cnt "
+                "FROM execution_events "
+                "WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND exec_fee IS NOT NULL"
+            )
+            if rows:
+                result["total_fees_usdt"] = float(rows[0]["total"] or 0)
+                result["execution_events_count"] = int(rows[0]["cnt"] or 0)
+
+            # Maker/taker split
+            rows = await self._fetch(
+                "SELECT "
+                "  COUNT(*) FILTER (WHERE is_maker = true) AS maker_cnt, "
+                "  COUNT(*) FILTER (WHERE is_maker = false) AS taker_cnt, "
+                "  COUNT(*) AS total_cnt "
+                "FROM execution_events "
+                "WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND is_maker IS NOT NULL"
+            )
+            if rows and int(rows[0]["total_cnt"] or 0) > 0:
+                total_ex = int(rows[0]["total_cnt"])
+                result["maker_pct"] = round(int(rows[0]["maker_cnt"] or 0) / total_ex * 100, 1)
+                result["taker_pct"] = round(int(rows[0]["taker_cnt"] or 0) / total_ex * 100, 1)
+
+            # Funding from FUNDING-type transactions only
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(funding), 0) AS total, COUNT(*) AS cnt "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND transaction_type ILIKE 'FUND%'"
+            )
+            if rows:
+                result["funding_usdt"] = float(rows[0]["total"] or 0)
+                result["transaction_events_count"] = int(rows[0]["cnt"] or 0)
+
+            # All account transactions (raw wallet change — includes deposits/withdrawals)
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(change), 0) AS total "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC')"
+            )
+            if rows:
+                result["raw_wallet_change_usdt"] = float(rows[0]["total"] or 0)
+
+            # Transfer transactions
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(change), 0) AS total "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND transaction_type ILIKE 'TRANSFER%'"
+            )
+            if rows:
+                result["transfer_change_usd"] = float(rows[0]["total"] or 0)
+
+            # Deposit/withdrawal transactions
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(change), 0) AS total "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND (transaction_type ILIKE 'DEPOSIT%' OR transaction_type ILIKE 'WITHDRAWAL%')"
+            )
+            if rows:
+                result["deposit_withdrawal_change_usd"] = float(rows[0]["total"] or 0)
+
+            # Trading-only net PnL: gross - fees + funding (does NOT include deposits/transfers)
+            result["net_pnl_usdt"] = result["gross_pnl_usdt"] - result["total_fees_usdt"] + result["funding_usdt"]
+            result["trading_net_pnl_usd"] = result["net_pnl_usdt"]
+
+        except Exception as exc:
+            log.debug("trade_journal.net_results_failed", error=str(exc))
+            return {"available": False, "reason": str(exc)}
+
+        return result
 
     async def upsert_market_candle(
         self,

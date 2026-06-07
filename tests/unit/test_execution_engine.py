@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -19,7 +20,19 @@ from trader.domain.models import (
     RiskDecision,
     TradeProposal,
 )
+from trader.exchange.fee_provider import FeeRates
 from trader.execution.engine import ExecutionEngine
+
+
+def _make_fee_provider(taker: float = 0.0006, maker: float = 0.0001) -> MagicMock:
+    """Return a fee provider stub with typical Bybit rates."""
+    fp = MagicMock()
+    _now = datetime.now(tz=UTC)
+    fp.get = AsyncMock(
+        return_value=FeeRates(maker_fee_rate=maker, taker_fee_rate=taker, source="stub", fetched_at=_now)
+    )
+    return fp
+
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -114,6 +127,7 @@ def _make_engine(
         shadow_mode=shadow_mode,
         cooldown_s=0,  # disable cooldown for tests
         trade_journal=trade_journal,
+        fee_provider=None if shadow_mode else _make_fee_provider(),
     )
     return engine
 

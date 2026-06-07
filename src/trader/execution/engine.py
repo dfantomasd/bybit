@@ -168,10 +168,14 @@ class ExecutionEngine:
         return None
 
     def mark_entry_submitted(self, order_link_id: str = "") -> None:
-        """Register order_link_id as pending and bump rate-limit counters."""
+        """Register order_link_id as pending and bump rate-limit counters.
+
+        Idempotent: duplicate IDs do not double-count.
+        """
+        is_new = order_link_id and order_link_id not in self._pending_entry_order_link_ids
         if order_link_id:
             self._pending_entry_order_link_ids.add(order_link_id)
-        if not self._shadow_mode:
+        if not self._shadow_mode and is_new:
             self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
 
@@ -179,20 +183,29 @@ class ExecutionEngine:
         """Remove order_link_id from pending set (idempotent).
 
         Only removes the exact ID — never releases an unrelated slot.
+        Empty ID is a no-op. Duplicate terminal events are ignored.
         """
-        if order_link_id:
+        if not order_link_id:
+            return
+        if order_link_id in self._pending_entry_order_link_ids:
             self._pending_entry_order_link_ids.discard(order_link_id)
-        self._pending_entry_count = max(0, self._pending_entry_count - 1)
+            self._pending_entry_count = max(0, self._pending_entry_count - 1)
 
-    def restore_pending_entries(self, order_link_ids: list[str]) -> None:
-        """Restore pending entry IDs from durable storage at startup."""
+    def restore_pending_entries(self, order_link_ids: list[str] | set[str]) -> None:
+        """Restore pending entry IDs from durable storage at startup.
+
+        Deduplicates, syncs legacy count with actual set size. Idempotent.
+        """
         for oid in order_link_ids:
-            self._pending_entry_order_link_ids.add(oid)
-        if order_link_ids:
+            if oid:
+                self._pending_entry_order_link_ids.add(oid)
+        # Sync legacy count to actual set size (not additive — avoids double-counting on re-restore)
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+        if self._pending_entry_order_link_ids:
             log.info(
                 "execution.pending_entries_restored",
-                count=len(order_link_ids),
-                ids=order_link_ids,
+                count=len(self._pending_entry_order_link_ids),
+                ids=sorted(self._pending_entry_order_link_ids),
             )
 
     def has_pending_entries(self) -> bool:
@@ -417,8 +430,6 @@ class ExecutionEngine:
                 return None
             # Verify SL is on the correct side of entry
             if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
-                from trader.domain.enums import OrderSide
-
                 sl_valid = (proposal.side == OrderSide.BUY and proposal.stop_loss < proposal.entry_price) or (
                     proposal.side == OrderSide.SELL and proposal.stop_loss > proposal.entry_price
                 )
@@ -495,47 +506,102 @@ class ExecutionEngine:
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
 
-        # 5b. Fee-aware entry filter: reject if net edge after all costs is below threshold
-        if not self._shadow_mode and self._fee_provider is not None and proposal.take_profit is not None:
+        # 5b. Fee-aware entry filter — strict fail-closed in live mode
+        if not self._shadow_mode:
             fee_rates = None
-            try:
-                fee_rates = await self._fee_provider.get(symbol)
-            except Exception as _fee_exc:
-                log.debug("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
-            if fee_rates is not None:
-                entry_price_d = proposal.entry_price
-                tp_d = proposal.take_profit
-                taker = Decimal(str(fee_rates.taker_fee_rate))
-                # gross edge as % of entry
-                if proposal.side == OrderSide.BUY:
-                    gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
-                else:
-                    gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
-                fee_pct = taker * Decimal("200")  # entry + exit
-                spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
-                slippage_pct = Decimal(str(self._expected_slippage_pct))
-                funding_pct = Decimal(str(self._funding_buffer_pct))
-                net_edge_pct = gross_edge_pct - fee_pct - spread_pct - slippage_pct - funding_pct
-                min_edge = Decimal(str(self._min_net_edge_pct))
-                log.info(
-                    "execution.net_edge_check",
+            _fee_reason: str | None = None
+            if self._fee_provider is None:
+                _fee_reason = "fee_provider_not_configured"
+            else:
+                try:
+                    fee_rates = await self._fee_provider.get(symbol)
+                    if fee_rates is None:
+                        _fee_reason = "fee_provider_returned_none"
+                except Exception as _fee_exc:
+                    _fee_reason = f"fee_provider_raised: {_fee_exc}"
+
+            if _fee_reason is not None:
+                log.warning(
+                    "execution.fee_rate_unavailable_blocking_entry",
                     symbol=symbol,
-                    gross_edge_pct=float(round(gross_edge_pct, 4)),
-                    fee_pct=float(round(fee_pct, 4)),
-                    spread_pct=float(round(spread_pct, 4)),
-                    slippage_pct=float(round(slippage_pct, 4)),
-                    funding_pct=float(round(funding_pct, 4)),
-                    net_edge_pct=float(round(net_edge_pct, 4)),
-                    decision="allow" if net_edge_pct >= min_edge else "reject",
+                    entry_order_mode=self._entry_order_mode,
+                    reason=_fee_reason,
                 )
-                if net_edge_pct < min_edge:
-                    log.warning(
-                        "execution.net_edge_too_low",
-                        symbol=symbol,
-                        net_edge_pct=float(round(net_edge_pct, 4)),
-                        min_edge_pct=float(min_edge),
-                    )
-                    return None
+                return None
+
+            assert fee_rates is not None
+
+            if proposal.take_profit is None:
+                log.warning("execution.live_rejected_no_take_profit", symbol=symbol)
+                return None
+            if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
+                log.warning("execution.live_rejected_bad_entry_price", symbol=symbol)
+                return None
+
+            entry_price_d = proposal.entry_price
+            tp_d = proposal.take_profit
+            taker = Decimal(str(fee_rates.taker_fee_rate))
+            if proposal.side == OrderSide.BUY:
+                gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
+            else:
+                gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
+            fee_pct = taker * Decimal("200")  # entry + exit taker
+            spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
+            # Round-trip slippage: EXPECTED_SLIPPAGE_PCT is per-side, multiply by 2
+            slippage_per_side_pct = Decimal(str(self._expected_slippage_pct))
+            roundtrip_slippage_pct = slippage_per_side_pct * Decimal("2")
+            funding_pct = Decimal(str(self._funding_buffer_pct))
+            net_edge_pct = gross_edge_pct - fee_pct - spread_pct - roundtrip_slippage_pct - funding_pct
+            min_edge = Decimal(str(self._min_net_edge_pct))
+            log.info(
+                "execution.net_edge_check",
+                symbol=symbol,
+                gross_edge_pct=float(round(gross_edge_pct, 4)),
+                fee_pct=float(round(fee_pct, 4)),
+                spread_pct=float(round(spread_pct, 4)),
+                slippage_per_side_pct=float(round(slippage_per_side_pct, 4)),
+                roundtrip_slippage_pct=float(round(roundtrip_slippage_pct, 4)),
+                funding_pct=float(round(funding_pct, 4)),
+                net_edge_pct=float(round(net_edge_pct, 4)),
+                decision="allow" if net_edge_pct >= min_edge else "reject",
+            )
+            if net_edge_pct < min_edge:
+                log.warning(
+                    "execution.net_edge_too_low",
+                    symbol=symbol,
+                    net_edge_pct=float(round(net_edge_pct, 4)),
+                    min_edge_pct=float(min_edge),
+                )
+                return None
+        elif self._shadow_mode and self._fee_provider is not None and proposal.take_profit is not None:
+            # Shadow mode: log net edge estimate if data available, never blocks
+            try:
+                _sh_fee = await self._fee_provider.get(symbol)
+            except Exception:
+                _sh_fee = None
+            if _sh_fee is not None and proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
+                _ep = proposal.entry_price
+                _tp = proposal.take_profit
+                _taker = Decimal(str(_sh_fee.taker_fee_rate))
+                _gross = (
+                    (_tp - _ep) / _ep * Decimal("100")
+                    if proposal.side == OrderSide.BUY
+                    else (_ep - _tp) / _ep * Decimal("100")
+                )
+                _rts = Decimal(str(self._expected_slippage_pct)) * Decimal("2")
+                _net = (
+                    _gross
+                    - _taker * Decimal("200")
+                    - Decimal(str(self._max_spread_bps)) / Decimal("100")
+                    - _rts
+                    - Decimal(str(self._funding_buffer_pct))
+                )
+                log.debug(
+                    "shadow.net_edge_estimate",
+                    symbol=symbol,
+                    net_edge_pct=float(round(_net, 4)),
+                    roundtrip_slippage_pct=float(round(_rts, 4)),
+                )
 
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
@@ -776,6 +842,12 @@ class ExecutionEngine:
             is_stop_loss=True,
         )
         use_limit = self._entry_order_mode == "POST_ONLY_LIMIT"
+        # POST_ONLY_LIMIT is blocked at config validation; belt-and-suspenders guard
+        if use_limit:
+            raise RuntimeError(
+                "POST_ONLY_LIMIT is disabled until maker pricing, TTL cancel and "
+                "reprice are implemented. Set ENTRY_ORDER_MODE=MARKET."
+            )
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,
@@ -815,6 +887,8 @@ class ExecutionEngine:
     def get_status(self) -> dict[str, Any]:
         return {
             "shadow_mode": self._shadow_mode,
+            "pending_entry_ids": sorted(self._pending_entry_order_link_ids),
+            "pending_entry_count": self._pending_entry_count,
             "open_positions": {
                 sym: {
                     "side": pos["side"].value,
