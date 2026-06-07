@@ -325,6 +325,9 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         """Enforce critical safety invariants after field parsing."""
+        if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
+            self.SCREENER_MAX_PRICE_USD = 25.0
+
         # TESTNET mode must use testnet endpoints to avoid spending real money.
         # SHADOW mode is safe with mainnet endpoints because orders are never
         # submitted — mainnet is needed on US-hosted deployments where Bybit
