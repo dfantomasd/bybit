@@ -72,6 +72,18 @@ class TestSettingsDefaults:
         settings = self._make_settings()
         assert settings.MAX_POSITIONS == 2  # type: ignore[union-attr]
 
+    def test_starter_mode_defaults_to_small_account_price_cap(self) -> None:
+        settings = self._make_settings(STARTER_OPTIMIZED_MODE="true", SCREENER_MAX_PRICE_USD="0")
+        assert settings.SCREENER_MAX_PRICE_USD == 25.0  # type: ignore[union-attr]
+
+    def test_explicit_screener_price_cap_is_preserved(self) -> None:
+        settings = self._make_settings(STARTER_OPTIMIZED_MODE="true", SCREENER_MAX_PRICE_USD="100")
+        assert settings.SCREENER_MAX_PRICE_USD == 100.0  # type: ignore[union-attr]
+
+    def test_screener_price_cap_can_be_disabled_outside_starter_mode(self) -> None:
+        settings = self._make_settings(STARTER_OPTIMIZED_MODE="false", SCREENER_MAX_PRICE_USD="0")
+        assert settings.SCREENER_MAX_PRICE_USD == 0.0  # type: ignore[union-attr]
+
     def test_single_telegram_chat_id_string(self) -> None:
         settings = self._make_settings(TELEGRAM_ALLOWED_CHAT_IDS="-1003976706688")
         assert settings.TELEGRAM_ALLOWED_CHAT_IDS == [-1003976706688]  # type: ignore[union-attr]
