@@ -496,6 +496,47 @@ class TradingApplication:
             summary = " | ".join(results)
             await self._telegram_bot.notify(f"✅ <b>Training ALL завершено</b>\n{summary}")
 
+    async def _start_model_promote(self, version: str) -> str:
+        """Promote a SHADOW_CHALLENGER model to CHAMPION via subprocess."""
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            raise RuntimeError("Trade journal/Postgres is not available.")
+
+        def code_text(value: str, limit: int = 800) -> str:
+            return html.escape(value[-limit:])
+
+        cmd = [sys.executable, "-m", "trader.training.promote", "--version", version, "--confirm"]
+        log.info("model_promote.started", version=version)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=60.0)
+            stdout = stdout_b.decode(errors="replace").strip()
+            stderr = stderr_b.decode(errors="replace").strip()
+            if proc.returncode == 0 and "promoted to CHAMPION" in stdout:
+                if (
+                    self._model_registry is not None
+                    and self._trade_journal is not None
+                    and self._trade_journal.is_enabled
+                ):
+                    await self._model_registry.load_active_model()
+                if self._telegram_bot is not None:
+                    await self._telegram_bot.notify(
+                        f"🏆 <b>Модель промоутирована</b>\n<code>{code_text(stdout)}</code>"
+                    )
+                return f"🏆 <b>Промоут успешен!</b>\n<code>{code_text(stdout)}</code>"
+            else:
+                out = stderr or stdout or f"exit {proc.returncode}"
+                if self._telegram_bot is not None:
+                    await self._telegram_bot.notify(f"❌ <b>Промоут не прошёл</b>\n<code>{code_text(out)}</code>")
+                return f"❌ <b>Промоут не прошёл:</b>\n<code>{code_text(out)}</code>"
+        except TimeoutError:
+            return "❌ Промоут завис (timeout 60s)"
+        except Exception as exc:
+            return f"❌ Ошибка промоута: <code>{html.escape(str(exc))}</code>"
+
     async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
         cmd = [
             sys.executable,
@@ -907,6 +948,7 @@ class TradingApplication:
             emergency_stop=self._emergency_stop,
             start_training=self._start_model_training,
             start_training_all=self._start_model_training_all,
+            promote_model=self._start_model_promote,
             runtime_settings=self._runtime_settings,
             set_runtime_setting=self._set_runtime_setting,
             symbol_candidates=self._symbol_candidates,

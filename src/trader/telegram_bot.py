@@ -130,6 +130,7 @@ class TradingController:
     db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     start_training: Callable[[int, int, float], Awaitable[str]] | None = None
     start_training_all: Callable[[], Awaitable[str]] | None = None
+    promote_model: Callable[[str], Awaitable[str]] | None = None
     runtime_settings: Callable[[], dict[str, Any]] | None = None
     set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
@@ -374,12 +375,13 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
             ],
             [InlineKeyboardButton("🧠🔁 Обучить ВСЕ примеры (5m/15m/30m)", callback_data="train:all")],
+            [InlineKeyboardButton("🏆 Промоутировать кандидата → CHAMPION", callback_data="control:promote")],
             [
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
             ],
             [InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary")],
-            [InlineKeyboardButton("❓ Как читать модель", callback_data="view:model_help")],
+            [InlineKeyboardButton("❓ Как читать модель + путь к реальным деньгам", callback_data="view:model_help")],
             [InlineKeyboardButton("🚨 Аварийная остановка", callback_data="control:stop")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="view:status")],
         ]
@@ -1151,24 +1153,38 @@ class TelegramMonitorBot:
 
     def _model_help_text(self) -> str:
         return (
-            "<b>❓ Как пользоваться моделью</b>\n\n"
-            "<b>1. База</b>\n"
-            "Если БД зеленая, бот сохраняет свечи, сигналы и результаты. "
-            "Свечи 1m/5m/15m/1h — это история рынка. Чем больше истории, тем надежнее обучение.\n\n"
-            "<b>2. Trainable 15m</b>\n"
-            "Это количество готовых размеченных примеров для обучения на горизонте 15 минут. "
-            "Для первого обучения достаточно примерно 1000. Для более уверенного CANARY лучше 2000+.\n\n"
-            "<b>3. Challenger</b>\n"
-            "Это новая обученная модель-кандидат. Она пока наблюдает в тени и не открывает сделки сама.\n\n"
-            "<b>4. Gate pass/block</b>\n"
-            "Модель смотрит на сигналы стратегии и решает: пропустить сигнал или заблокировать. "
-            "Если Gate lift положительный — фильтр модели помогает. Если отрицательный — модель пока не улучшает отбор.\n\n"
-            "<b>5. Model live decisions</b>\n"
-            "Сейчас <b>disabled</b>: модель не управляет реальными сделками. Это правильно для этапа проверки.\n\n"
-            "<b>Что делать пользователю</b>\n"
-            "Нажимать <b>База и модель</b> и <b>Готовность CANARY</b>. "
-            "Обучение можно запускать вручную кнопками <b>Обучить 500/1000</b>, "
-            "а автообучение само сработает, когда накопятся новые размеченные примеры."
+            "<b>❓ Что означают метрики и как добраться до реальных денег</b>\n\n"
+            "<b>Метрики модели (в «База и модель»)</b>\n\n"
+            "• <b>Precision (точность)</b> — сколько % сигналов, пропущенных моделью, оказались прибыльными.\n"
+            "  Хорошо: ≥ 55%. Ваш baseline ~40-45%.\n\n"
+            "• <b>Lift против baseline</b> — на сколько bps прибыльнее сигналы модели по сравнению со средним.\n"
+            "  Нужно > 0 bps. Хорошо: > 3 bps.\n\n"
+            "• <b>Walk-forward ожидание</b> — ожидаемая прибыль на сигнал (уже с учётом комиссий и порога).\n"
+            "  Нужно > 0 bps для промоута. Хорошо: > 3 bps.\n\n"
+            "• <b>Lift фильтра (Gate lift)</b> — улучшает ли модель отбор сигналов В РЕАЛЬНОМ ТЕНЕВОМ РЕЖИМЕ.\n"
+            "  Показывает n/a или 0/0, пока новая модель не оценила ~50 живых сигналов.\n"
+            "  ⏳ Это нормально — накопится автоматически за 1-2 часа работы бота.\n\n"
+            "• <b>Paper baseline / Paper gate</b> — бумажный счёт: что было бы если бы бот торговал.\n"
+            "  Baseline = все сигналы, Gate = только пропущенные моделью.\n\n"
+            "<b>🛣 Путь к реальным деньгам (CANARY)</b>\n\n"
+            "<b>Шаг 1 — Накопить данные</b>\n"
+            "✓ Примеры 15m ≥ 1000 (сейчас уже есть)\n\n"
+            "<b>Шаг 2 — Обучить модель</b>\n"
+            "✓ Нажать «Обучить ВСЕ» или «Обучить 1000»\n"
+            "✓ Качество = ХОРОШО, Walk-forward > 0 bps\n\n"
+            "<b>Шаг 3 — Промоутировать кандидата</b>\n"
+            "✓ Нажать «🏆 Промоутировать кандидата → CHAMPION»\n"
+            "✓ После этого модель начнёт оценивать живые сигналы\n\n"
+            "<b>Шаг 4 — Дать модели поработать в тени (~2-4 часа)</b>\n"
+            "✓ Gate lift > 0 bps (на ≥ 50 сигналах)\n"
+            "✓ Paper gate: ≥ 20 бумажных сделок с положительным PnL\n\n"
+            "<b>Шаг 5 — Включить CANARY на Render</b>\n"
+            "Переменные окружения:\n"
+            "<code>TRADING_MODE=CANARY_LIVE\n"
+            "LIVE_ARMED=true</code>\n"
+            "CANARY торгует минимальным размером (5-10 USDT) чтобы проверить механику.\n\n"
+            "<b>Важно:</b> Кнопка «Shadow ON» в боте — это не настоящий Shadow. "
+            "Реальное включение только через Render env vars."
         )
 
     async def _cmd_db_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1330,16 +1346,82 @@ class TelegramMonitorBot:
             f"Фильтр модели 15m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
             f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
             f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
-            f"Lift фильтра: <code>{gate_lift_str}</code>",
+            "Lift фильтра: <code>"
+            + ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
+            + "</code>",
             f"Причины блоков: <code>{gate_reasons_str}</code>",
             f"Paper baseline: <code>{_paper_line(paper_baseline)}</code>",
             f"Paper model gate: <code>{_paper_line(paper_gate)}</code>",
             f"Дрифт данных: <code>{self._ru(drift)}</code>",
             "Решения модели в live: <b>выключены</b>",
             "",
-            "<i>bps = 0.01%. Precision показывает долю прибыльных сигналов среди выбранных моделью. "
-            "Lift показывает, стала ли модель лучше базовой стратегии.</i>",
+            "<i>bps = 0.01%. Precision = % прибыльных среди пропущенных моделью. "
+            "Lift = насколько пропущенные лучше среднего по всем сигналам.</i>",
+            "",
         ]
+
+        # ── Roadmap к реальным деньгам ──────────────────────────────────
+        lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
+        # 1. Данные
+        lbl_ok = int(labelled_15m or 0) >= 1000
+        lines.append(f"{'✅' if lbl_ok else '❌'} Данных 15m ≥ 1000 → сейчас: <code>{labelled_15m}</code>")
+        # 2. Модель обучена, quality GOOD
+        trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
+        lines.append(
+            f"{'✅' if trained_ok else '❌'} Качество модели = ХОРОШО → "
+            f"<code>{self._ru(model_quality) if db_model_version else 'не обучена'}</code>"
+        )
+        # 3. Walk-forward > 0
+        wfe_val = float(expectancy_bps) if expectancy_bps is not None else None
+        wfe_ok = wfe_val is not None and wfe_val > 0
+        lines.append(
+            f"{'✅' if wfe_ok else '❌'} Walk-forward > 0 bps → "
+            f"<code>{expectancy_str if expectancy_bps is not None else 'n/a'}</code>"
+        )
+        # 4. Champion
+        champ_ok = champion_ver not in ("none", "", None)
+        lines.append(
+            f"{'✅' if champ_ok else '❌'} Основная модель = CHAMPION → "
+            f"<code>{'есть: ' + str(champion_ver) if champ_ok else 'нет → нажмите «Промоутировать»'}</code>"
+        )
+        # 5. Gate lift
+        if gate_total == 0 and db_model_version:
+            gate_road_icon = "⏳"
+            gate_road_val = f"ждём ~50 сигналов (сейчас {gate_total})"
+        elif gate_lift is not None and float(gate_lift) > 0:
+            gate_road_icon = "✅"
+            gate_road_val = gate_lift_str
+        else:
+            gate_road_icon = "❌" if gate_total > 0 else "⏳"
+            gate_road_val = gate_lift_str if gate_lift is not None else "n/a"
+        lines.append(f"{gate_road_icon} Lift фильтра > 0 bps (≥50 сигналов) → <code>{gate_road_val}</code>")
+        # 6. Paper gate
+        paper_gate_count = int(paper_gate.get("count") or 0)
+        paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
+        if paper_gate_count < 20:
+            paper_road_icon = "⏳"
+            paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
+        elif paper_gate_bps_val > 0:
+            paper_road_icon = "✅"
+            paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
+        else:
+            paper_road_icon = "❌"
+            paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
+        lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+
+        all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
+        if (
+            all_done
+            and gate_total >= 50
+            and gate_lift is not None
+            and float(gate_lift) > 0
+            and paper_gate_count >= 20
+            and paper_gate_bps_val > 0
+        ):
+            lines.append("\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render.")
+        else:
+            lines.append("\n💡 <i>Нажмите «❓ Как читать модель» для пошагового руководства.</i>")
+
         if latest_run_error:
             lines.append(f"Ошибка последнего обучения: <code>{latest_run_error}</code>")
         if db_diag.get("error"):
@@ -1707,6 +1789,27 @@ class TelegramMonitorBot:
         if action == "resume":
             await self._controller.resume()
             await self._button_reply(update, "Бот <b>возобновлен</b>.", reply_markup=self._main_menu())
+            return
+        if action == "promote":
+            if self._controller.promote_model is None:
+                await self._button_reply(update, "Промоут сейчас недоступен.", reply_markup=self._main_menu())
+                return
+            db_diag: dict[str, Any] = {}
+            if self._controller.db_diagnostics_provider is not None:
+                try:
+                    db_diag = await self._controller.db_diagnostics_provider()
+                except Exception as exc:
+                    log.warning("telegram.promote.db_diag_failed", error=str(exc))
+            latest_model = db_diag.get("latest_model_version", {}) or {}
+            version = latest_model.get("version") or ""
+            if not version:
+                await self._button_reply(update, "Нет модели-кандидата для промоута.", reply_markup=self._main_menu())
+                return
+            try:
+                msg = await self._controller.promote_model(version)
+            except Exception as exc:
+                msg = f"❌ Промоут не удался: <code>{html.escape(str(exc))}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
             return
         if action == "train":
             if self._controller.start_training is None:
