@@ -230,6 +230,7 @@ class MarketScreener:
         self._max_price_usd = max_price_usd
         self._interval = interval_s
         self._denylist: set[str] = set(denylist or [])
+        self._manual_symbols: set[str] = set()
         self._on_symbols_added = on_symbols_added
         self._on_symbols_removed = on_symbols_removed
         self._has_open_position = has_open_position
@@ -271,6 +272,14 @@ class MarketScreener:
     @property
     def metrics(self) -> ScreenerMetrics:
         return self._metrics
+
+    @property
+    def manual_symbols(self) -> list[str]:
+        """Operator-selected symbols that should stay in the trading universe when eligible."""
+        return sorted(self._manual_symbols)
+
+    def set_manual_symbols(self, symbols: list[str]) -> None:
+        self._manual_symbols = {symbol.upper() for symbol in symbols if symbol}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -465,11 +474,17 @@ class MarketScreener:
         # Tier 1: wide universe
         wide = scored[: self._wide_max]
 
-        # Tier 2: feature universe (top-N of wide)
-        feature_symbols = [s.symbol for s in wide[: self._feature_max]]
+        ranked_symbols = [s.symbol for s in wide]
+
+        # Tier 2: feature universe. Manual symbols are only honored after they
+        # pass the same liquidity/spread/price filters and appear in the wide universe.
+        manual_ranked = [symbol for symbol in ranked_symbols if symbol in self._manual_symbols]
+        feature_symbols = list(dict.fromkeys([*manual_ranked, *ranked_symbols[: self._feature_max]]))[
+            : self._feature_max
+        ]
 
         # Tier 3: execution candidates (top-M of feature)
-        exec_symbols = feature_symbols[: self._exec_candidates]
+        exec_symbols = list(dict.fromkeys([*manual_ranked, *feature_symbols]))[: self._exec_candidates]
 
         self._metrics.rejection_reasons = rejection_counts
 

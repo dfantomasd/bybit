@@ -160,6 +160,24 @@ class TestMarketScreener:
         assert len(screener.feature_universe) <= 5
 
     @pytest.mark.asyncio
+    async def test_manual_symbols_are_prioritised_when_eligible(self):
+        tickers = [_make_ticker(f"SYM{i}USDT", float(100 - i) * 1_000_000) for i in range(10)]
+        screener = MarketScreener(
+            rest_client=_make_rest(tickers),
+            feature_max_symbols=3,
+            execution_candidates=2,
+            min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
+        )
+        screener.set_manual_symbols(["SYM8USDT"])
+        await screener._refresh()
+
+        assert screener.manual_symbols == ["SYM8USDT"]
+        assert screener.feature_universe[0] == "SYM8USDT"
+        assert screener.execution_candidates[0] == "SYM8USDT"
+
+    @pytest.mark.asyncio
     async def test_fallback_on_api_error(self):
         rest = MagicMock()
         rest.get_tickers = AsyncMock(side_effect=Exception("network error"))

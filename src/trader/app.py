@@ -722,6 +722,7 @@ class TradingApplication:
             "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
             "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
             "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
+            "manual_symbols": self._selected_symbols(),
             "model_gate_canary_enabled": (
                 self._settings.MODEL_GATE_CANARY_ENABLED if self._settings is not None else False
             ),
@@ -794,6 +795,38 @@ class TradingApplication:
             return f"Model gate threshold set to {fvalue:.2f}"
         raise ValueError("unknown setting")
 
+    def _symbol_candidates(self) -> list[str]:
+        if self._screener is None:
+            return list(_SYMBOLS)
+        wide = self._screener.wide_universe
+        if wide:
+            return [item.symbol for item in wide[:100]]
+        return self._screener.active_symbols
+
+    def _selected_symbols(self) -> list[str]:
+        if self._screener is None:
+            return []
+        return self._screener.manual_symbols
+
+    async def _toggle_manual_symbol(self, symbol: str) -> str:
+        if self._screener is None:
+            raise RuntimeError("Сканер еще не запущен")
+        symbol = symbol.upper()
+        if symbol not in set(self._symbol_candidates()):
+            raise ValueError(f"{symbol} сейчас не проходит фильтры сканера")
+
+        selected = set(self._screener.manual_symbols)
+        if symbol in selected:
+            selected.remove(symbol)
+            self._screener.set_manual_symbols(sorted(selected))
+            return f"☐ <code>{symbol}</code> убрана из ручного списка."
+
+        selected.add(symbol)
+        self._screener.set_manual_symbols(sorted(selected))
+        if symbol not in self._screener.active_symbols:
+            await self._on_screener_symbols_added([symbol])
+        return f"✅ <code>{symbol}</code> добавлена: бот будет учиться и торговать по ней, пока она проходит фильтры."
+
     # ------------------------------------------------------------------
 
     async def _start_telegram_bot(self) -> None:
@@ -839,6 +872,9 @@ class TradingApplication:
             start_training=self._start_model_training,
             runtime_settings=self._runtime_settings,
             set_runtime_setting=self._set_runtime_setting,
+            symbol_candidates=self._symbol_candidates,
+            selected_symbols=self._selected_symbols,
+            toggle_symbol=self._toggle_manual_symbol,
             is_paused=lambda: self._trading_paused,
             is_shadow=lambda: self._execution_engine._shadow_mode if self._execution_engine is not None else True,
             current_profile=lambda: self._current_risk_profile_str,

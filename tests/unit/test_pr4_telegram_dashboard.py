@@ -29,6 +29,8 @@ def _make_bot() -> TelegramMonitorBot:
         current_profile=lambda: "CONSERVATIVE",
         active_symbols=lambda: [],
         regime_for=lambda s: None,
+        symbol_candidates=lambda: ["BTCUSDT", "ETHUSDT", "DOGEUSDT"],
+        selected_symbols=lambda: ["ETHUSDT"],
         diagnostics_provider=lambda: {},
         db_diagnostics_provider=None,
     )
@@ -120,6 +122,35 @@ def test_main_menu_has_db_model_button() -> None:
     assert any("База" in t or "модель" in t or "🗄" in t for t in all_texts), (
         f"No DB/model button found in menu: {all_texts}"
     )
+
+
+def test_main_menu_has_symbol_selection_button() -> None:
+    bot = _make_bot()
+    markup = bot._main_menu()
+    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert any("Выбрать пары" in text for text in all_texts)
+
+
+def test_symbol_select_menu_marks_selected_symbols() -> None:
+    bot = _make_bot()
+    markup = bot._symbol_select_menu()
+    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
+    assert "☐ BTCUSDT" in all_texts
+    assert "✅ ETHUSDT" in all_texts
+
+
+@pytest.mark.asyncio
+async def test_symbol_toggle_button_calls_controller() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.toggle_symbol = AsyncMock(return_value="✅ <code>DOGEUSDT</code> добавлена")
+    update = _fake_update()
+
+    await bot._handle_symbol_button(update, "toggle:DOGEUSDT:0")
+
+    bot._controller.toggle_symbol.assert_awaited_once_with("DOGEUSDT")
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "DOGEUSDT" in reply_text
 
 
 def test_control_menu_no_active_button() -> None:

@@ -120,6 +120,9 @@ class TradingController:
     current_profile: Callable[[], str]
     active_symbols: Callable[[], list[str]]
     regime_for: Callable[[str], str | None]  # symbol → regime string
+    symbol_candidates: Callable[[], list[str]] | None = None
+    selected_symbols: Callable[[], list[str]] | None = None
+    toggle_symbol: Callable[[str], Awaitable[str]] | None = None
     signal_log: deque[SignalEntry] = field(default_factory=lambda: deque(maxlen=20))
     # Optional diagnostics provider (returns dict from TradingApplication.get_diagnostics)
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
@@ -338,6 +341,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("📂 Позиции", callback_data="view:positions"),
                 InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
             ],
+            [InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select")],
             [
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
@@ -418,6 +422,31 @@ class TelegramMonitorBot:
             ],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
         ]
+        return InlineKeyboardMarkup(rows)
+
+    def _symbol_select_menu(self, *, page: int = 0, page_size: int = 10) -> InlineKeyboardMarkup:
+        candidates = self._symbol_candidates()
+        selected = set(self._selected_symbols())
+        total_pages = max(1, (len(candidates) + page_size - 1) // page_size)
+        page = max(0, min(page, total_pages - 1))
+        start = page * page_size
+        rows: list[list[InlineKeyboardButton]] = []
+        for symbol in candidates[start : start + page_size]:
+            mark = "✅" if symbol in selected else "☐"
+            rows.append([InlineKeyboardButton(f"{mark} {symbol}", callback_data=f"sym:toggle:{symbol}:{page}")])
+        rows.append(
+            [
+                InlineKeyboardButton("◀️", callback_data=f"sym:page:{max(0, page - 1)}"),
+                InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"sym:page:{page}"),
+                InlineKeyboardButton("▶️", callback_data=f"sym:page:{min(total_pages - 1, page + 1)}"),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton("🔄 Обновить", callback_data=f"sym:page:{page}"),
+                InlineKeyboardButton("⬅️ Меню", callback_data="view:status"),
+            ]
+        )
         return InlineKeyboardMarkup(rows)
 
     async def _button_reply(
@@ -1559,6 +1588,9 @@ class TelegramMonitorBot:
         if data.startswith("risk:"):
             await self._queue_risk_change(update, data.removeprefix("risk:").upper())
             return
+        if data.startswith("sym:"):
+            await self._handle_symbol_button(update, data.removeprefix("sym:"))
+            return
         await self._button_reply(update, "Неизвестная кнопка.", reply_markup=self._main_menu())
 
     async def _handle_view_button(self, update: Update, action: str) -> None:
@@ -1581,6 +1613,9 @@ class TelegramMonitorBot:
         if action == "model_help":
             await self._cmd_model_help(update, fake_context)  # type: ignore[arg-type]
             return
+        if action == "symbol_select":
+            await self._show_symbol_select(update, page=0)
+            return
         if action == "control":
             await self._button_reply(
                 update,
@@ -1593,6 +1628,55 @@ class TelegramMonitorBot:
             await self._button_reply(update, "Неизвестный экран.", reply_markup=self._main_menu())
             return
         await handler(update, fake_context)  # type: ignore[arg-type]
+
+    async def _show_symbol_select(self, update: Update, *, page: int) -> None:
+        candidates = self._symbol_candidates()
+        selected = self._selected_symbols()
+        if not candidates:
+            await self._button_reply(
+                update,
+                "<b>✅ Выбор торговых пар</b>\n\n"
+                "Сканер пока не вернул подходящие пары. Подождите обновления сканера или проверьте подключение к Bybit.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        await self._button_reply(
+            update,
+            "<b>✅ Выбор торговых пар</b>\n\n"
+            f"Показано до 100 пар, которые прошли фильтры ликвидности, спреда и цены. "
+            f"Выбрано вручную: <code>{len(selected)}</code>.\n\n"
+            "Нажмите на пару, чтобы добавить или убрать галочку. Выбранные пары будут попадать в обучение, "
+            "расчет признаков и торговый отбор, если остаются подходящими по рынку.",
+            reply_markup=self._symbol_select_menu(page=page),
+        )
+
+    async def _handle_symbol_button(self, update: Update, payload: str) -> None:
+        parts = payload.split(":")
+        if not parts:
+            await self._button_reply(update, "Неизвестное действие выбора пар.", reply_markup=self._main_menu())
+            return
+        if parts[0] == "page":
+            page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+            await self._show_symbol_select(update, page=page)
+            return
+        if parts[0] == "toggle" and len(parts) >= 2:
+            symbol = parts[1].upper()
+            page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
+            if self._controller is None or self._controller.toggle_symbol is None:
+                await self._button_reply(update, "Выбор пар сейчас недоступен.", reply_markup=self._main_menu())
+                return
+            try:
+                msg = await self._controller.toggle_symbol(symbol)
+            except Exception as exc:
+                msg = f"❌ Не удалось изменить выбор: <code>{html.escape(str(exc))}</code>"
+            await self._button_reply(
+                update,
+                f"<b>✅ Выбор торговых пар</b>\n\n{msg}\n\n"
+                "Изменение применится к сканеру; новые пары получат историю свечей и WebSocket-подписки.",
+                reply_markup=self._symbol_select_menu(page=page),
+            )
+            return
+        await self._button_reply(update, "Неизвестное действие выбора пар.", reply_markup=self._main_menu())
 
     async def _handle_control_button(self, update: Update, action: str) -> None:
         if self._controller is None:
@@ -1755,11 +1839,22 @@ class TelegramMonitorBot:
             "/signals     — последние сигналы стратегии\n"
             "/regime      — режим рынка по монетам\n"
             "/symbols     — активные монеты\n"
+            "/start       — меню, включая выбор торговых пар\n"
             "/pnl         — история закрытого PnL\n"
             "/net         — чистый PnL с комиссиями и фандингом\n"
             "/diagnostics — счетчики и задержки циклов\n"
             "/help        — это сообщение\n" + ctrl_section
         )
+
+    def _symbol_candidates(self) -> list[str]:
+        if self._controller is None or self._controller.symbol_candidates is None:
+            return []
+        return self._controller.symbol_candidates()[:100]
+
+    def _selected_symbols(self) -> list[str]:
+        if self._controller is None or self._controller.selected_symbols is None:
+            return []
+        return self._controller.selected_symbols()
 
     def _limits_text(self) -> str:
         if self._controller is None or self._controller.runtime_settings is None:
