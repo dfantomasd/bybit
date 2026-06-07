@@ -102,6 +102,8 @@ class TradingApplication:
         self._latest_exchange_positions: list[Any] = []
         self._latest_exchange_positions_at: datetime | None = None
         self._trailing_stop_keys: set[str] = set()
+        self._fee_provider: Any | None = None
+        self._last_tx_log_sync_at: datetime | None = None
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
@@ -236,6 +238,16 @@ class TradingApplication:
             trade_journal=self._trade_journal,
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
+
+        from trader.exchange.fee_provider import FeeRateProvider
+
+        self._fee_provider = FeeRateProvider(
+            rest=self._bybit_adapter._rest,
+            category=self._settings.DEFAULT_MARKET_CATEGORY,
+            default_maker=self._settings.DEFAULT_LINEAR_MAKER_FEE_RATE,
+            default_taker=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE,
+            shadow_mode=self._initial_shadow_mode(),
+        )
 
         # Run Bybit exchange preflight checks (clock skew, API perms, balance, etc.)
         has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
@@ -529,6 +541,12 @@ class TradingApplication:
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
             startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
             is_canary=is_canary,
+            fee_provider=self._fee_provider,
+            max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+            expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+            funding_buffer_pct=self._settings.FUNDING_BUFFER_PCT,
+            min_net_edge_pct=self._settings.MIN_EXPECTED_NET_EDGE_PCT,
+            entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
         # P0.2: Restore pending entry IDs from durable storage before any new entries
@@ -894,6 +912,10 @@ class TradingApplication:
                                     side=event.side.value,
                                     exec_price=event.exec_price,
                                     exec_qty=event.exec_qty,
+                                    exec_fee=event.exec_fee if event.exec_fee else None,
+                                    exec_value=event.exec_value if event.exec_value else None,
+                                    is_maker=event.is_maker if hasattr(event, "is_maker") else None,
+                                    closed_size=event.closed_size if event.closed_size else None,
                                 )
                                 await self._trade_journal.record_order_event(
                                     order_link_id=event.order_link_id or event.exec_id,
@@ -1240,8 +1262,14 @@ class TradingApplication:
                     info.tick_size,
                     round_up=True,
                 )
+                fee_rates = None
+                if self._fee_provider is not None:
+                    try:
+                        fee_rates = await self._fee_provider.get(pos.symbol)
+                    except Exception as _fee_exc:
+                        log.debug("profit_manager.fee_rate_failed", symbol=pos.symbol, error=str(_fee_exc))
                 breakeven_stop = self._round_to_tick(
-                    self._breakeven_stop(pos.entry_price, pos.side.value),
+                    self._breakeven_stop(pos.entry_price, pos.side.value, fee_rates=fee_rates),
                     info.tick_size,
                     round_up=pos.side.value == "Sell",
                 )
@@ -1273,6 +1301,26 @@ class TradingApplication:
                     symbol=pos.symbol,
                     error=str(exc),
                 )
+
+    async def _sync_transaction_log(self) -> None:
+        """Sync Bybit transaction log to database periodically."""
+        assert self._settings is not None
+        if self._trade_journal is None or self._bybit_adapter is None:
+            return
+        try:
+            resp = await self._bybit_adapter._rest.get_transaction_log(
+                account_type="UNIFIED",
+                category=self._settings.DEFAULT_MARKET_CATEGORY,
+                currency="USDT",
+                limit=50,
+            )
+            entries = (resp.get("result") or {}).get("list", [])
+            if entries:
+                inserted = await self._trade_journal.record_transaction_log_entries(entries)
+                if inserted:
+                    log.info("transaction_log.synced", inserted=inserted)
+        except Exception as exc:
+            log.debug("transaction_log.sync_failed", error=str(exc))
 
     async def _sync_execution_positions(self) -> None:
         """Keep local execution/risk state aligned with Bybit TP/SL closures."""
@@ -1329,9 +1377,24 @@ class TradingApplication:
         delta = entry_price * Decimal(str(self._settings.TRAILING_ACTIVATION_PCT)) / Decimal("100")
         return entry_price + delta if side == "Buy" else entry_price - delta
 
-    def _breakeven_stop(self, entry_price: Decimal, side: str) -> Decimal:
+    def _breakeven_stop(self, entry_price: Decimal, side: str, fee_rates: Any | None = None) -> Decimal:
+        """Compute a breakeven stop that covers round-trip taker fees + spread + slippage + buffer."""
         assert self._settings is not None
-        offset = entry_price * Decimal(str(self._settings.BREAKEVEN_STOP_OFFSET_PCT)) / Decimal("100")
+        # Default to config taker rate if no live fee data
+        if fee_rates is not None:
+            taker = Decimal(str(fee_rates.taker_fee_rate))
+        else:
+            taker = Decimal(str(self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE))
+        entry_fee_pct = taker * Decimal("100")
+        exit_fee_pct = taker * Decimal("100")
+        spread_pct = Decimal(str(self._settings.SCREENER_MAX_SPREAD_BPS)) / Decimal("100")
+        slippage_pct = Decimal(str(self._settings.EXPECTED_SLIPPAGE_PCT))
+        buffer_pct = Decimal(str(self._settings.MIN_NET_PROFIT_BUFFER_PCT))
+        total_offset_pct = entry_fee_pct + exit_fee_pct + spread_pct + slippage_pct + buffer_pct
+        # Also respect the legacy static offset as a minimum floor
+        static_pct = Decimal(str(self._settings.BREAKEVEN_STOP_OFFSET_PCT))
+        offset_pct = max(total_offset_pct, static_pct)
+        offset = entry_price * offset_pct / Decimal("100")
         return entry_price + offset if side == "Buy" else entry_price - offset
 
     def _round_to_tick(
@@ -1729,6 +1792,19 @@ class TradingApplication:
                     await self._refresh_closed_pnl_memory()
                 await self._sync_execution_positions()
                 await self._manage_open_positions()
+
+                # Sync transaction log periodically
+                now = datetime.now(tz=UTC)
+                tx_interval = self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
+                if (
+                    self._last_tx_log_sync_at is None
+                    or (now - self._last_tx_log_sync_at).total_seconds() >= tx_interval
+                ):
+                    self._last_tx_log_sync_at = now
+                    try:
+                        await self._sync_transaction_log()
+                    except Exception as _tx_exc:
+                        log.debug("strategy_loop.tx_log_sync_failed", error=str(_tx_exc))
 
                 balance = self._cached_balance
                 capital = balance

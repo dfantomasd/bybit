@@ -175,6 +175,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("regime", self._cmd_regime))
         app.add_handler(CommandHandler("symbols", self._cmd_symbols))
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
+        app.add_handler(CommandHandler("net", self._cmd_net_results))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
 
         # Control
@@ -574,6 +575,41 @@ class TelegramMonitorBot:
         total_icon = "📈" if total >= 0 else "📉"
         lines.append(f"\n{total_icon} <b>Total (shown):</b> <code>{total:+.4f} USDT</code>")
         await self._reply(update, "\n".join(lines))
+
+    async def _cmd_net_results(self, update: Update, context: Any) -> None:
+        """Show daily net P&L breakdown including fees and funding."""
+        del context
+        if not await self._authorised(update):
+            return
+        # Delegate to health provider for stats
+        try:
+            stats = await self._health_provider() if callable(self._health_provider) else {}
+            net_stats = stats.get("net_results", {}) if stats else {}
+        except Exception:
+            net_stats = {}
+
+        gross = net_stats.get("gross_pnl_usd", 0.0)
+        fees = net_stats.get("total_fees_usd", 0.0)
+        funding = net_stats.get("total_funding_usd", 0.0)
+        slippage_est = net_stats.get("estimated_slippage_usd", 0.0)
+        net = net_stats.get("net_pnl_usd", gross - fees - funding)
+        maker_pct = net_stats.get("maker_fill_pct", 0.0)
+        taker_pct = net_stats.get("taker_fill_pct", 100.0)
+        fee_drag = abs(fees) + abs(funding) + abs(slippage_est)
+
+        text = (
+            "📈 <b>NET RESULTS (today)</b>\n\n"
+            f"Gross PnL:        <code>{gross:+.4f} USDT</code>\n"
+            f"Trading fees:     <code>{fees:+.4f} USDT</code>\n"
+            f"Funding:          <code>{funding:+.4f} USDT</code>\n"
+            f"Est. slippage:    <code>{slippage_est:+.4f} USDT</code>\n"
+            f"─────────────────────────────\n"
+            f"Net PnL:          <code>{net:+.4f} USDT</code>\n"
+            f"Fee drag:         <code>{fee_drag:.4f} USDT</code>\n\n"
+            f"Maker fills:      <code>{maker_pct:.1f}%</code>\n"
+            f"Taker fills:      <code>{taker_pct:.1f}%</code>"
+        )
+        await self._reply(update, text)
 
     async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1008,6 +1044,7 @@ class TelegramMonitorBot:
             "/regime      — market regime per symbol\n"
             "/symbols     — active symbols\n"
             "/pnl         — closed PnL history\n"
+            "/net         — net P&L breakdown (fees, funding, slippage)\n"
             "/diagnostics — counters & loop timing\n"
             "/help        — this message\n" + ctrl_section
         )

@@ -74,12 +74,34 @@ class Settings(BaseSettings):
     PROFIT_MANAGER_ENABLED: bool = True
     TRAILING_STOP_ENABLED: bool = True
     POSITION_MANAGEMENT_INTERVAL_SECONDS: int = 30
-    TRAILING_ACTIVATION_PCT: float = 0.45
+    TRAILING_ACTIVATION_PCT: float = 0.70
     """Unrealised profit percent before enabling exchange trailing stop."""
-    TRAILING_DISTANCE_PCT: float = 0.30
+    TRAILING_DISTANCE_PCT: float = 0.25
     """Trailing stop distance as percent of current mark price."""
-    BREAKEVEN_STOP_OFFSET_PCT: float = 0.03
+    BREAKEVEN_STOP_OFFSET_PCT: float = 0.20
     """Small offset beyond entry used when moving stop to breakeven."""
+    MIN_NET_PROFIT_BUFFER_PCT: float = 0.08
+    """Minimum profit above all costs required at breakeven stop."""
+    EXPECTED_SLIPPAGE_PCT: float = 0.03
+    """Expected slippage per side as percent of price."""
+
+    DEFAULT_LINEAR_MAKER_FEE_RATE: float = 0.0002
+    DEFAULT_LINEAR_TAKER_FEE_RATE: float = 0.00055
+    """Fallback fee rates when API is unavailable (SHADOW only)."""
+
+    MIN_EXPECTED_NET_EDGE_PCT: float = 0.15
+    """Minimum expected net edge (after all costs) required to enter a trade."""
+    FUNDING_BUFFER_PCT: float = 0.01
+    """Estimated funding cost buffer per position."""
+
+    ENTRY_ORDER_MODE: str = "MARKET"
+    """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
+    ENTRY_LIMIT_TTL_SECONDS: int = 5
+    """Seconds to wait for a limit entry fill before cancelling."""
+    ENTRY_REPRICE_ATTEMPTS: int = 1
+    """Max repricing attempts before abandoning a limit entry."""
+    ALLOW_TAKER_ENTRY: bool = False
+    """Allow market fallback if limit entry fails. False = skip trade."""
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""
@@ -254,6 +276,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Operational
     # ------------------------------------------------------------------
+    TRANSACTION_LOG_SYNC_INTERVAL_SECONDS: int = 60
+    """How often to sync the Bybit transaction log to the database."""
     RECONCILIATION_INTERVAL_SECONDS: int = 30
     POSITION_SYNC_INTERVAL_SECONDS: int = 30
     """How often to sync exchange positions into the local execution/risk state."""
