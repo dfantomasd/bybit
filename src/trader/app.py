@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
 import signal
 import sys
@@ -635,9 +636,9 @@ class TradingApplication:
         return min(0.80, max(0.50, threshold))
 
     def _update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
-        latest_model = diag.get("latest_model_version", {}) or {}
-        metrics = latest_model.get("metrics") or {}
-        gate = diag.get("shadow_gate_15m", {}) or {}
+        latest_model = self._dict_or_empty(diag.get("latest_model_version"))
+        metrics = self._dict_or_empty(latest_model.get("metrics"))
+        gate = self._dict_or_empty(diag.get("shadow_gate_15m"))
         self._model_gate_quality = {
             "quality": metrics.get("quality"),
             "lift_bps": metrics.get("lift_bps"),
@@ -646,6 +647,18 @@ class TradingApplication:
             "gate_lift_vs_all_bps": gate.get("lift_vs_all_bps"),
         }
         self._model_gate_quality_checked_at = datetime.now(tz=UTC)
+
+    @staticmethod
+    def _dict_or_empty(value: Any) -> dict[str, Any]:
+        if isinstance(value, dict):
+            return value
+        if isinstance(value, str) and value.strip():
+            try:
+                parsed = json.loads(value)
+            except json.JSONDecodeError:
+                return {}
+            return parsed if isinstance(parsed, dict) else {}
+        return {}
 
     def _model_gate_quality_allows_canary(self) -> tuple[bool, str]:
         assert self._settings is not None

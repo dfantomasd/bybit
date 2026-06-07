@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import json
 import uuid
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -70,6 +71,39 @@ async def test_trade_journal_reconnector_recovers_after_startup_failure() -> Non
 
     assert journal.attempts == 1
     assert journal.is_enabled is True
+
+
+def test_model_gate_quality_accepts_json_string_metrics() -> None:
+    """Postgres JSONB may arrive as a JSON string; diagnostics must not crash."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+
+    app._update_model_gate_quality_from_diag(
+        {
+            "latest_model_version": {
+                "metrics": json.dumps(
+                    {
+                        "quality": "GOOD",
+                        "lift_bps": 2.5,
+                        "best_threshold": 0.61,
+                    }
+                )
+            },
+            "shadow_gate_15m": json.dumps(
+                {
+                    "total_count": 77,
+                    "lift_vs_all_bps": 1.2,
+                }
+            ),
+        }
+    )
+
+    assert app._model_gate_quality["quality"] == "GOOD"
+    assert app._model_gate_quality["lift_bps"] == 2.5
+    assert app._model_gate_quality["best_threshold"] == 0.61
+    assert app._model_gate_quality["gate_total_count"] == 77
+    assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
 
 
 def _instrument(min_notional: str = "5") -> InstrumentInfo:
