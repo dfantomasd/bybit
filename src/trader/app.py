@@ -215,7 +215,8 @@ class TradingApplication:
 
         config = uvicorn.Config(
             app=fastapi_app,
-            host="0.0.0.0",  # noqa: S104
+            # Container service must bind internally; external exposure belongs to the platform.
+            host="0.0.0.0",  # noqa: S104  # nosec B104
             port=port,
             log_level="warning",
             access_log=False,

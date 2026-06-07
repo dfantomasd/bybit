@@ -13,6 +13,7 @@ import asyncio
 import logging
 import os
 from datetime import UTC, datetime
+from pathlib import Path
 from typing import Any
 
 from trader.domain.enums import KillSwitchMode
@@ -31,7 +32,7 @@ class KillSwitch:
     - FULL_STOP: stop everything, requires manual restart
     """
 
-    FLAG_FILE = "/tmp/bybit_trader_kill.flag"  # noqa: S108
+    DEFAULT_FLAG_FILE = Path.home() / ".bybit_trader_kill.flag"
 
     # Modes that can be deactivated without manual restart
     _DEACTIVATABLE_MODES = {KillSwitchMode.PAUSE_NEW_ENTRIES}
@@ -41,6 +42,7 @@ class KillSwitch:
         execution_engine_ref: Any = None,
         event_bus: Any = None,
         metrics: Any = None,
+        flag_file: str | os.PathLike[str] | None = None,
         log: logging.Logger | None = None,
     ) -> None:
         self._engine = execution_engine_ref
@@ -48,6 +50,7 @@ class KillSwitch:
         self._metrics = metrics
         self._log = log or logger
         self._lock = asyncio.Lock()
+        self._flag_file = Path(flag_file or os.getenv("KILL_SWITCH_FLAG_FILE") or self.DEFAULT_FLAG_FILE)
 
         self._active: bool = False
         self._mode: KillSwitchMode | None = None
@@ -134,9 +137,9 @@ class KillSwitch:
 
         The file content (if any) is used as the reason string.
         """
-        if os.path.exists(self.FLAG_FILE):
+        if self._flag_file.exists():
             try:
-                with open(self.FLAG_FILE) as fh:
+                with self._flag_file.open(encoding="utf-8") as fh:
                     content = fh.read().strip()
                 reason = content or "kill flag file present"
             except OSError:
