@@ -591,13 +591,13 @@ async def test_database_model_telegram_screen() -> None:
     # The method calls self._reply which calls message.reply_text with HTML parse mode.
     await bot._cmd_db_model(fake_update, fake_context)  # type: ignore[arg-type]
     text = fake_message.reply_text.await_args.args[0]
-    assert "Trainable 15m" in text
+    assert "ПУТЬ К РЕАЛЬНЫМ СДЕЛКАМ" in text
     assert "v20260607_1000" in text
-    assert "Quality" in text
-    assert "GOOD" in text
-    assert "+2.70 bps" in text
-    assert "Shadow gate 15m" in text
-    assert "12/20 pass" in text
-    assert "Paper baseline" in text
-    assert "Paper model gate" in text
+    assert "Кандидат в тени" in text
+    assert "ОЦЕНКА ФИЛЬТРА" in text
+    assert "Пропустил" in text
+    assert "Заблокировал" in text
+    assert "+2.40 bps" in text  # gate lift_vs_all_bps=2.4
+    assert "Правила (без модели)" in text
+    assert "С фильтром модели" in text
     assert "score_below_regime_threshold" in text

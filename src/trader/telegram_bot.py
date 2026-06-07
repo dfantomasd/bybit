@@ -920,8 +920,6 @@ class TelegramMonitorBot:
 
         connected = db_diag.get("connected", False)
         db_icon = "🟢" if connected else "🔴"
-        configured = db_diag.get("configured", True)
-        db_status = "connected" if connected else ("configured, reconnecting" if configured else "not configured")
         db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
         db_error_str = html.escape(str(db_error)) if db_error else ""
         if len(db_error_str) > 180:
@@ -960,27 +958,11 @@ class TelegramMonitorBot:
             challenger_ver = db_model_version or "none"
         if last_training == "never" and latest_run.get("finished_at"):
             last_training = latest_run["finished_at"].strftime("%Y-%m-%d %H:%M UTC")
-        wf_exp = model_info.get("walk_forward_expectancy", "n/a")
-        drift = model_info.get("drift_status", "n/a")
-        latest_run_status = latest_run.get("status", "none")
         latest_run_samples = latest_run.get("sample_count", 0) or 0
-        latest_run_model = latest_run.get("model_version") or "none"
         latest_run_error = str(latest_run.get("error") or "")
         if len(latest_run_error) > 120:
             latest_run_error = f"{latest_run_error[:117]}..."
         latest_run_error = html.escape(latest_run_error)
-        model_quality = model_metrics.get("quality", "n/a")
-        validation_samples = model_metrics.get("validation_samples", "n/a")
-        precision = model_metrics.get("precision")
-        lift_bps = model_metrics.get("lift_bps")
-        expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
-        best_threshold = model_metrics.get("best_threshold")
-        best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
-        precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
-        lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
-        expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
-        best_threshold_str = f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
-        best_threshold_avg_str = f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
         gate = db_diag.get("shadow_gate_15m", {}) or {}
         gate_total = gate.get("total_count", 0) or 0
         gate_pass = gate.get("pass_count", 0) or 0
