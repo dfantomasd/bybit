@@ -17,10 +17,12 @@ def _make_app(trading_mode: TradingMode = TradingMode.SHADOW, live_mode: bool = 
     settings.BYBIT_API_KEY.get_secret_value.return_value = "test-key-abc"
     settings.BYBIT_API_SECRET.get_secret_value.return_value = "test-secret"
     settings.BYBIT_REGION.value = "GLOBAL"
-    settings.BYBIT_USE_TESTNET = True
+    settings.BYBIT_USE_TESTNET = trading_mode not in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
     settings.DEFAULT_MARKET_CATEGORY = "linear"
     settings.TRADING_MODE = trading_mode
     settings.LIVE_MODE = live_mode
+    settings.LIVE_ARMED = live_mode
+    settings.SHADOW_MODE = not live_mode
     app._settings = settings
     return app
 

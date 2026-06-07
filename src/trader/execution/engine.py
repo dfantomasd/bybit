@@ -430,8 +430,6 @@ class ExecutionEngine:
                 return None
             # Verify SL is on the correct side of entry
             if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
-                from trader.domain.enums import OrderSide
-
                 sl_valid = (proposal.side == OrderSide.BUY and proposal.stop_loss < proposal.entry_price) or (
                     proposal.side == OrderSide.SELL and proposal.stop_loss > proposal.entry_price
                 )
@@ -581,11 +579,7 @@ class ExecutionEngine:
                 _sh_fee = await self._fee_provider.get(symbol)
             except Exception:
                 _sh_fee = None
-            if (
-                _sh_fee is not None
-                and proposal.entry_price is not None
-                and proposal.entry_price > Decimal("0")
-            ):
+            if _sh_fee is not None and proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
                 _ep = proposal.entry_price
                 _tp = proposal.take_profit
                 _taker = Decimal(str(_sh_fee.taker_fee_rate))
@@ -595,7 +589,13 @@ class ExecutionEngine:
                     else (_ep - _tp) / _ep * Decimal("100")
                 )
                 _rts = Decimal(str(self._expected_slippage_pct)) * Decimal("2")
-                _net = _gross - _taker * Decimal("200") - Decimal(str(self._max_spread_bps)) / Decimal("100") - _rts - Decimal(str(self._funding_buffer_pct))
+                _net = (
+                    _gross
+                    - _taker * Decimal("200")
+                    - Decimal(str(self._max_spread_bps)) / Decimal("100")
+                    - _rts
+                    - Decimal(str(self._funding_buffer_pct))
+                )
                 log.debug(
                     "shadow.net_edge_estimate",
                     symbol=symbol,
@@ -844,12 +844,10 @@ class ExecutionEngine:
         use_limit = self._entry_order_mode == "POST_ONLY_LIMIT"
         # POST_ONLY_LIMIT is blocked at config validation; belt-and-suspenders guard
         if use_limit:
-            log.error(
-                "execution.post_only_limit_not_implemented",
-                symbol=proposal.symbol,
-                entry_order_mode=self._entry_order_mode,
+            raise RuntimeError(
+                "POST_ONLY_LIMIT is disabled until maker pricing, TTL cancel and "
+                "reprice are implemented. Set ENTRY_ORDER_MODE=MARKET."
             )
-            use_limit = False
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,

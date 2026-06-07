@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -21,8 +22,19 @@ import pytest
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskDecisionStatus
 from trader.domain.events import ExecutionUpdateEvent, OrderType
 from trader.domain.models import InstrumentInfo, TradeProposal
+from trader.exchange.fee_provider import FeeRates
 from trader.risk.exposure import ExposureTracker
 from trader.risk.profiles import RiskProfile
+
+
+def _make_fee_provider(taker: float = 0.0006, maker: float = 0.0001) -> MagicMock:
+    fp = MagicMock()
+    _now = datetime.now(tz=UTC)
+    fp.get = AsyncMock(
+        return_value=FeeRates(maker_fee_rate=maker, taker_fee_rate=taker, source="stub", fetched_at=_now)
+    )
+    return fp
+
 
 # ---------------------------------------------------------------------------
 # Shared helpers
@@ -105,6 +117,7 @@ def _make_engine(shadow: bool = False, buffer_pct: float = 3.0) -> Any:
         shadow_mode=shadow,
         category="linear",
         min_notional_safety_buffer_pct=buffer_pct,
+        fee_provider=None if shadow else _make_fee_provider(),
     )
     return engine, adapter
 

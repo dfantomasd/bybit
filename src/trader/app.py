@@ -304,6 +304,119 @@ class TradingApplication:
             self._execution_engine._shadow_mode = enabled
         log.info("shadow_mode.changed", enabled=enabled)
 
+    async def _reconcile_durable_pending_orders(self, *, startup: bool = False) -> None:
+        """Reconcile pending order states against Bybit API. Called at startup and periodically."""
+        if self._trade_journal is None or self._bybit_adapter is None or self._execution_engine is None:
+            return
+
+        label = "startup" if startup else "background"
+        log.info("pending_reconciliation.started", phase=label)
+
+        try:
+            pending_ids = await self._trade_journal.get_unresolved_durable_orders()
+        except Exception as exc:
+            log.warning("pending_reconciliation.failed_load", error=str(exc))
+            return
+
+        if not pending_ids:
+            log.info("pending_reconciliation.completed", phase=label, resolved=0, expired=0, remaining=0)
+            return
+
+        # get_unresolved_durable_orders returns list[dict]; extract order_link_ids
+        if pending_ids and isinstance(pending_ids[0], dict):
+            pending_ids = [r["order_link_id"] for r in pending_ids if r.get("order_link_id")]
+
+        resolved = 0
+        expired = 0
+
+        stale_ttl = getattr(self._settings, "STALE_PENDING_TTL_SECONDS", 600) if self._settings else 600
+
+        for order_link_id in pending_ids:
+            try:
+                terminal_state = await self._check_order_terminal_state(order_link_id)
+
+                if terminal_state is not None:
+                    log.info(
+                        "pending_reconciliation.resolved_terminal",
+                        order_link_id=order_link_id,
+                        state=terminal_state,
+                    )
+                    await self._trade_journal.mark_durable_order_terminal(order_link_id, terminal_state)
+                    self._execution_engine.mark_entry_resolved(order_link_id)
+                    resolved += 1
+                else:
+                    age = await self._trade_journal.get_durable_order_age_seconds(order_link_id)
+                    if age is not None and age >= stale_ttl:
+                        log.warning(
+                            "pending_reconciliation.expired_stale",
+                            order_link_id=order_link_id,
+                            age_seconds=age,
+                            ttl_seconds=stale_ttl,
+                        )
+                        await self._trade_journal.expire_stale_durable_order(order_link_id)
+                        self._execution_engine.mark_entry_resolved(order_link_id)
+                        expired += 1
+                        if self._telegram_bot is not None:
+                            await self._telegram_bot.notify(
+                                f"⚠️ <b>Stale pending order expired</b>\n"
+                                f"Order <code>{order_link_id}</code> was pending for "
+                                f"{int(age)}s and has been released."
+                            )
+                    else:
+                        log.info(
+                            "pending_reconciliation.unresolved_recent",
+                            order_link_id=order_link_id,
+                            age_seconds=age,
+                        )
+            except Exception as exc:
+                log.warning("pending_reconciliation.check_failed", order_link_id=order_link_id, error=str(exc))
+
+        remaining = len(pending_ids) - resolved - expired
+        log.info(
+            "pending_reconciliation.completed",
+            phase=label,
+            resolved=resolved,
+            expired=expired,
+            remaining=remaining,
+        )
+
+    async def _check_order_terminal_state(self, order_link_id: str) -> str | None:
+        """Check Bybit API to determine if order reached a terminal state.
+
+        Returns terminal state name or None if order is still open/unknown.
+        """
+        if self._bybit_adapter is None or self._settings is None:
+            return None
+
+        category = getattr(self._settings, "DEFAULT_MARKET_CATEGORY", "linear")
+
+        # 1. Check open orders
+        try:
+            open_resp = await self._bybit_adapter._rest.get_open_orders(category=category, orderLinkId=order_link_id)
+            open_list = (open_resp.get("result") or {}).get("list", [])
+            for o in open_list:
+                if o.get("orderLinkId") == order_link_id:
+                    status = o.get("orderStatus", "")
+                    if status in ("Filled", "Cancelled", "Rejected", "Expired"):
+                        return status.upper()
+                    log.info("pending_reconciliation.open_order_kept", order_link_id=order_link_id, status=status)
+                    return None
+        except Exception as exc:
+            log.debug("pending_reconciliation.open_orders_check_failed", order_link_id=order_link_id, error=str(exc))
+
+        # 2. Check order history
+        try:
+            hist_resp = await self._bybit_adapter._rest.get_order_history(category=category, orderLinkId=order_link_id)
+            hist_list = (hist_resp.get("result") or {}).get("list", [])
+            for o in hist_list:
+                if o.get("orderLinkId") == order_link_id:
+                    status = o.get("orderStatus", "")
+                    return status.upper() if status else "UNKNOWN_RECONCILIATION_REQUIRED"
+        except Exception as exc:
+            log.debug("pending_reconciliation.history_check_failed", order_link_id=order_link_id, error=str(exc))
+
+        return None
+
     def _active_execution_allowed(self) -> bool:
         """Return True when orders may be submitted to the configured endpoint.
 
@@ -312,17 +425,17 @@ class TradingApplication:
         Testnet bypasses the LIVE_ARMED gate (not real money).
         """
         assert self._settings is not None
+        # SHADOW mode (either by TRADING_MODE or SHADOW_MODE flag) always blocks
         if self._settings.TRADING_MODE == TradingMode.SHADOW:
             return False
+        if self._settings.SHADOW_MODE:
+            return False
+        # Testnet: bypass mainnet live-armed check
         if self._settings.BYBIT_USE_TESTNET:
             return True
         if self._settings.TRADING_MODE not in (TradingMode.LIVE, TradingMode.CANARY_LIVE):
             return False
-        return (
-            self._settings.LIVE_MODE
-            and self._settings.LIVE_ARMED
-            and not self._settings.SHADOW_MODE
-        )
+        return self._settings.LIVE_MODE and self._settings.LIVE_ARMED
 
     def _initial_shadow_mode(self) -> bool:
         """Compute startup execution mode from settings and safety gates."""
@@ -562,10 +675,14 @@ class TradingApplication:
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
-        # P0.2: Restore pending entry IDs from durable storage before any new entries
+        # P0.2: Reconcile and restore pending entry IDs from durable storage before any new entries
         if self._trade_journal is not None:
             try:
-                pending_ids = await self._trade_journal.load_pending_from_db()
+                await self._reconcile_durable_pending_orders(startup=True)
+            except Exception as exc:
+                log.warning("execution_engine.startup_reconciliation_failed", error=str(exc))
+            try:
+                pending_ids = await self._trade_journal.load_pending_from_durable_state()
                 if pending_ids:
                     self._execution_engine.restore_pending_entries(pending_ids)
                     log.info("execution_engine.pending_restored", count=len(pending_ids))
@@ -1134,6 +1251,12 @@ class TradingApplication:
                         log.debug("reconciliation.clean", summary=result.summary)
             except Exception as exc:
                 log.warning("reconciliation.error", error=str(exc))
+
+            # Background stale pending reconciliation
+            try:
+                await self._reconcile_durable_pending_orders(startup=False)
+            except Exception as exc:
+                log.warning("reconciliation.durable_pending_error", error=str(exc))
 
             try:
                 await asyncio.wait_for(

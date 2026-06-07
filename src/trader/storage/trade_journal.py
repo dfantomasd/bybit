@@ -36,6 +36,11 @@ def _parse_dec(v: Any) -> Decimal | None:
         return None
 
 
+def _norm_key_part(value: Any) -> str:
+    """Return empty string for None, else str(value). Preserves 0 as '0'."""
+    return "" if value is None else str(value)
+
+
 def _parse_ts(v: Any) -> datetime | None:
     try:
         if v is None:
@@ -550,9 +555,20 @@ class TradeJournal:
 
                 # Deterministic SHA-256 event_key for dedup even without trade_id
                 _key_src = "|".join(
-                    str(entry.get(k) or "")
-                    for k in ("transactionTime", "type", "symbol", "side",
-                               "tradeId", "orderId", "orderLinkId", "change", "fee", "funding", "cashFlow")
+                    _norm_key_part(entry.get(k))
+                    for k in (
+                        "transactionTime",
+                        "type",
+                        "symbol",
+                        "side",
+                        "tradeId",
+                        "orderId",
+                        "orderLinkId",
+                        "change",
+                        "fee",
+                        "funding",
+                        "cashFlow",
+                    )
                 )
                 event_key = hashlib.sha256(_key_src.encode()).hexdigest()
 
@@ -613,6 +629,28 @@ class TradeJournal:
         if ids:
             log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
         return ids
+
+    async def load_pending_from_durable_state(self) -> list[str]:
+        """Return order_link_ids with unresolved durable state at startup."""
+        if not self._pool:
+            return []
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                """
+                SELECT order_link_id
+                FROM durable_order_state
+                WHERE state IN (
+                    'CREATED_LOCAL', 'SUBMITTING', 'REST_ACCEPTED',
+                    'WS_CONFIRMED', 'PARTIALLY_FILLED',
+                    'UNKNOWN_RECONCILIATION_REQUIRED'
+                )
+                AND order_link_id IS NOT NULL
+                AND order_link_id != ''
+                """
+            )
+            ids = [r["order_link_id"] for r in rows]
+            log.info("journal.pending_from_durable_state", count=len(ids))
+            return ids
 
     async def upsert_durable_order_state(
         self,
@@ -704,37 +742,59 @@ class TradeJournal:
             order_link_id,
         )
 
-    async def expire_stale_durable_order(self, order_link_id: str, reason: str) -> None:
+    async def expire_stale_durable_order(self, order_link_id: str, reason: str = "stale") -> None:
         """Mark a stale pending order as EXPIRED."""
-        await self.mark_durable_order_terminal(
-            order_link_id, "EXPIRED", f"stale pending expired: {reason}"
-        )
+        await self.mark_durable_order_terminal(order_link_id, "EXPIRED", f"stale pending expired: {reason}")
+
+    async def get_durable_order_age_seconds(self, order_link_id: str) -> float | None:
+        """Return age in seconds of a durable order, or None if not found."""
+        if not self._pool:
+            return None
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT EXTRACT(EPOCH FROM (NOW() - created_at)) AS age_s "
+                "FROM durable_order_state WHERE order_link_id = $1",
+                order_link_id,
+            )
+            return float(row["age_s"]) if row else None
 
     async def get_net_results_today(self) -> dict[str, Any]:
-        """Aggregate net P&L for the current UTC day from all available sources."""
+        """Aggregate net P&L for the current UTC day from all available sources.
+
+        Separates trading PnL (closed_pnl + executions) from account balance changes
+        (deposits, withdrawals, transfers) so /net shows trading-only results.
+        """
         if not self.is_enabled:
             return {"available": False, "reason": "journal_disabled"}
 
         result: dict[str, Any] = {
             "available": True,
-            "gross_pnl_usd": 0.0,
-            "total_fees_usd": 0.0,
-            "total_funding_usd": 0.0,
-            "raw_change_usd": 0.0,
-            "net_pnl_usd": 0.0,
-            "maker_fill_pct": 0.0,
-            "taker_fill_pct": 0.0,
-            "execution_count": 0,
-            "transaction_count": 0,
+            "gross_pnl_usdt": 0.0,
+            "total_fees_usdt": 0.0,
+            "funding_usdt": 0.0,
+            "net_pnl_usdt": 0.0,
+            "raw_wallet_change_usdt": 0.0,
+            "trading_net_pnl_usd": 0.0,
+            "transfer_change_usd": 0.0,
+            "deposit_withdrawal_change_usd": 0.0,
+            "closed_trades_count": 0,
+            "execution_events_count": 0,
+            "transaction_events_count": 0,
+            "maker_pct": 0.0,
+            "taker_pct": 0.0,
+            "period": "today",
         }
         try:
+            # Gross PnL from closed positions
             rows = await self._fetch(
-                "SELECT COALESCE(SUM(closed_pnl), 0) AS total FROM closed_pnl "
+                "SELECT COALESCE(SUM(closed_pnl), 0) AS total, COUNT(*) AS cnt FROM closed_pnl "
                 "WHERE created_at >= date_trunc('day', now() AT TIME ZONE 'UTC')"
             )
             if rows:
-                result["gross_pnl_usd"] = float(rows[0]["total"] or 0)
+                result["gross_pnl_usdt"] = float(rows[0]["total"] or 0)
+                result["closed_trades_count"] = int(rows[0]["cnt"] or 0)
 
+            # Fees from execution events
             rows = await self._fetch(
                 "SELECT COALESCE(SUM(ABS(exec_fee)), 0) AS total, COUNT(*) AS cnt "
                 "FROM execution_events "
@@ -742,9 +802,10 @@ class TradeJournal:
                 "  AND exec_fee IS NOT NULL"
             )
             if rows:
-                result["total_fees_usd"] = float(rows[0]["total"] or 0)
-                result["execution_count"] = int(rows[0]["cnt"] or 0)
+                result["total_fees_usdt"] = float(rows[0]["total"] or 0)
+                result["execution_events_count"] = int(rows[0]["cnt"] or 0)
 
+            # Maker/taker split
             rows = await self._fetch(
                 "SELECT "
                 "  COUNT(*) FILTER (WHERE is_maker = true) AS maker_cnt, "
@@ -756,33 +817,53 @@ class TradeJournal:
             )
             if rows and int(rows[0]["total_cnt"] or 0) > 0:
                 total_ex = int(rows[0]["total_cnt"])
-                result["maker_fill_pct"] = round(int(rows[0]["maker_cnt"] or 0) / total_ex * 100, 1)
-                result["taker_fill_pct"] = round(int(rows[0]["taker_cnt"] or 0) / total_ex * 100, 1)
+                result["maker_pct"] = round(int(rows[0]["maker_cnt"] or 0) / total_ex * 100, 1)
+                result["taker_pct"] = round(int(rows[0]["taker_cnt"] or 0) / total_ex * 100, 1)
 
+            # Funding from FUNDING-type transactions only
             rows = await self._fetch(
                 "SELECT COALESCE(SUM(funding), 0) AS total, COUNT(*) AS cnt "
                 "FROM account_transaction_events "
                 "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
-                "  AND funding IS NOT NULL"
+                "  AND transaction_type ILIKE 'FUND%'"
             )
             if rows:
-                result["total_funding_usd"] = float(rows[0]["total"] or 0)
-                result["transaction_count"] = int(rows[0]["cnt"] or 0)
+                result["funding_usdt"] = float(rows[0]["total"] or 0)
+                result["transaction_events_count"] = int(rows[0]["cnt"] or 0)
 
+            # All account transactions (raw wallet change — includes deposits/withdrawals)
             rows = await self._fetch(
                 "SELECT COALESCE(SUM(change), 0) AS total "
                 "FROM account_transaction_events "
                 "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC')"
             )
             if rows:
-                result["raw_change_usd"] = float(rows[0]["total"] or 0)
+                result["raw_wallet_change_usdt"] = float(rows[0]["total"] or 0)
 
-            if result["transaction_count"] > 0:
-                result["net_pnl_usd"] = result["raw_change_usd"]
-            else:
-                result["net_pnl_usd"] = (
-                    result["gross_pnl_usd"] - result["total_fees_usd"] + result["total_funding_usd"]
-                )
+            # Transfer transactions
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(change), 0) AS total "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND transaction_type ILIKE 'TRANSFER%'"
+            )
+            if rows:
+                result["transfer_change_usd"] = float(rows[0]["total"] or 0)
+
+            # Deposit/withdrawal transactions
+            rows = await self._fetch(
+                "SELECT COALESCE(SUM(change), 0) AS total "
+                "FROM account_transaction_events "
+                "WHERE transaction_time >= date_trunc('day', now() AT TIME ZONE 'UTC') "
+                "  AND (transaction_type ILIKE 'DEPOSIT%' OR transaction_type ILIKE 'WITHDRAWAL%')"
+            )
+            if rows:
+                result["deposit_withdrawal_change_usd"] = float(rows[0]["total"] or 0)
+
+            # Trading-only net PnL: gross - fees + funding (does NOT include deposits/transfers)
+            result["net_pnl_usdt"] = result["gross_pnl_usdt"] - result["total_fees_usdt"] + result["funding_usdt"]
+            result["trading_net_pnl_usd"] = result["net_pnl_usdt"]
+
         except Exception as exc:
             log.debug("trade_journal.net_results_failed", error=str(exc))
             return {"available": False, "reason": str(exc)}

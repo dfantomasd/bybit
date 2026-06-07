@@ -53,11 +53,13 @@ def _allowed(settings: MagicMock) -> bool:
 
     if settings.TRADING_MODE == TradingMode.SHADOW:
         return False
+    if settings.SHADOW_MODE:
+        return False
     if settings.BYBIT_USE_TESTNET:
         return True
     if settings.TRADING_MODE not in (TradingMode.LIVE, TradingMode.CANARY_LIVE):
         return False
-    return settings.LIVE_MODE and settings.LIVE_ARMED and not settings.SHADOW_MODE
+    return settings.LIVE_MODE and settings.LIVE_ARMED
 
 
 class TestActiveExecutionAllowed:
@@ -316,7 +318,7 @@ class TestRoundTripSlippage:
 
         src = inspect.getsource(ExecutionEngine._submit_locked)
         # The fix: roundtrip_slippage_pct = slippage_per_side_pct * Decimal("2")
-        assert '* Decimal("2")' in src or 'roundtrip_slippage' in src
+        assert '* Decimal("2")' in src or "roundtrip_slippage" in src
 
 
 # ---------------------------------------------------------------------------
@@ -350,13 +352,14 @@ class TestPostOnlyLimitBlocked:
         assert s.ENTRY_ORDER_MODE == "MARKET"
 
     def test_engine_belt_and_suspenders_disables_limit(self) -> None:
-        """ExecutionEngine._build_intent falls back from POST_ONLY_LIMIT to MARKET."""
+        """ExecutionEngine._build_intent raises RuntimeError for POST_ONLY_LIMIT."""
         import inspect
 
         from trader.execution.engine import ExecutionEngine
 
         src = inspect.getsource(ExecutionEngine._build_intent)
-        assert "post_only_limit_not_implemented" in src.lower() or "use_limit = False" in src
+        assert "RuntimeError" in src
+        assert "POST_ONLY_LIMIT" in src or "post_only_limit" in src.lower()
 
 
 # ---------------------------------------------------------------------------
@@ -580,3 +583,234 @@ class TestDiagnosticsFields:
         src = inspect.getsource(ExecutionEngine.get_status)
         assert "pending_entry_ids" in src
         assert "pending_entry_count" in src
+
+
+# ---------------------------------------------------------------------------
+# Additional: _active_execution_allowed() calls real method via mock app
+# ---------------------------------------------------------------------------
+
+
+class TestActiveExecutionAllowedRealMethod:
+    """Call TradingApplication._active_execution_allowed() directly."""
+
+    def _make_app(self, **kwargs) -> Any:
+        from trader.app import TradingApplication
+        from trader.domain.enums import TradingMode
+
+        app = TradingApplication.__new__(TradingApplication)
+        s = MagicMock()
+        s.TRADING_MODE = TradingMode(kwargs.get("trading_mode", "SHADOW"))
+        s.LIVE_MODE = kwargs.get("live_mode", False)
+        s.LIVE_ARMED = kwargs.get("live_armed", False)
+        s.SHADOW_MODE = kwargs.get("shadow_mode", True)
+        s.BYBIT_USE_TESTNET = kwargs.get("use_testnet", False)
+        app._settings = s
+        return app
+
+    def test_application_shadow_flag_blocks_testnet_execution(self) -> None:
+        from trader.app import TradingApplication
+
+        app = self._make_app(trading_mode="CANARY_LIVE", shadow_mode=True, use_testnet=True)
+        assert TradingApplication._active_execution_allowed(app) is False
+
+    def test_application_live_requires_live_armed(self) -> None:
+        from trader.app import TradingApplication
+
+        app = self._make_app(
+            trading_mode="LIVE", live_mode=True, live_armed=False, shadow_mode=False, use_testnet=False
+        )
+        assert TradingApplication._active_execution_allowed(app) is False
+
+    def test_application_canary_live_fully_armed_allowed(self) -> None:
+        from trader.app import TradingApplication
+
+        app = self._make_app(
+            trading_mode="CANARY_LIVE", live_mode=True, live_armed=True, shadow_mode=False, use_testnet=False
+        )
+        assert TradingApplication._active_execution_allowed(app) is True
+
+
+# ---------------------------------------------------------------------------
+# POST_ONLY_LIMIT raises RuntimeError not silent fallback
+# ---------------------------------------------------------------------------
+
+
+class TestPostOnlyLimitRaises:
+    def test_post_only_guard_raises_instead_of_market_fallback(self) -> None:
+        """_build_intent() must raise when POST_ONLY_LIMIT mode reaches execution."""
+        import inspect
+
+        from trader.execution.engine import ExecutionEngine
+
+        src = inspect.getsource(ExecutionEngine._build_intent)
+        assert "RuntimeError" in src
+        assert "post_only_limit" in src.lower() or "POST_ONLY_LIMIT" in src
+
+
+# ---------------------------------------------------------------------------
+# Event key zero value preservation
+# ---------------------------------------------------------------------------
+
+
+class TestEventKeyZeroPreservation:
+    def test_event_key_preserves_zero_values(self) -> None:
+        """_norm_key_part must preserve 0 as '0', not empty string."""
+        from trader.storage.trade_journal import _norm_key_part
+
+        assert _norm_key_part(0) == "0"
+        assert _norm_key_part(0.0) == "0.0"
+        assert _norm_key_part(None) == ""
+        assert _norm_key_part("") == ""
+        assert _norm_key_part("hello") == "hello"
+
+
+# ---------------------------------------------------------------------------
+# Env defaults
+# ---------------------------------------------------------------------------
+
+
+class TestEnvDefaults:
+    def test_env_example_has_safe_breakeven_defaults(self) -> None:
+        import pathlib
+
+        env_example = pathlib.Path(".env.example").read_text()
+        assert "BREAKEVEN_STOP_OFFSET_PCT=0.20" in env_example
+        assert "TRAILING_ACTIVATION_PCT=0.70" in env_example
+        assert "TRAILING_DISTANCE_PCT=0.25" in env_example
+
+
+# ---------------------------------------------------------------------------
+# Stale pending reconciliation structural tests
+# ---------------------------------------------------------------------------
+
+
+class TestStalePendingReconciliationStructural:
+    def test_startup_uses_durable_order_state_not_order_events(self) -> None:
+        """TradeJournal must have load_pending_from_durable_state method."""
+        from trader.storage.trade_journal import TradeJournal
+
+        assert hasattr(TradeJournal, "load_pending_from_durable_state")
+
+    def test_journal_has_get_durable_order_age_seconds(self) -> None:
+        from trader.storage.trade_journal import TradeJournal
+
+        assert hasattr(TradeJournal, "get_durable_order_age_seconds")
+
+    def test_app_has_reconcile_durable_pending_orders(self) -> None:
+        from trader.app import TradingApplication
+
+        assert hasattr(TradingApplication, "_reconcile_durable_pending_orders")
+
+    def test_app_has_check_order_terminal_state(self) -> None:
+        from trader.app import TradingApplication
+
+        assert hasattr(TradingApplication, "_check_order_terminal_state")
+
+    @pytest.mark.asyncio
+    async def test_reconcile_resolves_terminal_order(self) -> None:
+        """If order history shows FILLED, engine slot is released."""
+        from trader.app import TradingApplication
+
+        app = TradingApplication.__new__(TradingApplication)
+        app._settings = MagicMock()
+        app._settings.STALE_PENDING_TTL_SECONDS = 600
+        app._settings.DEFAULT_MARKET_CATEGORY = "linear"
+
+        # Mock journal
+        journal = MagicMock()
+        journal.get_unresolved_durable_orders = AsyncMock(return_value=["ord-terminal-1"])
+        journal.get_durable_order_age_seconds = AsyncMock(return_value=30.0)
+        journal.mark_durable_order_terminal = AsyncMock()
+        app._trade_journal = journal
+
+        # Mock engine
+        engine = MagicMock()
+        engine.mark_entry_resolved = MagicMock()
+        app._execution_engine = engine
+
+        # Mock telegram
+        app._telegram_bot = None
+
+        # Mock _check_order_terminal_state to return FILLED
+        async def mock_check(order_link_id):
+            return "FILLED"
+
+        app._check_order_terminal_state = mock_check
+
+        # Wire adapter
+        app._bybit_adapter = MagicMock()
+
+        await TradingApplication._reconcile_durable_pending_orders(app, startup=True)
+
+        journal.mark_durable_order_terminal.assert_awaited_once_with("ord-terminal-1", "FILLED")
+        engine.mark_entry_resolved.assert_called_once_with("ord-terminal-1")
+
+    @pytest.mark.asyncio
+    async def test_background_reconcile_expires_stale_pending(self) -> None:
+        """Order absent everywhere + age >= TTL → expired, slot released, alert sent."""
+        from trader.app import TradingApplication
+
+        app = TradingApplication.__new__(TradingApplication)
+        app._settings = MagicMock()
+        app._settings.STALE_PENDING_TTL_SECONDS = 600
+        app._settings.DEFAULT_MARKET_CATEGORY = "linear"
+
+        journal = MagicMock()
+        journal.get_unresolved_durable_orders = AsyncMock(return_value=["ord-stale-1"])
+        journal.get_durable_order_age_seconds = AsyncMock(return_value=700.0)  # > 600
+        journal.expire_stale_durable_order = AsyncMock()
+        app._trade_journal = journal
+
+        engine = MagicMock()
+        engine.mark_entry_resolved = MagicMock()
+        app._execution_engine = engine
+
+        telegram = MagicMock()
+        telegram.notify = AsyncMock()
+        app._telegram_bot = telegram
+
+        app._bybit_adapter = MagicMock()
+
+        async def mock_check(order_link_id):
+            return None  # not found anywhere
+
+        app._check_order_terminal_state = mock_check
+
+        await TradingApplication._reconcile_durable_pending_orders(app, startup=False)
+
+        journal.expire_stale_durable_order.assert_awaited_once_with("ord-stale-1")
+        engine.mark_entry_resolved.assert_called_once_with("ord-stale-1")
+        telegram.notify.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_recent_unknown_pending_remains_blocking(self) -> None:
+        """Order not found but age < TTL stays pending (not released)."""
+        from trader.app import TradingApplication
+
+        app = TradingApplication.__new__(TradingApplication)
+        app._settings = MagicMock()
+        app._settings.STALE_PENDING_TTL_SECONDS = 600
+        app._settings.DEFAULT_MARKET_CATEGORY = "linear"
+
+        journal = MagicMock()
+        journal.get_unresolved_durable_orders = AsyncMock(return_value=["ord-recent-1"])
+        journal.get_durable_order_age_seconds = AsyncMock(return_value=30.0)  # < 600
+        journal.expire_stale_durable_order = AsyncMock()
+        journal.mark_durable_order_terminal = AsyncMock()
+        app._trade_journal = journal
+
+        engine = MagicMock()
+        engine.mark_entry_resolved = MagicMock()
+        app._execution_engine = engine
+        app._telegram_bot = None
+        app._bybit_adapter = MagicMock()
+
+        async def mock_check(order_link_id):
+            return None
+
+        app._check_order_terminal_state = mock_check
+
+        await TradingApplication._reconcile_durable_pending_orders(app, startup=False)
+
+        journal.expire_stale_durable_order.assert_not_awaited()
+        engine.mark_entry_resolved.assert_not_called()

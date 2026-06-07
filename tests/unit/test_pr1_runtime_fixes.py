@@ -26,6 +26,7 @@ import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, OrderStatus, RiskDecisionStatus, RiskProfile
 from trader.domain.models import InstrumentInfo, TradeProposal
+from trader.exchange.fee_provider import FeeRates
 from trader.exchange.reconciliation import ReconciliationService
 from trader.execution.engine import ExecutionEngine
 from trader.risk.circuit_breakers import CircuitBreakerManager
@@ -34,6 +35,16 @@ from trader.risk.exposure import ExposureTracker
 from trader.risk.kill_switch import KillSwitch
 from trader.risk.manager import RiskManager
 from trader.risk.profiles import get_risk_limits
+
+
+def _make_fee_provider(taker: float = 0.0006, maker: float = 0.0001) -> MagicMock:
+    fp = MagicMock()
+    _now = datetime.now(tz=UTC)
+    fp.get = AsyncMock(
+        return_value=FeeRates(maker_fee_rate=maker, taker_fee_rate=taker, source="stub", fetched_at=_now)
+    )
+    return fp
+
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -105,6 +116,7 @@ def _make_engine(
         max_concurrent_pending_entries=max_concurrent_pending,
         max_same_side_positions=max_same_side,
         startup_warmup_seconds=startup_warmup_seconds,
+        fee_provider=None if shadow else _make_fee_provider(),
     )
     return engine, adapter, rm
 
