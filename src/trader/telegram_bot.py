@@ -34,6 +34,7 @@ Safety:
 
 from __future__ import annotations
 
+import html
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -722,14 +723,40 @@ class TelegramMonitorBot:
         candles = db_diag.get("candles_by_interval", {})
         latest_1m = db_diag.get("latest_candle_1m")
         latest_str = latest_1m.strftime("%H:%M:%S UTC") if latest_1m else "none"
+        outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
+        labelled_15m = db_diag.get("labelled_samples_15m", 0)
+        outcome_parts = [
+            f"{horizon}m={count}"
+            for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
+        ]
+        outcome_breakdown = ", ".join(outcome_parts) if outcome_parts else "none"
 
         model_info = diag.get("model", {}) or {}
+        db_model = db_diag.get("latest_model_version", {}) or {}
+        latest_run = db_diag.get("latest_training_run", {}) or {}
         champion_ver = model_info.get("champion_version", "none")
         challenger_ver = model_info.get("challenger_version", "none")
         last_training = model_info.get("last_training", "never")
         samples = model_info.get("training_samples", 0)
+        if not samples and db_model:
+            samples = db_model.get("training_samples", 0)
+        db_model_version = db_model.get("version")
+        db_model_status = db_model.get("status")
+        if champion_ver == "none" and db_model_status == "CHAMPION":
+            champion_ver = db_model_version or "none"
+        if challenger_ver == "none" and db_model_status and db_model_status != "CHAMPION":
+            challenger_ver = db_model_version or "none"
+        if last_training == "never" and latest_run.get("finished_at"):
+            last_training = latest_run["finished_at"].strftime("%Y-%m-%d %H:%M UTC")
         wf_exp = model_info.get("walk_forward_expectancy", "n/a")
         drift = model_info.get("drift_status", "n/a")
+        latest_run_status = latest_run.get("status", "none")
+        latest_run_samples = latest_run.get("sample_count", 0) or 0
+        latest_run_model = latest_run.get("model_version") or "none"
+        latest_run_error = str(latest_run.get("error") or "")
+        if len(latest_run_error) > 120:
+            latest_run_error = f"{latest_run_error[:117]}..."
+        latest_run_error = html.escape(latest_run_error)
 
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
@@ -742,18 +769,25 @@ class TelegramMonitorBot:
             f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
             f"Feature snapshots:   <code>{db_diag.get('feature_snapshots', 0)}</code>",
             f"Prediction outcomes: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
+            f"Labelled horizons:   <code>{outcome_breakdown}</code>",
+            f"Trainable 15m:       <code>{labelled_15m}</code>",
             "",
             "<b>Модель</b>",
             f"Последнее обучение: <code>{last_training}</code>",
             f"Training samples:   <code>{samples}</code>",
             f"Champion version:   <code>{champion_ver}</code>",
             f"Challenger version: <code>{challenger_ver}</code>",
+            f"Latest DB model:    <code>{db_model_version or 'none'}</code> <code>{db_model_status or ''}</code>",
+            f"Last train run:     <code>{latest_run_status}</code> samples=<code>{latest_run_samples}</code>",
+            f"Run model version:  <code>{latest_run_model}</code>",
             f"Walk-forward exp:   <code>{wf_exp}</code>",
             f"Drift:              <code>{drift}</code>",
             "Model live decisions: <b>disabled</b>",
         ]
+        if latest_run_error:
+            lines.append(f"Last train error: <code>{latest_run_error}</code>")
         if db_diag.get("error"):
-            lines.append(f"\n<i>Error: {db_diag['error']}</i>")
+            lines.append(f"\n<i>Error: {html.escape(str(db_diag['error']))}</i>")
 
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 

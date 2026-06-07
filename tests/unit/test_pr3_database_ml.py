@@ -322,6 +322,62 @@ async def test_feature_snapshot_written() -> None:
     assert "DOGEUSDT" in args
 
 
+@pytest.mark.asyncio
+async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> None:
+    """DB diagnostics should expose enough model/training state for Telegram controls."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+    journal._enabled = True
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict]:
+        del args
+        if "FROM market_candles GROUP BY interval" in query:
+            return [{"interval": "1", "cnt": 1000}, {"interval": "15", "cnt": 250}]
+        if "MAX(open_time)" in query:
+            return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
+        if "FROM feature_snapshots fs" in query:
+            return [{"cnt": 777}]
+        if "FROM feature_snapshots" in query:
+            return [{"cnt": 1200}]
+        if "GROUP BY horizon_minutes" in query:
+            return [{"horizon_minutes": 5, "cnt": 300}, {"horizon_minutes": 15, "cnt": 777}]
+        if "FROM prediction_outcomes" in query:
+            return [{"cnt": 900}]
+        if "FROM training_runs" in query:
+            return [
+                {
+                    "status": "COMPLETED",
+                    "model_version": "v20260607_1000",
+                    "sample_count": 777,
+                    "error": None,
+                    "started_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
+                    "finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                }
+            ]
+        if "FROM model_versions" in query:
+            return [
+                {
+                    "version": "v20260607_1000",
+                    "status": "SHADOW_CHALLENGER",
+                    "training_samples": 777,
+                    "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                }
+            ]
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["labelled_samples_15m"] == 777
+    assert diag["prediction_outcomes_by_horizon"] == {"5": 300, "15": 777}
+    assert diag["latest_training_run"]["status"] == "COMPLETED"
+    assert diag["latest_model_version"]["version"] == "v20260607_1000"
+
+
 # ---------------------------------------------------------------------------
 # No lookahead leakage check (conceptual / structural)
 # ---------------------------------------------------------------------------
@@ -364,6 +420,20 @@ async def test_database_model_telegram_screen() -> None:
             "latest_candle_1m": datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
             "feature_snapshots": 500,
             "prediction_outcomes": 300,
+            "prediction_outcomes_by_horizon": {"5": 120, "15": 180},
+            "labelled_samples_15m": 180,
+            "latest_training_run": {
+                "status": "COMPLETED",
+                "model_version": "v20260607_1000",
+                "sample_count": 180,
+                "error": None,
+                "finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+            },
+            "latest_model_version": {
+                "version": "v20260607_1000",
+                "status": "SHADOW_CHALLENGER",
+                "training_samples": 180,
+            },
         }
 
     async def fake_health() -> Any:
@@ -410,6 +480,8 @@ async def test_database_model_telegram_screen() -> None:
 
     fake_context = type("_Ctx", (), {"args": []})()
 
-    # The method calls self._reply which calls message.reply_html
+    # The method calls self._reply which calls message.reply_text with HTML parse mode.
     await bot._cmd_db_model(fake_update, fake_context)  # type: ignore[arg-type]
-    # No assertion needed; passing without exception is the test
+    text = fake_message.reply_text.await_args.args[0]
+    assert "Trainable 15m" in text
+    assert "v20260607_1000" in text
