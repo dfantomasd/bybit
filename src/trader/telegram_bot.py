@@ -187,6 +187,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("net", self._cmd_net_results))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
+        app.add_handler(CommandHandler("model_help", self._cmd_model_help))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -354,6 +355,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
             ],
             [InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary")],
+            [InlineKeyboardButton("❓ Как читать модель", callback_data="view:model_help")],
             [InlineKeyboardButton("🚨 Emergency stop", callback_data="control:stop")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="view:status")],
         ]
@@ -867,6 +869,35 @@ class TelegramMonitorBot:
             return f"{seconds:.0f}s ago"
         return str(timedelta(seconds=int(seconds)))
 
+    async def _cmd_model_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Explain model/training screens in operator-friendly Russian."""
+        del context
+        if not await self._authorised(update):
+            return
+        await self._reply(update, self._model_help_text(), reply_markup=self._control_menu())
+
+    def _model_help_text(self) -> str:
+        return (
+            "<b>❓ Как пользоваться моделью</b>\n\n"
+            "<b>1. База</b>\n"
+            "Если БД зеленая, бот сохраняет свечи, сигналы и результаты. "
+            "Свечи 1m/5m/15m/1h — это история рынка. Чем больше истории, тем надежнее обучение.\n\n"
+            "<b>2. Trainable 15m</b>\n"
+            "Это количество готовых размеченных примеров для обучения на горизонте 15 минут. "
+            "Для первого обучения достаточно примерно 1000. Для более уверенного CANARY лучше 2000+.\n\n"
+            "<b>3. Challenger</b>\n"
+            "Это новая обученная модель-кандидат. Она пока наблюдает в тени и не открывает сделки сама.\n\n"
+            "<b>4. Gate pass/block</b>\n"
+            "Модель смотрит на сигналы стратегии и решает: пропустить сигнал или заблокировать. "
+            "Если Gate lift положительный — фильтр модели помогает. Если отрицательный — модель пока не улучшает отбор.\n\n"
+            "<b>5. Model live decisions</b>\n"
+            "Сейчас <b>disabled</b>: модель не управляет реальными сделками. Это правильно для этапа проверки.\n\n"
+            "<b>Что делать пользователю</b>\n"
+            "Нажимать <b>База и модель</b> и <b>Готовность CANARY</b>. "
+            "Обучение можно запускать вручную кнопками <b>Обучить 500/1000</b>, "
+            "а автообучение само сработает, когда накопятся новые размеченные примеры."
+        )
+
     async def _cmd_db_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """🗄 БАЗА И МОДЕЛЬ screen."""
         del context
@@ -976,11 +1007,20 @@ class TelegramMonitorBot:
             dd_usd = paper_notional * drawdown_bps / 10000.0
             return f"{int(stats.get('count') or 0)} trades, {total_bps:+.1f} bps / {usd:+.3f} USDT, DD {dd_usd:+.3f}"
 
+        data_note = "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
+        training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
+        if gate_lift is None:
+            gate_note = "фильтр модели еще не оценен"
+        elif float(gate_lift) > 0:
+            gate_note = "фильтр модели улучшает отбор сигналов"
+        else:
+            gate_note = "фильтр модели пока НЕ улучшает отбор сигналов"
+
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
             "",
             f"БД: {db_icon} {db_status}",
-            f"DB error: <code>{db_error_str or 'none'}</code>",
+            f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
             f"Последняя свеча 1m: <code>{latest_str}</code>",
             f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
             f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
@@ -990,6 +1030,12 @@ class TelegramMonitorBot:
             f"Prediction outcomes: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
             f"Labelled horizons:   <code>{outcome_breakdown}</code>",
             f"Trainable 15m:       <code>{labelled_15m}</code>",
+            "",
+            "<b>Простыми словами</b>",
+            f"Данные: <code>{data_note}</code>",
+            f"Обучение: <code>{training_note}</code>",
+            f"Оценка модели: <code>{gate_note}</code>",
+            "Реальные сделки: <code>модель не управляет ордерами</code>",
             "",
             "<b>Модель</b>",
             f"Последнее обучение: <code>{last_training}</code>",
@@ -1294,6 +1340,9 @@ class TelegramMonitorBot:
         if action == "canary":
             await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
             return
+        if action == "model_help":
+            await self._cmd_model_help(update, fake_context)  # type: ignore[arg-type]
+            return
         if action == "control":
             await self._button_reply(
                 update,
@@ -1451,6 +1500,7 @@ class TelegramMonitorBot:
                 "/train [500] [15] [5] — train shadow model\n"
                 "/limits — show/change safe runtime limits\n"
                 "/canary — readiness check for tiny CANARY_LIVE test\n"
+                "/model_help — explain model/training in Russian\n"
                 "/mode shadow|active — switch execution mode\n"
                 "/shadow on|off — toggle shadow mode\n"
                 "/risk conservative|moderate|aggressive|scalp\n"

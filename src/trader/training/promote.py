@@ -24,7 +24,7 @@ async def _promote(version: str, confirm: bool) -> None:
 
     settings = Settings()
     dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2)
+    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
 
     try:
         row = await pool.fetchrow(

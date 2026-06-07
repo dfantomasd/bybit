@@ -431,10 +431,12 @@ async def test_trade_journal_keeps_reconnectable_after_connect_failure(monkeypat
     journal._ensure_schema = AsyncMock()  # type: ignore[method-assign]
     fake_pool = MagicMock()
     attempts = 0
+    create_pool_kwargs: list[dict[str, Any]] = []
 
     async def fake_create_pool(*args: Any, **kwargs: Any) -> MagicMock:
-        del args, kwargs
+        del args
         nonlocal attempts
+        create_pool_kwargs.append(kwargs)
         attempts += 1
         if attempts == 1:
             raise OSError("temporary postgres dns failure")
@@ -456,6 +458,7 @@ async def test_trade_journal_keeps_reconnectable_after_connect_failure(monkeypat
     assert reconnected is True
     assert journal.is_enabled is True
     assert journal._pool is fake_pool
+    assert all(kwargs["statement_cache_size"] == 0 for kwargs in create_pool_kwargs)
 
 
 # ---------------------------------------------------------------------------
