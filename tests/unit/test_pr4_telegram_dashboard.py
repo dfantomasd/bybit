@@ -136,3 +136,55 @@ def test_control_menu_no_risk_escalation() -> None:
     all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
     risk_buttons = [c for c in all_callbacks if c and c.startswith("risk:")]
     assert not risk_buttons, f"Risk escalation buttons found in control menu: {risk_buttons}"
+
+
+def test_control_menu_has_training_and_limits() -> None:
+    """Control menu should expose safe training and limit controls."""
+    bot = _make_bot()
+    markup = bot._control_menu()
+    all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    assert "control:train" in all_callbacks
+    assert "control:limits" in all_callbacks
+
+
+@pytest.mark.asyncio
+async def test_train_command_starts_shadow_training() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.start_training = AsyncMock(return_value="training started")
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": ["500", "15", "5"]})()
+
+    await bot._cmd_train(update, ctx)  # type: ignore[arg-type]
+
+    bot._controller.start_training.assert_awaited_once_with(500, 15, 5.0)
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "training started" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_limits_command_updates_safe_runtime_setting() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(
+        return_value={
+            "paused": False,
+            "shadow": True,
+            "risk_profile": "CONSERVATIVE",
+            "max_entries_per_minute": 1,
+            "max_concurrent_pending": 1,
+            "max_same_side": 1,
+            "screener_max_price_usd": 25,
+            "feature_max_symbols": 20,
+            "execution_candidates": 10,
+        }
+    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Max entries/min set to 2")
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": ["entries", "2"]})()
+
+    await bot._cmd_limits(update, ctx)  # type: ignore[arg-type]
+
+    bot._controller.set_runtime_setting.assert_awaited_once_with("entries", 2)
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Max entries/min set to 2" in reply_text
