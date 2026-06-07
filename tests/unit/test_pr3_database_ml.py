@@ -345,6 +345,15 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"horizon_minutes": 5, "cnt": 300}, {"horizon_minutes": 15, "cnt": 777}]
         if "FROM prediction_outcomes" in query:
             return [{"cnt": 900}]
+        if "metadata->>'gate_reason'" in query:
+            return [{"reason": "score_below_regime_threshold", "cnt": 8}]
+        if "pe.model_version = 'RULE_BASELINE_V1'" in query and "GATE_PASS" in query:
+            return [
+                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": 1.0},
+                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": -2.0},
+                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 4.5},
+                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 3.5},
+            ]
         if "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in query:
             return [
                 {
@@ -367,7 +376,13 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                     "model_version": "v20260607_1000",
                     "sample_count": 777,
                     "error": None,
-                    "metrics": {"quality": "GOOD", "precision": 0.62, "lift_bps": 3.4},
+                    "metrics": {
+                        "quality": "GOOD",
+                        "precision": 0.62,
+                        "lift_bps": 3.4,
+                        "best_threshold": 0.6,
+                        "best_threshold_avg_net_return_bps": 4.5,
+                    },
                     "started_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
                     "finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                 }
@@ -378,7 +393,13 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                     "version": "v20260607_1000",
                     "status": "SHADOW_CHALLENGER",
                     "training_samples": 777,
-                    "metrics": {"quality": "GOOD", "precision": 0.62, "lift_bps": 3.4},
+                    "metrics": {
+                        "quality": "GOOD",
+                        "precision": 0.62,
+                        "lift_bps": 3.4,
+                        "best_threshold": 0.6,
+                        "best_threshold_avg_net_return_bps": 4.5,
+                    },
                     "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                     "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                 }
@@ -395,6 +416,9 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["latest_model_version"]["version"] == "v20260607_1000"
     assert diag["shadow_gate_15m"]["pass_count"] == 12
     assert diag["shadow_gate_15m"]["pass_vs_block_bps"] == 6.0
+    assert diag["shadow_gate_15m"]["top_block_reasons"] == {"score_below_regime_threshold": 8}
+    assert diag["paper_pnl_15m"]["baseline"]["total_bps"] == -1.0
+    assert diag["paper_pnl_15m"]["model_gate"]["total_bps"] == 8.0
 
 
 # ---------------------------------------------------------------------------
@@ -458,6 +482,8 @@ async def test_database_model_telegram_screen() -> None:
                     "validation_samples": 80,
                     "precision": 0.61,
                     "lift_bps": 2.7,
+                    "best_threshold": 0.6,
+                    "best_threshold_avg_net_return_bps": 5.1,
                     "walk_forward_expectancy_bps": 4.2,
                 },
             },
@@ -469,6 +495,12 @@ async def test_database_model_telegram_screen() -> None:
                 "pass_avg_net_return_bps": 4.5,
                 "block_avg_net_return_bps": -1.5,
                 "lift_vs_all_bps": 2.4,
+                "top_block_reasons": {"score_below_regime_threshold": 8},
+            },
+            "paper_notional_usd": 5.0,
+            "paper_pnl_15m": {
+                "baseline": {"count": 20, "total_bps": 10.0, "max_drawdown_bps": -4.0},
+                "model_gate": {"count": 12, "total_bps": 18.0, "max_drawdown_bps": -2.0},
             },
         }
 
@@ -526,3 +558,6 @@ async def test_database_model_telegram_screen() -> None:
     assert "+2.70 bps" in text
     assert "Shadow gate 15m" in text
     assert "12/20 pass" in text
+    assert "Paper baseline" in text
+    assert "Paper model gate" in text
+    assert "score_below_regime_threshold" in text

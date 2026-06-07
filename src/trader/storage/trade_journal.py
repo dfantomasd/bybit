@@ -233,8 +233,11 @@ class TradeJournal:
                 feature_snapshot_id uuid,
                 score double precision NOT NULL,
                 strategy_signal text,
-                decision text
+                decision text,
+                metadata jsonb
             );
+            ALTER TABLE prediction_events
+                ADD COLUMN IF NOT EXISTS metadata jsonb;
             CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
                 ON prediction_events (symbol, created_at DESC);
 
@@ -741,15 +744,16 @@ class TradeJournal:
         strategy_signal: str | None = None,
         decision: str | None = None,
         feature_snapshot_id: str | None = None,
+        metadata: dict[str, Any] | None = None,
     ) -> str:
         """Write a shadow-mode prediction event; return prediction_id."""
         rows = await self._fetch(
             """
             INSERT INTO prediction_events (
                 symbol, interval, model_version, feature_snapshot_id,
-                score, strategy_signal, decision
+                score, strategy_signal, decision, metadata
             )
-            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7)
+            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8::jsonb)
             RETURNING prediction_id
             """,
             symbol,
@@ -759,6 +763,7 @@ class TradeJournal:
             score,
             strategy_signal,
             decision,
+            json.dumps(metadata or {}),
         )
         return str(rows[0]["prediction_id"]) if rows else ""
 
@@ -920,6 +925,7 @@ class TradeJournal:
             "latest_training_run": {},
             "latest_model_version": {},
             "shadow_gate_15m": {},
+            "paper_pnl_15m": {},
         }
         if not self.is_enabled:
             return result
@@ -1017,6 +1023,69 @@ class TradeJournal:
                         (float(pass_avg) - float(block_avg)) if pass_avg is not None and block_avg is not None else None
                     )
                 result["shadow_gate_15m"] = gate
+                reason_rows = await self._fetch(
+                    """
+                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_BLOCK'
+                      AND po.horizon_minutes = 15
+                      AND po.label IS NOT NULL
+                    GROUP BY reason
+                    ORDER BY cnt DESC
+                    LIMIT 3
+                    """,
+                    latest_model_version,
+                )
+                if reason_rows:
+                    gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
+                paper_rows = await self._fetch(
+                    """
+                    SELECT pe.model_version, pe.decision, po.net_return_bps, pe.created_at
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE po.horizon_minutes = 15
+                      AND po.label IS NOT NULL
+                      AND (
+                        pe.model_version = 'RULE_BASELINE_V1'
+                        OR (pe.model_version = $1 AND pe.decision = 'GATE_PASS')
+                      )
+                    ORDER BY pe.created_at ASC
+                    LIMIT 1000
+                    """,
+                    latest_model_version,
+                )
+
+                def _paper_stats(kind: str) -> dict[str, Any]:
+                    returns: list[float] = []
+                    for row in paper_rows:
+                        if kind == "baseline" and row["model_version"] != "RULE_BASELINE_V1":
+                            continue
+                        if kind == "gate" and not (
+                            row["model_version"] == latest_model_version and row["decision"] == "GATE_PASS"
+                        ):
+                            continue
+                        returns.append(float(row["net_return_bps"] or 0.0))
+                    equity = 0.0
+                    peak = 0.0
+                    max_drawdown = 0.0
+                    for ret in returns:
+                        equity += ret
+                        peak = max(peak, equity)
+                        max_drawdown = min(max_drawdown, equity - peak)
+                    return {
+                        "count": len(returns),
+                        "avg_bps": (sum(returns) / len(returns)) if returns else None,
+                        "total_bps": sum(returns),
+                        "max_drawdown_bps": max_drawdown,
+                    }
+
+                result["paper_pnl_15m"] = {
+                    "model_version": latest_model_version,
+                    "baseline": _paper_stats("baseline"),
+                    "model_gate": _paper_stats("gate"),
+                }
         except Exception as exc:
             log.debug("trade_journal.diagnostics_failed", error=str(exc))
         return result

@@ -124,6 +124,10 @@ class TradingApplication:
         self._ws_private: Any | None = None
         # ML shadow scoring
         self._model_registry: Any | None = None
+        self._model_gate_recent_blocks: deque[bool] = deque(maxlen=100)
+        self._model_gate_block_counter: int = 0
+        self._model_gate_quality: dict[str, Any] = {}
+        self._model_gate_quality_checked_at: datetime | None = None
 
     def _market_data_intervals(self) -> list[str]:
         """Configured kline intervals with 1m kept first for strategy compatibility."""
@@ -509,6 +513,11 @@ class TradingApplication:
             self._last_training_message = str(exc)
             text = f"❌ <b>Training crashed</b>\n<code>{code_text(str(exc))}</code>"
             log.warning("model_training.crashed", error=str(exc))
+        if self._trade_journal is not None and self._trade_journal.is_enabled:
+            try:
+                self._update_model_gate_quality_from_diag(await self._trade_journal.get_db_diagnostics())
+            except Exception as diag_exc:
+                log.debug("model_gate.quality_refresh_failed", error=str(diag_exc))
         if self._telegram_bot is not None:
             await self._telegram_bot.notify(text)
 
@@ -540,6 +549,7 @@ class TradingApplication:
 
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
+                self._update_model_gate_quality_from_diag(diag)
                 trainable = int(diag.get("labelled_samples_15m", 0) or 0)
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
@@ -566,6 +576,92 @@ class TradingApplication:
             except Exception as exc:
                 log.warning("model_auto_training.failed", error=str(exc))
 
+    def _model_gate_threshold(self, regime_context: Any | None) -> float:
+        """Return a conservative threshold adjusted by market regime."""
+        assert self._settings is not None
+        best_threshold = self._model_gate_quality.get("best_threshold")
+        threshold = (
+            float(best_threshold) if best_threshold is not None else float(self._settings.MODEL_SHADOW_GATE_THRESHOLD)
+        )
+        if regime_context is None:
+            return threshold + 0.02
+
+        regime = getattr(getattr(regime_context, "regime", None), "value", str(getattr(regime_context, "regime", "")))
+        volatility = getattr(
+            getattr(regime_context, "volatility_level", None),
+            "value",
+            str(getattr(regime_context, "volatility_level", "")),
+        )
+        if regime in {"BULL_TREND", "BEAR_TREND"}:
+            threshold -= 0.02
+        elif regime in {"SIDEWAYS", "UNCERTAIN"}:
+            threshold += 0.03
+        elif regime in {"HIGH_VOLATILITY", "LOW_LIQUIDITY"}:
+            threshold += 0.05
+        if volatility in {"HIGH", "EXTREME"}:
+            threshold += 0.03
+        elif volatility == "LOW":
+            threshold += 0.01
+        return min(0.80, max(0.50, threshold))
+
+    def _update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
+        latest_model = diag.get("latest_model_version", {}) or {}
+        metrics = latest_model.get("metrics") or {}
+        gate = diag.get("shadow_gate_15m", {}) or {}
+        self._model_gate_quality = {
+            "quality": metrics.get("quality"),
+            "lift_bps": metrics.get("lift_bps"),
+            "best_threshold": metrics.get("best_threshold"),
+            "gate_total_count": gate.get("total_count", 0) or 0,
+            "gate_lift_vs_all_bps": gate.get("lift_vs_all_bps"),
+        }
+        self._model_gate_quality_checked_at = datetime.now(tz=UTC)
+
+    def _model_gate_quality_allows_canary(self) -> tuple[bool, str]:
+        assert self._settings is not None
+        if not self._model_gate_quality:
+            return False, "quality_unknown"
+        expected_quality = str(self._settings.MODEL_GATE_CANARY_MIN_QUALITY).upper()
+        quality = str(self._model_gate_quality.get("quality") or "").upper()
+        if expected_quality and quality != expected_quality:
+            return False, f"quality_not_{expected_quality.lower()}:{quality or 'none'}"
+        gate_total = int(self._model_gate_quality.get("gate_total_count") or 0)
+        if gate_total < int(self._settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS):
+            return False, f"insufficient_gate_observations:{gate_total}"
+        lift = self._model_gate_quality.get("gate_lift_vs_all_bps")
+        if lift is None or float(lift) < float(self._settings.MODEL_GATE_CANARY_MIN_LIFT_BPS):
+            return False, f"insufficient_gate_lift:{lift}"
+        return True, "quality_ok"
+
+    def _model_gate_canary_blocks(self, gate_decision: str, threshold: float, score: float) -> tuple[bool, str]:
+        """Decide whether observational gate may block execution without starving trades."""
+        assert self._settings is not None
+        if not self._settings.MODEL_GATE_CANARY_ENABLED:
+            return False, "canary_disabled"
+        if gate_decision != "GATE_BLOCK":
+            self._model_gate_recent_blocks.append(False)
+            return False, "gate_pass"
+        quality_ok, quality_reason = self._model_gate_quality_allows_canary()
+        if not quality_ok:
+            self._model_gate_recent_blocks.append(False)
+            return False, quality_reason
+
+        recent = list(self._model_gate_recent_blocks)
+        block_rate = (sum(recent) / len(recent) * 100.0) if recent else 0.0
+        if len(recent) >= self._settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS:
+            if block_rate >= self._settings.MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT:
+                self._model_gate_recent_blocks.append(False)
+                return False, f"max_block_rate_guard:{block_rate:.1f}%"
+
+        self._model_gate_block_counter += 1
+        every_n = max(1, int(self._settings.MODEL_GATE_CANARY_ALLOW_EVERY_NTH_BLOCKED))
+        if self._model_gate_block_counter % every_n == 0:
+            self._model_gate_recent_blocks.append(False)
+            return False, f"sample_through_every_{every_n}"
+
+        self._model_gate_recent_blocks.append(True)
+        return True, f"score_below_threshold:{score:.3f}<{threshold:.3f}"
+
     def _runtime_settings(self) -> dict[str, Any]:
         return {
             "paused": self._trading_paused,
@@ -581,6 +677,11 @@ class TradingApplication:
             "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
             "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
             "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
+            "model_gate_canary_enabled": (
+                self._settings.MODEL_GATE_CANARY_ENABLED if self._settings is not None else False
+            ),
+            "model_gate_threshold": self._settings.MODEL_SHADOW_GATE_THRESHOLD if self._settings is not None else None,
+            "model_gate_quality": self._model_gate_quality,
         }
 
     async def _set_runtime_setting(self, key: str, value: Any) -> str:
@@ -634,6 +735,18 @@ class TradingApplication:
             if self._screener is not None:
                 self._screener._exec_candidates = ivalue
             return f"Execution candidates set to {ivalue}"
+        if key == "model_gate":
+            sval = str(value).strip().lower()
+            if sval not in {"on", "off", "true", "false", "1", "0"}:
+                raise ValueError("model_gate must be on/off")
+            self._settings.MODEL_GATE_CANARY_ENABLED = sval in {"on", "true", "1"}
+            return f"Model gate canary set to {'ON' if self._settings.MODEL_GATE_CANARY_ENABLED else 'OFF'}"
+        if key == "model_gate_threshold":
+            fvalue = float(value)
+            if not 0.50 <= fvalue <= 0.80:
+                raise ValueError("model_gate_threshold must be 0.50..0.80")
+            self._settings.MODEL_SHADOW_GATE_THRESHOLD = fvalue
+            return f"Model gate threshold set to {fvalue:.2f}"
         raise ValueError("unknown setting")
 
     # ------------------------------------------------------------------
@@ -663,7 +776,12 @@ class TradingApplication:
         async def _db_diagnostics_provider() -> dict:
             if self._trade_journal is None:
                 return {"connected": False}
-            return await self._trade_journal.get_db_diagnostics()
+            diag = await self._trade_journal.get_db_diagnostics()
+            self._update_model_gate_quality_from_diag(diag)
+            diag["paper_notional_usd"] = (
+                float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
+            )
+            return diag
 
         controller = TradingController(
             pause=self._pause_trading,
@@ -1713,6 +1831,7 @@ class TradingApplication:
             "hour_skipped_open_position": hour_counts.get("skipped_open_position", 0),
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
+            "hour_model_gate_canary_blocked": hour_counts.get("model_gate_canary_blocked", 0),
             "model": {
                 "last_training": self._last_training_message,
                 "training_samples": (
@@ -1983,14 +2102,34 @@ class TradingApplication:
                 try:
                     prediction = self._model_registry.score(vec.values)
                     if prediction is not None:
+                        threshold = self._model_gate_threshold(regime_ctx)
+                        gate_decision = None
+                        gate_reason = "gate_disabled"
+                        canary_blocked = False
+                        canary_reason = "canary_disabled"
+                        regime_name = (
+                            regime_ctx.regime.value
+                            if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                            else "UNKNOWN"
+                        )
+                        volatility_name = (
+                            regime_ctx.volatility_level.value
+                            if regime_ctx is not None and getattr(regime_ctx, "volatility_level", None) is not None
+                            else "UNKNOWN"
+                        )
+                        if self._settings.MODEL_SHADOW_GATE_ENABLED:
+                            gate_decision = "GATE_PASS" if prediction.score >= threshold else "GATE_BLOCK"
+                            gate_reason = (
+                                "score_meets_threshold"
+                                if gate_decision == "GATE_PASS"
+                                else "score_below_regime_threshold"
+                            )
+                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
+                                gate_decision,
+                                threshold,
+                                prediction.score,
+                            )
                         if self._trade_journal is not None and self._trade_journal.is_enabled:
-                            gate_decision = None
-                            if self._settings.MODEL_SHADOW_GATE_ENABLED:
-                                gate_decision = (
-                                    "GATE_PASS"
-                                    if prediction.score >= self._settings.MODEL_SHADOW_GATE_THRESHOLD
-                                    else "GATE_BLOCK"
-                                )
                             await self._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,
@@ -1999,7 +2138,28 @@ class TradingApplication:
                                 strategy_signal=proposal.side.value,
                                 decision=gate_decision,
                                 feature_snapshot_id=snapshot_id,
+                                metadata={
+                                    "canary_blocked": canary_blocked,
+                                    "canary_reason": canary_reason,
+                                    "confidence": prediction.confidence,
+                                    "gate_reason": gate_reason,
+                                    "regime": regime_name,
+                                    "score": prediction.score,
+                                    "threshold": threshold,
+                                    "volatility": volatility_name,
+                                },
                             )
+                        if canary_blocked:
+                            self._record_diag("model_gate_canary_blocked")
+                            log.info(
+                                "model_gate.canary_blocked",
+                                symbol=proposal.symbol,
+                                model_version=prediction.model_version,
+                                score=prediction.score,
+                                threshold=threshold,
+                                reason=canary_reason,
+                            )
+                            return
                     else:
                         log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
                 except Exception as _ml_exc:

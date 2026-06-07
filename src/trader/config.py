@@ -280,6 +280,14 @@ class Settings(BaseSettings):
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
+    MODEL_GATE_CANARY_ENABLED: bool = False
+    """When enabled, allow the model gate to block entries only with conservative safeguards."""
+    MODEL_GATE_CANARY_MIN_QUALITY: str = "GOOD"
+    MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT: float = 60.0
+    MODEL_GATE_CANARY_MIN_OBSERVATIONS: int = 50
+    MODEL_GATE_CANARY_MIN_LIFT_BPS: float = 0.0
+    MODEL_GATE_CANARY_ALLOW_EVERY_NTH_BLOCKED: int = 3
+    MODEL_PAPER_NOTIONAL_USD: float = 5.0
 
     # ------------------------------------------------------------------
     # CANARY_LIVE safety

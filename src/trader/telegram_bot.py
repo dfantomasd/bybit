@@ -696,6 +696,7 @@ class TelegramMonitorBot:
             f"Skipped open pos:   <code>{diag.get('hour_skipped_open_position', 0)}</code>",
             f"Skipped entry cd:   <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
             f"Skipped fail cd:    <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
+            f"Model gate blocks:  <code>{diag.get('hour_model_gate_canary_blocked', 0)}</code>",
         ]
         await self._reply(update, "\n".join(lines))
 
@@ -769,9 +770,13 @@ class TelegramMonitorBot:
         precision = model_metrics.get("precision")
         lift_bps = model_metrics.get("lift_bps")
         expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
+        best_threshold = model_metrics.get("best_threshold")
+        best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
         precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
         lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
         expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
+        best_threshold_str = f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
+        best_threshold_avg_str = f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
         gate = db_diag.get("shadow_gate_15m", {}) or {}
         gate_total = gate.get("total_count", 0) or 0
         gate_pass = gate.get("pass_count", 0) or 0
@@ -779,9 +784,24 @@ class TelegramMonitorBot:
         gate_pass_avg = gate.get("pass_avg_net_return_bps")
         gate_block_avg = gate.get("block_avg_net_return_bps")
         gate_lift = gate.get("lift_vs_all_bps")
+        gate_reasons = gate.get("top_block_reasons", {}) or {}
         gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
         gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
         gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+        gate_reasons_str = (
+            ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
+        )
+        paper = db_diag.get("paper_pnl_15m", {}) or {}
+        paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
+        paper_baseline = paper.get("baseline", {}) or {}
+        paper_gate = paper.get("model_gate", {}) or {}
+
+        def _paper_line(stats: dict[str, Any]) -> str:
+            total_bps = float(stats.get("total_bps") or 0.0)
+            drawdown_bps = float(stats.get("max_drawdown_bps") or 0.0)
+            usd = paper_notional * total_bps / 10000.0
+            dd_usd = paper_notional * drawdown_bps / 10000.0
+            return f"{int(stats.get('count') or 0)} trades, {total_bps:+.1f} bps / {usd:+.3f} USDT, DD {dd_usd:+.3f}"
 
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
@@ -809,11 +829,15 @@ class TelegramMonitorBot:
             f"Validation samples: <code>{validation_samples}</code>",
             f"Precision:          <code>{precision_str}</code>",
             f"Lift vs baseline:   <code>{lift_str}</code>",
+            f"Best threshold:     <code>{best_threshold_str}</code> avg=<code>{best_threshold_avg_str}</code>",
             f"Walk-forward exp:   <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
             f"Shadow gate 15m:    <code>{gate_pass}/{gate_total} pass</code>, block=<code>{gate_block}</code>",
             f"Gate pass avg:      <code>{gate_pass_avg_str}</code>",
             f"Gate block avg:     <code>{gate_block_avg_str}</code>",
             f"Gate lift vs all:   <code>{gate_lift_str}</code>",
+            f"Gate block why:     <code>{gate_reasons_str}</code>",
+            f"Paper baseline:     <code>{_paper_line(paper_baseline)}</code>",
+            f"Paper model gate:   <code>{_paper_line(paper_gate)}</code>",
             f"Drift:              <code>{drift}</code>",
             "Model live decisions: <b>disabled</b>",
         ]
@@ -993,13 +1017,19 @@ class TelegramMonitorBot:
         if len(args) != 2 or self._controller.set_runtime_setting is None:
             await self._reply(
                 update,
-                "Usage: /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N",
+                "Usage: /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N\n"
+                "Model gate: /limits model_gate on|off, /limits model_gate_threshold 0.60",
             )
             return
         key = args[0].lower()
         raw_value = args[1]
         try:
-            value: Any = float(raw_value) if key == "price_cap" else int(raw_value)
+            if key in {"price_cap", "model_gate_threshold"}:
+                value: Any = float(raw_value)
+            elif key == "model_gate":
+                value = raw_value
+            else:
+                value = int(raw_value)
             msg = await self._controller.set_runtime_setting(key, value)
         except Exception as exc:
             await self._reply(update, f"❌ Limit change rejected: <code>{exc}</code>")
@@ -1269,6 +1299,7 @@ class TelegramMonitorBot:
         if self._controller is None or self._controller.runtime_settings is None:
             return "<b>Runtime limits</b>\nNot available."
         s = self._controller.runtime_settings()
+        gate_quality = s.get("model_gate_quality", {}) or {}
         return (
             "<b>Runtime limits</b>\n"
             f"Paused: <code>{str(s.get('paused', False)).lower()}</code>\n"
@@ -1279,9 +1310,16 @@ class TelegramMonitorBot:
             f"Max same-side: <code>{s.get('max_same_side', 'n/a')}</code>\n"
             f"Price cap: <code>{s.get('screener_max_price_usd', 'n/a')}</code>\n"
             f"Feature symbols: <code>{s.get('feature_max_symbols', 'n/a')}</code>\n"
-            f"Exec candidates: <code>{s.get('execution_candidates', 'n/a')}</code>\n\n"
+            f"Exec candidates: <code>{s.get('execution_candidates', 'n/a')}</code>\n"
+            f"Model gate canary: <code>{str(s.get('model_gate_canary_enabled', False)).lower()}</code>\n"
+            f"Model gate threshold: <code>{s.get('model_gate_threshold', 'n/a')}</code>\n\n"
+            f"Model gate quality: <code>{gate_quality.get('quality', 'n/a')}</code>, "
+            f"best=<code>{gate_quality.get('best_threshold', 'n/a')}</code>, "
+            f"obs=<code>{gate_quality.get('gate_total_count', 0)}</code>, "
+            f"lift=<code>{gate_quality.get('gate_lift_vs_all_bps', 'n/a')}</code>\n\n"
             "Change: <code>/limits entries 1</code>, <code>/limits pending 1</code>, "
-            "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>"
+            "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>\n"
+            "Model gate: <code>/limits model_gate on</code>, <code>/limits model_gate_threshold 0.60</code>"
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
