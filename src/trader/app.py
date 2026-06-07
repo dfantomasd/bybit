@@ -46,6 +46,7 @@ _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
 _TRAINING_HEARTBEAT_SECONDS = 30.0
 _TRAINING_TIMEOUT_SECONDS = 900.0
+_TRADE_JOURNAL_RECONNECT_INTERVAL = 30.0
 _BALANCE_REFRESH_INTERVAL = 60.0  # seconds between balance refreshes
 _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
@@ -220,6 +221,27 @@ class TradingApplication:
             enabled=self._settings.TRADE_JOURNAL_ENABLED,
         )
         await self._trade_journal.connect()
+        task = asyncio.create_task(self._run_trade_journal_reconnector(), name="trade-journal-reconnector")
+        self._background_tasks.append(task)
+
+    async def _run_trade_journal_reconnector(self) -> None:
+        """Keep trying Postgres after transient Render startup/network failures."""
+        if self._trade_journal is None:
+            return
+        while not self._shutdown_event.is_set():
+            if not self._trade_journal.is_enabled:
+                try:
+                    connected = await self._trade_journal.reconnect_if_needed(
+                        min_interval=_TRADE_JOURNAL_RECONNECT_INTERVAL
+                    )
+                    if connected:
+                        log.info("trade_journal.reconnected")
+                except Exception as exc:
+                    log.debug("trade_journal.reconnect_failed", error=str(exc))
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=_TRADE_JOURNAL_RECONNECT_INTERVAL)
+            except TimeoutError:
+                continue
 
     async def _start_http_server(self) -> asyncio.Task:
         from trader.api.fastapi_app import create_app
@@ -419,6 +441,8 @@ class TradingApplication:
         """Start offline model training in a subprocess; trading loop stays isolated."""
         if self._training_task is not None and not self._training_task.done():
             return "⏳ Training is already running."
+        if self._trade_journal is not None and not self._trade_journal.is_enabled:
+            await self._trade_journal.reconnect_if_needed(force=True)
         if self._trade_journal is None or not self._trade_journal.is_enabled:
             raise RuntimeError("Trade journal/Postgres is not available.")
         self._training_task = asyncio.create_task(
@@ -527,9 +551,6 @@ class TradingApplication:
         if not self._settings.MODEL_AUTO_TRAIN_ENABLED:
             log.info("model_auto_training.disabled")
             return
-        if self._trade_journal is None or not self._trade_journal.is_enabled:
-            log.info("model_auto_training.skipped", reason="trade_journal_unavailable")
-            return
 
         check_seconds = max(60, int(self._settings.MODEL_AUTO_TRAIN_CHECK_SECONDS))
         min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
@@ -546,6 +567,15 @@ class TradingApplication:
 
             if self._training_task is not None and not self._training_task.done():
                 continue
+
+            if self._trade_journal is None:
+                log.info("model_auto_training.waiting", reason="trade_journal_not_started")
+                continue
+            if not self._trade_journal.is_enabled:
+                await self._trade_journal.reconnect_if_needed()
+                if not self._trade_journal.is_enabled:
+                    log.info("model_auto_training.waiting", reason="trade_journal_unavailable")
+                    continue
 
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
@@ -775,7 +805,9 @@ class TradingApplication:
 
         async def _db_diagnostics_provider() -> dict:
             if self._trade_journal is None:
-                return {"connected": False}
+                return {"connected": False, "configured": False, "error": "trade_journal_not_started"}
+            if not self._trade_journal.is_enabled:
+                await self._trade_journal.reconnect_if_needed(force=True)
             diag = await self._trade_journal.get_db_diagnostics()
             self._update_model_gate_quality_from_diag(diag)
             diag["paper_notional_usd"] = (

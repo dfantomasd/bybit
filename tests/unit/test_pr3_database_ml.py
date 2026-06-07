@@ -421,6 +421,43 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["paper_pnl_15m"]["model_gate"]["total_bps"] == 8.0
 
 
+@pytest.mark.asyncio
+async def test_trade_journal_keeps_reconnectable_after_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A transient Render/Postgres startup failure must not disable DB forever."""
+    from trader.storage import trade_journal as trade_journal_module
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._ensure_schema = AsyncMock()  # type: ignore[method-assign]
+    fake_pool = MagicMock()
+    attempts = 0
+
+    async def fake_create_pool(*args: Any, **kwargs: Any) -> MagicMock:
+        del args, kwargs
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise OSError("temporary postgres dns failure")
+        return fake_pool
+
+    monkeypatch.setattr(trade_journal_module.asyncpg, "create_pool", fake_create_pool)
+
+    await journal.connect()
+    first_diag = await journal.get_db_diagnostics()
+
+    assert journal.is_configured is True
+    assert journal.is_enabled is False
+    assert first_diag["configured"] is True
+    assert first_diag["connected"] is False
+    assert "temporary postgres dns failure" in first_diag["last_connect_error"]
+
+    reconnected = await journal.reconnect_if_needed(force=True)
+
+    assert reconnected is True
+    assert journal.is_enabled is True
+    assert journal._pool is fake_pool
+
+
 # ---------------------------------------------------------------------------
 # No lookahead leakage check (conceptual / structural)
 # ---------------------------------------------------------------------------
