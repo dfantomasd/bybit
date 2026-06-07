@@ -334,18 +334,53 @@ class TelegramMonitorBot:
         """Control submenu — safe operations only (no risk escalation, no LIVE activation)."""
         rows = [
             [
-                InlineKeyboardButton("Pause", callback_data="control:pause"),
-                InlineKeyboardButton("Resume", callback_data="control:resume"),
+                InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
+                InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
             ],
             [
-                InlineKeyboardButton("Shadow ON", callback_data="mode:shadow"),
+                InlineKeyboardButton("🔦 Shadow ON", callback_data="mode:shadow"),
+                InlineKeyboardButton("🚫 LIVE заблокирован", callback_data="mode:active"),
             ],
             [
-                InlineKeyboardButton("Train model", callback_data="control:train"),
-                InlineKeyboardButton("Limits", callback_data="control:limits"),
+                InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
+                InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
             ],
-            [InlineKeyboardButton("Emergency stop", callback_data="control:stop")],
-            [InlineKeyboardButton("Back", callback_data="view:status")],
+            [
+                InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
+                InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
+            ],
+            [InlineKeyboardButton("🚨 Emergency stop", callback_data="control:stop")],
+            [InlineKeyboardButton("⬅️ Назад", callback_data="view:status")],
+        ]
+        return InlineKeyboardMarkup(rows)
+
+    def _limits_menu(self) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton("Entries 1", callback_data="limit:entries:1"),
+                InlineKeyboardButton("Entries 2", callback_data="limit:entries:2"),
+            ],
+            [
+                InlineKeyboardButton("Pending 1", callback_data="limit:pending:1"),
+                InlineKeyboardButton("Pending 2", callback_data="limit:pending:2"),
+            ],
+            [
+                InlineKeyboardButton("Same-side 1", callback_data="limit:same_side:1"),
+                InlineKeyboardButton("Same-side 2", callback_data="limit:same_side:2"),
+            ],
+            [
+                InlineKeyboardButton("Price ≤10", callback_data="limit:price_cap:10"),
+                InlineKeyboardButton("Price ≤25", callback_data="limit:price_cap:25"),
+            ],
+            [
+                InlineKeyboardButton("Feature 10", callback_data="limit:feature_symbols:10"),
+                InlineKeyboardButton("Feature 20", callback_data="limit:feature_symbols:20"),
+            ],
+            [
+                InlineKeyboardButton("Exec 5", callback_data="limit:exec_candidates:5"),
+                InlineKeyboardButton("Exec 10", callback_data="limit:exec_candidates:10"),
+            ],
+            [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
         ]
         return InlineKeyboardMarkup(rows)
 
@@ -957,6 +992,12 @@ class TelegramMonitorBot:
         if data.startswith("control:"):
             await self._handle_control_button(update, data.removeprefix("control:"))
             return
+        if data.startswith("train:"):
+            await self._handle_train_button(update, data.removeprefix("train:"))
+            return
+        if data.startswith("limit:"):
+            await self._handle_limit_button(update, data.removeprefix("limit:"))
+            return
         if data.startswith("mode:"):
             await self._handle_mode_button(update, data.removeprefix("mode:"))
             return
@@ -1019,7 +1060,7 @@ class TelegramMonitorBot:
             await self._button_reply(update, msg, reply_markup=self._main_menu())
             return
         if action == "limits":
-            await self._button_reply(update, self._limits_text(), reply_markup=self._control_menu())
+            await self._button_reply(update, self._limits_text(), reply_markup=self._limits_menu())
             return
         if action == "stop":
             cid = self._chat_id(update)
@@ -1035,6 +1076,37 @@ class TelegramMonitorBot:
             )
             return
         await self._button_reply(update, "Unknown control.", reply_markup=self._main_menu())
+
+    async def _handle_train_button(self, update: Update, payload: str) -> None:
+        if self._controller is None or self._controller.start_training is None:
+            await self._button_reply(update, "Training control not available.", reply_markup=self._main_menu())
+            return
+        try:
+            min_s_raw, horizon_raw, label_raw = payload.split(":", maxsplit=2)
+            min_samples = int(min_s_raw)
+            horizon = int(horizon_raw)
+            label_bps = float(label_raw)
+            msg = await self._controller.start_training(min_samples, horizon, label_bps)
+        except Exception as exc:
+            msg = f"❌ Training failed to start: <code>{exc}</code>"
+        await self._button_reply(update, msg, reply_markup=self._main_menu())
+
+    async def _handle_limit_button(self, update: Update, payload: str) -> None:
+        if self._controller is None or self._controller.set_runtime_setting is None:
+            await self._button_reply(update, "Runtime settings not available.", reply_markup=self._main_menu())
+            return
+        try:
+            key, raw_value = payload.split(":", maxsplit=1)
+            value: Any = float(raw_value) if key == "price_cap" else int(raw_value)
+            msg = await self._controller.set_runtime_setting(key, value)
+        except Exception as exc:
+            await self._button_reply(
+                update,
+                f"❌ Limit change rejected: <code>{exc}</code>",
+                reply_markup=self._limits_menu(),
+            )
+            return
+        await self._button_reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._limits_menu())
 
     async def _handle_mode_button(self, update: Update, action: str) -> None:
         if self._controller is None:

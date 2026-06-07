@@ -122,11 +122,14 @@ def test_main_menu_has_db_model_button() -> None:
 
 
 def test_control_menu_no_active_button() -> None:
-    """Control menu should NOT have 'Active' execution button."""
+    """Control menu should NOT have a dangerous Active enable button."""
     bot = _make_bot()
     markup = bot._control_menu()
-    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
-    assert "Active" not in all_texts, "Dangerous 'Active' button still present in control menu"
+    active_buttons = [
+        btn for row in markup.inline_keyboard for btn in row if "active" in (btn.callback_data or "").lower()
+    ]
+    assert len(active_buttons) == 1
+    assert "заблокирован" in active_buttons[0].text.lower() or "blocked" in active_buttons[0].text.lower()
 
 
 def test_control_menu_no_risk_escalation() -> None:
@@ -143,8 +146,26 @@ def test_control_menu_has_training_and_limits() -> None:
     bot = _make_bot()
     markup = bot._control_menu()
     all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
-    assert "control:train" in all_callbacks
+    assert "train:500:15:5" in all_callbacks
+    assert "train:1000:15:5" in all_callbacks
     assert "control:limits" in all_callbacks
+    assert "view:db_model" in all_callbacks
+
+
+def test_limits_menu_has_common_presets() -> None:
+    """Limits submenu should expose common small-account presets."""
+    bot = _make_bot()
+    markup = bot._limits_menu()
+    all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+    for expected in [
+        "limit:entries:1",
+        "limit:pending:1",
+        "limit:same_side:1",
+        "limit:price_cap:25",
+        "limit:feature_symbols:20",
+        "limit:exec_candidates:10",
+    ]:
+        assert expected in all_callbacks
 
 
 @pytest.mark.asyncio
@@ -188,3 +209,32 @@ async def test_limits_command_updates_safe_runtime_setting() -> None:
     bot._controller.set_runtime_setting.assert_awaited_once_with("entries", 2)
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Max entries/min set to 2" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_limit_button_updates_runtime_setting() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value={})
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Screener price cap set to 25")
+    update = _fake_update()
+
+    await bot._handle_limit_button(update, "price_cap:25")
+
+    bot._controller.set_runtime_setting.assert_awaited_once_with("price_cap", 25.0)
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Screener price cap set to 25" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_train_button_starts_shadow_training() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.start_training = AsyncMock(return_value="training started")
+    update = _fake_update()
+
+    await bot._handle_train_button(update, "1000:15:5")
+
+    bot._controller.start_training.assert_awaited_once_with(1000, 15, 5.0)
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "training started" in reply_text
