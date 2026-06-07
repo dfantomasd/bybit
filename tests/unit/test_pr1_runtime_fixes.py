@@ -40,6 +40,38 @@ from trader.risk.profiles import get_risk_limits
 # ---------------------------------------------------------------------------
 
 
+@pytest.mark.asyncio
+async def test_trade_journal_reconnector_recovers_after_startup_failure() -> None:
+    """Background reconnect should revive Postgres without restarting the Render service."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+
+    class FakeJournal:
+        def __init__(self) -> None:
+            self.connected = False
+            self.attempts = 0
+
+        @property
+        def is_enabled(self) -> bool:
+            return self.connected
+
+        async def reconnect_if_needed(self, *, min_interval: float = 30.0, force: bool = False) -> bool:
+            del min_interval, force
+            self.attempts += 1
+            self.connected = True
+            app._shutdown_event.set()
+            return True
+
+    journal = FakeJournal()
+    app._trade_journal = journal
+
+    await app._run_trade_journal_reconnector()
+
+    assert journal.attempts == 1
+    assert journal.is_enabled is True
+
+
 def _instrument(min_notional: str = "5") -> InstrumentInfo:
     return InstrumentInfo(
         symbol="DOGEUSDT",

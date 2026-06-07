@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -56,13 +56,23 @@ class TradeJournal:
         self._dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._enabled = enabled and bool(postgres_dsn)
         self._pool: asyncpg.Pool | None = None
+        self._last_connect_attempt_at: datetime | None = None
+        self._last_connect_error_at: datetime | None = None
+        self._last_connect_error: str | None = None
+        self._last_read_error_at: datetime | None = None
+        self._last_read_error: str | None = None
         self._last_successful_write_at: datetime | None = None
         self._last_write_error_at: datetime | None = None
+        self._last_write_error: str | None = None
         self._consecutive_write_errors: int = 0
 
     @property
     def is_enabled(self) -> bool:
         return self._enabled and self._pool is not None
+
+    @property
+    def is_configured(self) -> bool:
+        return self._enabled
 
     @property
     def durable_state_healthy(self) -> bool:
@@ -78,19 +88,50 @@ class TradeJournal:
                 self._last_successful_write_at.isoformat() if self._last_successful_write_at else None
             ),
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
+            "last_write_error": getattr(self, "_last_write_error", None),
+            "last_read_error_at": (
+                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
+            ),
+            "last_read_error": getattr(self, "_last_read_error", None),
+            "last_connect_error_at": (
+                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
+            ),
+            "last_connect_error": getattr(self, "_last_connect_error", None),
         }
 
     async def connect(self) -> None:
-        if not self._enabled:
+        if not self._enabled or self._pool is not None:
             return
+        self._last_connect_attempt_at = datetime.now(tz=UTC)
         try:
             self._pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=3)
             await self._ensure_schema()
+            self._last_connect_error_at = None
+            self._last_connect_error = None
             log.info("trade_journal.connected")
         except Exception as exc:
-            self._enabled = False
+            if self._pool is not None:
+                try:
+                    await self._pool.close()
+                except Exception as close_exc:
+                    log.debug("trade_journal.failed_pool_close_failed", error=str(close_exc))
             self._pool = None
-            log.warning("trade_journal.disabled", error=str(exc))
+            self._last_connect_error_at = datetime.now(tz=UTC)
+            self._last_connect_error = str(exc)
+            log.warning("trade_journal.unavailable", error=str(exc))
+
+    async def reconnect_if_needed(self, *, min_interval: float = 30.0, force: bool = False) -> bool:
+        """Try to reconnect after transient startup/network failures."""
+        if not self._enabled:
+            return False
+        if self._pool is not None:
+            return True
+        if not force and self._last_connect_attempt_at is not None:
+            age = datetime.now(tz=UTC) - self._last_connect_attempt_at
+            if age < timedelta(seconds=min_interval):
+                return False
+        await self.connect()
+        return self.is_enabled
 
     async def close(self) -> None:
         if self._pool is not None:
@@ -916,6 +957,12 @@ class TradeJournal:
         """Return read-only diagnostics for Telegram 🗄 screen."""
         result: dict[str, Any] = {
             "connected": self.is_enabled,
+            "configured": self.is_configured,
+            "last_connect_error": self._last_connect_error,
+            "last_connect_error_at": self._last_connect_error_at,
+            "last_read_error": self._last_read_error,
+            "last_read_error_at": self._last_read_error_at,
+            "write_health": self.write_health(),
             "candles_by_interval": {},
             "latest_candle_1m": None,
             "feature_snapshots": 0,
@@ -928,8 +975,16 @@ class TradeJournal:
             "paper_pnl_15m": {},
         }
         if not self.is_enabled:
+            await self.reconnect_if_needed()
+            result["connected"] = self.is_enabled
+            result["last_connect_error"] = self._last_connect_error
+            result["last_connect_error_at"] = self._last_connect_error_at
+            result["write_health"] = self.write_health()
+        if not self.is_enabled:
             return result
         try:
+            self._last_read_error = None
+            self._last_read_error_at = None
             result["candles_by_interval"] = await self.get_candle_counts()
             result["latest_candle_1m"] = await self.get_latest_candle_time("1")
             rows = await self._fetch("SELECT count(*) AS cnt FROM feature_snapshots")
@@ -1087,6 +1142,10 @@ class TradeJournal:
                     "model_gate": _paper_stats("gate"),
                 }
         except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            result["last_read_error"] = self._last_read_error
+            result["last_read_error_at"] = self._last_read_error_at
             log.debug("trade_journal.diagnostics_failed", error=str(exc))
         return result
 
@@ -1153,6 +1212,7 @@ class TradeJournal:
             self._consecutive_write_errors = 0
         except Exception as exc:
             self._last_write_error_at = datetime.now(tz=UTC)
+            self._last_write_error = str(exc)
             self._consecutive_write_errors += 1
             log.debug(
                 "trade_journal.write_failed",
@@ -1180,6 +1240,8 @@ class TradeJournal:
             async with self._pool.acquire() as conn:
                 return await conn.fetch(query, *args)
         except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
             log.debug("trade_journal.fetch_failed", error=str(exc))
             return []
 

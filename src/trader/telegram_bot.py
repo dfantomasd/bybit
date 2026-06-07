@@ -802,7 +802,7 @@ class TelegramMonitorBot:
         warn_if(hour_min_notional > 0, f"Min-notional rejected {hour_min_notional} actions in the last hour.")
         warn_if(bool(runtime.get("model_gate_canary_enabled")), "Model gate canary is already enabled.")
         diag_error = diag.get("error")
-        db_error = db_diag.get("error")
+        db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
         warn_if(bool(diag_error), f"Runtime diagnostics error: {html.escape(str(diag_error))}")
         warn_if(bool(db_error), f"DB diagnostics error: {html.escape(str(db_error))}")
         if loop_at in (None, "never"):
@@ -889,6 +889,12 @@ class TelegramMonitorBot:
 
         connected = db_diag.get("connected", False)
         db_icon = "🟢" if connected else "🔴"
+        configured = db_diag.get("configured", True)
+        db_status = "connected" if connected else ("configured, reconnecting" if configured else "not configured")
+        db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
+        db_error_str = html.escape(str(db_error)) if db_error else ""
+        if len(db_error_str) > 180:
+            db_error_str = f"{db_error_str[:177]}..."
         candles = db_diag.get("candles_by_interval", {})
         latest_1m = db_diag.get("latest_candle_1m")
         latest_str = latest_1m.strftime("%H:%M:%S UTC") if latest_1m else "none"
@@ -973,7 +979,8 @@ class TelegramMonitorBot:
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
             "",
-            f"БД: {db_icon} {'connected' if connected else 'unavailable'}",
+            f"БД: {db_icon} {db_status}",
+            f"DB error: <code>{db_error_str or 'none'}</code>",
             f"Последняя свеча 1m: <code>{latest_str}</code>",
             f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
             f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
