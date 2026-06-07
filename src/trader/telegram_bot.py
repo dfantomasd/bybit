@@ -129,6 +129,7 @@ class TradingController:
     # Optional async DB diagnostics provider
     db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     start_training: Callable[[int, int, float], Awaitable[str]] | None = None
+    start_training_all: Callable[[], Awaitable[str]] | None = None
     runtime_settings: Callable[[], dict[str, Any]] | None = None
     set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
@@ -372,6 +373,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
                 InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
             ],
+            [InlineKeyboardButton("🧠🔁 Обучить ВСЕ примеры (5m/15m/30m)", callback_data="train:all")],
             [
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
@@ -677,15 +679,27 @@ class TelegramMonitorBot:
             await self._reply(update, "<b>Закрытый PnL</b>\nЗакрытых сделок пока нет.")
             return
         total = Decimal("0")
-        lines = ["<b>Закрытый PnL (последние 20)</b>"]
-        for r in records[:10]:
+        shown = records[:20]
+        lines = [f"<b>Закрытый PnL — последние {len(shown)} сделок</b>", ""]
+        for r in shown:
             sym = r.get("symbol", "?")
             pnl = Decimal(str(r.get("closedPnl", "0")))
             total += pnl
+            side_raw = str(r.get("side", "")).upper()
+            side = "LONG" if side_raw == "BUY" else ("SHORT" if side_raw == "SELL" else side_raw or "?")
+            qty = r.get("qty", "")
+            entry = r.get("avgEntryPrice", "")
+            exit_p = r.get("avgExitPrice", "")
             icon = "✅" if pnl >= 0 else "❌"
-            lines.append(f"{icon} <code>{sym}</code>: <code>{pnl:+.4f}</code>")
+            price_part = f" @ {entry}→{exit_p}" if entry and exit_p else ""
+            qty_part = f" ×{qty}" if qty else ""
+            lines.append(f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>")
         total_icon = "📈" if total >= 0 else "📉"
-        lines.append(f"\n{total_icon} <b>Итого на экране:</b> <code>{total:+.4f} USDT</code>")
+        lines.append(f"\n{total_icon} <b>Итого за {len(shown)} сделок:</b> <code>{total:+.4f} USDT</code>")
+        lines.append(
+            "\n💡 <i>LONG = куплено и закрыто; SHORT = продано и закрыто.\n"
+            "Сумма — реализованный PnL по Bybit (без учёта незакрытых позиций).</i>"
+        )
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_net_results(self, update: Update, context: Any) -> None:
@@ -1723,7 +1737,20 @@ class TelegramMonitorBot:
         await self._button_reply(update, "Неизвестное действие управления.", reply_markup=self._main_menu())
 
     async def _handle_train_button(self, update: Update, payload: str) -> None:
-        if self._controller is None or self._controller.start_training is None:
+        if self._controller is None:
+            await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
+            return
+        if payload == "all":
+            if self._controller.start_training_all is None:
+                await self._button_reply(update, "Обучение ВСЕ сейчас недоступно.", reply_markup=self._main_menu())
+                return
+            try:
+                msg = await self._controller.start_training_all()
+            except Exception as exc:
+                msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            return
+        if self._controller.start_training is None:
             await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
             return
         try:

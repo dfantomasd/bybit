@@ -213,7 +213,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         x_val, y_val = x_arr[train_size:], y[train_size:]
         returns_val = returns_bps[train_size:]
 
-        version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}"
+        version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m"
         model = ChallengerModel(version=version, feature_names=feature_names)
 
         _fit_model(model, x_train, y_train)
