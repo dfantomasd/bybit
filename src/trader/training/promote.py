@@ -12,6 +12,8 @@ Promotion criteria:
 from __future__ import annotations
 
 import asyncio
+import json
+from typing import Any
 
 import click
 
@@ -28,7 +30,7 @@ async def _promote(version: str, confirm: bool) -> None:
 
     try:
         row = await pool.fetchrow(
-            "SELECT version, status, training_samples, artifact FROM model_versions WHERE version = $1",
+            "SELECT version, status, training_samples, artifact, metrics FROM model_versions WHERE version = $1",
             version,
         )
         if not row:
@@ -39,15 +41,34 @@ async def _promote(version: str, confirm: bool) -> None:
             click.echo(f"Cannot promote model in status {row['status']!r}", err=True)
             return
 
+        if row["artifact"] is None:
+            click.echo(f"Model version {version!r} has no artifact", err=True)
+            return
+
+        metrics_raw = row["metrics"] or {}
+        metrics: dict[str, Any] = json.loads(metrics_raw) if isinstance(metrics_raw, str) else dict(metrics_raw)
+        walk_forward_expectancy = float(
+            metrics.get("walk_forward_expectancy_bps")
+            or metrics.get("best_threshold_avg_net_return_bps")
+            or metrics.get("avg_net_return_predicted_positive_bps")
+            or 0.0
+        )
+
         model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=version)
         model.training_samples = row["training_samples"]
 
-        can, reason = model.can_promote(min_samples=settings.MODEL_MIN_TRAINING_SAMPLES)
+        can, reason = model.can_promote(
+            min_samples=settings.MODEL_MIN_TRAINING_SAMPLES,
+            walk_forward_expectancy=walk_forward_expectancy,
+        )
         if not can:
             click.echo(f"Promotion criteria not met: {reason}", err=True)
             return
 
-        click.echo(f"Model {version} meets promotion criteria ({model.training_samples} samples)")
+        click.echo(
+            f"Model {version} meets promotion criteria "
+            f"({model.training_samples} samples, walk_forward={walk_forward_expectancy:+.2f} bps)"
+        )
 
         if not confirm:
             click.echo("Add --confirm to actually promote this model to CHAMPION")

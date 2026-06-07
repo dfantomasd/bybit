@@ -121,6 +121,7 @@ class TradingApplication:
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
         self._training_task: asyncio.Task | None = None
+        self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
@@ -440,22 +441,23 @@ class TradingApplication:
 
     async def _start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:
         """Start offline model training in a subprocess; trading loop stays isolated."""
-        if self._training_task is not None and not self._training_task.done():
-            return "⏳ Training is already running."
-        if self._trade_journal is not None and not self._trade_journal.is_enabled:
-            await self._trade_journal.reconnect_if_needed(force=True)
-        if self._trade_journal is None or not self._trade_journal.is_enabled:
-            raise RuntimeError("Trade journal/Postgres is not available.")
-        self._training_task = asyncio.create_task(
-            self._run_model_training(min_samples, horizon, label_bps),
-            name="model-training",
-        )
-        self._background_tasks.append(self._training_task)
+        async with self._training_start_lock:
+            if self._training_task is not None and not self._training_task.done():
+                return "⏳ Обучение уже идет."
+            if self._trade_journal is not None and not self._trade_journal.is_enabled:
+                await self._trade_journal.reconnect_if_needed(force=True)
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                raise RuntimeError("Trade journal/Postgres is not available.")
+            self._training_task = asyncio.create_task(
+                self._run_model_training(min_samples, horizon, label_bps),
+                name="model-training",
+            )
+            self._background_tasks.append(self._training_task)
         return (
-            "🧠 <b>Training started</b>\n"
-            f"min_samples=<code>{min_samples}</code>, horizon=<code>{horizon}m</code>, "
-            f"label=<code>{label_bps:g} bps</code>\n"
-            "Result will be sent here when the run finishes."
+            "🧠 <b>Обучение запущено</b>\n"
+            f"минимум примеров=<code>{min_samples}</code>, горизонт=<code>{horizon}m</code>, "
+            f"порог=<code>{label_bps:g} bps</code>\n"
+            "Результат придет сюда после завершения."
         )
 
     async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
