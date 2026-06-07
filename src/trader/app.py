@@ -460,6 +460,46 @@ class TradingApplication:
             "Результат придет сюда после завершения."
         )
 
+    async def _start_model_training_all(self) -> str:
+        """Start sequential training on all available data for every horizon (5m, 15m, 30m)."""
+        async with self._training_start_lock:
+            if self._training_task is not None and not self._training_task.done():
+                return "⏳ Обучение уже идет."
+            if self._trade_journal is not None and not self._trade_journal.is_enabled:
+                await self._trade_journal.reconnect_if_needed(force=True)
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                raise RuntimeError("Trade journal/Postgres is not available.")
+            self._training_task = asyncio.create_task(
+                self._run_model_training_all(),
+                name="model-training-all",
+            )
+            self._background_tasks.append(self._training_task)
+        return (
+            "🧠🔁 <b>Обучение ВСЕ запущено</b>\n"
+            "Горизонты: <code>5m, 15m, 30m</code> | Порог: <code>5 bps</code>\n"
+            "Используются все доступные примеры (мин. 100).\n"
+            "Результаты придут по мере завершения каждого горизонта."
+        )
+
+    async def _run_model_training_all(self) -> None:
+        """Run training sequentially for all horizons using all available labeled data."""
+        horizons = [5, 15, 30]
+        label_bps = 5.0
+        min_samples = 100
+        results: list[str] = []
+        for horizon in horizons:
+            if self._telegram_bot is not None:
+                await self._telegram_bot.notify(
+                    f"⏳ <b>Training ALL</b>: запускаю горизонт <code>{horizon}m</code>…"
+                )
+            await self._run_model_training(min_samples, horizon, label_bps)
+            results.append(f"h{horizon}m: готово")
+        if self._telegram_bot is not None:
+            summary = " | ".join(results)
+            await self._telegram_bot.notify(
+                f"✅ <b>Training ALL завершено</b>\n{summary}"
+            )
+
     async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
         cmd = [
             sys.executable,
@@ -870,6 +910,7 @@ class TradingApplication:
             set_risk_profile=self._change_risk_profile,
             emergency_stop=self._emergency_stop,
             start_training=self._start_model_training,
+            start_training_all=self._start_model_training_all,
             runtime_settings=self._runtime_settings,
             set_runtime_setting=self._set_runtime_setting,
             symbol_candidates=self._symbol_candidates,
