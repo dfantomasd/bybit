@@ -47,6 +47,8 @@ services:
         value: "10"
       - key: SCREENER_REFRESH_SECONDS
         value: "300"
+      - key: SCREENER_MAX_PRICE_USD
+        value: "25"
       # Burst/rate limiting
       - key: MAX_NEW_ENTRIES_PER_MINUTE
         value: "1"
