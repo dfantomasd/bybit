@@ -115,6 +115,8 @@ class TradingApplication:
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
+        self._training_task: asyncio.Task | None = None
+        self._last_training_message: str = "never"
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
         # ML shadow scoring
@@ -406,6 +408,139 @@ class TradingApplication:
                 "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
             )
 
+    async def _start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:
+        """Start offline model training in a subprocess; trading loop stays isolated."""
+        if self._training_task is not None and not self._training_task.done():
+            return "⏳ Training is already running."
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            raise RuntimeError("Trade journal/Postgres is not available.")
+        self._training_task = asyncio.create_task(
+            self._run_model_training(min_samples, horizon, label_bps),
+            name="model-training",
+        )
+        self._background_tasks.append(self._training_task)
+        return (
+            "🧠 <b>Training started</b>\n"
+            f"min_samples=<code>{min_samples}</code>, horizon=<code>{horizon}m</code>, "
+            f"label=<code>{label_bps:g} bps</code>\n"
+            "Result will be sent here when the run finishes."
+        )
+
+    async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
+        cmd = [
+            sys.executable,
+            "-m",
+            "trader.training.train",
+            "--min-samples",
+            str(min_samples),
+            "--horizon",
+            str(horizon),
+            "--label-bps",
+            str(label_bps),
+        ]
+        log.info("model_training.started", min_samples=min_samples, horizon=horizon, label_bps=label_bps)
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout_b, stderr_b = await proc.communicate()
+            stdout = stdout_b.decode(errors="replace").strip()
+            stderr = stderr_b.decode(errors="replace").strip()
+            if proc.returncode == 0 and "Checkpoint saved" in stdout:
+                self._last_training_message = stdout.splitlines()[-2] if len(stdout.splitlines()) >= 2 else stdout
+                if (
+                    self._model_registry is not None
+                    and self._trade_journal is not None
+                    and self._trade_journal.is_enabled
+                ):
+                    await self._model_registry.load_active_model()
+                text = "✅ <b>Training completed</b>\n" + f"<code>{self._last_training_message}</code>"
+            elif proc.returncode == 0:
+                self._last_training_message = stdout or stderr or "training finished without checkpoint"
+                text = "⚠️ <b>Training finished without checkpoint</b>\n" + f"<code>{self._last_training_message}</code>"
+            else:
+                self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
+                text = "❌ <b>Training failed</b>\n" + f"<code>{self._last_training_message[-1500:]}</code>"
+            log.info("model_training.finished", returncode=proc.returncode, message=self._last_training_message)
+        except Exception as exc:
+            self._last_training_message = str(exc)
+            text = f"❌ <b>Training crashed</b>\n<code>{exc}</code>"
+            log.warning("model_training.crashed", error=str(exc))
+        if self._telegram_bot is not None:
+            await self._telegram_bot.notify(text)
+
+    def _runtime_settings(self) -> dict[str, Any]:
+        return {
+            "paused": self._trading_paused,
+            "shadow": self._execution_engine._shadow_mode if self._execution_engine is not None else True,
+            "risk_profile": self._current_risk_profile_str,
+            "max_entries_per_minute": (
+                self._execution_engine._max_entries_per_minute if self._execution_engine is not None else None
+            ),
+            "max_concurrent_pending": (
+                self._execution_engine._max_concurrent_pending if self._execution_engine is not None else None
+            ),
+            "max_same_side": self._execution_engine._max_same_side if self._execution_engine is not None else None,
+            "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
+            "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
+            "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
+        }
+
+    async def _set_runtime_setting(self, key: str, value: Any) -> str:
+        assert self._settings is not None
+        key = key.lower()
+        if key == "entries":
+            ivalue = int(value)
+            if not 0 < ivalue <= 10:
+                raise ValueError("entries must be 1..10")
+            self._settings.MAX_NEW_ENTRIES_PER_MINUTE = ivalue
+            if self._execution_engine is not None:
+                self._execution_engine._max_entries_per_minute = ivalue
+            return f"Max entries/min set to {ivalue}"
+        if key == "pending":
+            ivalue = int(value)
+            if not 0 < ivalue <= 10:
+                raise ValueError("pending must be 1..10")
+            self._settings.MAX_CONCURRENT_PENDING_ENTRIES = ivalue
+            if self._execution_engine is not None:
+                self._execution_engine._max_concurrent_pending = ivalue
+            return f"Max pending entries set to {ivalue}"
+        if key == "same_side":
+            ivalue = int(value)
+            if not 0 < ivalue <= 10:
+                raise ValueError("same_side must be 1..10")
+            self._settings.MAX_SAME_SIDE_POSITIONS = ivalue
+            if self._execution_engine is not None:
+                self._execution_engine._max_same_side = ivalue
+            return f"Max same-side positions set to {ivalue}"
+        if key == "price_cap":
+            fvalue = float(value)
+            if fvalue < 0 or fvalue > 100_000:
+                raise ValueError("price_cap must be 0..100000")
+            self._settings.SCREENER_MAX_PRICE_USD = fvalue
+            if self._screener is not None:
+                self._screener._max_price_usd = fvalue
+            return f"Screener price cap set to {fvalue:g}"
+        if key == "feature_symbols":
+            ivalue = int(value)
+            if not 1 <= ivalue <= self._settings.SCREENER_WIDE_MAX_SYMBOLS:
+                raise ValueError(f"feature_symbols must be 1..{self._settings.SCREENER_WIDE_MAX_SYMBOLS}")
+            self._settings.SCREENER_FEATURE_MAX_SYMBOLS = ivalue
+            if self._screener is not None:
+                self._screener._feature_max = ivalue
+            return f"Feature symbols set to {ivalue}"
+        if key == "exec_candidates":
+            ivalue = int(value)
+            if not 1 <= ivalue <= self._settings.SCREENER_FEATURE_MAX_SYMBOLS:
+                raise ValueError(f"exec_candidates must be 1..{self._settings.SCREENER_FEATURE_MAX_SYMBOLS}")
+            self._settings.SCREENER_EXECUTION_CANDIDATES = ivalue
+            if self._screener is not None:
+                self._screener._exec_candidates = ivalue
+            return f"Execution candidates set to {ivalue}"
+        raise ValueError("unknown setting")
+
     # ------------------------------------------------------------------
 
     async def _start_telegram_bot(self) -> None:
@@ -441,6 +576,9 @@ class TradingApplication:
             set_shadow=self._set_shadow_mode,
             set_risk_profile=self._change_risk_profile,
             emergency_stop=self._emergency_stop,
+            start_training=self._start_model_training,
+            runtime_settings=self._runtime_settings,
+            set_runtime_setting=self._set_runtime_setting,
             is_paused=lambda: self._trading_paused,
             is_shadow=lambda: self._execution_engine._shadow_mode if self._execution_engine is not None else True,
             current_profile=lambda: self._current_risk_profile_str,
@@ -1480,6 +1618,30 @@ class TradingApplication:
             "hour_skipped_open_position": hour_counts.get("skipped_open_position", 0),
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
+            "model": {
+                "last_training": self._last_training_message,
+                "training_samples": (
+                    self._model_registry.champion.training_samples
+                    if self._model_registry is not None and self._model_registry.champion is not None
+                    else (
+                        self._model_registry.challenger.training_samples
+                        if self._model_registry is not None and self._model_registry.challenger is not None
+                        else 0
+                    )
+                ),
+                "champion_version": (
+                    self._model_registry.champion.version
+                    if self._model_registry is not None and self._model_registry.champion is not None
+                    else "none"
+                ),
+                "challenger_version": (
+                    self._model_registry.challenger.version
+                    if self._model_registry is not None and self._model_registry.challenger is not None
+                    else "none"
+                ),
+                "walk_forward_expectancy": "n/a",
+                "drift_status": "n/a",
+            },
         }
 
     async def _run_supervisor(self) -> None:

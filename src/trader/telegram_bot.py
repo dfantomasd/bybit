@@ -12,6 +12,9 @@ Observability commands (anyone in allowed_chat_ids):
 Control commands (require /confirm for dangerous ones):
   /pause              — pause new entries (keep existing positions)
   /resume             — resume after pause
+  /train [min] [horizon] [label_bps] — train shadow challenger
+  /limits             — show runtime safety limits
+  /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N
   /shadow on|off      — toggle shadow mode
   /risk conservative|moderate|aggressive|scalp — change risk profile
   /mode shadow|active — switch execution mode
@@ -101,6 +104,9 @@ class TradingController:
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
     # Optional async DB diagnostics provider
     db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    start_training: Callable[[int, int, float], Awaitable[str]] | None = None
+    runtime_settings: Callable[[], dict[str, Any]] | None = None
+    set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
     allow_risk_increase: bool = False
 
@@ -184,6 +190,8 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("shadow", self._cmd_shadow))
         app.add_handler(CommandHandler("mode", self._cmd_mode))
         app.add_handler(CommandHandler("risk", self._cmd_risk))
+        app.add_handler(CommandHandler("train", self._cmd_train))
+        app.add_handler(CommandHandler("limits", self._cmd_limits))
         app.add_handler(CommandHandler("stop", self._cmd_stop))
         app.add_handler(CommandHandler("confirm", self._cmd_confirm))
         app.add_handler(CallbackQueryHandler(self._on_button))
@@ -331,6 +339,10 @@ class TelegramMonitorBot:
             ],
             [
                 InlineKeyboardButton("Shadow ON", callback_data="mode:shadow"),
+            ],
+            [
+                InlineKeyboardButton("Train model", callback_data="control:train"),
+                InlineKeyboardButton("Limits", callback_data="control:limits"),
             ],
             [InlineKeyboardButton("Emergency stop", callback_data="control:stop")],
             [InlineKeyboardButton("Back", callback_data="view:status")],
@@ -842,6 +854,56 @@ class TelegramMonitorBot:
             "Send /confirm to apply, or ignore to cancel.",
         )
 
+    async def _cmd_train(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.start_training is None:
+            await self._reply(update, "Training control not available.")
+            return
+        args = context.args or []
+        try:
+            min_samples = int(args[0]) if len(args) >= 1 else 500
+            horizon = int(args[1]) if len(args) >= 2 else 15
+            label_bps = float(args[2]) if len(args) >= 3 else 5.0
+        except ValueError:
+            await self._reply(update, "Usage: /train [min_samples] [horizon_minutes] [label_bps]")
+            return
+        if min_samples < 50 or horizon <= 0 or label_bps < 0:
+            await self._reply(update, "Training parameters rejected: min_samples>=50, horizon>0, label_bps>=0.")
+            return
+        try:
+            msg = await self._controller.start_training(min_samples, horizon, label_bps)
+        except Exception as exc:
+            await self._reply(update, f"❌ Training failed to start: <code>{exc}</code>")
+            return
+        await self._reply(update, msg, reply_markup=self._main_menu())
+
+    async def _cmd_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.runtime_settings is None:
+            await self._reply(update, "Runtime settings not available.")
+            return
+        args = context.args or []
+        if not args:
+            await self._reply(update, self._limits_text(), reply_markup=self._control_menu())
+            return
+        if len(args) != 2 or self._controller.set_runtime_setting is None:
+            await self._reply(
+                update,
+                "Usage: /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N",
+            )
+            return
+        key = args[0].lower()
+        raw_value = args[1]
+        try:
+            value: Any = float(raw_value) if key == "price_cap" else int(raw_value)
+            msg = await self._controller.set_runtime_setting(key, value)
+        except Exception as exc:
+            await self._reply(update, f"❌ Limit change rejected: <code>{exc}</code>")
+            return
+        await self._reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._control_menu())
+
     async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
@@ -946,6 +1008,19 @@ class TelegramMonitorBot:
             await self._controller.resume()
             await self._button_reply(update, "Trading <b>resumed</b>.", reply_markup=self._main_menu())
             return
+        if action == "train":
+            if self._controller.start_training is None:
+                await self._button_reply(update, "Training control not available.", reply_markup=self._main_menu())
+                return
+            try:
+                msg = await self._controller.start_training(500, 15, 5.0)
+            except Exception as exc:
+                msg = f"❌ Training failed to start: <code>{exc}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            return
+        if action == "limits":
+            await self._button_reply(update, self._limits_text(), reply_markup=self._control_menu())
+            return
         if action == "stop":
             cid = self._chat_id(update)
             if cid:
@@ -1027,6 +1102,8 @@ class TelegramMonitorBot:
                 "\n<b>Control</b>\n"
                 "/pause   — stop new entries\n"
                 "/resume  — restart after pause\n"
+                "/train [500] [15] [5] — train shadow model\n"
+                "/limits — show/change safe runtime limits\n"
                 "/mode shadow|active — switch execution mode\n"
                 "/shadow on|off — toggle shadow mode\n"
                 "/risk conservative|moderate|aggressive|scalp\n"
@@ -1047,6 +1124,25 @@ class TelegramMonitorBot:
             "/net         — net P&L breakdown (fees, funding, slippage)\n"
             "/diagnostics — counters & loop timing\n"
             "/help        — this message\n" + ctrl_section
+        )
+
+    def _limits_text(self) -> str:
+        if self._controller is None or self._controller.runtime_settings is None:
+            return "<b>Runtime limits</b>\nNot available."
+        s = self._controller.runtime_settings()
+        return (
+            "<b>Runtime limits</b>\n"
+            f"Paused: <code>{str(s.get('paused', False)).lower()}</code>\n"
+            f"Shadow: <code>{str(s.get('shadow', True)).lower()}</code>\n"
+            f"Risk: <code>{s.get('risk_profile', 'n/a')}</code>\n"
+            f"Max entries/min: <code>{s.get('max_entries_per_minute', 'n/a')}</code>\n"
+            f"Max pending: <code>{s.get('max_concurrent_pending', 'n/a')}</code>\n"
+            f"Max same-side: <code>{s.get('max_same_side', 'n/a')}</code>\n"
+            f"Price cap: <code>{s.get('screener_max_price_usd', 'n/a')}</code>\n"
+            f"Feature symbols: <code>{s.get('feature_max_symbols', 'n/a')}</code>\n"
+            f"Exec candidates: <code>{s.get('execution_candidates', 'n/a')}</code>\n\n"
+            "Change: <code>/limits entries 1</code>, <code>/limits pending 1</code>, "
+            "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>"
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
