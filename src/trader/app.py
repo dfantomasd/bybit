@@ -512,6 +512,60 @@ class TradingApplication:
         if self._telegram_bot is not None:
             await self._telegram_bot.notify(text)
 
+    async def _run_auto_model_trainer(self) -> None:
+        """Automatically train a shadow challenger when enough new labels accumulate."""
+        assert self._settings is not None
+        if not self._settings.MODEL_AUTO_TRAIN_ENABLED:
+            log.info("model_auto_training.disabled")
+            return
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            log.info("model_auto_training.skipped", reason="trade_journal_unavailable")
+            return
+
+        check_seconds = max(60, int(self._settings.MODEL_AUTO_TRAIN_CHECK_SECONDS))
+        min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
+        increment_samples = max(1, int(self._settings.MODEL_AUTO_TRAIN_INCREMENT_SAMPLES))
+        horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+        label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=check_seconds)
+                break
+            except TimeoutError:
+                pass
+
+            if self._training_task is not None and not self._training_task.done():
+                continue
+
+            try:
+                diag = await self._trade_journal.get_db_diagnostics()
+                trainable = int(diag.get("labelled_samples_15m", 0) or 0)
+                latest_model = diag.get("latest_model_version", {}) or {}
+                latest_samples = int(latest_model.get("training_samples", 0) or 0)
+                enough_initial = latest_samples == 0 and trainable >= min_samples
+                enough_increment = latest_samples > 0 and (trainable - latest_samples) >= increment_samples
+                if not (enough_initial or enough_increment):
+                    continue
+
+                msg = await self._start_model_training(min_samples, horizon, label_bps)
+                log.info(
+                    "model_auto_training.started",
+                    trainable=trainable,
+                    latest_samples=latest_samples,
+                    min_samples=min_samples,
+                    increment_samples=increment_samples,
+                )
+                if self._telegram_bot is not None:
+                    await self._telegram_bot.notify(
+                        "🤖 <b>Auto-training triggered</b>\n"
+                        f"trainable_15m=<code>{trainable}</code>, "
+                        f"latest_model_samples=<code>{latest_samples}</code>\n"
+                        f"{msg}"
+                    )
+            except Exception as exc:
+                log.warning("model_auto_training.failed", error=str(exc))
+
     def _runtime_settings(self) -> dict[str, Any]:
         return {
             "paused": self._trading_paused,
@@ -2261,6 +2315,10 @@ class TradingApplication:
             # Outcome resolver: labels prediction events with horizon returns (every 5 min)
             outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")
             self._background_tasks.append(outcome_resolver_task)
+
+            # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
+            auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")
+            self._background_tasks.append(auto_trainer_task)
 
             # Adaptive load governor: narrows feature universe under memory/lag pressure
             load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")

@@ -35,6 +35,7 @@ Safety:
 from __future__ import annotations
 
 import html
+import json
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -734,6 +735,12 @@ class TelegramMonitorBot:
         model_info = diag.get("model", {}) or {}
         db_model = db_diag.get("latest_model_version", {}) or {}
         latest_run = db_diag.get("latest_training_run", {}) or {}
+        model_metrics = db_model.get("metrics") or latest_run.get("metrics") or {}
+        if isinstance(model_metrics, str):
+            try:
+                model_metrics = json.loads(model_metrics)
+            except json.JSONDecodeError:
+                model_metrics = {}
         champion_ver = model_info.get("champion_version", "none")
         challenger_ver = model_info.get("challenger_version", "none")
         last_training = model_info.get("last_training", "never")
@@ -757,6 +764,14 @@ class TelegramMonitorBot:
         if len(latest_run_error) > 120:
             latest_run_error = f"{latest_run_error[:117]}..."
         latest_run_error = html.escape(latest_run_error)
+        model_quality = model_metrics.get("quality", "n/a")
+        validation_samples = model_metrics.get("validation_samples", "n/a")
+        precision = model_metrics.get("precision")
+        lift_bps = model_metrics.get("lift_bps")
+        expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
+        precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
+        lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
+        expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
 
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
@@ -780,7 +795,11 @@ class TelegramMonitorBot:
             f"Latest DB model:    <code>{db_model_version or 'none'}</code> <code>{db_model_status or ''}</code>",
             f"Last train run:     <code>{latest_run_status}</code> samples=<code>{latest_run_samples}</code>",
             f"Run model version:  <code>{latest_run_model}</code>",
-            f"Walk-forward exp:   <code>{wf_exp}</code>",
+            f"Quality:            <code>{model_quality}</code>",
+            f"Validation samples: <code>{validation_samples}</code>",
+            f"Precision:          <code>{precision_str}</code>",
+            f"Lift vs baseline:   <code>{lift_str}</code>",
+            f"Walk-forward exp:   <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
             f"Drift:              <code>{drift}</code>",
             "Model live decisions: <b>disabled</b>",
         ]

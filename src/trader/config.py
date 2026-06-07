@@ -270,6 +270,13 @@ class Settings(BaseSettings):
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
     MODEL_SHADOW_SCORING_ENABLED: bool = True
     """Always run shadow scoring even when live decisions disabled."""
+    MODEL_AUTO_TRAIN_ENABLED: bool = True
+    """Automatically train a shadow challenger when enough new labelled examples accumulate."""
+    MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
+    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
+    MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
 
     # ------------------------------------------------------------------
     # CANARY_LIVE safety

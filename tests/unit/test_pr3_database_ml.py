@@ -352,6 +352,7 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                     "model_version": "v20260607_1000",
                     "sample_count": 777,
                     "error": None,
+                    "metrics": {"quality": "GOOD", "precision": 0.62, "lift_bps": 3.4},
                     "started_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
                     "finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                 }
@@ -362,6 +363,7 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                     "version": "v20260607_1000",
                     "status": "SHADOW_CHALLENGER",
                     "training_samples": 777,
+                    "metrics": {"quality": "GOOD", "precision": 0.62, "lift_bps": 3.4},
                     "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                     "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                 }
@@ -427,12 +429,20 @@ async def test_database_model_telegram_screen() -> None:
                 "model_version": "v20260607_1000",
                 "sample_count": 180,
                 "error": None,
+                "metrics": {"quality": "GOOD", "precision": 0.61, "lift_bps": 2.7},
                 "finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
             },
             "latest_model_version": {
                 "version": "v20260607_1000",
                 "status": "SHADOW_CHALLENGER",
                 "training_samples": 180,
+                "metrics": {
+                    "quality": "GOOD",
+                    "validation_samples": 80,
+                    "precision": 0.61,
+                    "lift_bps": 2.7,
+                    "walk_forward_expectancy_bps": 4.2,
+                },
             },
         }
 
@@ -485,3 +495,6 @@ async def test_database_model_telegram_screen() -> None:
     text = fake_message.reply_text.await_args.args[0]
     assert "Trainable 15m" in text
     assert "v20260607_1000" in text
+    assert "Quality" in text
+    assert "GOOD" in text
+    assert "+2.70 bps" in text

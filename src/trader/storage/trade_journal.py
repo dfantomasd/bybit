@@ -953,7 +953,7 @@ class TradeJournal:
             result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
             rows = await self._fetch(
                 """
-                SELECT status, model_version, sample_count, error, started_at, finished_at
+                SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
                 FROM training_runs
                 ORDER BY started_at DESC
                 LIMIT 1
@@ -963,7 +963,7 @@ class TradeJournal:
                 result["latest_training_run"] = dict(rows[0])
             rows = await self._fetch(
                 """
-                SELECT version, status, training_samples, training_finished_at, created_at
+                SELECT version, status, training_samples, metrics, training_finished_at, created_at
                 FROM model_versions
                 WHERE artifact IS NOT NULL
                 ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
