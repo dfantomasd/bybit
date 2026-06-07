@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -150,6 +151,71 @@ def test_control_menu_has_training_and_limits() -> None:
     assert "train:1000:15:5" in all_callbacks
     assert "control:limits" in all_callbacks
     assert "view:db_model" in all_callbacks
+    assert "view:canary" in all_callbacks
+
+
+@pytest.mark.asyncio
+async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(
+        return_value={
+            "model_gate_canary_enabled": False,
+            "model_gate_quality": {"quality": "GOOD", "sample_count": 150},
+        }
+    )
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
+            "last_ws_message_age_s": 10,
+            "last_strategy_loop_at": "2026-06-07T10:00:00Z",
+            "hour_api_rejected": 0,
+            "hour_min_notional_rejected": 0,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_candle_1m": datetime.now(UTC) - timedelta(seconds=30),
+            "candles_by_interval": {"1": 5000, "5": 1000, "15": 500, "60": 200},
+            "feature_snapshots": 3000,
+            "prediction_outcomes": 3000,
+            "labelled_samples_15m": 2500,
+            "latest_training_run": {"status": "COMPLETED"},
+            "latest_model_version": {"version": "v1"},
+            "shadow_gate_15m": {"total_count": 120, "lift_vs_all_bps": 1.5},
+            "paper_pnl_15m": {
+                "baseline": {"count": 50, "total_bps": -2.0},
+                "model_gate": {"count": 40, "total_bps": 10.0},
+            },
+        }
+    )
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "CANARY readiness" in reply_text
+    assert "READY" in reply_text
+    assert "NOT READY" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_canary_readiness_reports_not_ready_without_data() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value={})
+    bot._controller.diagnostics_provider = MagicMock(return_value={"active_symbols": []})
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value={"connected": False})
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "CANARY readiness" in reply_text
+    assert "NOT READY" in reply_text
 
 
 def test_limits_menu_has_common_presets() -> None:
