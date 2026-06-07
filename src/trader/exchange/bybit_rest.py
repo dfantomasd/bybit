@@ -534,6 +534,24 @@ class BybitRestClient:
             params={"category": category, "symbol": symbol},
         )
 
+    async def get_transaction_log(
+        self,
+        account_type: str = "UNIFIED",
+        category: str = "linear",
+        currency: str = "USDT",
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "accountType": account_type,
+            "category": category,
+            "currency": currency,
+            "limit": limit,
+        }
+        if cursor:
+            params["cursor"] = cursor
+        return await self._get("/v5/account/transaction-log", params=params)
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------

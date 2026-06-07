@@ -75,6 +75,12 @@ class ExecutionEngine:
         max_same_side_positions: int = 10,
         startup_warmup_seconds: int = 0,
         is_canary: bool = False,
+        fee_provider: Any | None = None,
+        max_spread_bps: float = 8.0,
+        expected_slippage_pct: float = 0.03,
+        funding_buffer_pct: float = 0.01,
+        min_net_edge_pct: float = 0.15,
+        entry_order_mode: str = "MARKET",
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -86,6 +92,12 @@ class ExecutionEngine:
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
         self._is_canary = is_canary
+        self._fee_provider = fee_provider
+        self._max_spread_bps = max_spread_bps
+        self._expected_slippage_pct = expected_slippage_pct
+        self._funding_buffer_pct = funding_buffer_pct
+        self._min_net_edge_pct = min_net_edge_pct
+        self._entry_order_mode = entry_order_mode
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -483,6 +495,48 @@ class ExecutionEngine:
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
 
+        # 5b. Fee-aware entry filter: reject if net edge after all costs is below threshold
+        if not self._shadow_mode and self._fee_provider is not None and proposal.take_profit is not None:
+            fee_rates = None
+            try:
+                fee_rates = await self._fee_provider.get(symbol)
+            except Exception as _fee_exc:
+                log.debug("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
+            if fee_rates is not None:
+                entry_price_d = proposal.entry_price
+                tp_d = proposal.take_profit
+                taker = Decimal(str(fee_rates.taker_fee_rate))
+                # gross edge as % of entry
+                if proposal.side == OrderSide.BUY:
+                    gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
+                else:
+                    gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
+                fee_pct = taker * Decimal("200")  # entry + exit
+                spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
+                slippage_pct = Decimal(str(self._expected_slippage_pct))
+                funding_pct = Decimal(str(self._funding_buffer_pct))
+                net_edge_pct = gross_edge_pct - fee_pct - spread_pct - slippage_pct - funding_pct
+                min_edge = Decimal(str(self._min_net_edge_pct))
+                log.info(
+                    "execution.net_edge_check",
+                    symbol=symbol,
+                    gross_edge_pct=float(round(gross_edge_pct, 4)),
+                    fee_pct=float(round(fee_pct, 4)),
+                    spread_pct=float(round(spread_pct, 4)),
+                    slippage_pct=float(round(slippage_pct, 4)),
+                    funding_pct=float(round(funding_pct, 4)),
+                    net_edge_pct=float(round(net_edge_pct, 4)),
+                    decision="allow" if net_edge_pct >= min_edge else "reject",
+                )
+                if net_edge_pct < min_edge:
+                    log.warning(
+                        "execution.net_edge_too_low",
+                        symbol=symbol,
+                        net_edge_pct=float(round(net_edge_pct, 4)),
+                        min_edge_pct=float(min_edge),
+                    )
+                    return None
+
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
             log.info(
@@ -721,20 +775,21 @@ class ExecutionEngine:
             proposal.side,
             is_stop_loss=True,
         )
+        use_limit = self._entry_order_mode == "POST_ONLY_LIMIT"
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,
             symbol=proposal.symbol,
             market_type=proposal.market_type,
             side=proposal.side,
-            order_type=OrderType.MARKET,
+            order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
             qty=decision.approved_qty,
             price=None,  # Market order — no price needed
             order_link_id=link_id,
             take_profit=take_profit,
             stop_loss=stop_loss,
-            tp_order_type=OrderType.MARKET,
-            sl_order_type=OrderType.MARKET,
+            tp_order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
+            sl_order_type=OrderType.MARKET,  # SL always market
         )
 
     def _round_exit_price(

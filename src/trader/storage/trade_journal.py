@@ -26,6 +26,22 @@ def _decimal_or_none(value: Any) -> Decimal | None:
         return None
 
 
+def _parse_dec(v: Any) -> Decimal | None:
+    try:
+        return Decimal(str(v)) if v not in (None, "", "0", 0) else None
+    except Exception:
+        return None
+
+
+def _parse_ts(v: Any) -> datetime | None:
+    try:
+        if v is None:
+            return None
+        return datetime.fromtimestamp(int(v) / 1000, tz=UTC)
+    except Exception:
+        return None
+
+
 def _dt_from_ms(value: Any) -> datetime:
     try:
         return datetime.fromtimestamp(int(value) / 1000, tz=UTC)
@@ -286,6 +302,27 @@ class TradeJournal:
                 ON execution_events (order_link_id);
             """
             )
+            await conn.execute("""
+                CREATE TABLE IF NOT EXISTS account_transaction_events (
+                    id bigserial PRIMARY KEY,
+                    transaction_time timestamptz NOT NULL,
+                    symbol text,
+                    side text,
+                    funding numeric,
+                    fee numeric,
+                    fee_rate numeric,
+                    cash_flow numeric,
+                    change numeric,
+                    cash_balance numeric,
+                    trade_price numeric,
+                    trade_id text,
+                    order_id text,
+                    order_link_id text,
+                    created_at timestamptz NOT NULL DEFAULT now()
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS account_transaction_events_trade_id_idx
+                    ON account_transaction_events (trade_id) WHERE trade_id IS NOT NULL;
+            """)
 
     async def record_signal(
         self,
@@ -479,6 +516,42 @@ class TradeJournal:
             decision_id,
             datetime.now(tz=UTC),
         )
+
+    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+        """Persist Bybit transaction log entries. Returns count inserted."""
+        if not self.is_enabled or not entries:
+            return 0
+        inserted = 0
+        for entry in entries:
+            try:
+                trade_id = entry.get("tradeId") or None
+                await self._execute(
+                    """
+                    INSERT INTO account_transaction_events
+                        (transaction_time, symbol, side, funding, fee, fee_rate,
+                         cash_flow, change, cash_balance, trade_price,
+                         trade_id, order_id, order_link_id, created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+                    ON CONFLICT (trade_id) DO NOTHING
+                    """,
+                    _parse_ts(entry.get("transactionTime")),
+                    entry.get("symbol"),
+                    entry.get("side"),
+                    _parse_dec(entry.get("funding")),
+                    _parse_dec(entry.get("fee")),
+                    _parse_dec(entry.get("feeRate")),
+                    _parse_dec(entry.get("cashFlow")),
+                    _parse_dec(entry.get("change")),
+                    _parse_dec(entry.get("cashBalance")),
+                    _parse_dec(entry.get("tradePrice")),
+                    trade_id,
+                    entry.get("orderId"),
+                    entry.get("orderLinkId"),
+                )
+                inserted += 1
+            except Exception as exc:
+                log.debug("trade_journal.transaction_log_insert_failed", error=str(exc))
+        return inserted
 
     async def load_pending_from_db(self) -> list[str]:
         """Return order_link_ids with non-terminal status (CREATED_LOCAL or SUBMITTING).
