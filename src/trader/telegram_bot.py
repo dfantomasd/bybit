@@ -1086,8 +1086,7 @@ class TelegramMonitorBot:
             f" | 5m <code>{candles.get('5', 0)}</code>"
             f" | 15m <code>{candles.get('15', 0)}</code>"
             f" | 1h <code>{candles.get('60', 0)}</code>",
-            f"Примеры для обучения (15m): <code>{labelled_15m}/2000</code>"
-            f" <code>[{data_bar}]</code> {data_pct}%",
+            f"Примеры для обучения (15m): <code>{labelled_15m}/2000</code> <code>[{data_bar}]</code> {data_pct}%",
             f"Записано исходов: <code>{db_diag.get('prediction_outcomes', 0)}</code>"
             f"  (по горизонтам: <code>{outcome_breakdown}</code>)",
             "",
@@ -1101,7 +1100,11 @@ class TelegramMonitorBot:
 
         # качество модели — с объяснениями
         if model_quality or precision is not None:
-            _q_labels = {"GOOD": "✅ Хорошая", "WEAK": "⚠️ Слабая", "INSUFFICIENT_VALIDATION": "⚠️ Мало данных для оценки"}
+            _q_labels = {
+                "GOOD": "✅ Хорошая",
+                "WEAK": "⚠️ Слабая",
+                "INSUFFICIENT_VALIDATION": "⚠️ Мало данных для оценки",
+            }
             _q_label = _q_labels.get(model_quality or "", f"❓ {model_quality or 'не оценена'}")
             lines.append(f"Качество: {_q_label}")
             if validation_samples:
@@ -1472,9 +1475,7 @@ class TelegramMonitorBot:
             await self._controller.pause()
             await self._button_reply(
                 update,
-                "⏸ <b>Приостановлено.</b>\n"
-                "✅ Данные и оценка модели — продолжаются.\n"
-                "❌ Новые сделки — остановлены.",
+                "⏸ <b>Приостановлено.</b>\n✅ Данные и оценка модели — продолжаются.\n❌ Новые сделки — остановлены.",
                 reply_markup=self._main_menu(),
             )
             return
@@ -1482,9 +1483,7 @@ class TelegramMonitorBot:
             await self._controller.resume()
             await self._button_reply(
                 update,
-                "▶️ <b>Возобновлено.</b>\n"
-                "✅ Сделки снова активны.\n"
-                "<i>(Shadow режим = сделки не реальные)</i>",
+                "▶️ <b>Возобновлено.</b>\n✅ Сделки снова активны.\n<i>(Shadow режим = сделки не реальные)</i>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -1646,8 +1645,8 @@ class TelegramMonitorBot:
         gate_quality = s.get("model_gate_quality", {}) or {}
         is_paused = bool(s.get("paused", False))
         is_shadow = bool(s.get("shadow", True))
-        state_line = ("⏸ Пауза — новые сделки НЕ открываются" if is_paused else "▶️ Работает — сделки активны")
-        shadow_line = ("🔦 Shadow — сделки не реальные (наблюдение)" if is_shadow else "💰 Режим: РЕАЛЬНЫЕ сделки")
+        state_line = "⏸ Пауза — новые сделки НЕ открываются" if is_paused else "▶️ Работает — сделки активны"
+        shadow_line = "🔦 Shadow — сделки не реальные (наблюдение)" if is_shadow else "💰 Режим: РЕАЛЬНЫЕ сделки"
         gate_obs = int(gate_quality.get("gate_total_count") or 0)
         gate_lift = gate_quality.get("gate_lift_vs_all_bps")
         gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "н/д"

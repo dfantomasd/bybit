@@ -206,9 +206,9 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
     await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
 
     reply_text = update.effective_message.reply_text.call_args[0][0]
-    assert "CANARY readiness" in reply_text
-    assert "READY" in reply_text
-    assert "NOT READY" not in reply_text
+    assert "Готовность к CANARY" in reply_text
+    assert "ГОТОВО" in reply_text
+    assert "НЕ ГОТОВО" not in reply_text
 
 
 @pytest.mark.asyncio
@@ -224,8 +224,8 @@ async def test_canary_readiness_reports_not_ready_without_data() -> None:
     await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
 
     reply_text = update.effective_message.reply_text.call_args[0][0]
-    assert "CANARY readiness" in reply_text
-    assert "NOT READY" in reply_text
+    assert "Готовность к CANARY" in reply_text
+    assert "НЕ ГОТОВО" in reply_text
 
 
 def test_limits_menu_has_common_presets() -> None:
