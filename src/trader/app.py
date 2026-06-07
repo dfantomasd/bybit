@@ -489,16 +489,12 @@ class TradingApplication:
         results: list[str] = []
         for horizon in horizons:
             if self._telegram_bot is not None:
-                await self._telegram_bot.notify(
-                    f"⏳ <b>Training ALL</b>: запускаю горизонт <code>{horizon}m</code>…"
-                )
+                await self._telegram_bot.notify(f"⏳ <b>Training ALL</b>: запускаю горизонт <code>{horizon}m</code>…")
             await self._run_model_training(min_samples, horizon, label_bps)
             results.append(f"h{horizon}m: готово")
         if self._telegram_bot is not None:
             summary = " | ".join(results)
-            await self._telegram_bot.notify(
-                f"✅ <b>Training ALL завершено</b>\n{summary}"
-            )
+            await self._telegram_bot.notify(f"✅ <b>Training ALL завершено</b>\n{summary}")
 
     async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
         cmd = [

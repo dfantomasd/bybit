@@ -693,9 +693,7 @@ class TelegramMonitorBot:
             icon = "✅" if pnl >= 0 else "❌"
             price_part = f" @ {entry}→{exit_p}" if entry and exit_p else ""
             qty_part = f" ×{qty}" if qty else ""
-            lines.append(
-                f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>"
-            )
+            lines.append(f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>")
         total_icon = "📈" if total >= 0 else "📉"
         lines.append(f"\n{total_icon} <b>Итого за {len(shown)} сделок:</b> <code>{total:+.4f} USDT</code>")
         lines.append(
