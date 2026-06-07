@@ -915,6 +915,10 @@ class TradeJournal:
             "latest_candle_1m": None,
             "feature_snapshots": 0,
             "prediction_outcomes": 0,
+            "prediction_outcomes_by_horizon": {},
+            "labelled_samples_15m": 0,
+            "latest_training_run": {},
+            "latest_model_version": {},
         }
         if not self.is_enabled:
             return result
@@ -925,6 +929,49 @@ class TradeJournal:
             result["feature_snapshots"] = int(rows[0]["cnt"]) if rows else 0
             rows = await self._fetch("SELECT count(*) AS cnt FROM prediction_outcomes")
             result["prediction_outcomes"] = int(rows[0]["cnt"]) if rows else 0
+            rows = await self._fetch(
+                """
+                SELECT horizon_minutes, count(*) AS cnt
+                FROM prediction_outcomes
+                WHERE label IS NOT NULL
+                GROUP BY horizon_minutes
+                ORDER BY horizon_minutes
+                """
+            )
+            result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
+            rows = await self._fetch(
+                """
+                SELECT count(*) AS cnt
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = 15
+                  AND po.label IS NOT NULL
+                  AND fs.feature_values IS NOT NULL
+                """
+            )
+            result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+            rows = await self._fetch(
+                """
+                SELECT status, model_version, sample_count, error, started_at, finished_at
+                FROM training_runs
+                ORDER BY started_at DESC
+                LIMIT 1
+                """
+            )
+            if rows:
+                result["latest_training_run"] = dict(rows[0])
+            rows = await self._fetch(
+                """
+                SELECT version, status, training_samples, training_finished_at, created_at
+                FROM model_versions
+                WHERE artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            if rows:
+                result["latest_model_version"] = dict(rows[0])
         except Exception as exc:
             log.debug("trade_journal.diagnostics_failed", error=str(exc))
         return result

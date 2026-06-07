@@ -25,7 +25,7 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: int) -> None:
+async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: int) -> int:
     import asyncpg
 
     from trader.config import Settings
@@ -69,7 +69,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 msg,
                 run_id,
             )
-            return
+            return 1
 
         click.echo(f"Training on {len(rows)} samples (horizon={horizon_minutes}m)")
 
@@ -92,6 +92,15 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         x_arr = np.array(x_list, dtype=np.float32)
         y = np.array(y_list, dtype=np.int32)
+        if len(x_arr) < min_samples:
+            msg = f"Insufficient usable samples: {len(x_arr)} < {min_samples}"
+            click.echo(msg, err=True)
+            await pool.execute(
+                "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
+                msg,
+                run_id,
+            )
+            return 1
 
         # Shuffle
         idx = np.random.permutation(len(x_arr))
@@ -118,8 +127,12 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 training_started_at, training_finished_at)
             VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())
             ON CONFLICT (version) DO UPDATE SET
+                status = EXCLUDED.status,
                 artifact = EXCLUDED.artifact,
                 training_samples = EXCLUDED.training_samples,
+                feature_schema_hash = EXCLUDED.feature_schema_hash,
+                metrics = EXCLUDED.metrics,
+                training_started_at = EXCLUDED.training_started_at,
                 training_finished_at = now()
             """,
             version,
@@ -127,7 +140,15 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             model.training_samples,
             model.feature_schema_hash,
             artifact,
-            json.dumps({"label_bps_threshold": label_bps_threshold, "horizon_minutes": horizon_minutes}),
+            json.dumps(
+                {
+                    "features": len(feature_names),
+                    "horizon_minutes": horizon_minutes,
+                    "label_bps_threshold": label_bps_threshold,
+                    "positive_rate": float(np.mean(y)) if len(y) else 0.0,
+                    "run_id": run_id,
+                }
+            ),
             run_started,
         )
 
@@ -140,14 +161,20 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         click.echo(f"Checkpoint saved as version={version}, status=SHADOW_CHALLENGER")
         click.echo("Run 'python -m trader.training.promote --version <version>' to evaluate and promote.")
+        return 0
 
     except Exception as exc:
         log.exception("Training failed")
-        await pool.execute(
-            "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
-            str(exc),
-            run_id,
-        )
+        try:
+            await pool.execute(
+                "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
+                str(exc),
+                run_id,
+            )
+        except Exception as update_exc:
+            log.debug("Training run failure update failed: %s", update_exc)
+        click.echo(f"Training failed: {exc}", err=True)
+        return 1
     finally:
         await pool.close()
 
@@ -158,7 +185,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 @click.option("--horizon", default=15, type=int, help="Prediction horizon in minutes")
 def main(min_samples: int, label_bps: float, horizon: int) -> None:
     """Train challenger model from historical feature snapshots."""
-    asyncio.run(_train(min_samples, label_bps, horizon))
+    raise SystemExit(asyncio.run(_train(min_samples, label_bps, horizon)))
 
 
 if __name__ == "__main__":
