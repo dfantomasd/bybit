@@ -238,14 +238,16 @@ class PreflightChecker:
             all_perms = all_perm_keys | all_perm_values
 
             warning = None
-            if _DANGEROUS_PERMISSIONS & all_perm_keys:
+            # Warn only if the key has actual Withdraw/Withdrawal in permission VALUES.
+            # The "Wallet" category key alone (for AccountTransfer etc.) is safe.
+            dangerous_found = any(
+                p.lower() in ("withdraw", "withdrawal", "withdrawalservice")
+                for p in all_perm_values
+            )
+            if dangerous_found:
                 warning = (
-                    "API key has WITHDRAWAL permission (Wallet category) — this is dangerous for a trading bot. "
+                    "API key has WITHDRAWAL permission — this is dangerous for a trading bot. "
                     "Revoke it immediately."
-                )
-            elif any(p.lower() in ("withdraw", "withdrawal") for p in all_perm_values):
-                warning = (
-                    "API key has WITHDRAWAL permission — this is dangerous for a trading bot. Revoke it immediately."
                 )
 
             return CheckResult(
@@ -271,8 +273,12 @@ class PreflightChecker:
             result = resp.get("result", {})
             account_type = result.get("unifiedMarginStatus", result.get("marginMode", ""))
 
-            # Bybit unifiedMarginStatus: 1=Regular, 2=Unified margin, 3=Unified trade
-            unified = account_type in (2, 3, "2", "3", "UNIFIED", "UTA")
+            # Bybit unifiedMarginStatus: 1=Regular, 2-6=Unified variants (UTA1.0, UTA2.0, etc.)
+            unified = account_type in (
+                2, 3, 4, 5, 6,
+                "2", "3", "4", "5", "6",
+                "UNIFIED", "UTA", "UTA1.0", "UTA2.0",
+            )
             return CheckResult(
                 name="account_type",
                 passed=unified,

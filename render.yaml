@@ -64,6 +64,21 @@ services:
         value: "true"
       - key: MULTITIMEFRAME_INTERVALS
         value: "1,5,15,60"
+      # Execution safety
+      - key: ENTRY_ORDER_MODE
+        value: MARKET
+      - key: EXPECTED_SLIPPAGE_PCT
+        value: "0.03"
+      - key: MIN_EXPECTED_NET_EDGE_PCT
+        value: "0.15"
+      - key: MIN_NET_PROFIT_BUFFER_PCT
+        value: "0.08"
+      - key: FUNDING_BUFFER_PCT
+        value: "0.01"
+      - key: TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
+        value: "60"
+      - key: STALE_PENDING_TTL_SECONDS
+        value: "600"
       # DB safety gates
       - key: TRADE_JOURNAL_REQUIRED_FOR_ACTIVE
         value: "true"
