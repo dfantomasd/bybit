@@ -88,8 +88,6 @@ select = [
 ]
 ignore = [
     "S101",   # allow assert in tests
-    "ANN101", # missing self annotation
-    "ANN102", # missing cls annotation
     "ANN401", # allow Any
     "E501",   # line too long (handled by formatter)
 ]
