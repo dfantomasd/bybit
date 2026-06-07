@@ -75,6 +75,7 @@ class ExecutionEngine:
         max_same_side_positions: int = 10,
         startup_warmup_seconds: int = 0,
         is_canary: bool = False,
+        stale_pending_ttl_seconds: int = 600,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -86,6 +87,7 @@ class ExecutionEngine:
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
         self._is_canary = is_canary
+        self._stale_pending_ttl = stale_pending_ttl_seconds
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -99,6 +101,10 @@ class ExecutionEngine:
         self._pending_entry_order_link_ids: set[str] = set()
         # Legacy count — kept for compatibility with rate-limit check
         self._pending_entry_count: int = 0
+        # Timestamps of pending entries for stale detection
+        self._pending_entry_timestamps: dict[str, datetime] = {}
+        # Latest rejection reason for diagnostics
+        self._latest_rejection_reason: str | None = None
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -136,22 +142,30 @@ class ExecutionEngine:
         we simulate freely so tests and monitoring remain unaffected.
         """
         if self.is_in_warmup():
-            return f"startup_warmup_active ({self.warmup_seconds_remaining():.0f}s remaining)"
+            reason = f"startup_warmup_active ({self.warmup_seconds_remaining():.0f}s remaining)"
+            self._latest_rejection_reason = reason
+            return reason
 
         # Rate / burst limits only apply to live execution
         if not self._shadow_mode:
             self._prune_recent_entries()
             if len(self._recent_entries) >= self._max_entries_per_minute:
-                return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
+                reason = f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
+                self._latest_rejection_reason = reason
+                return reason
 
             if self._pending_entry_count >= self._max_concurrent_pending:
-                return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
+                reason = f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
+                self._latest_rejection_reason = reason
+                return reason
 
         same_side_count = sum(
             1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
         )
         if same_side_count >= self._max_same_side:
-            return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
+            reason = f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
+            self._latest_rejection_reason = reason
+            return reason
 
         return None
 
@@ -159,6 +173,7 @@ class ExecutionEngine:
         """Register order_link_id as pending and bump rate-limit counters."""
         if order_link_id:
             self._pending_entry_order_link_ids.add(order_link_id)
+            self._pending_entry_timestamps[order_link_id] = datetime.now(tz=UTC)
         if not self._shadow_mode:
             self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
@@ -166,16 +181,26 @@ class ExecutionEngine:
     def mark_entry_resolved(self, order_link_id: str = "") -> None:
         """Remove order_link_id from pending set (idempotent).
 
-        Only removes the exact ID — never releases an unrelated slot.
+        Decrements _pending_entry_count only when the ID was actually present,
+        so a terminal update for a foreign order cannot release an unrelated slot.
         """
         if order_link_id:
+            was_present = order_link_id in self._pending_entry_order_link_ids
             self._pending_entry_order_link_ids.discard(order_link_id)
-        self._pending_entry_count = max(0, self._pending_entry_count - 1)
+            self._pending_entry_timestamps.pop(order_link_id, None)
+            if was_present:
+                self._pending_entry_count = max(0, self._pending_entry_count - 1)
+        else:
+            # Legacy path: no ID supplied — unconditional decrement
+            self._pending_entry_count = max(0, self._pending_entry_count - 1)
 
     def restore_pending_entries(self, order_link_ids: list[str]) -> None:
         """Restore pending entry IDs from durable storage at startup."""
+        # Use age = stale_ttl so restored entries are immediately considered potentially stale
+        placeholder_ts = datetime.now(tz=UTC) - timedelta(seconds=self._stale_pending_ttl)
         for oid in order_link_ids:
             self._pending_entry_order_link_ids.add(oid)
+            self._pending_entry_timestamps[oid] = placeholder_ts
         if order_link_ids:
             log.info(
                 "execution.pending_entries_restored",
@@ -185,6 +210,28 @@ class ExecutionEngine:
 
     def has_pending_entries(self) -> bool:
         return bool(self._pending_entry_order_link_ids)
+
+    def get_pending_diagnostics(self) -> dict[str, Any]:
+        """Return diagnostics about pending entries."""
+        now = datetime.now(tz=UTC)
+        oldest_age: float | None = None
+        stale_count = 0
+        for _oid, ts in self._pending_entry_timestamps.items():
+            age = (now - ts).total_seconds()
+            if oldest_age is None or age > oldest_age:
+                oldest_age = age
+            if age > self._stale_pending_ttl:
+                stale_count += 1
+        return {
+            "pending_entry_ids": list(self._pending_entry_order_link_ids),
+            "pending_entry_count": len(self._pending_entry_order_link_ids),
+            "oldest_pending_age_seconds": oldest_age,
+            "stale_pending_count": stale_count,
+        }
+
+    def get_latest_rejection_reason(self) -> str | None:
+        """Return the last rejection reason from rate-limit or pending-entry checks."""
+        return self._latest_rejection_reason
 
     # ------------------------------------------------------------------
     # Position awareness
@@ -323,6 +370,8 @@ class ExecutionEngine:
 
         # P0.2/P0.3: Block new entries while pending ones await resolution
         if self.has_pending_entries():
+            reason = f"pending_entries: {list(self._pending_entry_order_link_ids)}"
+            self._latest_rejection_reason = reason
             log.debug(
                 "execution.skipped_pending_entries",
                 symbol=symbol,

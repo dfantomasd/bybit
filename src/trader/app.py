@@ -306,7 +306,11 @@ class TradingApplication:
             return False
         if self._settings.BYBIT_USE_TESTNET:
             return True
-        return self._settings.LIVE_MODE and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+        return (
+            self._settings.LIVE_MODE
+            and self._settings.LIVE_ARMED
+            and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+        )
 
     def _initial_shadow_mode(self) -> bool:
         """Compute startup execution mode from settings and safety gates."""
@@ -531,19 +535,152 @@ class TradingApplication:
             is_canary=is_canary,
         )
 
-        # P0.2: Restore pending entry IDs from durable storage before any new entries
-        if self._trade_journal is not None:
+        # P0.2 + hotfix: Restore pending IDs, then reconcile against exchange to filter stale ones
+        if self._trade_journal is not None and self._bybit_adapter is not None:
+            try:
+                pending_ids = await self._trade_journal.load_pending_from_db()
+                if pending_ids:
+                    log.info("execution_engine.pending_found_in_db", count=len(pending_ids), ids=pending_ids)
+                    # Reconcile against exchange to filter already-resolved entries
+                    resolved_ids = await self._reconcile_pending_at_startup(pending_ids)
+                    live_ids = [pid for pid in pending_ids if pid not in resolved_ids]
+                    if live_ids:
+                        self._execution_engine.restore_pending_entries(live_ids)
+                        log.info("execution_engine.pending_restored", count=len(live_ids), ids=live_ids)
+                    else:
+                        log.info("execution_engine.no_live_pending_after_reconcile")
+            except Exception as exc:
+                log.warning("execution_engine.pending_restore_failed", error=str(exc))
+        elif self._trade_journal is not None:
             try:
                 pending_ids = await self._trade_journal.load_pending_from_db()
                 if pending_ids:
                     self._execution_engine.restore_pending_entries(pending_ids)
-                    log.info("execution_engine.pending_restored", count=len(pending_ids))
+                    log.info("execution_engine.pending_restored_no_reconcile", count=len(pending_ids))
             except Exception as exc:
                 log.warning("execution_engine.pending_restore_failed", error=str(exc))
 
         # Sync open positions from exchange so we don't double-enter on restart
         await self._execution_engine.sync_positions()
         log.info("execution_engine.initialized", shadow_mode=shadow, is_canary=is_canary)
+
+    async def _reconcile_pending_at_startup(self, pending_ids: list[str]) -> set[str]:
+        """Check each pending order_link_id against exchange state; return resolved IDs.
+
+        An ID is considered resolved (should not block new entries) if:
+        - It appears in exchange open orders (still pending → keep it)
+        - It appears in order history as FILLED/CANCELLED/EXPIRED/REJECTED
+        - It appears in executions (FILLED)
+        - Its created_at is older than STALE_PENDING_TTL_SECONDS (EXPIRED)
+        """
+        assert self._bybit_adapter is not None
+        assert self._settings is not None
+        stale_ttl = getattr(self._settings, "STALE_PENDING_TTL_SECONDS", 600)
+        resolved: set[str] = set()
+
+        try:
+            open_resp = await self._bybit_adapter._rest.get_open_orders(category=self._settings.DEFAULT_MARKET_CATEGORY)
+            open_ids = {o.get("orderLinkId") for o in (open_resp.get("result") or {}).get("list", [])}
+        except Exception as exc:
+            log.warning("startup_reconcile.open_orders_failed", error=str(exc))
+            open_ids = set()
+
+        for pid in pending_ids:
+            if pid in open_ids:
+                # Genuinely still open on exchange — keep as pending
+                continue
+
+            # Not in open orders — check history
+            outcome = "UNKNOWN"
+            try:
+                hist_resp = await self._bybit_adapter._rest.get_order_history(
+                    category=self._settings.DEFAULT_MARKET_CATEGORY,
+                    order_link_id=pid,
+                )
+                hist_list = (hist_resp.get("result") or {}).get("list", [])
+                if hist_list:
+                    outcome = hist_list[0].get("orderStatus", "UNKNOWN")
+            except Exception as exc:
+                log.debug("startup_reconcile.history_failed", pid=pid, error=str(exc))
+
+            if outcome in ("Filled", "Cancelled", "Expired", "Rejected", "FILLED", "CANCELLED", "EXPIRED", "REJECTED"):
+                resolved.add(pid)
+                log.info("startup_reconcile.resolved_from_history", pid=pid, outcome=outcome)
+                if self._trade_journal is not None:
+                    try:
+                        status_map = {
+                            "Filled": "FILLED",
+                            "FILLED": "FILLED",
+                            "Cancelled": "CANCELLED",
+                            "CANCELLED": "CANCELLED",
+                            "Expired": "EXPIRED",
+                            "EXPIRED": "EXPIRED",
+                            "Rejected": "REJECTED",
+                            "REJECTED": "REJECTED",
+                        }
+                        await self._trade_journal.record_order_event(
+                            order_link_id=pid,
+                            proposal_id=None,
+                            decision_id=None,
+                            symbol="UNKNOWN",
+                            side="unknown",
+                            qty=Decimal("0"),
+                            status=status_map.get(outcome, "CANCELLED"),
+                        )
+                    except Exception as _journal_exc:
+                        log.debug("startup_reconcile.journal_write_failed", pid=pid, error=str(_journal_exc))
+                continue
+
+            # Check if stale by created_at from durable_order_state
+            try:
+                rows = await self._trade_journal._fetch(
+                    "SELECT created_at FROM order_events WHERE order_link_id=$1 ORDER BY created_at ASC LIMIT 1",
+                    pid,
+                )
+                if rows:
+                    created_at = rows[0]["created_at"]
+                    if created_at.tzinfo is None:
+                        created_at = created_at.replace(tzinfo=UTC)
+                    age_seconds = (datetime.now(tz=UTC) - created_at).total_seconds()
+                    if age_seconds > stale_ttl:
+                        resolved.add(pid)
+                        log.warning(
+                            "startup_reconcile.stale_pending_expired",
+                            pid=pid,
+                            age_seconds=age_seconds,
+                            ttl=stale_ttl,
+                        )
+                        if self._trade_journal is not None:
+                            try:
+                                await self._trade_journal.record_order_event(
+                                    order_link_id=pid,
+                                    proposal_id=None,
+                                    decision_id=None,
+                                    symbol="UNKNOWN",
+                                    side="unknown",
+                                    qty=Decimal("0"),
+                                    status="EXPIRED",
+                                    error=f"stale_pending: age={age_seconds:.0f}s > ttl={stale_ttl}s",
+                                )
+                            except Exception as _exp_exc:
+                                log.debug("startup_reconcile.expire_journal_failed", pid=pid, error=str(_exp_exc))
+                        if self._telegram_bot is not None:
+                            try:
+                                await self._telegram_bot.notify(
+                                    f"⚠️ Stale pending order <code>{pid}</code> expired at startup "
+                                    f"(age {age_seconds:.0f}s > TTL {stale_ttl}s). Entry unblocked."
+                                )
+                            except Exception as _tg_exc:
+                                log.debug("startup_reconcile.telegram_failed", pid=pid, error=str(_tg_exc))
+                        continue
+            except Exception as exc:
+                log.debug("startup_reconcile.age_check_failed", pid=pid, error=str(exc))
+
+            log.warning("startup_reconcile.unknown_outcome", pid=pid, outcome=outcome)
+            # Unknown — treat as stale to avoid blocking indefinitely
+            resolved.add(pid)
+
+        return resolved
 
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
@@ -615,8 +752,13 @@ class TradingApplication:
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
+        if not hasattr(self, "_seeded_symbols"):
+            self._seeded_symbols: set[str] = set()
 
         for symbol in seed_symbols:
+            if symbol in self._seeded_symbols:
+                continue
+            self._seeded_symbols.add(symbol)
             for interval in [_WS_INTERVAL]:
                 try:
                     resp = await self._bybit_adapter._rest.get_kline(
@@ -863,7 +1005,7 @@ class TradingApplication:
                         # Release pending entry count on terminal — exactly once per order
                         if is_terminal and order_link_id not in _pending_released:
                             if self._execution_engine is not None:
-                                self._execution_engine.mark_entry_resolved()
+                                self._execution_engine.mark_entry_resolved(order_link_id)
                             _pending_released.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
@@ -1123,9 +1265,10 @@ class TradingApplication:
         )
         self._regime_classifier = RegimeClassifier()
 
+        current_symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
         task = asyncio.create_task(
             self._feature_pipeline.run(
-                symbols=_SYMBOLS,  # fallback; screener overrides via symbol_source
+                symbols=current_symbols,
                 intervals=[_WS_INTERVAL],
                 symbol_source=self._screener,
             ),
@@ -1383,6 +1526,19 @@ class TradingApplication:
             "hour_skipped_open_position": hour_counts.get("skipped_open_position", 0),
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
+            **(
+                self._execution_engine.get_pending_diagnostics()
+                if self._execution_engine is not None
+                else {
+                    "pending_entry_ids": [],
+                    "pending_entry_count": 0,
+                    "oldest_pending_age_seconds": None,
+                    "stale_pending_count": 0,
+                }
+            ),
+            "latest_rejection_reason": (
+                self._execution_engine.get_latest_rejection_reason() if self._execution_engine is not None else None
+            ),
         }
 
     async def _run_supervisor(self) -> None:

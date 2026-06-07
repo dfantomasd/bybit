@@ -255,6 +255,8 @@ class Settings(BaseSettings):
     # Operational
     # ------------------------------------------------------------------
     RECONCILIATION_INTERVAL_SECONDS: int = 30
+    STALE_PENDING_TTL_SECONDS: int = 600
+    """How long (seconds) before a pending entry is considered stale and auto-expired."""
     POSITION_SYNC_INTERVAL_SECONDS: int = 30
     """How often to sync exchange positions into the local execution/risk state."""
     HEALTH_CHECK_INTERVAL_SECONDS: int = 15

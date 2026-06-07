@@ -238,7 +238,8 @@ class PreflightChecker:
             all_perms = all_perm_keys | all_perm_values
 
             warning = None
-            if _DANGEROUS_PERMISSIONS & all_perm_keys:
+            wallet_perms = permissions.get("Wallet") or permissions.get("wallet") or []
+            if any("withdraw" in str(p).lower() for p in wallet_perms):
                 warning = (
                     "API key has WITHDRAWAL permission (Wallet category) — this is dangerous for a trading bot. "
                     "Revoke it immediately."
@@ -271,8 +272,8 @@ class PreflightChecker:
             result = resp.get("result", {})
             account_type = result.get("unifiedMarginStatus", result.get("marginMode", ""))
 
-            # Bybit unifiedMarginStatus: 1=Regular, 2=Unified margin, 3=Unified trade
-            unified = account_type in (2, 3, "2", "3", "UNIFIED", "UTA")
+            # Bybit unifiedMarginStatus: 1=Regular, 2=Unified margin, 3=Unified trade, 4/5/6=UTA variants
+            unified = account_type in (2, 3, 4, 5, 6, "2", "3", "4", "5", "6", "UNIFIED", "UTA")
             return CheckResult(
                 name="account_type",
                 passed=unified,
@@ -406,3 +407,7 @@ class PreflightChecker:
                 critical=False,
                 message=f"Leverage check failed: {exc}",
             )
+
+
+# Alias for backwards-compatibility and test usage
+BybitPreflightChecker = PreflightChecker
