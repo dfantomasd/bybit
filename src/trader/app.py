@@ -22,6 +22,7 @@ CRITICAL SAFETY RULES:
 from __future__ import annotations
 
 import asyncio
+import html
 import os
 import signal
 import sys
@@ -43,6 +44,8 @@ _WS_INTERVAL = "1"  # 1-minute klines over WS
 _MIN_SEED_BARS = 60  # bars to fetch from REST at startup
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
+_TRAINING_HEARTBEAT_SECONDS = 30.0
+_TRAINING_TIMEOUT_SECONDS = 900.0
 _BALANCE_REFRESH_INTERVAL = 60.0  # seconds between balance refreshes
 _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
@@ -439,16 +442,51 @@ class TradingApplication:
             str(label_bps),
         ]
         log.info("model_training.started", min_samples=min_samples, horizon=horizon, label_bps=label_bps)
+        started_at = datetime.now(tz=UTC)
+
+        def code_text(value: str, limit: int = 1500) -> str:
+            return html.escape(value[-limit:])
+
         try:
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            stdout_b, stderr_b = await proc.communicate()
+            communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
+            timed_out = False
+            while True:
+                try:
+                    stdout_b, stderr_b = await asyncio.wait_for(
+                        asyncio.shield(communicate_task),
+                        timeout=_TRAINING_HEARTBEAT_SECONDS,
+                    )
+                    break
+                except TimeoutError:
+                    elapsed = (datetime.now(tz=UTC) - started_at).total_seconds()
+                    if elapsed >= _TRAINING_TIMEOUT_SECONDS:
+                        timed_out = True
+                        if proc.returncode is None:
+                            proc.kill()
+                        try:
+                            stdout_b, stderr_b = await asyncio.wait_for(communicate_task, timeout=10.0)
+                        except TimeoutError:
+                            communicate_task.cancel()
+                            stdout_b = b""
+                            stderr_b = f"training timeout after {elapsed:.0f}s".encode()
+                        break
+                    if self._telegram_bot is not None:
+                        await self._telegram_bot.notify(
+                            "⏳ <b>Training still running</b>\n"
+                            f"elapsed=<code>{int(elapsed)}s</code>, "
+                            f"min_samples=<code>{min_samples}</code>, horizon=<code>{horizon}m</code>"
+                        )
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()
-            if proc.returncode == 0 and "Checkpoint saved" in stdout:
+            if timed_out:
+                self._last_training_message = stderr or stdout or "training timeout"
+                text = "❌ <b>Training timed out</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
+            elif proc.returncode == 0 and "Checkpoint saved" in stdout:
                 self._last_training_message = stdout.splitlines()[-2] if len(stdout.splitlines()) >= 2 else stdout
                 if (
                     self._model_registry is not None
@@ -456,17 +494,20 @@ class TradingApplication:
                     and self._trade_journal.is_enabled
                 ):
                     await self._model_registry.load_active_model()
-                text = "✅ <b>Training completed</b>\n" + f"<code>{self._last_training_message}</code>"
+                text = "✅ <b>Training completed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             elif proc.returncode == 0:
                 self._last_training_message = stdout or stderr or "training finished without checkpoint"
-                text = "⚠️ <b>Training finished without checkpoint</b>\n" + f"<code>{self._last_training_message}</code>"
+                text = (
+                    "⚠️ <b>Training finished without checkpoint</b>\n"
+                    + f"<code>{code_text(self._last_training_message)}</code>"
+                )
             else:
                 self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
-                text = "❌ <b>Training failed</b>\n" + f"<code>{self._last_training_message[-1500:]}</code>"
+                text = "❌ <b>Training failed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             log.info("model_training.finished", returncode=proc.returncode, message=self._last_training_message)
         except Exception as exc:
             self._last_training_message = str(exc)
-            text = f"❌ <b>Training crashed</b>\n<code>{exc}</code>"
+            text = f"❌ <b>Training crashed</b>\n<code>{code_text(str(exc))}</code>"
             log.warning("model_training.crashed", error=str(exc))
         if self._telegram_bot is not None:
             await self._telegram_bot.notify(text)
