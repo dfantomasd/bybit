@@ -16,6 +16,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import uuid
 from decimal import Decimal
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
@@ -613,11 +614,12 @@ async def test_baseline_prediction_written_without_model() -> None:
 
 @pytest.mark.asyncio
 async def test_first_training_dataset_can_be_built_without_existing_model() -> None:
-    """prediction_events table accepts inserts with only baseline fields."""
+    """prediction_events table accepts baseline inserts linked to feature snapshots."""
     from trader.storage.trade_journal import TradeJournal
 
     journal = TradeJournal.__new__(TradeJournal)
     journal._enabled = True
+    snapshot_id = str(uuid.uuid4())
 
     calls: list[dict[str, Any]] = []
 
@@ -634,10 +636,13 @@ async def test_first_training_dataset_can_be_built_without_existing_model() -> N
         score=0.65,
         strategy_signal="Buy",
         decision="SHADOW_BASELINE",
+        feature_snapshot_id=snapshot_id,
     )
 
     assert len(calls) == 1
     assert "prediction_events" in calls[0]["query"]
+    assert "feature_snapshot_id" in calls[0]["query"]
+    assert calls[0]["args"][3] == snapshot_id
 
 
 # ===========================================================================

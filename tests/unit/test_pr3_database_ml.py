@@ -171,6 +171,73 @@ async def test_registry_score_falls_back_to_challenger() -> None:
         assert pred.model_version == "challenger_v1"
 
 
+@pytest.mark.asyncio
+async def test_registry_load_active_prefers_champion() -> None:
+    """load_active_model should load CHAMPION before any shadow challenger."""
+    champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
+    for i in range(10):
+        champion.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        return_value=[
+            {
+                "version": "champion_v1",
+                "artifact": champion.to_bytes(),
+                "training_samples": champion.training_samples,
+            }
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    loaded = await registry.load_active_model()
+
+    assert loaded is not None
+    assert loaded.version == "champion_v1"
+    assert loaded.status == ModelStatus.CHAMPION
+    assert registry.champion is loaded
+    assert registry.challenger is None
+    assert journal._fetch.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
+    """A freshly trained SHADOW_CHALLENGER should be usable for shadow scoring after restart."""
+    challenger = ChallengerModel(version="challenger_v1", feature_names=["f1"])
+    for i in range(10):
+        challenger.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "version": "challenger_v1",
+                    "status": ModelStatus.SHADOW_CHALLENGER,
+                    "artifact": challenger.to_bytes(),
+                    "training_samples": challenger.training_samples,
+                }
+            ],
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    loaded = await registry.load_active_model()
+
+    assert loaded is not None
+    assert loaded.version == "challenger_v1"
+    assert loaded.status == ModelStatus.SHADOW_CHALLENGER
+    assert registry.champion is None
+    assert registry.challenger is loaded
+    pred = registry.score([5.0])
+    if pred is not None:
+        assert pred.model_version == "challenger_v1"
+        assert pred.is_live_decision is False
+
+
 # ---------------------------------------------------------------------------
 # TradeJournal: schema validation (mocked pool)
 # ---------------------------------------------------------------------------

@@ -163,7 +163,7 @@ class TradingApplication:
             bybit_rest_url=bybit_base,
             trading_mode=self._settings.TRADING_MODE,
             system_status=self._status,
-            model_enabled=self._settings.LLM_ENABLED,
+            model_enabled=self._settings.MODEL_ENABLED,
         )
 
         result = await self._health_checker.run_preflight()
@@ -1541,7 +1541,7 @@ class TradingApplication:
 
                 self._model_registry = ModelRegistry(trade_journal=self._trade_journal)
                 if self._trade_journal is not None and self._trade_journal.is_enabled:
-                    await self._model_registry.load_champion()
+                    await self._model_registry.load_active_model()
                 log.info("model_registry.initialized")
             except Exception as _mr_exc:
                 log.warning("model_registry.init_failed", error=str(_mr_exc))
@@ -1671,6 +1671,24 @@ class TradingApplication:
                     log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
 
             # ML shadow scoring — only records metadata, never influences trade decisions
+            if self._trade_journal is not None and self._trade_journal.is_enabled and snapshot_id:
+                try:
+                    await self._trade_journal.record_prediction_event(
+                        symbol=proposal.symbol,
+                        interval=_WS_INTERVAL,
+                        model_version="RULE_BASELINE_V1",
+                        score=proposal.confidence,
+                        strategy_signal=proposal.side.value,
+                        decision="SHADOW_BASELINE",
+                        feature_snapshot_id=snapshot_id,
+                    )
+                except Exception as _baseline_exc:
+                    log.debug(
+                        "strategy_loop.baseline_prediction_failed",
+                        symbol=proposal.symbol,
+                        error=str(_baseline_exc),
+                    )
+
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 try:
                     prediction = self._model_registry.score(vec.values)

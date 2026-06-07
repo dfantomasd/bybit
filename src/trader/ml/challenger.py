@@ -197,6 +197,13 @@ class ModelRegistry:
         if self._challenger is not None:
             self._challenger.partial_fit(features, label)
 
+    async def load_active_model(self) -> ChallengerModel | None:
+        """Load champion first; fall back to latest non-authoritative challenger."""
+        champion = await self.load_champion()
+        if champion is not None:
+            return champion
+        return await self.load_latest_challenger()
+
     async def save_checkpoint(self, model: ChallengerModel) -> None:
         """Persist model checkpoint to PostgreSQL."""
         if self._journal is None or not self._journal.is_enabled:
@@ -248,4 +255,30 @@ class ModelRegistry:
             return model
         except Exception as exc:
             log.debug("model_registry.load_champion_failed", exc_info=exc)
+            return None
+
+    async def load_latest_challenger(self) -> ChallengerModel | None:
+        """Load the latest challenger from PostgreSQL for non-authoritative scoring."""
+        if self._journal is None or not self._journal.is_enabled:
+            return None
+        try:
+            rows = await self._journal._fetch(
+                """
+                SELECT version, status, artifact, training_samples
+                FROM model_versions
+                WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER') AND artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            if not rows:
+                return None
+            row = rows[0]
+            model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
+            model.status = str(row["status"]) if "status" in row else ModelStatus.SHADOW_CHALLENGER
+            self._challenger = model
+            log.info("model_registry.challenger_loaded", version=model.version, samples=model.training_samples)
+            return model
+        except Exception as exc:
+            log.debug("model_registry.load_challenger_failed", exc_info=exc)
             return None
