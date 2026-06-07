@@ -872,7 +872,7 @@ class TradeJournal:
                 ON po.prediction_id = pe.prediction_id
                 AND po.horizon_minutes = $1
             WHERE po.prediction_id IS NULL
-              AND pe.created_at < now() - ($1 * interval '1 minute')
+              AND pe.created_at < now() - make_interval(mins => $1)
               AND pe.feature_snapshot_id IS NOT NULL
             LIMIT $2
             """,

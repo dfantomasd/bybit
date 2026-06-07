@@ -337,13 +337,15 @@ class TelegramMonitorBot:
 
     def _control_menu(self) -> InlineKeyboardMarkup:
         """Control submenu — safe operations only (no risk escalation, no LIVE activation)."""
+        is_paused = self._controller.is_paused() if self._controller is not None else False
+        if is_paused:
+            pause_btn = InlineKeyboardButton("▶️ Возобновить сделки", callback_data="control:resume")
+        else:
+            pause_btn = InlineKeyboardButton("⏸ Пауза (стоп новых сделок)", callback_data="control:pause")
         rows = [
+            [pause_btn],
             [
-                InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
-                InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
-            ],
-            [
-                InlineKeyboardButton("🔦 Shadow ON", callback_data="mode:shadow"),
+                InlineKeyboardButton("🔦 Shadow вкл", callback_data="mode:shadow"),
                 InlineKeyboardButton("🚫 LIVE заблокирован", callback_data="mode:active"),
             ],
             [
@@ -364,28 +366,28 @@ class TelegramMonitorBot:
     def _limits_menu(self) -> InlineKeyboardMarkup:
         rows = [
             [
-                InlineKeyboardButton("Entries 1", callback_data="limit:entries:1"),
-                InlineKeyboardButton("Entries 2", callback_data="limit:entries:2"),
+                InlineKeyboardButton("Входов 1/мин", callback_data="limit:entries:1"),
+                InlineKeyboardButton("Входов 2/мин", callback_data="limit:entries:2"),
             ],
             [
-                InlineKeyboardButton("Pending 1", callback_data="limit:pending:1"),
-                InlineKeyboardButton("Pending 2", callback_data="limit:pending:2"),
+                InlineKeyboardButton("Ожидающих 1", callback_data="limit:pending:1"),
+                InlineKeyboardButton("Ожидающих 2", callback_data="limit:pending:2"),
             ],
             [
-                InlineKeyboardButton("Same-side 1", callback_data="limit:same_side:1"),
-                InlineKeyboardButton("Same-side 2", callback_data="limit:same_side:2"),
+                InlineKeyboardButton("Одна сторона 1", callback_data="limit:same_side:1"),
+                InlineKeyboardButton("Одна сторона 2", callback_data="limit:same_side:2"),
             ],
             [
-                InlineKeyboardButton("Price ≤10", callback_data="limit:price_cap:10"),
-                InlineKeyboardButton("Price ≤25", callback_data="limit:price_cap:25"),
+                InlineKeyboardButton("Цена ≤$10", callback_data="limit:price_cap:10"),
+                InlineKeyboardButton("Цена ≤$25", callback_data="limit:price_cap:25"),
             ],
             [
-                InlineKeyboardButton("Feature 10", callback_data="limit:feature_symbols:10"),
-                InlineKeyboardButton("Feature 20", callback_data="limit:feature_symbols:20"),
+                InlineKeyboardButton("Символов 10", callback_data="limit:feature_symbols:10"),
+                InlineKeyboardButton("Символов 20", callback_data="limit:feature_symbols:20"),
             ],
             [
-                InlineKeyboardButton("Exec 5", callback_data="limit:exec_candidates:5"),
-                InlineKeyboardButton("Exec 10", callback_data="limit:exec_candidates:10"),
+                InlineKeyboardButton("Кандидаты 5", callback_data="limit:exec_candidates:5"),
+                InlineKeyboardButton("Кандидаты 10", callback_data="limit:exec_candidates:10"),
             ],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
         ]
@@ -769,75 +771,81 @@ class TelegramMonitorBot:
         is_shadow = self._controller.is_shadow() if self._controller is not None else True
         is_paused = self._controller.is_paused() if self._controller is not None else False
 
-        require("DB connected", bool(db_diag.get("connected")), "storage is reachable")
-        require("Fresh 1m candle", latest_age_s is not None and latest_age_s <= 600, self._age_label(latest_age_s))
-        require("1m history", int(candles.get("1") or 0) >= 1000, f"{int(candles.get('1') or 0)} candles")
-        require("5m history", int(candles.get("5") or 0) >= 200, f"{int(candles.get('5') or 0)} candles")
-        require("15m history", int(candles.get("15") or 0) >= 200, f"{int(candles.get('15') or 0)} candles")
-        require("1h history", int(candles.get("60") or 0) >= 100, f"{int(candles.get('60') or 0)} candles")
-        require("Active symbols", len(active_symbols) >= 3, f"{len(active_symbols)} symbols")
-        require("Feature snapshots", feature_snapshots >= 1000, f"{feature_snapshots} snapshots")
-        require("Labelled 15m samples", trainable_15m >= 1000, f"{trainable_15m} samples")
-        require("Prediction outcomes", prediction_outcomes >= 1000, f"{prediction_outcomes} outcomes")
+        require("БД подключена", bool(db_diag.get("connected")), "хранилище доступно")
+        require("Свежая 1m свеча", latest_age_s is not None and latest_age_s <= 600, self._age_label(latest_age_s))
+        require("История 1m", int(candles.get("1") or 0) >= 1000, f"{int(candles.get('1') or 0)} свечей")
+        require("История 5m", int(candles.get("5") or 0) >= 200, f"{int(candles.get('5') or 0)} свечей")
+        require("История 15m", int(candles.get("15") or 0) >= 200, f"{int(candles.get('15') or 0)} свечей")
+        require("История 1h", int(candles.get("60") or 0) >= 100, f"{int(candles.get('60') or 0)} свечей")
+        require("Активных символов", len(active_symbols) >= 3, f"{len(active_symbols)} символов")
+        require("Снимков признаков", feature_snapshots >= 1000, f"{feature_snapshots} снимков")
+        require("Размеченных примеров (15m)", trainable_15m >= 1000, f"{trainable_15m} примеров")
+        require("Записано исходов", prediction_outcomes >= 1000, f"{prediction_outcomes} исходов")
         require(
-            "Training completed",
+            "Обучение выполнено",
             bool(latest_model.get("version")) or latest_run.get("status") == "COMPLETED",
-            f"run={latest_run.get('status', 'none')} model={latest_model.get('version') or 'none'}",
+            f"запуск={latest_run.get('status', 'нет')} модель={latest_model.get('version') or 'нет'}",
         )
-        require("Shadow mode", bool(is_shadow), "orders are not live yet")
-        require("Not paused", not bool(is_paused), "scanner can keep collecting/evaluating")
-        require("Websocket alive", ws_age is None or float(ws_age) <= 180, self._age_label(ws_age))
+        require("Режим наблюдения (Shadow)", bool(is_shadow), "ордера ещё не реальные")
+        require("Не на паузе", not bool(is_paused), "сканер продолжает собирать и оценивать")
+        require("WebSocket активен", ws_age is None or float(ws_age) <= 180, self._age_label(ws_age))
 
-        warn_if(trainable_15m < 2000, f"Trainable 15m is {trainable_15m}; preferred before real CANARY is 2000+.")
-        warn_if(gate_total < 50, f"Model gate has only {gate_total} labelled shadow decisions; preferred is 50+.")
+        warn_if(
+            trainable_15m < 2000,
+            f"Размеченных примеров {trainable_15m} — желательно 2000+ перед реальным CANARY.",
+        )
+        warn_if(gate_total < 50, f"Фильтр модели оценён только на {gate_total} наблюдениях; нужно 50+.")
         if gate_lift is not None:
             warn_if(
                 float(gate_lift) <= 0,
-                f"Model gate lift is {float(gate_lift):+.2f} bps; better to wait for positive lift.",
+                f"Польза фильтра: {float(gate_lift):+.2f} bps — лучше подождать положительного значения.",
             )
         else:
-            warnings.append("Model gate lift is not measured yet.")
-        warn_if(paper_gate_count < 20, f"Paper model-gate sample is {paper_gate_count}; preferred is 20+.")
-        warn_if(paper_gate_count >= 20 and paper_gate_bps <= 0, f"Paper model-gate PnL is {paper_gate_bps:+.1f} bps.")
-        warn_if(paper_base_count == 0, "Paper baseline has no completed trades yet.")
-        warn_if(hour_api_rejected > 0, f"API rejected {hour_api_rejected} actions in the last hour.")
-        warn_if(hour_min_notional > 0, f"Min-notional rejected {hour_min_notional} actions in the last hour.")
-        warn_if(bool(runtime.get("model_gate_canary_enabled")), "Model gate canary is already enabled.")
+            warnings.append("Польза фильтра ещё не измерена (нет размеченных наблюдений).")
+        warn_if(paper_gate_count < 20, f"Бумажных сделок с фильтром: {paper_gate_count} — нужно 20+.")
+        warn_if(
+            paper_gate_count >= 20 and paper_gate_bps <= 0,
+            f"Бумажный P&L с фильтром: {paper_gate_bps:+.1f} bps (отрицательный).",
+        )
+        warn_if(paper_base_count == 0, "Бумажных сделок без фильтра ещё нет.")
+        warn_if(hour_api_rejected > 0, f"API отклонил {hour_api_rejected} действий за последний час.")
+        warn_if(hour_min_notional > 0, f"Мало средств: {hour_min_notional} отказов по мин. объёму за час.")
+        warn_if(bool(runtime.get("model_gate_canary_enabled")), "Фильтр модели уже включён (canary).")
         diag_error = diag.get("error")
         db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
-        warn_if(bool(diag_error), f"Runtime diagnostics error: {html.escape(str(diag_error))}")
-        warn_if(bool(db_error), f"DB diagnostics error: {html.escape(str(db_error))}")
+        warn_if(bool(diag_error), f"Ошибка диагностики: {html.escape(str(diag_error))}")
+        warn_if(bool(db_error), f"Ошибка БД: {html.escape(str(db_error))}")
         if loop_at in (None, "never"):
-            warnings.append("Strategy loop timestamp is not available.")
+            warnings.append("Временная метка стратегии недоступна.")
 
         failed = [item for item in checks if not item[1]]
         if failed:
-            status = "❌ NOT READY"
+            status = "❌ НЕ ГОТОВО"
         elif warnings:
-            status = "⚠️ ALMOST READY"
+            status = "⚠️ ПОЧТИ ГОТОВО"
         else:
-            status = "✅ READY"
+            status = "✅ ГОТОВО"
 
         lines = [
-            "<b>🚦 CANARY readiness</b>",
-            f"Status: <b>{status}</b>",
+            "<b>🚦 Готовность к CANARY</b>",
+            f"Статус: <b>{status}</b>",
             "",
-            "<b>Required</b>",
+            "<b>Обязательные условия</b>",
         ]
         for label, ok, detail in checks:
             icon = "✅" if ok else "❌"
             lines.append(f"{icon} {label}: <code>{html.escape(str(detail))}</code>")
-        lines.extend(["", "<b>Warnings</b>"])
+        lines.extend(["", "<b>Предупреждения</b>"])
         if warnings:
             lines.extend(f"⚠️ {warning}" for warning in warnings[:8])
         else:
-            lines.append("✅ No warnings.")
+            lines.append("✅ Всё в порядке.")
         lines.extend(
             [
                 "",
-                "<b>Next</b>",
-                "Keep CANARY tiny: 1 position, low notional, model live decisions still disabled.",
-                "Telegram cannot enable LIVE; env vars must be changed deliberately on Render.",
+                "<b>Следующий шаг</b>",
+                "CANARY: 1 позиция, малый объём, решения модели пока отключены.",
+                "Включить LIVE нельзя из Telegram — только переменные окружения на Render.",
             ]
         )
         return "\n".join(lines)
@@ -963,6 +971,11 @@ class TelegramMonitorBot:
         if len(latest_run_error) > 120:
             latest_run_error = f"{latest_run_error[:117]}..."
         latest_run_error = html.escape(latest_run_error)
+        model_quality = model_metrics.get("quality")
+        precision = model_metrics.get("precision")
+        lift_bps = model_metrics.get("lift_bps")
+        expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
+        validation_samples = model_metrics.get("validation_samples")
         gate = db_diag.get("shadow_gate_15m", {}) or {}
         gate_total = gate.get("total_count", 0) or 0
         gate_pass = gate.get("pass_count", 0) or 0
@@ -1079,11 +1092,36 @@ class TelegramMonitorBot:
             f"  (по горизонтам: <code>{outcome_breakdown}</code>)",
             "",
             "━━ 🧠 МОДЕЛЬ ━━",
-            f"Обучена: <code>{last_training}</code>  (<code>{samples}</code> примеров)",
+            f"Обучена: <code>{last_training}</code>  (на <code>{samples}</code> примерах)",
             f"Статус: {model_status_label}",
             f"Чемпион: <code>{'нет' if champion_ver == 'none' else champion_ver}</code>"
             + ("  ← нужно повысить" if not step4_ok and step3_ok else ""),
-            f"Следующее автообучение: примерно через <code>{_samples_to_next}</code> примеров",
+            f"Автообучение: ✅ включено — следующее через ~<code>{_samples_to_next}</code> новых примеров",
+        ]
+
+        # качество модели — с объяснениями
+        if model_quality or precision is not None:
+            _q_labels = {"GOOD": "✅ Хорошая", "WEAK": "⚠️ Слабая", "INSUFFICIENT_VALIDATION": "⚠️ Мало данных для оценки"}
+            _q_label = _q_labels.get(model_quality or "", f"❓ {model_quality or 'не оценена'}")
+            lines.append(f"Качество: {_q_label}")
+            if validation_samples:
+                lines.append(f"  ↳ проверено на <code>{validation_samples}</code> невиданных примерах")
+            if precision is not None:
+                _prec = float(precision)
+                _prec_note = "✅ угадывает чаще половины" if _prec >= 0.5 else "⚠️ угадывает реже половины"
+                lines.append(f"  ↳ точность: <code>{_prec:.1%}</code> ({_prec_note}; нужно ≥50%)")
+            if expectancy_bps is not None:
+                _exp = float(expectancy_bps)
+                _exp_note = "✅ прибыльная" if _exp > 0 else "⚠️ убыточная в среднем"
+                lines.append(f"  ↳ ожидаемая доходность: <code>{_exp:+.1f} bps</code> за сделку ({_exp_note})")
+            if lift_bps is not None:
+                _lb = float(lift_bps)
+                _lb_note = "✅ лучше случайного" if _lb > 0 else "⚠️ хуже случайного"
+                lines.append(f"  ↳ отбор сигналов: <code>{_lb:+.2f} bps</code> vs базовый ({_lb_note})")
+        elif db_model_version:
+            lines.append("Качество: ❓ метрики ещё не рассчитаны")
+
+        lines += [
             "",
             "━━ 🔍 ОЦЕНКА ФИЛЬТРА (15m) ━━",
         ]
@@ -1138,7 +1176,14 @@ class TelegramMonitorBot:
             await self._reply(update, "Control not available.")
             return
         await self._controller.pause()
-        await self._reply(update, "⏸ Trading <b>paused</b>. No new entries will be opened.\nUse /resume to restart.")
+        await self._reply(
+            update,
+            "⏸ <b>Бот приостановлен.</b>\n"
+            "✅ Сбор данных (свечи, WebSocket, снимки признаков) — <b>продолжается</b>.\n"
+            "✅ Оценка сигналов моделью — <b>продолжается</b>.\n"
+            "❌ Открытие новых сделок — <b>остановлено</b>.\n\n"
+            "Используйте /resume или кнопку меню для возобновления.",
+        )
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1148,10 +1193,15 @@ class TelegramMonitorBot:
             await self._reply(update, "Control not available.")
             return
         if not self._controller.is_paused():
-            await self._reply(update, "Trading is not paused.")
+            await self._reply(update, "Бот сейчас не на паузе.")
             return
         await self._controller.resume()
-        await self._reply(update, "▶️ Trading <b>resumed</b>.")
+        await self._reply(
+            update,
+            "▶️ <b>Бот возобновлён.</b>\n"
+            "✅ Поиск и открытие новых сделок снова активно.\n"
+            "<i>(Если режим Shadow включён — сделки по-прежнему не реальные)</i>",
+        )
 
     async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorised(update):
@@ -1422,13 +1472,21 @@ class TelegramMonitorBot:
             await self._controller.pause()
             await self._button_reply(
                 update,
-                "Trading <b>paused</b>. No new entries will be opened.",
+                "⏸ <b>Приостановлено.</b>\n"
+                "✅ Данные и оценка модели — продолжаются.\n"
+                "❌ Новые сделки — остановлены.",
                 reply_markup=self._main_menu(),
             )
             return
         if action == "resume":
             await self._controller.resume()
-            await self._button_reply(update, "Trading <b>resumed</b>.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "▶️ <b>Возобновлено.</b>\n"
+                "✅ Сделки снова активны.\n"
+                "<i>(Shadow режим = сделки не реальные)</i>",
+                reply_markup=self._main_menu(),
+            )
             return
         if action == "train":
             if self._controller.start_training is None:
@@ -1583,29 +1641,43 @@ class TelegramMonitorBot:
 
     def _limits_text(self) -> str:
         if self._controller is None or self._controller.runtime_settings is None:
-            return "<b>Runtime limits</b>\nNot available."
+            return "<b>⚙️ Параметры</b>\nНедоступно."
         s = self._controller.runtime_settings()
         gate_quality = s.get("model_gate_quality", {}) or {}
+        is_paused = bool(s.get("paused", False))
+        is_shadow = bool(s.get("shadow", True))
+        state_line = ("⏸ Пауза — новые сделки НЕ открываются" if is_paused else "▶️ Работает — сделки активны")
+        shadow_line = ("🔦 Shadow — сделки не реальные (наблюдение)" if is_shadow else "💰 Режим: РЕАЛЬНЫЕ сделки")
+        gate_obs = int(gate_quality.get("gate_total_count") or 0)
+        gate_lift = gate_quality.get("gate_lift_vs_all_bps")
+        gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "н/д"
         return (
-            "<b>Runtime limits</b>\n"
-            f"Paused: <code>{str(s.get('paused', False)).lower()}</code>\n"
-            f"Shadow: <code>{str(s.get('shadow', True)).lower()}</code>\n"
-            f"Risk: <code>{s.get('risk_profile', 'n/a')}</code>\n"
-            f"Max entries/min: <code>{s.get('max_entries_per_minute', 'n/a')}</code>\n"
-            f"Max pending: <code>{s.get('max_concurrent_pending', 'n/a')}</code>\n"
-            f"Max same-side: <code>{s.get('max_same_side', 'n/a')}</code>\n"
-            f"Price cap: <code>{s.get('screener_max_price_usd', 'n/a')}</code>\n"
-            f"Feature symbols: <code>{s.get('feature_max_symbols', 'n/a')}</code>\n"
-            f"Exec candidates: <code>{s.get('execution_candidates', 'n/a')}</code>\n"
-            f"Model gate canary: <code>{str(s.get('model_gate_canary_enabled', False)).lower()}</code>\n"
-            f"Model gate threshold: <code>{s.get('model_gate_threshold', 'n/a')}</code>\n\n"
-            f"Model gate quality: <code>{gate_quality.get('quality', 'n/a')}</code>, "
-            f"best=<code>{gate_quality.get('best_threshold', 'n/a')}</code>, "
-            f"obs=<code>{gate_quality.get('gate_total_count', 0)}</code>, "
-            f"lift=<code>{gate_quality.get('gate_lift_vs_all_bps', 'n/a')}</code>\n\n"
-            "Change: <code>/limits entries 1</code>, <code>/limits pending 1</code>, "
-            "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>\n"
-            "Model gate: <code>/limits model_gate on</code>, <code>/limits model_gate_threshold 0.60</code>"
+            "<b>⚙️ Текущие параметры</b>\n\n"
+            f"{state_line}\n"
+            f"{shadow_line}\n"
+            f"Риск-профиль: <code>{s.get('risk_profile', 'н/д')}</code>\n\n"
+            "<b>Ограничения торговли:</b>\n"
+            f"• Входов в минуту: <code>{s.get('max_entries_per_minute', 'н/д')}</code>"
+            " — макс. сделок за 1 минуту\n"
+            f"• Ожидающих ордеров: <code>{s.get('max_concurrent_pending', 'н/д')}</code>"
+            " — ордеров одновременно\n"
+            f"• Одна сторона (Long/Short): <code>{s.get('max_same_side', 'н/д')}</code>"
+            " — макс. позиций в одну сторону\n"
+            f"• Цена монеты ≤ <code>{s.get('screener_max_price_usd', 'н/д')}</code> USD\n"
+            f"• Символов в анализе: <code>{s.get('feature_max_symbols', 'н/д')}</code>\n"
+            f"• Кандидатов на сделку: <code>{s.get('execution_candidates', 'н/д')}</code>\n\n"
+            "<b>Фильтр модели:</b>\n"
+            f"• Включён: <code>{'да' if s.get('model_gate_canary_enabled', False) else 'нет'}</code>"
+            " — модель блокирует слабые сигналы\n"
+            f"• Порог уверенности: <code>{s.get('model_gate_threshold', 'н/д')}</code>"
+            " — выше = строже фильтр\n"
+            f"• Качество: <code>{gate_quality.get('quality', 'н/д')}</code>,"
+            f" наблюдений: <code>{gate_obs}</code>,"
+            f" польза: <code>{gate_lift_str}</code>\n\n"
+            "<b>Изменить кнопками ниже или командой:</b>\n"
+            "<code>/limits entries 1</code> | <code>/limits pending 1</code> | "
+            "<code>/limits price_cap 25</code>\n"
+            "<code>/limits model_gate on</code> | <code>/limits model_gate_threshold 0.60</code>"
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
