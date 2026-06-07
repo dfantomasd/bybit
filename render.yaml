@@ -83,6 +83,14 @@ services:
         value: "true"
       - key: MODEL_ALLOW_LIVE_DECISIONS
         value: "false"
+      - key: MODEL_AUTO_TRAIN_ENABLED
+        value: "true"
+      - key: MODEL_AUTO_TRAIN_MIN_SAMPLES
+        value: "1000"
+      - key: MODEL_AUTO_TRAIN_INCREMENT_SAMPLES
+        value: "1000"
+      - key: MODEL_AUTO_TRAIN_CHECK_SECONDS
+        value: "300"
       # Secrets (not synced — set via Render dashboard)
       - key: BYBIT_API_KEY
         sync: false
