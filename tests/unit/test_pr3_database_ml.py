@@ -345,6 +345,21 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"horizon_minutes": 5, "cnt": 300}, {"horizon_minutes": 15, "cnt": 777}]
         if "FROM prediction_outcomes" in query:
             return [{"cnt": 900}]
+        if "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in query:
+            return [
+                {
+                    "decision": "GATE_PASS",
+                    "cnt": 12,
+                    "avg_net_return_bps": 4.5,
+                    "precision": 0.58,
+                },
+                {
+                    "decision": "GATE_BLOCK",
+                    "cnt": 8,
+                    "avg_net_return_bps": -1.5,
+                    "precision": 0.25,
+                },
+            ]
         if "FROM training_runs" in query:
             return [
                 {
@@ -378,6 +393,8 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["prediction_outcomes_by_horizon"] == {"5": 300, "15": 777}
     assert diag["latest_training_run"]["status"] == "COMPLETED"
     assert diag["latest_model_version"]["version"] == "v20260607_1000"
+    assert diag["shadow_gate_15m"]["pass_count"] == 12
+    assert diag["shadow_gate_15m"]["pass_vs_block_bps"] == 6.0
 
 
 # ---------------------------------------------------------------------------
@@ -444,6 +461,15 @@ async def test_database_model_telegram_screen() -> None:
                     "walk_forward_expectancy_bps": 4.2,
                 },
             },
+            "shadow_gate_15m": {
+                "model_version": "v20260607_1000",
+                "total_count": 20,
+                "pass_count": 12,
+                "block_count": 8,
+                "pass_avg_net_return_bps": 4.5,
+                "block_avg_net_return_bps": -1.5,
+                "lift_vs_all_bps": 2.4,
+            },
         }
 
     async def fake_health() -> Any:
@@ -498,3 +524,5 @@ async def test_database_model_telegram_screen() -> None:
     assert "Quality" in text
     assert "GOOD" in text
     assert "+2.70 bps" in text
+    assert "Shadow gate 15m" in text
+    assert "12/20 pass" in text

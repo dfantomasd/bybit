@@ -1984,12 +1984,20 @@ class TradingApplication:
                     prediction = self._model_registry.score(vec.values)
                     if prediction is not None:
                         if self._trade_journal is not None and self._trade_journal.is_enabled:
+                            gate_decision = None
+                            if self._settings.MODEL_SHADOW_GATE_ENABLED:
+                                gate_decision = (
+                                    "GATE_PASS"
+                                    if prediction.score >= self._settings.MODEL_SHADOW_GATE_THRESHOLD
+                                    else "GATE_BLOCK"
+                                )
                             await self._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,
                                 model_version=prediction.model_version,
                                 score=prediction.score,
                                 strategy_signal=proposal.side.value,
+                                decision=gate_decision,
                                 feature_snapshot_id=snapshot_id,
                             )
                     else:

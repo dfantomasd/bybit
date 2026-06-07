@@ -772,6 +772,16 @@ class TelegramMonitorBot:
         precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
         lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
         expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
+        gate = db_diag.get("shadow_gate_15m", {}) or {}
+        gate_total = gate.get("total_count", 0) or 0
+        gate_pass = gate.get("pass_count", 0) or 0
+        gate_block = gate.get("block_count", 0) or 0
+        gate_pass_avg = gate.get("pass_avg_net_return_bps")
+        gate_block_avg = gate.get("block_avg_net_return_bps")
+        gate_lift = gate.get("lift_vs_all_bps")
+        gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
+        gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
+        gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
 
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
@@ -800,6 +810,10 @@ class TelegramMonitorBot:
             f"Precision:          <code>{precision_str}</code>",
             f"Lift vs baseline:   <code>{lift_str}</code>",
             f"Walk-forward exp:   <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
+            f"Shadow gate 15m:    <code>{gate_pass}/{gate_total} pass</code>, block=<code>{gate_block}</code>",
+            f"Gate pass avg:      <code>{gate_pass_avg_str}</code>",
+            f"Gate block avg:     <code>{gate_block_avg_str}</code>",
+            f"Gate lift vs all:   <code>{gate_lift_str}</code>",
             f"Drift:              <code>{drift}</code>",
             "Model live decisions: <b>disabled</b>",
         ]
