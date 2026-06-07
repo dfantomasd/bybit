@@ -48,6 +48,14 @@ _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
 _SUPERVISOR_CHECK_INTERVAL = 5.0  # seconds between supervisor task health checks
 _SUPERVISOR_HEARTBEAT_INTERVAL = 60.0  # seconds between heartbeat log lines
 _DIAG_WINDOW = timedelta(hours=1)  # sliding window for per-hour diagnostics
+_INTERVAL_MS = {
+    "1": 60_000,
+    "3": 180_000,
+    "5": 300_000,
+    "15": 900_000,
+    "30": 1_800_000,
+    "60": 3_600_000,
+}
 _CRITICAL_TASK_NAMES = frozenset(
     {
         "screener",
@@ -111,6 +119,18 @@ class TradingApplication:
         self._ws_private: Any | None = None
         # ML shadow scoring
         self._model_registry: Any | None = None
+
+    def _market_data_intervals(self) -> list[str]:
+        """Configured kline intervals with 1m kept first for strategy compatibility."""
+        if self._settings is None or not self._settings.MULTITIMEFRAME_ENABLED:
+            return [_WS_INTERVAL]
+
+        intervals: list[str] = []
+        for interval in [_WS_INTERVAL, *self._settings.MULTITIMEFRAME_INTERVALS]:
+            interval = str(interval).strip()
+            if interval and interval not in intervals:
+                intervals.append(interval)
+        return intervals
 
     # ------------------------------------------------------------------
     # Startup
@@ -571,7 +591,8 @@ class TradingApplication:
             await self._seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._ws_public is not None:
-                topics = [f"kline.{_WS_INTERVAL}.{symbol}", f"tickers.{symbol}"]
+                topics = [f"kline.{interval}.{symbol}" for interval in self._market_data_intervals()]
+                topics.append(f"tickers.{symbol}")
                 await self._ws_public.subscribe(topics)
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
 
@@ -593,6 +614,8 @@ class TradingApplication:
             min_volume_usd=self._settings.SCREENER_MIN_VOLUME_USD,
             max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
             min_top_book_depth_usd=self._settings.SCREENER_MIN_TOP_BOOK_DEPTH_USD,
+            min_price_usd=self._settings.SCREENER_MIN_PRICE_USD,
+            max_price_usd=self._settings.SCREENER_MAX_PRICE_USD,
             interval_s=self._settings.SCREENER_REFRESH_SECONDS,
             denylist=list(self._settings.SCREENER_DENYLIST),
             on_symbols_added=self._on_screener_symbols_added,
@@ -636,7 +659,7 @@ class TradingApplication:
         seed_symbols = symbols or _SYMBOLS
 
         for symbol in seed_symbols:
-            for interval in [_WS_INTERVAL]:
+            for interval in self._market_data_intervals():
                 try:
                     resp = await self._bybit_adapter._rest.get_kline(
                         category="linear",
@@ -663,6 +686,23 @@ class TradingApplication:
                                 confirm=True,  # historical bars are confirmed
                             )
                             self._candle_store.add(symbol, interval, candle)
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                                close_time = datetime.fromtimestamp((ts_ms + bar_ms - 1) / 1000, tz=UTC)
+                                await self._trade_journal.upsert_market_candle(
+                                    symbol=symbol,
+                                    interval=interval,
+                                    open_time=open_time,
+                                    close_time=close_time,
+                                    open=Decimal(str(row[1])),
+                                    high=Decimal(str(row[2])),
+                                    low=Decimal(str(row[3])),
+                                    close=Decimal(str(row[4])),
+                                    volume=Decimal(str(row[5])),
+                                    turnover=Decimal(str(row[6])),
+                                    confirmed=True,
+                                    source="rest_seed",
+                                )
                             count += 1
                         except (IndexError, ValueError):
                             continue
@@ -702,7 +742,8 @@ class TradingApplication:
         category = self._settings.DEFAULT_MARKET_CATEGORY
         subs: list[str] = []
         for symbol in symbols:
-            subs.append(f"kline.{_WS_INTERVAL}.{symbol}")
+            for interval in self._market_data_intervals():
+                subs.append(f"kline.{interval}.{symbol}")
             subs.append(f"tickers.{symbol}")
 
         event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
@@ -733,15 +774,7 @@ class TradingApplication:
 
                             # Persist confirmed candle to PostgreSQL (best-effort)
                             if self._trade_journal is not None and self._trade_journal.is_enabled:
-                                _interval_ms = {
-                                    "1": 60_000,
-                                    "3": 180_000,
-                                    "5": 300_000,
-                                    "15": 900_000,
-                                    "30": 1_800_000,
-                                    "60": 3_600_000,
-                                }
-                                bar_ms = _interval_ms.get(event.interval, 60_000)
+                                bar_ms = _INTERVAL_MS.get(event.interval, 60_000)
                                 close_time = datetime.fromtimestamp(
                                     (event.open_time.timestamp() * 1000 + bar_ms - 1) / 1000,
                                     tz=UTC,

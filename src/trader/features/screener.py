@@ -180,6 +180,8 @@ class MarketScreener:
         min_volume_usd:         Minimum 24h turnover (USD) to enter wide universe.
         max_spread_bps:         Maximum bid-ask spread (basis points) allowed.
         min_top_book_depth_usd: Minimum top-of-book depth required.
+        min_price_usd:          Optional minimum last price; 0 disables.
+        max_price_usd:          Optional maximum last price; 0 disables.
         interval_s:             Screener refresh period (seconds).
         denylist:               Symbols explicitly excluded (special zones, etc.).
         on_symbols_added:       Callback when symbols enter the feature universe.
@@ -189,7 +191,6 @@ class MarketScreener:
 
         # Deprecated / backward-compat
         max_symbols:            Maps to feature_max_symbols if provided.
-        max_price_usd:          Ignored (kept for API compatibility).
     """
 
     def __init__(
@@ -202,6 +203,8 @@ class MarketScreener:
         min_volume_usd: float = 20_000_000.0,
         max_spread_bps: float = 8.0,
         min_top_book_depth_usd: float = 5_000.0,
+        min_price_usd: float = 0.0,
+        max_price_usd: float = 0.0,
         interval_s: int = 900,
         denylist: list[str] | None = None,
         on_symbols_added: Callable[[list[str]], Awaitable[None]] | None = None,
@@ -210,7 +213,6 @@ class MarketScreener:
         has_pending_order: Callable[[str], bool] | None = None,
         # Backward-compat aliases
         max_symbols: int | None = None,
-        max_price_usd: float = 0.0,  # noqa: ARG002 — ignored, kept for API compat
     ) -> None:
         import asyncio
 
@@ -224,6 +226,8 @@ class MarketScreener:
         self._min_volume = min_volume_usd
         self._max_spread_bps = max_spread_bps
         self._min_depth_usd = min_top_book_depth_usd
+        self._min_price_usd = min_price_usd
+        self._max_price_usd = max_price_usd
         self._interval = interval_s
         self._denylist: set[str] = set(denylist or [])
         self._on_symbols_added = on_symbols_added
@@ -413,6 +417,12 @@ class MarketScreener:
                 continue
             if last_price <= 0.00001:
                 _reject("dead_coin")
+                continue
+            if self._min_price_usd > 0 and last_price < self._min_price_usd:
+                _reject("below_min_price")
+                continue
+            if self._max_price_usd > 0 and last_price > self._max_price_usd:
+                _reject("above_max_price")
                 continue
 
             try:

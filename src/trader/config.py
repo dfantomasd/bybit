@@ -187,6 +187,12 @@ class Settings(BaseSettings):
     SCREENER_MIN_TOP_BOOK_DEPTH_USD: float = 5_000.0
     """Minimum top-of-book depth in USD (bid1 + ask1 notional)."""
 
+    SCREENER_MIN_PRICE_USD: float = 0.0
+    """Optional minimum last price filter. 0 disables the lower bound."""
+
+    SCREENER_MAX_PRICE_USD: float = 0.0
+    """Optional maximum last price filter. 0 disables the upper bound."""
+
     SCREENER_REFRESH_SECONDS: int = 900
     """How often to refresh the screener universe (seconds)."""
 

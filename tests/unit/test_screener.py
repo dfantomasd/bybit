@@ -126,6 +126,27 @@ class TestMarketScreener:
         assert "DEADUSDT" not in screener.feature_universe
 
     @pytest.mark.asyncio
+    async def test_filters_above_max_price_for_small_accounts(self):
+        tickers = [
+            _make_ticker("BTCUSDT", 500_000_000, price=65000.0),
+            _make_ticker("XRPUSDT", 300_000_000, price=0.5),
+            _make_ticker("ADAUSDT", 250_000_000, price=0.4),
+        ]
+        screener = MarketScreener(
+            rest_client=_make_rest(tickers),
+            min_volume_usd=1,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
+            max_price_usd=25.0,
+        )
+        await screener._refresh()
+
+        assert "BTCUSDT" not in screener.feature_universe
+        assert "XRPUSDT" in screener.feature_universe
+        assert "ADAUSDT" in screener.feature_universe
+        assert screener.metrics.rejection_reasons["above_max_price"] == 1
+
+    @pytest.mark.asyncio
     async def test_max_symbols_respected(self):
         tickers = [_make_ticker(f"SYM{i}USDT", float(100 - i) * 1_000_000) for i in range(20)]
         screener = MarketScreener(
