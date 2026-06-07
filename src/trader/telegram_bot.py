@@ -8,6 +8,7 @@ Observability commands (anyone in allowed_chat_ids):
   /regime    — current market regime per symbol
   /symbols   — active symbols from screener
   /pnl       — recent closed PnL
+  /canary    — readiness check for a tiny CANARY_LIVE test
 
 Control commands (require /confirm for dangerous ones):
   /pause              — pause new entries (keep existing positions)
@@ -39,7 +40,7 @@ import json
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -185,6 +186,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         app.add_handler(CommandHandler("net", self._cmd_net_results))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -351,6 +353,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
             ],
+            [InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary")],
             [InlineKeyboardButton("🚨 Emergency stop", callback_data="control:stop")],
             [InlineKeyboardButton("⬅️ Назад", callback_data="view:status")],
         ]
@@ -699,6 +702,170 @@ class TelegramMonitorBot:
             f"Model gate blocks:  <code>{diag.get('hour_model_gate_canary_blocked', 0)}</code>",
         ]
         await self._reply(update, "\n".join(lines))
+
+    async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show whether the system is ready for a tiny CANARY_LIVE test."""
+        del context
+        if not await self._authorised(update):
+            return
+
+        db_diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+            try:
+                db_diag = await self._controller.db_diagnostics_provider()
+            except Exception as exc:
+                db_diag = {"connected": False, "error": str(exc)}
+
+        diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.diagnostics_provider is not None:
+            try:
+                diag = self._controller.diagnostics_provider()
+            except Exception as exc:
+                diag = {"error": str(exc)}
+
+        await self._reply(
+            update,
+            self._canary_readiness_text(db_diag=db_diag, diag=diag),
+            reply_markup=self._control_menu(),
+        )
+
+    def _canary_readiness_text(self, *, db_diag: dict[str, Any], diag: dict[str, Any]) -> str:
+        checks: list[tuple[str, bool, str]] = []
+        warnings: list[str] = []
+
+        def require(label: str, ok: bool, detail: str) -> None:
+            checks.append((label, ok, detail))
+
+        def warn_if(condition: bool, detail: str) -> None:
+            if condition:
+                warnings.append(detail)
+
+        candles = db_diag.get("candles_by_interval", {}) or {}
+        latest_1m = db_diag.get("latest_candle_1m")
+        latest_age_s = self._utc_age_seconds(latest_1m)
+        active_symbols = diag.get("active_symbols") or []
+        runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
+        latest_run = db_diag.get("latest_training_run", {}) or {}
+        latest_model = db_diag.get("latest_model_version", {}) or {}
+        gate = db_diag.get("shadow_gate_15m", {}) or {}
+        paper = db_diag.get("paper_pnl_15m", {}) or {}
+        paper_baseline = paper.get("baseline", {}) or {}
+        paper_gate = paper.get("model_gate", {}) or {}
+
+        trainable_15m = int(db_diag.get("labelled_samples_15m") or 0)
+        prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
+        feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
+        gate_total = int(gate.get("total_count") or 0)
+        gate_lift = gate.get("lift_vs_all_bps")
+        paper_gate_count = int(paper_gate.get("count") or 0)
+        paper_gate_bps = float(paper_gate.get("total_bps") or 0.0)
+        paper_base_count = int(paper_baseline.get("count") or 0)
+        ws_age = diag.get("last_ws_message_age_s")
+        loop_at = diag.get("last_strategy_loop_at")
+        hour_api_rejected = int(diag.get("hour_api_rejected") or 0)
+        hour_min_notional = int(diag.get("hour_min_notional_rejected") or 0)
+        is_shadow = self._controller.is_shadow() if self._controller is not None else True
+        is_paused = self._controller.is_paused() if self._controller is not None else False
+
+        require("DB connected", bool(db_diag.get("connected")), "storage is reachable")
+        require("Fresh 1m candle", latest_age_s is not None and latest_age_s <= 600, self._age_label(latest_age_s))
+        require("1m history", int(candles.get("1") or 0) >= 1000, f"{int(candles.get('1') or 0)} candles")
+        require("5m history", int(candles.get("5") or 0) >= 200, f"{int(candles.get('5') or 0)} candles")
+        require("15m history", int(candles.get("15") or 0) >= 200, f"{int(candles.get('15') or 0)} candles")
+        require("1h history", int(candles.get("60") or 0) >= 100, f"{int(candles.get('60') or 0)} candles")
+        require("Active symbols", len(active_symbols) >= 3, f"{len(active_symbols)} symbols")
+        require("Feature snapshots", feature_snapshots >= 1000, f"{feature_snapshots} snapshots")
+        require("Labelled 15m samples", trainable_15m >= 1000, f"{trainable_15m} samples")
+        require("Prediction outcomes", prediction_outcomes >= 1000, f"{prediction_outcomes} outcomes")
+        require(
+            "Training completed",
+            bool(latest_model.get("version")) or latest_run.get("status") == "COMPLETED",
+            f"run={latest_run.get('status', 'none')} model={latest_model.get('version') or 'none'}",
+        )
+        require("Shadow mode", bool(is_shadow), "orders are not live yet")
+        require("Not paused", not bool(is_paused), "scanner can keep collecting/evaluating")
+        require("Websocket alive", ws_age is None or float(ws_age) <= 180, self._age_label(ws_age))
+
+        warn_if(trainable_15m < 2000, f"Trainable 15m is {trainable_15m}; preferred before real CANARY is 2000+.")
+        warn_if(gate_total < 50, f"Model gate has only {gate_total} labelled shadow decisions; preferred is 50+.")
+        if gate_lift is not None:
+            warn_if(
+                float(gate_lift) <= 0,
+                f"Model gate lift is {float(gate_lift):+.2f} bps; better to wait for positive lift.",
+            )
+        else:
+            warnings.append("Model gate lift is not measured yet.")
+        warn_if(paper_gate_count < 20, f"Paper model-gate sample is {paper_gate_count}; preferred is 20+.")
+        warn_if(paper_gate_count >= 20 and paper_gate_bps <= 0, f"Paper model-gate PnL is {paper_gate_bps:+.1f} bps.")
+        warn_if(paper_base_count == 0, "Paper baseline has no completed trades yet.")
+        warn_if(hour_api_rejected > 0, f"API rejected {hour_api_rejected} actions in the last hour.")
+        warn_if(hour_min_notional > 0, f"Min-notional rejected {hour_min_notional} actions in the last hour.")
+        warn_if(bool(runtime.get("model_gate_canary_enabled")), "Model gate canary is already enabled.")
+        diag_error = diag.get("error")
+        db_error = db_diag.get("error")
+        warn_if(bool(diag_error), f"Runtime diagnostics error: {html.escape(str(diag_error))}")
+        warn_if(bool(db_error), f"DB diagnostics error: {html.escape(str(db_error))}")
+        if loop_at in (None, "never"):
+            warnings.append("Strategy loop timestamp is not available.")
+
+        failed = [item for item in checks if not item[1]]
+        if failed:
+            status = "❌ NOT READY"
+        elif warnings:
+            status = "⚠️ ALMOST READY"
+        else:
+            status = "✅ READY"
+
+        lines = [
+            "<b>🚦 CANARY readiness</b>",
+            f"Status: <b>{status}</b>",
+            "",
+            "<b>Required</b>",
+        ]
+        for label, ok, detail in checks:
+            icon = "✅" if ok else "❌"
+            lines.append(f"{icon} {label}: <code>{html.escape(str(detail))}</code>")
+        lines.extend(["", "<b>Warnings</b>"])
+        if warnings:
+            lines.extend(f"⚠️ {warning}" for warning in warnings[:8])
+        else:
+            lines.append("✅ No warnings.")
+        lines.extend(
+            [
+                "",
+                "<b>Next</b>",
+                "Keep CANARY tiny: 1 position, low notional, model live decisions still disabled.",
+                "Telegram cannot enable LIVE; env vars must be changed deliberately on Render.",
+            ]
+        )
+        return "\n".join(lines)
+
+    @staticmethod
+    def _utc_age_seconds(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return max(0.0, (datetime.now(UTC) - value.astimezone(UTC)).total_seconds())
+
+    @staticmethod
+    def _age_label(age_s: Any) -> str:
+        if age_s is None:
+            return "unknown"
+        try:
+            seconds = float(age_s)
+        except (TypeError, ValueError):
+            return "unknown"
+        if seconds < 120:
+            return f"{seconds:.0f}s ago"
+        return str(timedelta(seconds=int(seconds)))
 
     async def _cmd_db_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """🗄 БАЗА И МОДЕЛЬ screen."""
@@ -1117,6 +1284,9 @@ class TelegramMonitorBot:
         if action == "db_model":
             await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]
             return
+        if action == "canary":
+            await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            return
         if action == "control":
             await self._button_reply(
                 update,
@@ -1273,6 +1443,7 @@ class TelegramMonitorBot:
                 "/resume  — restart after pause\n"
                 "/train [500] [15] [5] — train shadow model\n"
                 "/limits — show/change safe runtime limits\n"
+                "/canary — readiness check for tiny CANARY_LIVE test\n"
                 "/mode shadow|active — switch execution mode\n"
                 "/shadow on|off — toggle shadow mode\n"
                 "/risk conservative|moderate|aggressive|scalp\n"
