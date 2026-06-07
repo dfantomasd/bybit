@@ -1007,64 +1007,140 @@ class TelegramMonitorBot:
             dd_usd = paper_notional * drawdown_bps / 10000.0
             return f"{int(stats.get('count') or 0)} trades, {total_bps:+.1f} bps / {usd:+.3f} USDT, DD {dd_usd:+.3f}"
 
-        data_note = "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
-        training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
-        if gate_lift is None:
-            gate_note = "фильтр модели еще не оценен"
-        elif float(gate_lift) > 0:
-            gate_note = "фильтр модели улучшает отбор сигналов"
+        # --- прогресс по шагам к реальным сделкам ---
+        step1_ok = labelled_15m >= 2000
+        step1_partial = 1000 <= labelled_15m < 2000
+        step2_ok = bool(db_model_version)
+        step3_ok = gate_lift is not None and float(gate_lift) > 0
+        step3_partial = gate_lift is not None and not step3_ok
+        step4_ok = champion_ver != "none"
+
+        def _sicon(ok: bool, partial: bool = False) -> str:
+            return "✅" if ok else ("⚠️" if partial else "❌")
+
+        steps_done = sum([step1_ok, step2_ok, step3_ok, step4_ok])
+        bar_f = steps_done * 2
+        progress_bar = "█" * bar_f + "░" * (10 - bar_f)
+
+        # прогресс-бар накопления данных
+        data_pct = min(100, int(labelled_15m / 2000 * 100))
+        data_bar_f = min(10, int(labelled_15m / 2000 * 10))
+        data_bar = "█" * data_bar_f + "░" * (10 - data_bar_f)
+
+        # когда следующее автообучение
+        _trained_on = int(samples) if samples else int(latest_run_samples)
+        _next_train_at = _trained_on + 1000
+        _samples_to_next = max(0, _next_train_at - labelled_15m)
+
+        # статус модели
+        _status_map = {
+            "CHAMPION": "🏆 Чемпион (управляет решениями)",
+            "SHADOW_CHALLENGER": "🔵 Кандидат в тени (наблюдает, не торгует)",
+            "VALIDATED": "🔵 Проверен (ещё не чемпион)",
+        }
+        model_status_label = _status_map.get(db_model_status or "", f"⚪ {db_model_status or 'нет'}")
+
+        # объяснение фильтра
+        pass_pct = int(gate_pass / gate_total * 100) if gate_total > 0 else 0
+        gate_blocks_good = (
+            gate_lift is not None
+            and gate_pass_avg is not None
+            and gate_block_avg is not None
+            and float(gate_block_avg) > float(gate_pass_avg)
+        )
+
+        # текущий блокер и следующий шаг
+        if not step2_ok:
+            blocker = "нет обученной модели"
+            next_action = "Нажмите «Обучить 1000» или подождите автообучения"
+        elif not step3_ok:
+            if gate_total < 50:
+                blocker = f"фильтр ещё накапливает наблюдения ({gate_total}/50)"
+                next_action = "Ждём — наблюдения накапливаются автоматически"
+            else:
+                blocker = f"фильтр пока снижает доходность (lift {gate_lift_str})"
+                next_action = f"Ждём следующего автообучения (ещё ~{_samples_to_next} примеров)"
+        elif not step4_ok:
+            blocker = "кандидат ещё не повышен до чемпиона"
+            next_action = "Запустить promote через консоль Render"
         else:
-            gate_note = "фильтр модели пока НЕ улучшает отбор сигналов"
+            blocker = "ждём включения реальных сделок"
+            next_action = "Вручную: TRADING_MODE=CANARY_LIVE + LIVE_MODE=true + LIVE_ARMED=true"
 
         lines = [
             "<b>🗄 БАЗА И МОДЕЛЬ</b>",
             "",
-            f"БД: {db_icon} {db_status}",
-            f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
-            f"Последняя свеча 1m: <code>{latest_str}</code>",
-            f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
-            f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
-            f"Свечей 15m: <code>{candles.get('15', 0)}</code>",
-            f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
-            f"Feature snapshots:   <code>{db_diag.get('feature_snapshots', 0)}</code>",
-            f"Prediction outcomes: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
-            f"Labelled horizons:   <code>{outcome_breakdown}</code>",
-            f"Trainable 15m:       <code>{labelled_15m}</code>",
+            "━━ 🎯 ПУТЬ К РЕАЛЬНЫМ СДЕЛКАМ ━━",
+            f"{_sicon(step1_ok, step1_partial)} Шаг 1: Данных достаточно"
+            + (f" (<code>{labelled_15m}</code> примеров)" if step1_ok else f" (<code>{labelled_15m}/2000</code>)"),
+            f"{_sicon(step2_ok)} Шаг 2: Модель обучена"
+            + (f" (<code>{db_model_version}</code>)" if step2_ok else " — ещё нет"),
+            f"{_sicon(step3_ok, step3_partial)} Шаг 3: Фильтр улучшает отбор"
+            + (f" (lift <code>{gate_lift_str}</code>)" if gate_lift is not None else " — ещё не измерен"),
+            f"{_sicon(step4_ok)} Шаг 4: Повысить до чемпиона"
+            + (f" (<code>{champion_ver}</code>)" if step4_ok else " — пока не выполнено"),
+            "❌ Шаг 5: Включить CANARY_LIVE на Render — финальное действие вручную",
             "",
-            "<b>Простыми словами</b>",
-            f"Данные: <code>{data_note}</code>",
-            f"Обучение: <code>{training_note}</code>",
-            f"Оценка модели: <code>{gate_note}</code>",
-            "Реальные сделки: <code>модель не управляет ордерами</code>",
+            f"Прогресс: <code>[{progress_bar}] {steps_done}/4 шагов до повышения</code>",
             "",
-            "<b>Модель</b>",
-            f"Последнее обучение: <code>{last_training}</code>",
-            f"Training samples:   <code>{samples}</code>",
-            f"Champion version:   <code>{champion_ver}</code>",
-            f"Challenger version: <code>{challenger_ver}</code>",
-            f"Latest DB model:    <code>{db_model_version or 'none'}</code> <code>{db_model_status or ''}</code>",
-            f"Last train run:     <code>{latest_run_status}</code> samples=<code>{latest_run_samples}</code>",
-            f"Run model version:  <code>{latest_run_model}</code>",
-            f"Quality:            <code>{model_quality}</code>",
-            f"Validation samples: <code>{validation_samples}</code>",
-            f"Precision:          <code>{precision_str}</code>",
-            f"Lift vs baseline:   <code>{lift_str}</code>",
-            f"Best threshold:     <code>{best_threshold_str}</code> avg=<code>{best_threshold_avg_str}</code>",
-            f"Walk-forward exp:   <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
-            f"Shadow gate 15m:    <code>{gate_pass}/{gate_total} pass</code>, block=<code>{gate_block}</code>",
-            f"Gate pass avg:      <code>{gate_pass_avg_str}</code>",
-            f"Gate block avg:     <code>{gate_block_avg_str}</code>",
-            f"Gate lift vs all:   <code>{gate_lift_str}</code>",
-            f"Gate block why:     <code>{gate_reasons_str}</code>",
-            f"Paper baseline:     <code>{_paper_line(paper_baseline)}</code>",
-            f"Paper model gate:   <code>{_paper_line(paper_gate)}</code>",
-            f"Drift:              <code>{drift}</code>",
-            "Model live decisions: <b>disabled</b>",
+            "━━ 📊 ДАННЫЕ ━━",
+            f"БД: {db_icon} {'подключена' if connected else 'недоступна'}"
+            + (f"  •  ошибка: <code>{db_error_str}</code>" if db_error_str else ""),
+            f"Последняя свеча: <code>{latest_str}</code>",
+            f"История: 1m <code>{candles.get('1', 0)}</code>"
+            f" | 5m <code>{candles.get('5', 0)}</code>"
+            f" | 15m <code>{candles.get('15', 0)}</code>"
+            f" | 1h <code>{candles.get('60', 0)}</code>",
+            f"Примеры для обучения (15m): <code>{labelled_15m}/2000</code>"
+            f" <code>[{data_bar}]</code> {data_pct}%",
+            f"Записано исходов: <code>{db_diag.get('prediction_outcomes', 0)}</code>"
+            f"  (по горизонтам: <code>{outcome_breakdown}</code>)",
+            "",
+            "━━ 🧠 МОДЕЛЬ ━━",
+            f"Обучена: <code>{last_training}</code>  (<code>{samples}</code> примеров)",
+            f"Статус: {model_status_label}",
+            f"Чемпион: <code>{'нет' if champion_ver == 'none' else champion_ver}</code>"
+            + ("  ← нужно повысить" if not step4_ok and step3_ok else ""),
+            f"Следующее автообучение: примерно через <code>{_samples_to_next}</code> примеров",
+            "",
+            "━━ 🔍 ОЦЕНКА ФИЛЬТРА (15m) ━━",
+        ]
+
+        if gate_total == 0:
+            lines.append("Наблюдений ещё нет — фильтр только начинает работу")
+        else:
+            lines += [
+                f"Проверено сигналов: <code>{gate_total}</code>",
+                f"  ✔ Пропустил   : <code>{gate_pass}</code> ({pass_pct}%) → <code>{gate_pass_avg_str}</code> в среднем",
+                f"  ✘ Заблокировал: <code>{gate_block}</code> ({100 - pass_pct}%) → <code>{gate_block_avg_str}</code> в среднем",
+                f"Польза от фильтра: <code>{gate_lift_str}</code>"
+                + (" ✅ фильтр работает!" if step3_ok else " ⚠️ нужно > 0"),
+            ]
+            if gate_blocks_good:
+                lines.append("⚠️ <i>Проблема: заблокированные сделки выгоднее пропущенных — модель учится</i>")
+            if gate_reasons_str and gate_reasons_str != "n/a":
+                lines.append(f"Причина блоков: <code>{gate_reasons_str}</code>")
+
+        paper_base_count = int(paper_baseline.get("count") or 0)
+        paper_gate_count = int(paper_gate.get("count") or 0)
+        if paper_base_count > 0 or paper_gate_count > 0:
+            lines += [
+                "",
+                "━━ 📈 БУМАЖНЫЕ СДЕЛКИ (симуляция) ━━",
+                f"Правила (без модели): <code>{_paper_line(paper_baseline)}</code>",
+                f"С фильтром модели  : <code>{_paper_line(paper_gate)}</code>",
+            ]
+
+        lines += [
+            "",
+            "━━ 📋 ТЕКУЩИЙ БЛОКЕР ━━",
+            f"Ждём: {blocker}",
+            f"Действие: {next_action}",
         ]
         if latest_run_error:
-            lines.append(f"Last train error: <code>{latest_run_error}</code>")
+            lines += ["", f"⚠️ Ошибка обучения: <code>{latest_run_error}</code>"]
         if db_diag.get("error"):
-            lines.append(f"\n<i>Error: {html.escape(str(db_diag['error']))}</i>")
+            lines.append(f"\n<i>Ошибка БД: {html.escape(str(db_diag['error']))}</i>")
 
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
