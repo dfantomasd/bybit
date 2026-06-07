@@ -67,6 +67,31 @@ def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bp
     avg_all = float(np.mean(returns_bps)) if len(returns_bps) else 0.0
     avg_predicted_positive = float(np.mean(returns_bps[predicted_positive])) if predicted_positive.sum() else None
     lift_bps = (avg_predicted_positive - avg_all) if avg_predicted_positive is not None else None
+    threshold_candidates = [0.50, 0.55, 0.60, 0.65, 0.70]
+    threshold_metrics: list[dict[str, Any]] = []
+    min_pass = max(10, int(len(x_val) * 0.05))
+    best_threshold: float | None = None
+    best_threshold_avg_bps: float | None = None
+    best_threshold_pass_rate: float | None = None
+    for threshold in threshold_candidates:
+        passed = score_arr >= threshold
+        pass_count = int(passed.sum())
+        pass_rate = float(pass_count / len(score_arr)) if len(score_arr) else 0.0
+        avg_pass_bps = float(np.mean(returns_bps[passed])) if pass_count else None
+        threshold_metrics.append(
+            {
+                "threshold": threshold,
+                "pass_count": pass_count,
+                "pass_rate": pass_rate,
+                "avg_net_return_bps": avg_pass_bps,
+            }
+        )
+        if pass_count < min_pass or avg_pass_bps is None:
+            continue
+        if best_threshold_avg_bps is None or avg_pass_bps > best_threshold_avg_bps:
+            best_threshold = threshold
+            best_threshold_avg_bps = avg_pass_bps
+            best_threshold_pass_rate = pass_rate
 
     quality = "INSUFFICIENT_VALIDATION"
     if len(x_val) >= 100:
@@ -77,12 +102,16 @@ def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bp
         "avg_model_score": float(score_arr.mean()) if len(score_arr) else 0.0,
         "avg_net_return_all_bps": avg_all,
         "avg_net_return_predicted_positive_bps": avg_predicted_positive,
+        "best_threshold": best_threshold,
+        "best_threshold_avg_net_return_bps": best_threshold_avg_bps,
+        "best_threshold_pass_rate": best_threshold_pass_rate,
         "lift_bps": lift_bps,
         "positive_rate": positive_rate,
         "precision": precision,
         "predicted_positive_rate": predicted_positive_rate,
         "quality": quality,
         "recall": recall,
+        "threshold_metrics": threshold_metrics,
         "validation_samples": int(len(x_val)),
         "walk_forward_expectancy_bps": avg_predicted_positive,
     }

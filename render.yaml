@@ -95,6 +95,14 @@ services:
         value: "true"
       - key: MODEL_SHADOW_GATE_THRESHOLD
         value: "0.55"
+      - key: MODEL_GATE_CANARY_ENABLED
+        value: "false"
+      - key: MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT
+        value: "60"
+      - key: MODEL_GATE_CANARY_ALLOW_EVERY_NTH_BLOCKED
+        value: "3"
+      - key: MODEL_PAPER_NOTIONAL_USD
+        value: "5"
       # Secrets (not synced — set via Render dashboard)
       - key: BYBIT_API_KEY
         sync: false
