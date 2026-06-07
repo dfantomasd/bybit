@@ -104,7 +104,12 @@ class TradeJournal:
             return
         self._last_connect_attempt_at = datetime.now(tz=UTC)
         try:
-            self._pool = await asyncpg.create_pool(dsn=self._dsn, min_size=1, max_size=3)
+            self._pool = await asyncpg.create_pool(
+                dsn=self._dsn,
+                min_size=1,
+                max_size=3,
+                statement_cache_size=0,
+            )
             await self._ensure_schema()
             self._last_connect_error_at = None
             self._last_connect_error = None
