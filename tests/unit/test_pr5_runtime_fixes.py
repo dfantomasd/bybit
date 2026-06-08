@@ -8,11 +8,10 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
 from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-
 
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — _active_symbols helper
@@ -68,8 +67,8 @@ def test_active_symbols_falls_back_when_screener_empty():
 
 @pytest.mark.asyncio
 async def test_pipeline_logs_symbols_updated_on_change():
-    from trader.features.pipeline import FeaturePipeline
     from trader.data.candles import CandleStore
+    from trader.features.pipeline import FeaturePipeline
 
     store = CandleStore(max_bars=10)
     pipeline = FeaturePipeline(candle_store=store, stale_threshold_s=999.0, watchdog_interval_s=0.05)
@@ -85,8 +84,6 @@ async def test_pipeline_logs_symbols_updated_on_change():
     screener = DynamicScreener()
 
     log_calls: list[str] = []
-
-    import structlog
 
     with patch("trader.features.pipeline.log") as mock_log:
         mock_log.info = MagicMock(side_effect=lambda event, **kw: log_calls.append(event))
@@ -107,8 +104,8 @@ async def test_pipeline_logs_symbols_updated_on_change():
 
 @pytest.mark.asyncio
 async def test_pipeline_no_log_when_symbols_unchanged():
-    from trader.features.pipeline import FeaturePipeline
     from trader.data.candles import CandleStore
+    from trader.features.pipeline import FeaturePipeline
 
     store = CandleStore(max_bars=10)
     pipeline = FeaturePipeline(candle_store=store, stale_threshold_s=999.0, watchdog_interval_s=0.05)
@@ -346,7 +343,7 @@ async def test_reconcile_clears_old_stale_unblocks_new_submit():
 
 def test_telegram_db_model_handler_registered():
     """Both /db and /model must route to _cmd_db_model (inspect handler list directly)."""
-    from trader.telegram_bot import TelegramMonitorBot, TelegramBotConfig
+    from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot
 
     config = TelegramBotConfig(
         token="fake:token",
@@ -368,8 +365,6 @@ def test_telegram_db_model_handler_registered():
         mock_app = MagicMock()
 
         def record_handler(handler: Any) -> None:
-            from telegram.ext import CommandHandler as CH
-
             if hasattr(handler, "commands"):
                 for cmd in handler.commands:
                     registered[cmd] = handler.callback
