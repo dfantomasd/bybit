@@ -124,15 +124,26 @@ class FeaturePipeline:
 
         log.info(
             "feature_pipeline.watchdog_started",
-            symbols=symbols,
+            symbols=list(symbols),
             intervals=intervals,
             stale_threshold_s=self._stale_threshold_s,
             watchdog_interval_s=self._watchdog_interval_s,
         )
 
+        _prev_active: list[str] = list(symbols)
+
         while not self._stop_event.is_set():
             active = symbol_source.active_symbols if symbol_source is not None else symbols
             now = datetime.now(tz=UTC)
+
+            # Log only when the active symbol list actually changes
+            if sorted(active) != sorted(_prev_active):
+                log.info(
+                    "feature_pipeline.symbols_updated",
+                    old_symbols=_prev_active,
+                    new_symbols=list(active),
+                )
+                _prev_active = list(active)
 
             stale_pairs: list[tuple[str, str]] = []
             for symbol in active:

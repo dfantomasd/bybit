@@ -211,6 +211,8 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
+        app.add_handler(CommandHandler("db", self._cmd_db_model))
+        app.add_handler(CommandHandler("model", self._cmd_db_model))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -773,7 +775,24 @@ class TelegramMonitorBot:
             f"Пропущено cooldown:     <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
             f"Пропущено после ошибки: <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
             f"Блоков фильтра модели:  <code>{diag.get('hour_model_gate_canary_blocked', 0)}</code>",
+            f"Пропущено pending-заявка:<code>{diag.get('hour_skipped_pending_entries', 0)}</code>",
+            f"Ордеров размещено:      <code>{diag.get('hour_order_placed', 0)}</code>",
+            f"Ордеров неудачно:       <code>{diag.get('hour_order_failed', 0)}</code>",
         ]
+
+        # Pending entry blocking warning
+        pending_ids = diag.get("pending_entry_ids") or []
+        pending_symbols = diag.get("pending_entry_symbols") or []
+        pending_count = diag.get("pending_entry_count") or 0
+        if pending_count > 0:
+            ids_str = ", ".join(f"<code>{pid[:16]}…</code>" for pid in pending_ids[:3])
+            sym_str = ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
+            lines.append(
+                f"\n⚠️ Новые входы <b>заблокированы</b> pending-заявкой:\n"
+                f"ID: {ids_str or 'нет'}, символ: {sym_str}\n"
+                f"Проверка stale pending выполняется автоматически при старте."
+            )
+
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1158,6 +1177,21 @@ class TelegramMonitorBot:
         text = str(value or "none")
         return _STATUS_RU.get(text, text)
 
+    @staticmethod
+    def _fmt_timestamp(ts: Any) -> str:
+        """Format a datetime or ISO string; returns 'нет' if absent."""
+        if ts is None:
+            return "нет"
+        from datetime import datetime as _dt
+
+        if isinstance(ts, _dt):
+            return ts.strftime("%H:%M:%S UTC")
+        try:
+            parsed = _dt.fromisoformat(str(ts))
+            return parsed.strftime("%H:%M:%S UTC")
+        except Exception:
+            return str(ts)[:19]
+
     async def _cmd_model_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain model/training screens in operator-friendly Russian."""
         del context
@@ -1206,242 +1240,257 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        try:
+            db_diag: dict[str, Any] = {}
+            if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+                try:
+                    db_diag = await self._controller.db_diagnostics_provider()
+                except Exception as exc:
+                    db_diag = {"error": str(exc)}
 
-        db_diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
-            try:
-                db_diag = await self._controller.db_diagnostics_provider()
-            except Exception as exc:
-                db_diag = {"error": str(exc)}
+            diag: dict[str, Any] = {}
+            if self._controller is not None and self._controller.diagnostics_provider is not None:
+                try:
+                    diag = self._controller.diagnostics_provider()
+                except Exception as _diag_exc:
+                    log.debug("telegram.diagnostics_provider_failed", error=str(_diag_exc))
 
-        diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.diagnostics_provider is not None:
-            try:
-                diag = self._controller.diagnostics_provider()
-            except Exception as _diag_exc:
-                log.debug("telegram.diagnostics_provider_failed", error=str(_diag_exc))
+            connected = db_diag.get("connected", False)
+            db_icon = "🟢" if connected else "🔴"
+            configured = db_diag.get("configured", True)
+            db_status = "подключена" if connected else ("настроена, переподключается" if configured else "не настроена")
+            db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
+            db_error_str = html.escape(str(db_error)) if db_error else ""
+            if len(db_error_str) > 180:
+                db_error_str = f"{db_error_str[:177]}..."
+            candles = db_diag.get("candles_by_interval", {})
+            latest_1m = db_diag.get("latest_candle_1m")
+            latest_str = self._fmt_timestamp(latest_1m)
+            outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
+            labelled_15m = db_diag.get("labelled_samples_15m", 0)
+            outcome_parts = [
+                f"{horizon}m={count}"
+                for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
+            ]
+            outcome_breakdown = ", ".join(outcome_parts) if outcome_parts else "нет"
 
-        connected = db_diag.get("connected", False)
-        db_icon = "🟢" if connected else "🔴"
-        configured = db_diag.get("configured", True)
-        db_status = "подключена" if connected else ("настроена, переподключается" if configured else "не настроена")
-        db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
-        db_error_str = html.escape(str(db_error)) if db_error else ""
-        if len(db_error_str) > 180:
-            db_error_str = f"{db_error_str[:177]}..."
-        candles = db_diag.get("candles_by_interval", {})
-        latest_1m = db_diag.get("latest_candle_1m")
-        latest_str = latest_1m.strftime("%H:%M:%S UTC") if latest_1m else "нет"
-        outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
-        labelled_15m = db_diag.get("labelled_samples_15m", 0)
-        outcome_parts = [
-            f"{horizon}m={count}"
-            for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
-        ]
-        outcome_breakdown = ", ".join(outcome_parts) if outcome_parts else "нет"
-
-        model_info = diag.get("model", {}) or {}
-        db_model = db_diag.get("latest_model_version", {}) or {}
-        latest_run = db_diag.get("latest_training_run", {}) or {}
-        model_metrics = db_model.get("metrics") or latest_run.get("metrics") or {}
-        if isinstance(model_metrics, str):
-            try:
-                model_metrics = json.loads(model_metrics)
-            except json.JSONDecodeError:
-                model_metrics = {}
-        champion_ver = model_info.get("champion_version", "none")
-        challenger_ver = model_info.get("challenger_version", "none")
-        last_training = model_info.get("last_training", "never")
-        samples = model_info.get("training_samples", 0)
-        if not samples and db_model:
-            samples = db_model.get("training_samples", 0)
-        db_model_version = db_model.get("version")
-        db_model_status = db_model.get("status")
-        if champion_ver == "none" and db_model_status == "CHAMPION":
-            champion_ver = db_model_version or "none"
-        if challenger_ver == "none" and db_model_status and db_model_status != "CHAMPION":
-            challenger_ver = db_model_version or "none"
-        if last_training == "never" and latest_run.get("finished_at"):
-            last_training = latest_run["finished_at"].strftime("%Y-%m-%d %H:%M UTC")
-        wf_exp = model_info.get("walk_forward_expectancy", "n/a")
-        drift = model_info.get("drift_status", "n/a")
-        latest_run_status = latest_run.get("status", "none")
-        latest_run_samples = latest_run.get("sample_count", 0) or 0
-        latest_run_model = latest_run.get("model_version") or "none"
-        latest_run_error = str(latest_run.get("error") or "")
-        if len(latest_run_error) > 120:
-            latest_run_error = f"{latest_run_error[:117]}..."
-        latest_run_error = html.escape(latest_run_error)
-        model_quality = model_metrics.get("quality", "n/a")
-        validation_samples = model_metrics.get("validation_samples", "n/a")
-        precision = model_metrics.get("precision")
-        lift_bps = model_metrics.get("lift_bps")
-        expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
-        best_threshold = model_metrics.get("best_threshold")
-        best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
-        precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
-        lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
-        expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
-        best_threshold_str = f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
-        best_threshold_avg_str = f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
-        gate = db_diag.get("shadow_gate_15m", {}) or {}
-        gate_total = gate.get("total_count", 0) or 0
-        gate_pass = gate.get("pass_count", 0) or 0
-        gate_block = gate.get("block_count", 0) or 0
-        gate_pass_avg = gate.get("pass_avg_net_return_bps")
-        gate_block_avg = gate.get("block_avg_net_return_bps")
-        gate_lift = gate.get("lift_vs_all_bps")
-        gate_reasons = gate.get("top_block_reasons", {}) or {}
-        gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
-        gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
-        gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
-        gate_reasons_str = (
-            ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
-        )
-        paper = db_diag.get("paper_pnl_15m", {}) or {}
-        paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
-        paper_baseline = paper.get("baseline", {}) or {}
-        paper_gate = paper.get("model_gate", {}) or {}
-
-        def _paper_line(stats: dict[str, Any]) -> str:
-            total_bps = float(stats.get("total_bps") or 0.0)
-            drawdown_bps = float(stats.get("max_drawdown_bps") or 0.0)
-            usd = paper_notional * total_bps / 10000.0
-            dd_usd = paper_notional * drawdown_bps / 10000.0
-            return (
-                f"{int(stats.get('count') or 0)} сделок, {total_bps:+.1f} bps "
-                f"(примерно {usd:+.3f} USDT), просадка {dd_usd:+.3f}"
+            model_info = diag.get("model", {}) or {}
+            db_model = db_diag.get("latest_model_version", {}) or {}
+            latest_run = db_diag.get("latest_training_run", {}) or {}
+            model_metrics = db_model.get("metrics") or latest_run.get("metrics") or {}
+            if isinstance(model_metrics, str):
+                try:
+                    model_metrics = json.loads(model_metrics)
+                except json.JSONDecodeError:
+                    model_metrics = {}
+            champion_ver = model_info.get("champion_version", "none")
+            challenger_ver = model_info.get("challenger_version", "none")
+            last_training = model_info.get("last_training", "never")
+            samples = model_info.get("training_samples", 0)
+            if not samples and db_model:
+                samples = db_model.get("training_samples", 0)
+            db_model_version = db_model.get("version")
+            db_model_status = db_model.get("status")
+            if champion_ver == "none" and db_model_status == "CHAMPION":
+                champion_ver = db_model_version or "none"
+            if challenger_ver == "none" and db_model_status and db_model_status != "CHAMPION":
+                challenger_ver = db_model_version or "none"
+            if last_training == "never" and latest_run.get("finished_at"):
+                last_training = latest_run["finished_at"].strftime("%Y-%m-%d %H:%M UTC")
+            wf_exp = model_info.get("walk_forward_expectancy", "n/a")
+            drift = model_info.get("drift_status", "n/a")
+            latest_run_status = latest_run.get("status", "none")
+            latest_run_samples = latest_run.get("sample_count", 0) or 0
+            latest_run_model = latest_run.get("model_version") or "none"
+            latest_run_error = str(latest_run.get("error") or "")
+            if len(latest_run_error) > 120:
+                latest_run_error = f"{latest_run_error[:117]}..."
+            latest_run_error = html.escape(latest_run_error)
+            model_quality = model_metrics.get("quality", "n/a")
+            validation_samples = model_metrics.get("validation_samples", "n/a")
+            precision = model_metrics.get("precision")
+            lift_bps = model_metrics.get("lift_bps")
+            expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
+            best_threshold = model_metrics.get("best_threshold")
+            best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
+            precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
+            lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
+            expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
+            best_threshold_str = f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
+            best_threshold_avg_str = (
+                f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
             )
+            gate = db_diag.get("shadow_gate_15m", {}) or {}
+            gate_total = gate.get("total_count", 0) or 0
+            gate_pass = gate.get("pass_count", 0) or 0
+            gate_block = gate.get("block_count", 0) or 0
+            gate_pass_avg = gate.get("pass_avg_net_return_bps")
+            gate_block_avg = gate.get("block_avg_net_return_bps")
+            gate_lift = gate.get("lift_vs_all_bps")
+            gate_reasons = gate.get("top_block_reasons", {}) or {}
+            gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
+            gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
+            gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+            gate_reasons_str = (
+                ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
+            )
+            paper = db_diag.get("paper_pnl_15m", {}) or {}
+            paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
+            paper_baseline = paper.get("baseline", {}) or {}
+            paper_gate = paper.get("model_gate", {}) or {}
 
-        data_note = "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
-        training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
-        if gate_lift is None:
-            gate_note = "фильтр модели еще не оценен"
-        elif float(gate_lift) > 0:
-            gate_note = "фильтр модели улучшает отбор сигналов"
-        else:
-            gate_note = "фильтр модели пока НЕ улучшает отбор сигналов"
+            def _paper_line(stats: dict[str, Any]) -> str:
+                total_bps = float(stats.get("total_bps") or 0.0)
+                drawdown_bps = float(stats.get("max_drawdown_bps") or 0.0)
+                usd = paper_notional * total_bps / 10000.0
+                dd_usd = paper_notional * drawdown_bps / 10000.0
+                return (
+                    f"{int(stats.get('count') or 0)} сделок, {total_bps:+.1f} bps "
+                    f"(примерно {usd:+.3f} USDT), просадка {dd_usd:+.3f}"
+                )
 
-        lines = [
-            "<b>🗄 БАЗА И МОДЕЛЬ</b>",
-            "",
-            f"БД: {db_icon} {db_status}",
-            f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
-            f"Последняя свеча 1m: <code>{latest_str}</code>",
-            f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
-            f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
-            f"Свечей 15m: <code>{candles.get('15', 0)}</code>",
-            f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
-            f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
-            f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
-            f"Горизонты разметки: <code>{outcome_breakdown}</code>",
-            f"Готово для обучения 15m: <code>{labelled_15m}</code>",
-            "",
-            "<b>Простыми словами</b>",
-            f"Данные: <code>{data_note}</code>",
-            f"Обучение: <code>{training_note}</code>",
-            f"Оценка модели: <code>{gate_note}</code>",
-            "Реальные сделки: <code>модель не управляет ордерами</code>",
-            "",
-            "<b>Модель</b>",
-            f"Последнее обучение: <code>{last_training}</code>",
-            f"Обучающих примеров: <code>{samples}</code>",
-            f"Основная модель: <code>{champion_ver}</code>",
-            f"Кандидат: <code>{challenger_ver}</code>",
-            f"Последняя модель в БД: <code>{db_model_version or 'нет'}</code> <code>{self._ru(db_model_status)}</code>",
-            f"Последний запуск: <code>{self._ru(latest_run_status)}</code>, примеров=<code>{latest_run_samples}</code>",
-            f"Версия из запуска: <code>{latest_run_model}</code>",
-            f"Качество: <code>{self._ru(model_quality)}</code>",
-            f"Проверочных примеров: <code>{validation_samples}</code>",
-            f"Точность прибыльных сигналов: <code>{precision_str}</code>",
-            f"Улучшение против baseline: <code>{lift_str}</code>",
-            f"Лучший порог модели: <code>{best_threshold_str}</code>, среднее=<code>{best_threshold_avg_str}</code>",
-            f"Ожидание walk-forward: <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
-            f"Фильтр модели 15m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
-            f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
-            f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
-            "Lift фильтра: <code>"
-            + ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
-            + "</code>",
-            f"Причины блоков: <code>{gate_reasons_str}</code>",
-            f"Paper baseline: <code>{_paper_line(paper_baseline)}</code>",
-            f"Paper model gate: <code>{_paper_line(paper_gate)}</code>",
-            f"Дрифт данных: <code>{self._ru(drift)}</code>",
-            "Решения модели в live: <b>выключены</b>",
-            "",
-            "<i>bps = 0.01%. Precision = % прибыльных среди пропущенных моделью. "
-            "Lift = насколько пропущенные лучше среднего по всем сигналам.</i>",
-            "",
-        ]
+            data_note = (
+                "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
+            )
+            training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
+            if gate_lift is None:
+                gate_note = "фильтр модели еще не оценен"
+            elif float(gate_lift) > 0:
+                gate_note = "фильтр модели улучшает отбор сигналов"
+            else:
+                gate_note = "фильтр модели пока НЕ улучшает отбор сигналов"
 
-        # ── Roadmap к реальным деньгам ──────────────────────────────────
-        lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
-        # 1. Данные
-        lbl_ok = int(labelled_15m or 0) >= 1000
-        lines.append(f"{'✅' if lbl_ok else '❌'} Данных 15m ≥ 1000 → сейчас: <code>{labelled_15m}</code>")
-        # 2. Модель обучена, quality GOOD
-        trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
-        lines.append(
-            f"{'✅' if trained_ok else '❌'} Качество модели = ХОРОШО → "
-            f"<code>{self._ru(model_quality) if db_model_version else 'не обучена'}</code>"
-        )
-        # 3. Walk-forward > 0
-        wfe_val = float(expectancy_bps) if expectancy_bps is not None else None
-        wfe_ok = wfe_val is not None and wfe_val > 0
-        lines.append(
-            f"{'✅' if wfe_ok else '❌'} Walk-forward > 0 bps → "
-            f"<code>{expectancy_str if expectancy_bps is not None else 'n/a'}</code>"
-        )
-        # 4. Champion
-        champ_ok = champion_ver not in ("none", "", None)
-        lines.append(
-            f"{'✅' if champ_ok else '❌'} Основная модель = CHAMPION → "
-            f"<code>{'есть: ' + str(champion_ver) if champ_ok else 'нет → нажмите «Промоутировать»'}</code>"
-        )
-        # 5. Gate lift
-        if gate_total == 0 and db_model_version:
-            gate_road_icon = "⏳"
-            gate_road_val = f"ждём ~50 сигналов (сейчас {gate_total})"
-        elif gate_lift is not None and float(gate_lift) > 0:
-            gate_road_icon = "✅"
-            gate_road_val = gate_lift_str
-        else:
-            gate_road_icon = "❌" if gate_total > 0 else "⏳"
-            gate_road_val = gate_lift_str if gate_lift is not None else "n/a"
-        lines.append(f"{gate_road_icon} Lift фильтра > 0 bps (≥50 сигналов) → <code>{gate_road_val}</code>")
-        # 6. Paper gate
-        paper_gate_count = int(paper_gate.get("count") or 0)
-        paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
-        if paper_gate_count < 20:
-            paper_road_icon = "⏳"
-            paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
-        elif paper_gate_bps_val > 0:
-            paper_road_icon = "✅"
-            paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
-        else:
-            paper_road_icon = "❌"
-            paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
-        lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+            lines = [
+                "<b>🗄 БАЗА И МОДЕЛЬ</b>",
+                "",
+                f"БД: {db_icon} {db_status}",
+                f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
+                f"Последняя свеча 1m: <code>{latest_str}</code>",
+                f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
+                f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
+                f"Свечей 15m: <code>{candles.get('15', 0)}</code>",
+                f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
+                f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
+                f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
+                f"Горизонты разметки: <code>{outcome_breakdown}</code>",
+                f"Готово для обучения 15m: <code>{labelled_15m}</code>",
+                "",
+                "<b>Простыми словами</b>",
+                f"Данные: <code>{data_note}</code>",
+                f"Обучение: <code>{training_note}</code>",
+                f"Оценка модели: <code>{gate_note}</code>",
+                "Реальные сделки: <code>модель не управляет ордерами</code>",
+                "",
+                "<b>Модель</b>",
+                f"Последнее обучение: <code>{last_training}</code>",
+                f"Обучающих примеров: <code>{samples}</code>",
+                f"Основная модель: <code>{champion_ver}</code>",
+                f"Кандидат: <code>{challenger_ver}</code>",
+                f"Последняя модель в БД: <code>{db_model_version or 'нет'}</code> <code>{self._ru(db_model_status)}</code>",
+                f"Последний запуск: <code>{self._ru(latest_run_status)}</code>, примеров=<code>{latest_run_samples}</code>",
+                f"Версия из запуска: <code>{latest_run_model}</code>",
+                f"Качество: <code>{self._ru(model_quality)}</code>",
+                f"Проверочных примеров: <code>{validation_samples}</code>",
+                f"Точность прибыльных сигналов: <code>{precision_str}</code>",
+                f"Улучшение против baseline: <code>{lift_str}</code>",
+                f"Лучший порог модели: <code>{best_threshold_str}</code>, среднее=<code>{best_threshold_avg_str}</code>",
+                f"Ожидание walk-forward: <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
+                f"Фильтр модели 15m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
+                f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
+                f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
+                "Lift фильтра: <code>"
+                + ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
+                + "</code>",
+                f"Причины блоков: <code>{gate_reasons_str}</code>",
+                f"Paper baseline: <code>{_paper_line(paper_baseline)}</code>",
+                f"Paper model gate: <code>{_paper_line(paper_gate)}</code>",
+                f"Дрифт данных: <code>{self._ru(drift)}</code>",
+                "Решения модели в live: <b>выключены</b>",
+                "",
+                "<i>bps = 0.01%. Precision = % прибыльных среди пропущенных моделью. "
+                "Lift = насколько пропущенные лучше среднего по всем сигналам.</i>",
+                "",
+            ]
 
-        all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
-        if (
-            all_done
-            and gate_total >= 50
-            and gate_lift is not None
-            and float(gate_lift) > 0
-            and paper_gate_count >= 20
-            and paper_gate_bps_val > 0
-        ):
-            lines.append("\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render.")
-        else:
-            lines.append("\n💡 <i>Нажмите «❓ Как читать модель» для пошагового руководства.</i>")
+            # ── Roadmap к реальным деньгам ──────────────────────────────────
+            lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
+            # 1. Данные
+            lbl_ok = int(labelled_15m or 0) >= 1000
+            lines.append(f"{'✅' if lbl_ok else '❌'} Данных 15m ≥ 1000 → сейчас: <code>{labelled_15m}</code>")
+            # 2. Модель обучена, quality GOOD
+            trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
+            lines.append(
+                f"{'✅' if trained_ok else '❌'} Качество модели = ХОРОШО → "
+                f"<code>{self._ru(model_quality) if db_model_version else 'не обучена'}</code>"
+            )
+            # 3. Walk-forward > 0
+            wfe_val = float(expectancy_bps) if expectancy_bps is not None else None
+            wfe_ok = wfe_val is not None and wfe_val > 0
+            lines.append(
+                f"{'✅' if wfe_ok else '❌'} Walk-forward > 0 bps → "
+                f"<code>{expectancy_str if expectancy_bps is not None else 'n/a'}</code>"
+            )
+            # 4. Champion
+            champ_ok = champion_ver not in ("none", "", None)
+            lines.append(
+                f"{'✅' if champ_ok else '❌'} Основная модель = CHAMPION → "
+                f"<code>{'есть: ' + str(champion_ver) if champ_ok else 'нет → нажмите «Промоутировать»'}</code>"
+            )
+            # 5. Gate lift
+            if gate_total == 0 and db_model_version:
+                gate_road_icon = "⏳"
+                gate_road_val = f"ждём ~50 сигналов (сейчас {gate_total})"
+            elif gate_lift is not None and float(gate_lift) > 0:
+                gate_road_icon = "✅"
+                gate_road_val = gate_lift_str
+            else:
+                gate_road_icon = "❌" if gate_total > 0 else "⏳"
+                gate_road_val = gate_lift_str if gate_lift is not None else "n/a"
+            lines.append(f"{gate_road_icon} Lift фильтра > 0 bps (≥50 сигналов) → <code>{gate_road_val}</code>")
+            # 6. Paper gate
+            paper_gate_count = int(paper_gate.get("count") or 0)
+            paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
+            if paper_gate_count < 20:
+                paper_road_icon = "⏳"
+                paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
+            elif paper_gate_bps_val > 0:
+                paper_road_icon = "✅"
+                paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
+            else:
+                paper_road_icon = "❌"
+                paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
+            lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
 
-        if latest_run_error:
-            lines.append(f"Ошибка последнего обучения: <code>{latest_run_error}</code>")
-        if db_diag.get("error"):
-            lines.append(f"\n<i>Ошибка: {html.escape(str(db_diag['error']))}</i>")
+            all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
+            if (
+                all_done
+                and gate_total >= 50
+                and gate_lift is not None
+                and float(gate_lift) > 0
+                and paper_gate_count >= 20
+                and paper_gate_bps_val > 0
+            ):
+                lines.append("\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render.")
+            else:
+                lines.append("\n💡 <i>Нажмите «❓ Как читать модель» для пошагового руководства.</i>")
 
-        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+            if latest_run_error:
+                lines.append(f"Ошибка последнего обучения: <code>{latest_run_error}</code>")
+            if db_diag.get("error"):
+                lines.append(f"\n<i>Ошибка: {html.escape(str(db_diag['error']))}</i>")
+
+            await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+        except Exception as exc:
+            log.warning("telegram.db_model_render_failed", error=str(exc), exc_info=True)
+            err_text = html.escape(str(exc))[:200]
+            try:
+                await self._reply(
+                    update,
+                    f"<b>База и модель</b>\nНе удалось отправить диагностику.\nОшибка: <code>{err_text}</code>",
+                    reply_markup=self._main_menu(),
+                )
+            except Exception as _reply_exc:
+                log.debug("telegram.db_model_fallback_reply_failed", error=str(_reply_exc))
 
     # ------------------------------------------------------------------
     # Control commands
