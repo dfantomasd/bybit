@@ -257,7 +257,7 @@ class Settings(BaseSettings):
     MAX_EVENT_LOOP_LAG_MS: int = 500
     MAX_QUEUE_UTILIZATION_PCT: int = 70
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 5
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3
 
     # ------------------------------------------------------------------
     # ML / model
