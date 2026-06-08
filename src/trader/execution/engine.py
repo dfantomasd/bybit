@@ -103,6 +103,13 @@ class ExecutionEngine:
         self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
         self._entry_order_mode = entry_order_mode
 
+        # P0: Hard block POST_ONLY_LIMIT — not implemented, fail fast
+        if self._entry_order_mode == "POST_ONLY_LIMIT":
+            raise ValueError(
+                "ENTRY_ORDER_MODE=POST_ONLY_LIMIT is not implemented. "
+                "Use MARKET (default) or implement POST_ONLY_LIMIT support before enabling."
+            )
+
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
         self._max_concurrent_pending = max_concurrent_pending_entries
