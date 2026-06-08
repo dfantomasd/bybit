@@ -132,8 +132,7 @@ class ChallengerModel:
                 label=label,
                 confidence=confidence,
                 model_version=self.version,
-                is_live_decision=self.allow_live_decisions
-                and self.status == ModelStatus.CHAMPION,
+                is_live_decision=self.allow_live_decisions and self.status == ModelStatus.CHAMPION,
             )
         except Exception as exc:
             log.debug("challenger.predict_failed", exc_info=exc)
@@ -184,9 +183,7 @@ class ChallengerModel:
             version=version,
             feature_names=meta.get("feature_names", []),
             training_samples=meta.get("training_samples", 0),
-            label_schema_version=meta.get(
-                "label_schema_version", LEGACY_LABEL_SCHEMA_VERSION
-            ),
+            label_schema_version=meta.get("label_schema_version", LEGACY_LABEL_SCHEMA_VERSION),
         )
         model._clf = payload.get("clf")
         model._scaler = payload.get("scaler")
@@ -332,18 +329,13 @@ class ModelRegistry:
                 return None
             row = rows[0]
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
-            model = ChallengerModel.from_bytes(
-                bytes(row["artifact"]), version=str(row["version"])
-            )
+            model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = ModelStatus.CHAMPION
             model.training_samples = int(
-                _row_get(row, "training_samples", model.training_samples)
-                or model.training_samples
+                _row_get(row, "training_samples", model.training_samples) or model.training_samples
             )
             model.allow_live_decisions = True
-            model.label_schema_version = str(
-                metrics.get("label_schema_version") or model.label_schema_version
-            )
+            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._champion = model
             log.info(
                 "model_registry.champion_loaded",
@@ -378,18 +370,13 @@ class ModelRegistry:
                 return None
             row = rows[0]
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
-            model = ChallengerModel.from_bytes(
-                bytes(row["artifact"]), version=str(row["version"])
-            )
+            model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = str(_row_get(row, "status", ModelStatus.SHADOW_CHALLENGER))
             model.training_samples = int(
-                _row_get(row, "training_samples", model.training_samples)
-                or model.training_samples
+                _row_get(row, "training_samples", model.training_samples) or model.training_samples
             )
             model.allow_live_decisions = False
-            model.label_schema_version = str(
-                metrics.get("label_schema_version") or model.label_schema_version
-            )
+            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._challenger = model
             log.info(
                 "model_registry.challenger_loaded",
