@@ -899,6 +899,8 @@ class TradingApplication:
 
             except Exception as exc:
                 log.debug("model_progress_reporter.failed", error=str(exc))
+
+    def _model_gate_threshold(self, regime_context: Any | None) -> float:
         """Return a conservative threshold adjusted by market regime."""
         assert self._settings is not None
         best_threshold = self._model_gate_quality.get("best_threshold")
