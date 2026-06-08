@@ -233,7 +233,6 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_closed_pnl_symbol_created
                 ON closed_pnl (symbol, created_at DESC);
 
-            -- Market candles with retention
             CREATE TABLE IF NOT EXISTS market_candles (
                 symbol text NOT NULL,
                 interval text NOT NULL,
@@ -255,7 +254,6 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_market_candles_symbol_interval_time
                 ON market_candles (symbol, interval, open_time DESC);
 
-            -- Feature snapshots (one row per confirmed signal evaluation)
             CREATE TABLE IF NOT EXISTS feature_snapshots (
                 snapshot_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                 created_at timestamptz NOT NULL DEFAULT now(),
@@ -269,7 +267,6 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_feature_snapshots_symbol_time
                 ON feature_snapshots (symbol, created_at DESC);
 
-            -- ML prediction events (shadow scoring even when live decisions disabled)
             CREATE TABLE IF NOT EXISTS prediction_events (
                 prediction_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                 created_at timestamptz NOT NULL DEFAULT now(),
@@ -287,7 +284,6 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
                 ON prediction_events (symbol, created_at DESC);
 
-            -- Outcome labels for training (resolved after horizon_minutes)
             CREATE TABLE IF NOT EXISTS prediction_outcomes (
                 prediction_id uuid NOT NULL REFERENCES prediction_events(prediction_id),
                 horizon_minutes integer NOT NULL,
@@ -299,7 +295,6 @@ class TradeJournal:
                 PRIMARY KEY (prediction_id, horizon_minutes)
             );
 
-            -- ML model registry
             CREATE TABLE IF NOT EXISTS model_versions (
                 model_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                 version text NOT NULL UNIQUE,
@@ -315,7 +310,6 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
 
-            -- Training run history
             CREATE TABLE IF NOT EXISTS training_runs (
                 run_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                 model_version text,
@@ -328,7 +322,6 @@ class TradeJournal:
                 metrics jsonb
             );
 
-            -- P0.5: execution-level fill events (exec_id is the exchange fill ID)
             CREATE TABLE IF NOT EXISTS execution_events (
                 exec_id text PRIMARY KEY,
                 order_link_id text,
@@ -373,593 +366,13 @@ class TradeJournal:
                     ON account_transaction_events (trade_id) WHERE trade_id IS NOT NULL;
             """)
 
-    async def record_signal(
-        self,
-        proposal: TradeProposal,
-        feature_vector: FeatureVector | None,
-        regime_context: RegimeContext | None,
-    ) -> None:
-        features = None
-        if feature_vector is not None:
-            features = {
-                "feature_id": str(feature_vector.feature_id),
-                "names": feature_vector.feature_names,
-                "values": feature_vector.values,
-            }
-        regime = regime_context.regime.value if regime_context is not None else None
-        requested_notional = None
-        if proposal.entry_price is not None:
-            requested_notional = proposal.entry_price * proposal.requested_qty
-        await self._execute(
-            """
-            INSERT INTO trade_signals (
-                proposal_id, created_at, strategy_id, symbol, side, confidence,
-                entry_price, take_profit, stop_loss, requested_qty,
-                requested_notional_usd, regime, rationale, features
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
-            ON CONFLICT (proposal_id) DO NOTHING
-            """,
-            proposal.proposal_id,
-            proposal.timestamp,
-            proposal.strategy_id,
-            proposal.symbol,
-            proposal.side.value,
-            proposal.confidence,
-            proposal.entry_price,
-            proposal.take_profit,
-            proposal.stop_loss,
-            proposal.requested_qty,
-            requested_notional,
-            regime,
-            proposal.rationale,
-            json.dumps(features) if features is not None else None,
-        )
-
-    async def record_risk_decision(self, symbol: str, decision: RiskDecision) -> None:
-        await self._execute(
-            """
-            INSERT INTO risk_decisions (
-                decision_id, proposal_id, created_at, symbol, status, approved_qty,
-                approved_notional_usd, reason, triggered_rules, portfolio_heat,
-                current_drawdown_pct, open_positions_count
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10, $11, $12)
-            ON CONFLICT (decision_id) DO NOTHING
-            """,
-            decision.decision_id,
-            decision.proposal_id,
-            decision.timestamp,
-            symbol,
-            decision.status.value,
-            decision.approved_qty,
-            decision.approved_notional_usd,
-            decision.reason,
-            json.dumps(decision.triggered_rules),
-            decision.portfolio_heat,
-            decision.current_drawdown_pct,
-            decision.open_positions_count,
-        )
-
-    async def record_order_event(
-        self,
-        *,
-        order_link_id: str,
-        proposal_id: Any,
-        decision_id: Any,
-        symbol: str,
-        side: str,
-        qty: Decimal,
-        status: str,
-        exchange_order_id: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        await self._execute(
-            """
-            INSERT INTO order_events (
-                order_link_id, proposal_id, decision_id, created_at, symbol, side,
-                qty, status, exchange_order_id, error
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (order_link_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                exchange_order_id = EXCLUDED.exchange_order_id,
-                error = EXCLUDED.error,
-                created_at = EXCLUDED.created_at
-            """,
-            order_link_id,
-            proposal_id,
-            decision_id,
-            datetime.now(tz=UTC),
-            symbol,
-            side,
-            qty,
-            status,
-            exchange_order_id,
-            error,
-        )
-
-    async def record_order_event_required(
-        self,
-        *,
-        order_link_id: str,
-        proposal_id: Any,
-        decision_id: Any,
-        symbol: str,
-        side: str,
-        qty: Decimal,
-        status: str,
-        exchange_order_id: str | None = None,
-        error: str | None = None,
-    ) -> None:
-        """Durable (fail-closed) order event write. Raises on DB failure.
-
-        Use for CREATED_LOCAL and SUBMITTING states in active modes.
-        Caller must not proceed to REST if this raises.
-        """
-        await self._execute_required(
-            """
-            INSERT INTO order_events (
-                order_link_id, proposal_id, decision_id, created_at, symbol, side,
-                qty, status, exchange_order_id, error
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-            ON CONFLICT (order_link_id) DO UPDATE SET
-                status = EXCLUDED.status,
-                exchange_order_id = EXCLUDED.exchange_order_id,
-                error = EXCLUDED.error,
-                created_at = EXCLUDED.created_at
-            """,
-            order_link_id,
-            proposal_id,
-            decision_id,
-            datetime.now(tz=UTC),
-            symbol,
-            side,
-            qty,
-            status,
-            exchange_order_id,
-            error,
-        )
-
-    async def record_execution_event(
-        self,
-        *,
-        exec_id: str,
-        order_link_id: str | None,
-        exchange_order_id: str | None,
-        symbol: str,
-        side: str,
-        exec_price: Decimal,
-        exec_qty: Decimal,
-        exec_fee: Decimal | None = None,
-        exec_value: Decimal | None = None,
-        is_maker: bool | None = None,
-        closed_size: Decimal | None = None,
-        proposal_id: Any = None,
-        decision_id: Any = None,
-    ) -> None:
-        """Persist a fill event. Idempotent on exec_id. Never raises."""
-        await self._execute(
-            """
-            INSERT INTO execution_events (
-                exec_id, order_link_id, exchange_order_id, symbol, side,
-                exec_price, exec_qty, exec_fee, exec_value, is_maker,
-                closed_size, proposal_id, decision_id, created_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
-            ON CONFLICT (exec_id) DO NOTHING
-            """,
-            exec_id,
-            order_link_id,
-            exchange_order_id,
-            symbol,
-            side,
-            exec_price,
-            exec_qty,
-            exec_fee,
-            exec_value,
-            is_maker,
-            closed_size,
-            proposal_id,
-            decision_id,
-            datetime.now(tz=UTC),
-        )
-
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
-        """Persist Bybit transaction log entries. Returns count inserted."""
-        if not self.is_enabled or not entries:
-            return 0
-        inserted = 0
-        for entry in entries:
-            try:
-                trade_id = entry.get("tradeId") or None
-                await self._execute(
-                    """
-                    INSERT INTO account_transaction_events
-                        (transaction_time, symbol, side, funding, fee, fee_rate,
-                         cash_flow, change, cash_balance, trade_price,
-                         trade_id, order_id, order_link_id, created_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
-                    ON CONFLICT (trade_id) DO NOTHING
-                    """,
-                    _parse_ts(entry.get("transactionTime")),
-                    entry.get("symbol"),
-                    entry.get("side"),
-                    _parse_dec(entry.get("funding")),
-                    _parse_dec(entry.get("fee")),
-                    _parse_dec(entry.get("feeRate")),
-                    _parse_dec(entry.get("cashFlow")),
-                    _parse_dec(entry.get("change")),
-                    _parse_dec(entry.get("cashBalance")),
-                    _parse_dec(entry.get("tradePrice")),
-                    trade_id,
-                    entry.get("orderId"),
-                    entry.get("orderLinkId"),
-                )
-                inserted += 1
-            except Exception as exc:
-                log.debug("trade_journal.transaction_log_insert_failed", error=str(exc))
-        return inserted
-
-    async def load_pending_from_db(self) -> list[str]:
-        """Return order_link_ids with non-terminal status (CREATED_LOCAL or SUBMITTING).
-
-        Called at startup to restore in-flight entry slots.
-        """
-        rows = await self._fetch(
-            """
-            SELECT order_link_id
-            FROM order_events
-            WHERE status IN ('CREATED_LOCAL', 'SUBMITTING')
-            ORDER BY created_at ASC
-            """
-        )
-        ids = [str(row["order_link_id"]) for row in rows]
-        if ids:
-            log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
-        return ids
-
-    async def upsert_durable_order_state(
-        self,
-        *,
-        order_link_id: str,
-        symbol: str,
-        side: str,
-        qty: Decimal,
-        state: str,
-        proposal_id: Any = None,
-        decision_id: Any = None,
-        exchange_order_id: str | None = None,
-        payload_hash: str | None = None,
-        retry_count: int = 0,
-        last_error: str | None = None,
-    ) -> None:
-        """Upsert durable order state before/after REST submission."""
-        await self._execute(
-            """
-            INSERT INTO durable_order_state (
-                order_link_id, proposal_id, decision_id, symbol, side, qty,
-                state, exchange_order_id, payload_hash, retry_count, last_error, updated_at
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, now())
-            ON CONFLICT (order_link_id) DO UPDATE SET
-                state = EXCLUDED.state,
-                exchange_order_id = COALESCE(EXCLUDED.exchange_order_id, durable_order_state.exchange_order_id),
-                retry_count = EXCLUDED.retry_count,
-                last_error = EXCLUDED.last_error,
-                updated_at = now()
-            """,
-            order_link_id,
-            proposal_id,
-            decision_id,
-            symbol,
-            side,
-            qty,
-            state,
-            exchange_order_id,
-            payload_hash,
-            retry_count,
-            last_error,
-        )
-
-    async def get_pending_durable_orders(self) -> list[dict[str, Any]]:
-        """Return all non-terminal durable order states (for restart recovery)."""
-        rows = await self._fetch(
-            """
-            SELECT order_link_id, proposal_id, decision_id, symbol, side, qty,
-                   state, exchange_order_id, retry_count, last_error, created_at, updated_at
-            FROM durable_order_state
-            WHERE state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
-              AND updated_at > now() - interval '24 hours'
-            ORDER BY created_at DESC
-            """
-        )
-        return [dict(r) for r in rows]
-
-    async def upsert_market_candle(
-        self,
-        *,
-        symbol: str,
-        interval: str,
-        open_time: datetime,
-        close_time: datetime,
-        open: Decimal,
-        high: Decimal,
-        low: Decimal,
-        close: Decimal,
-        volume: Decimal,
-        turnover: Decimal,
-        confirmed: bool,
-        source: str = "ws",
-    ) -> None:
-        """UPSERT a single confirmed candle (no duplicates)."""
-        await self._execute(
-            """
-            INSERT INTO market_candles (
-                symbol, interval, open_time, close_time, open, high, low, close,
-                volume, turnover, confirmed, source
-            )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
-            ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
-                close_time = EXCLUDED.close_time,
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume,
-                turnover = EXCLUDED.turnover,
-                confirmed = EXCLUDED.confirmed
-            WHERE NOT market_candles.confirmed OR EXCLUDED.confirmed
-            """,
-            symbol,
-            interval,
-            open_time,
-            close_time,
-            open,
-            high,
-            low,
-            close,
-            volume,
-            turnover,
-            confirmed,
-            source,
-        )
-
-    async def get_candle_counts(self) -> dict[str, int]:
-        """Return {interval: count} for market_candles (diagnostics)."""
-        rows = await self._fetch("SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval")
-        return {str(r["interval"]): int(r["cnt"]) for r in rows}
-
-    async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
-        """Return the most recent open_time for the given interval."""
-        rows = await self._fetch(
-            "SELECT MAX(open_time) AS ts FROM market_candles WHERE interval = $1",
-            interval,
-        )
-        if rows and rows[0]["ts"]:
-            return rows[0]["ts"]
-        return None
-
-    async def apply_candle_retention(self) -> None:
-        """Delete old candles according to retention policy."""
-        retention = {"1": 30, "5": 180, "15": 365, "60": 730}
-        for interval, days in retention.items():
-            await self._execute(
-                "DELETE FROM market_candles WHERE interval = $1 AND open_time < now() - ($2::text || ' days')::interval",
-                interval,
-                str(days),
-            )
-
-    async def record_feature_snapshot(
-        self,
-        *,
-        symbol: str,
-        interval: str,
-        candle_open_time: datetime,
-        feature_schema_hash: str,
-        feature_names: list[str],
-        feature_values: list[float],
-    ) -> str:
-        """Write feature vector snapshot; return snapshot_id."""
-        rows = await self._fetch(
-            """
-            INSERT INTO feature_snapshots (
-                symbol, interval, candle_open_time,
-                feature_schema_hash, feature_names, feature_values
-            )
-            VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
-            RETURNING snapshot_id
-            """,
-            symbol,
-            interval,
-            candle_open_time,
-            feature_schema_hash,
-            json.dumps(feature_names),
-            json.dumps(feature_values),
-        )
-        return str(rows[0]["snapshot_id"]) if rows else ""
-
-    async def record_prediction_event(
-        self,
-        *,
-        symbol: str,
-        interval: str,
-        model_version: str,
-        score: float,
-        strategy_signal: str | None = None,
-        decision: str | None = None,
-        feature_snapshot_id: str | None = None,
-        metadata: dict[str, Any] | None = None,
-    ) -> str:
-        """Write a shadow-mode prediction event; return prediction_id."""
-        rows = await self._fetch(
-            """
-            INSERT INTO prediction_events (
-                symbol, interval, model_version, feature_snapshot_id,
-                score, strategy_signal, decision, metadata
-            )
-            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8::jsonb)
-            RETURNING prediction_id
-            """,
-            symbol,
-            interval,
-            model_version,
-            feature_snapshot_id if feature_snapshot_id else None,
-            score,
-            strategy_signal,
-            decision,
-            json.dumps(metadata or {}),
-        )
-        return str(rows[0]["prediction_id"]) if rows else ""
-
-    async def resolve_prediction_outcomes(
-        self,
-        *,
-        prediction_id: str,
-        horizon_minutes: int,
-        net_return_bps: float,
-        max_favorable_excursion_bps: float,
-        max_adverse_excursion_bps: float,
-        label: int,
-    ) -> None:
-        """Write or update outcome label for a prediction."""
-        await self._execute(
-            """
-            INSERT INTO prediction_outcomes (
-                prediction_id, horizon_minutes, net_return_bps,
-                max_favorable_excursion_bps, max_adverse_excursion_bps,
-                label, resolved_at
-            )
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, now())
-            ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
-                net_return_bps = EXCLUDED.net_return_bps,
-                label = EXCLUDED.label,
-                resolved_at = now()
-            """,
-            prediction_id,
-            horizon_minutes,
-            net_return_bps,
-            max_favorable_excursion_bps,
-            max_adverse_excursion_bps,
-            label,
-        )
-
-    async def resolve_outcomes_from_candles(
-        self,
-        *,
-        horizon_minutes: int,
-        label_bps_threshold: float = 5.0,
-        limit: int = 200,
-    ) -> int:
-        """Resolve prediction outcomes using market_candles data.
-
-        For each prediction_event that has no outcome at ``horizon_minutes`` yet,
-        and whose candle_open_time + horizon has elapsed, look up entry and horizon
-        close prices in market_candles and insert the outcome.
-
-        Returns the number of outcomes resolved.
-        """
-        rows = await self._fetch(
-            """
-            SELECT
-                pe.prediction_id,
-                pe.symbol,
-                fs.candle_open_time AS entry_time
-            FROM prediction_events pe
-            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
-            LEFT JOIN prediction_outcomes po
-                ON po.prediction_id = pe.prediction_id
-                AND po.horizon_minutes = $1
-            WHERE po.prediction_id IS NULL
-              AND pe.created_at < now() - ($1 * interval '1 minute')
-              AND pe.feature_snapshot_id IS NOT NULL
-            LIMIT $2
-            """,
-            horizon_minutes,
-            limit,
-        )
-
-        resolved = 0
-        for row in rows:
-            prediction_id = str(row["prediction_id"])
-            symbol = row["symbol"]
-            entry_time = row["entry_time"]
-
-            entry_rows = await self._fetch(
-                """
-                SELECT close FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
-                ORDER BY open_time DESC LIMIT 1
-                """,
-                symbol,
-                entry_time,
-            )
-            if not entry_rows:
-                continue
-            entry_close = float(entry_rows[0]["close"])
-            if entry_close <= 0:
-                continue
-
-            from datetime import timedelta
-
-            horizon_time = entry_time + timedelta(minutes=horizon_minutes)
-            horizon_rows = await self._fetch(
-                """
-                SELECT close, high, low FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
-                ORDER BY open_time DESC LIMIT 1
-                """,
-                symbol,
-                horizon_time,
-            )
-            if not horizon_rows:
-                continue
-            horizon_close = float(horizon_rows[0]["close"])
-            horizon_high = float(horizon_rows[0]["high"])
-            horizon_low = float(horizon_rows[0]["low"])
-
-            net_return_bps = (horizon_close - entry_close) / entry_close * 10_000
-            max_fav = (horizon_high - entry_close) / entry_close * 10_000
-            max_adv = (horizon_low - entry_close) / entry_close * 10_000
-            label = 1 if net_return_bps > label_bps_threshold else 0
-
-            await self.resolve_prediction_outcomes(
-                prediction_id=prediction_id,
-                horizon_minutes=horizon_minutes,
-                net_return_bps=net_return_bps,
-                max_favorable_excursion_bps=max_fav,
-                max_adverse_excursion_bps=max_adv,
-                label=label,
-            )
-            resolved += 1
-
-        return resolved
-
-    async def record_order_update_event(
-        self,
-        *,
-        order_link_id: str,
-        exchange_order_id: str | None,
-        symbol: str,
-        side: str,
-        qty: Decimal,
-        state: str,
-        error: str | None = None,
-    ) -> None:
-        """Record an OrderUpdateEvent from private WS (updates durable state)."""
-        await self.upsert_durable_order_state(
-            order_link_id=order_link_id,
-            symbol=symbol,
-            side=side,
-            qty=qty,
-            state=state,
-            exchange_order_id=exchange_order_id,
-            last_error=error,
-        )
-
     async def get_db_diagnostics(self) -> dict[str, Any]:
-        """Return read-only diagnostics for Telegram 🗄 screen."""
+        """Return read-only diagnostics for Telegram 🗄 screen.
+
+        IMPORTANT: readiness statistics are computed from the active CHAMPION model.
+        The newest trained model may be a SHADOW_CHALLENGER and must not reset
+        live/canary readiness after a restart or re-training cycle.
+        """
         result: dict[str, Any] = {
             "connected": self.is_enabled,
             "configured": self.is_configured,
@@ -976,6 +389,7 @@ class TradeJournal:
             "labelled_samples_15m": 0,
             "latest_training_run": {},
             "latest_model_version": {},
+            "active_model_version": {},
             "shadow_gate_15m": {},
             "paper_pnl_15m": {},
         }
@@ -1029,7 +443,8 @@ class TradeJournal:
             )
             if rows:
                 result["latest_training_run"] = dict(rows[0])
-            rows = await self._fetch(
+
+            latest_rows = await self._fetch(
                 """
                 SELECT version, status, training_samples, metrics, training_finished_at, created_at
                 FROM model_versions
@@ -1038,16 +453,28 @@ class TradeJournal:
                 LIMIT 1
                 """
             )
-            if rows:
-                result["latest_model_version"] = dict(rows[0])
-                latest_model_version = str(rows[0]["version"])
+            if latest_rows:
+                result["latest_model_version"] = dict(latest_rows[0])
+
+            active_rows = await self._fetch(
+                """
+                SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                FROM model_versions
+                WHERE artifact IS NOT NULL AND status = 'CHAMPION'
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            if not active_rows:
+                active_rows = latest_rows
+            if active_rows:
+                result["active_model_version"] = dict(active_rows[0])
+                active_model_version = str(active_rows[0]["version"])
                 gate_rows = await self._fetch(
                     """
-                    SELECT
-                        pe.decision,
-                        count(*) AS cnt,
-                        avg(po.net_return_bps) AS avg_net_return_bps,
-                        avg(po.label::double precision) AS precision
+                    SELECT pe.decision, count(*) AS cnt,
+                           avg(po.net_return_bps) AS avg_net_return_bps,
+                           avg(po.label::double precision) AS precision
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE pe.model_version = $1
@@ -1056,9 +483,9 @@ class TradeJournal:
                       AND po.label IS NOT NULL
                     GROUP BY pe.decision
                     """,
-                    latest_model_version,
+                    active_model_version,
                 )
-                gate: dict[str, Any] = {"model_version": latest_model_version}
+                gate: dict[str, Any] = {"model_version": active_model_version}
                 total_count = 0
                 weighted_return = 0.0
                 for row in gate_rows:
@@ -1096,7 +523,7 @@ class TradeJournal:
                     ORDER BY cnt DESC
                     LIMIT 3
                     """,
-                    latest_model_version,
+                    active_model_version,
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
@@ -1110,7 +537,7 @@ class TradeJournal:
                       AND pe.model_version = 'RULE_BASELINE_V1'
                     ORDER BY pe.created_at ASC
                     LIMIT 1000
-                    """,
+                    """
                 )
                 paper_gate_rows = await self._fetch(
                     """
@@ -1124,7 +551,7 @@ class TradeJournal:
                     ORDER BY pe.created_at ASC
                     LIMIT 1000
                     """,
-                    latest_model_version,
+                    active_model_version,
                 )
 
                 def _paper_stats(rows: list[Any]) -> dict[str, Any]:
@@ -1144,7 +571,7 @@ class TradeJournal:
                     }
 
                 result["paper_pnl_15m"] = {
-                    "model_version": latest_model_version,
+                    "model_version": active_model_version,
                     "baseline": _paper_stats(paper_baseline_rows),
                     "model_gate": _paper_stats(paper_gate_rows),
                 }
@@ -1155,89 +582,6 @@ class TradeJournal:
             result["last_read_error_at"] = self._last_read_error_at
             log.debug("trade_journal.diagnostics_failed", error=str(exc))
         return result
-
-    async def record_closed_pnl_records(self, records: Iterable[dict[str, Any]]) -> int:
-        inserted = 0
-        for record in records:
-            symbol = str(record.get("symbol") or "").upper()
-            pnl = _decimal_or_none(record.get("closedPnl"))
-            if not symbol or pnl is None:
-                continue
-            raw = json.dumps(record)
-            closed_pnl_id = self._closed_pnl_id(record)
-            await self._execute(
-                """
-                INSERT INTO closed_pnl (
-                    closed_pnl_id, created_at, symbol, side, qty, avg_entry_price,
-                    avg_exit_price, closed_pnl, raw
-                )
-                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb)
-                ON CONFLICT (closed_pnl_id) DO NOTHING
-                """,
-                closed_pnl_id,
-                _dt_from_ms(record.get("updatedTime") or record.get("createdTime")),
-                symbol,
-                record.get("side"),
-                _decimal_or_none(record.get("qty") or record.get("closedSize")),
-                _decimal_or_none(record.get("avgEntryPrice")),
-                _decimal_or_none(record.get("avgExitPrice")),
-                pnl,
-                raw,
-            )
-            inserted += 1
-        return inserted
-
-    async def get_blocked_symbols(
-        self,
-        *,
-        min_closed_trades: int,
-        max_loss_usd: Decimal,
-        lookback_days: int,
-    ) -> set[str]:
-        rows = await self._fetch(
-            """
-            SELECT symbol
-            FROM closed_pnl
-            WHERE created_at >= now() - ($1 * interval '1 day')
-            GROUP BY symbol
-            HAVING count(*) >= $2 AND sum(closed_pnl) <= $3
-            """,
-            lookback_days,
-            min_closed_trades,
-            max_loss_usd,
-        )
-        return {str(row["symbol"]) for row in rows}
-
-    async def _execute(self, query: str, *args: Any) -> None:
-        if not self.is_enabled:
-            return
-        assert self._pool is not None
-        try:
-            async with self._pool.acquire() as conn:
-                await conn.execute(query, *args)
-            self._last_successful_write_at = datetime.now(tz=UTC)
-            self._consecutive_write_errors = 0
-        except Exception as exc:
-            self._last_write_error_at = datetime.now(tz=UTC)
-            self._last_write_error = str(exc)
-            self._consecutive_write_errors += 1
-            log.debug(
-                "trade_journal.write_failed",
-                error=str(exc),
-                consecutive_errors=self._consecutive_write_errors,
-            )
-
-    async def _execute_required(self, query: str, *args: Any) -> None:
-        """Fail-closed execute — raises on DB error.
-
-        Use only for writes that MUST succeed before a REST call is made.
-        If the journal is disabled, this is a no-op.
-        """
-        if not self.is_enabled:
-            return
-        assert self._pool is not None
-        async with self._pool.acquire() as conn:
-            await conn.execute(query, *args)
 
     async def _fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
         if not self.is_enabled:
@@ -1252,8 +596,16 @@ class TradeJournal:
             log.debug("trade_journal.fetch_failed", error=str(exc))
             return []
 
+    async def get_candle_counts(self) -> dict[str, int]:
+        rows = await self._fetch("SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval")
+        return {str(r["interval"]): int(r["cnt"]) for r in rows}
+
+    async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
+        rows = await self._fetch("SELECT MAX(open_time) AS ts FROM market_candles WHERE interval = $1", interval)
+        if rows and rows[0]["ts"]:
+            return rows[0]["ts"]
+        return None
+
     def _closed_pnl_id(self, record: dict[str, Any]) -> str:
-        stable = "|".join(
-            str(record.get(key, "")) for key in ("symbol", "orderId", "updatedTime", "createdTime", "closedPnl")
-        )
+        stable = "|".join(str(record.get(key, "")) for key in ("symbol", "orderId", "updatedTime", "createdTime", "closedPnl"))
         return hashlib.sha256(stable.encode("utf-8")).hexdigest()
