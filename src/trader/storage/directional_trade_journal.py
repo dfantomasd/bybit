@@ -117,12 +117,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         limit: int = 200,
         cost_model: CostModelBps | None = None,
     ) -> int:
-        """Resolve Buy and Sell outcomes from confirmed 1-minute candles.
+        """Resolve Buy and Sell outcomes from complete confirmed 1-minute paths.
 
         Legacy long-only outcomes are recalculated because the lookup joins only
         rows carrying the current ``LABEL_SCHEMA_VERSION``. The existing primary
         key then updates the old row in place. MFE and MAE use every confirmed
-        candle inside the horizon rather than only the final bar.
+        candle inside the full horizon rather than only the final bar.
         """
 
         costs = cost_model or default_cost_model()
@@ -184,7 +184,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             horizon_time = entry_time + timedelta(minutes=horizon_minutes)
             path_rows = await self._fetch(
                 """
-                SELECT close, high, low
+                SELECT open_time, close, high, low
                 FROM market_candles
                 WHERE symbol = $1
                   AND interval = '1'
@@ -197,7 +197,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 entry_time,
                 horizon_time,
             )
-            if not path_rows:
+            if len(path_rows) != horizon_minutes:
+                continue
+            if path_rows[-1]["open_time"] != horizon_time:
                 continue
 
             outcome = build_directional_outcome(
@@ -226,7 +228,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         return resolved
 
     async def get_db_diagnostics(self) -> dict[str, Any]:
-        """Expose only current-schema label counts to model diagnostics."""
+        """Expose only current-schema labels and models to diagnostics."""
 
         result = await super().get_db_diagnostics()
         result["label_schema_version"] = LABEL_SCHEMA_VERSION
@@ -263,8 +265,36 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
         result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
 
-        # Fail closed until gate statistics are recalculated with the new label
-        # schema. Old long-only lift must never enable canary filtering.
+        rows = await self._fetch(
+            """
+            SELECT version, status, training_samples, metrics, training_finished_at, created_at
+            FROM model_versions
+            WHERE artifact IS NOT NULL
+              AND COALESCE(metrics->>'label_schema_version', '') = $1
+            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        result["latest_model_version"] = dict(rows[0]) if rows else {}
+
+        rows = await self._fetch(
+            """
+            SELECT version, status, training_samples, metrics, training_finished_at, created_at
+            FROM model_versions
+            WHERE status = 'CHAMPION'
+              AND artifact IS NOT NULL
+              AND COALESCE(metrics->>'label_schema_version', '') = $1
+            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        result["active_model_version"] = dict(rows[0]) if rows else {}
+
+        # Fail closed until app runtime explicitly separates Challenger shadow
+        # scoring from Champion-only Canary decisions. Old long-only lift must
+        # never enable live filtering.
         result["shadow_gate_15m"] = {}
         result["paper_pnl_15m"] = {}
         return result
