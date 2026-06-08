@@ -161,7 +161,7 @@ class ChallengerModel:
         return buf.getvalue()
 
     @classmethod
-    def from_bytes(cls, data: bytes, version: str) -> "ChallengerModel":
+    def from_bytes(cls, data: bytes, version: str) -> ChallengerModel:
         """Deserialize model from bytes."""
 
         buf = io.BytesIO(data)
