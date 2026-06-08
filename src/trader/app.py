@@ -750,26 +750,62 @@ class TradingApplication:
                 continue
 
             try:
+                from trader.training.labels import LABEL_SCHEMA_VERSION
+
                 diag = await self._trade_journal.get_db_diagnostics()
-                gate = diag.get("shadow_gate_15m", {}) or {}
                 latest_model = diag.get("latest_model_version", {}) or {}
 
                 challenger_version = str(latest_model.get("version", "") or "")
                 challenger_status = str(latest_model.get("status", "") or "")
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
 
                 if challenger_status != "SHADOW_CHALLENGER" or not challenger_version:
                     continue
 
-                if total_count < min_signals:
+                # Verify label schema and quality before fetching expensive gate stats
+                metrics = latest_model.get("metrics") or {}
+                if isinstance(metrics, str):
+                    import json as _json
+
+                    metrics = _json.loads(metrics) if metrics.strip() else {}
+                if str(metrics.get("label_schema_version") or "") != LABEL_SCHEMA_VERSION:
+                    log.debug(
+                        "model_auto_promote.skipped",
+                        reason="incompatible_label_schema",
+                        version=challenger_version,
+                    )
+                    continue
+
+                quality = str(metrics.get("quality") or "")
+                if quality != "GOOD":
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="quality_not_good",
+                        quality=quality,
+                        version=challenger_version,
+                    )
+                    continue
+
+                horizon = int(metrics.get("horizon_minutes") or 15)
+
+                # Use exact-version stats — shadow_gate_15m in diagnostics is for Champion, not Challenger
+                gate = await self._trade_journal.get_shadow_gate_stats_for_version(
+                    version=challenger_version,
+                    horizon_minutes=horizon,
+                    label_schema_version=LABEL_SCHEMA_VERSION,
+                    min_count=min_signals,
+                )
+                if not gate:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="insufficient_signals",
-                        total_count=total_count,
+                        version=challenger_version,
                         min_signals=min_signals,
                     )
                     continue
+
+                total_count = int(gate.get("total_count", 0) or 0)
+                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
+                pass_avg = float(gate.get("pass_avg_net_return_bps") or 0.0)
 
                 if lift_bps < min_lift_bps:
                     log.debug(
@@ -780,7 +816,14 @@ class TradingApplication:
                     )
                     continue
 
-                # Conservative: challenger must beat champion's own walk-forward expectancy
+                if pass_avg <= 0.0:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="non_positive_pass_expectancy",
+                        pass_avg=pass_avg,
+                    )
+                    continue
+
                 champion_wf_bps = await self._get_champion_walk_forward_bps()
                 if lift_bps <= champion_wf_bps:
                     log.debug(
@@ -800,27 +843,14 @@ class TradingApplication:
                 )
                 result = await self._start_model_promote(challenger_version)
 
-                # Auto-enable canary gate if model quality now allows it
-                canary_msg = ""
-                if self._settings is not None and not self._settings.MODEL_GATE_CANARY_ENABLED:
-                    self._update_model_gate_quality_from_diag(diag)
-                    quality_ok, _ = self._model_gate_quality_allows_canary()
-                    if quality_ok:
-                        self._settings.MODEL_GATE_CANARY_ENABLED = True
-                        log.info("model_auto_promote.canary_enabled", version=challenger_version)
-                        canary_msg = (
-                            "\n🚦 <b>Canary-фильтр включён</b> — модель начинает фильтровать слабые сигналы.\n"
-                            "Чтобы сохранить после перезапуска: задайте "
-                            "<code>MODEL_GATE_CANARY_ENABLED=true</code> в Render env vars."
-                        )
-
+                # Canary activation is a separate manual action — never auto-enabled here.
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
                         f"🤖 <b>Авто-промоут</b>\n"
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{result}{canary_msg}"
+                        f"{result}"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
@@ -1084,8 +1114,12 @@ class TradingApplication:
             sval = str(value).strip().lower()
             if sval not in {"on", "off", "true", "false", "1", "0"}:
                 raise ValueError("model_gate must be on/off")
-            self._settings.MODEL_GATE_CANARY_ENABLED = sval in {"on", "true", "1"}
-            return f"Model gate canary set to {'ON' if self._settings.MODEL_GATE_CANARY_ENABLED else 'OFF'}"
+            if sval in {"on", "true", "1"}:
+                raise ValueError(
+                    "Canary model gate can only be enabled through Render env after manual readiness review."
+                )
+            self._settings.MODEL_GATE_CANARY_ENABLED = False
+            return "Model gate canary set to OFF"
         if key == "model_gate_threshold":
             fvalue = float(value)
             if not 0.50 <= fvalue <= 0.80:
@@ -1260,6 +1294,8 @@ class TradingApplication:
             if available > Decimal("0"):
                 self._cached_balance = available
                 self._balance_refreshed_at = datetime.now(tz=UTC)
+                if self._exposure_tracker is not None:
+                    self._exposure_tracker.update_capital(available)
                 log.info(
                     "balance.refreshed",
                     available_usd=str(available),
@@ -1640,7 +1676,24 @@ class TradingApplication:
                         )
                     elif isinstance(event, OrderUpdateEvent):
                         # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
-                        order_link_id = event.order_link_id or event.order_id
+                        order_link_id = event.order_link_id or ""
+                        if not order_link_id and event.order_id:
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                try:
+                                    order_link_id = (
+                                        await self._trade_journal.find_order_link_id_by_exchange_order_id(
+                                            event.order_id
+                                        )
+                                        or ""
+                                    )
+                                except Exception as _lookup_exc:
+                                    log.debug("private_ws.reverse_lookup_failed", error=str(_lookup_exc))
+                        if not order_link_id:
+                            log.warning(
+                                "private_ws.order_link_id_not_found",
+                                order_id=event.order_id,
+                                status=event.status.value if event.status else "unknown",
+                            )
                         order_status = event.status  # OrderUpdateEvent.status is the correct field
                         log.info(
                             "private_ws.order_update",
@@ -1671,10 +1724,11 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
+                        # Fail-closed: don't release a slot if we couldn't resolve the order identity
+                        if is_terminal and not order_link_id:
+                            log.warning("private_ws.cannot_release_unknown_order", order_id=event.order_id)
+                            is_terminal = False
                         # Release pending entry slot on terminal — exactly once per order.
-                        # Pass the exact order_link_id so only the correct slot is released.
-                        # _pending_released is shared with ExecutionUpdateEvent to prevent
-                        # double-release when both events arrive for the same fill.
                         if is_terminal and order_link_id not in _pending_released:
                             if self._execution_engine is not None:
                                 self._execution_engine.mark_entry_resolved(order_link_id)
@@ -1729,7 +1783,13 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
-                        # P0.3: Release pending entry slot for this order_link_id only.
+                        # Accumulate realized PnL — deduped via seen_exec_ids at top of block
+                        if event.closed_pnl != Decimal("0") and self._risk_manager is not None:
+                            try:
+                                await self._risk_manager.update_daily_pnl(event.closed_pnl)
+                            except Exception as _pnl_exc:
+                                log.debug("private_ws.daily_pnl_update_failed", error=str(_pnl_exc))
+                        # Release pending entry slot for this order_link_id only.
                         # Guard against double-release if OrderUpdateEvent(FILLED) already ran.
                         if self._execution_engine is not None and event.order_link_id:
                             if event.order_link_id not in _pending_released:
@@ -1882,10 +1942,33 @@ class TradingApplication:
                     except Exception as exc:
                         log.debug("risk_monitor.balance_update_failed", error=str(exc))
 
-                # Check WS freshness and alert if stale
+                # Feed circuit breakers
+                if self._risk_manager is not None:
+                    try:
+                        drawdown_pct = self._risk_manager._drawdown.drawdown_pct
+                        if drawdown_pct > Decimal("0"):
+                            await self._risk_manager._breakers.check_drawdown(drawdown_pct)
+                    except Exception as exc:
+                        log.debug("risk_monitor.drawdown_breaker_failed", error=str(exc))
+
+                    if self._cached_balance > Decimal("0"):
+                        try:
+                            await self._risk_manager._breakers.check_daily_loss(
+                                self._risk_manager.daily_pnl,
+                                self._cached_balance,
+                            )
+                        except Exception as exc:
+                            log.debug("risk_monitor.daily_loss_breaker_failed", error=str(exc))
+
+                # Check WS freshness via circuit breaker
                 if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                     age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
-                    if age > 60.0:
+                    if self._risk_manager is not None:
+                        try:
+                            await self._risk_manager._breakers.check_websocket_staleness(age)
+                        except Exception as exc:
+                            log.debug("risk_monitor.ws_breaker_failed", error=str(exc))
+                    elif age > 60.0:
                         log.warning("risk_monitor.ws_stale", age_s=age)
                         self._record_diag("ws_stale")
 
@@ -1899,6 +1982,28 @@ class TradingApplication:
                 )
             except TimeoutError:
                 pass
+
+    async def _run_daily_stats_reset(self) -> None:
+        """Reset daily risk stats at UTC midnight."""
+        while not self._shutdown_event.is_set():
+            now = datetime.now(tz=UTC)
+            seconds_until_midnight = 86400 - (
+                now.hour * 3600 + now.minute * 60 + now.second + now.microsecond / 1_000_000
+            )
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=max(1.0, seconds_until_midnight),
+                )
+                break
+            except TimeoutError:
+                pass
+            if self._risk_manager is not None:
+                try:
+                    await self._risk_manager.reset_daily_stats()
+                    log.info("daily_stats.reset_at_utc_midnight")
+                except Exception as exc:
+                    log.warning("daily_stats.reset_failed", error=str(exc))
 
     async def _run_reconciliation(self) -> None:
         """Periodic reconciliation: compare local order state with exchange."""
@@ -3065,6 +3170,8 @@ class TradingApplication:
             # Risk monitor: updates equity/drawdown, checks WS staleness
             risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
             self._background_tasks.append(risk_monitor_task)
+            daily_reset_task = asyncio.create_task(self._run_daily_stats_reset(), name="daily-stats-reset")
+            self._background_tasks.append(daily_reset_task)
 
             # Outcome resolver: labels prediction events with horizon returns (every 5 min)
             outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")

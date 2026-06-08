@@ -794,6 +794,104 @@ class TradeJournal:
             reason,
         )
 
+    async def get_shadow_gate_stats_for_version(
+        self,
+        *,
+        version: str,
+        horizon_minutes: int = 15,
+        label_schema_version: str = "",
+        min_count: int = 1,
+    ) -> dict[str, Any]:
+        """Return shadow-gate stats for an exact model version. Empty dict if insufficient data."""
+        if not self.is_enabled or not version:
+            return {}
+
+        if label_schema_version:
+            rows = await self._fetch(
+                """
+                SELECT
+                    pe.decision,
+                    count(*) AS cnt,
+                    avg(po.net_return_bps) AS avg_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                WHERE pe.model_version = $1
+                  AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                  AND po.horizon_minutes = $2
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $3
+                  AND COALESCE(fs.training_eligible, true) = true
+                GROUP BY pe.decision
+                """,
+                version,
+                horizon_minutes,
+                label_schema_version,
+            )
+        else:
+            rows = await self._fetch(
+                """
+                SELECT
+                    pe.decision,
+                    count(*) AS cnt,
+                    avg(po.net_return_bps) AS avg_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                WHERE pe.model_version = $1
+                  AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                  AND po.horizon_minutes = $2
+                  AND po.label IS NOT NULL
+                  AND COALESCE(fs.training_eligible, true) = true
+                GROUP BY pe.decision
+                """,
+                version,
+                horizon_minutes,
+            )
+
+        if not rows:
+            return {}
+
+        result: dict[str, Any] = {"model_version": version, "horizon_minutes": horizon_minutes}
+        total_count = 0
+        weighted_return = 0.0
+        for row in rows:
+            decision = str(row["decision"])
+            count = int(row["cnt"])
+            avg_return = float(row["avg_net_return_bps"] or 0.0)
+            total_count += count
+            weighted_return += avg_return * count
+            key = "pass" if decision == "GATE_PASS" else "block"
+            result[f"{key}_count"] = count
+            result[f"{key}_avg_net_return_bps"] = avg_return
+
+        if total_count < min_count:
+            return {}
+
+        result["total_count"] = total_count
+        all_avg = weighted_return / total_count
+        result["all_avg_net_return_bps"] = all_avg
+        pass_avg = result.get("pass_avg_net_return_bps")
+        result["lift_vs_all_bps"] = (float(pass_avg) - all_avg) if pass_avg is not None else None
+        result["pass_avg_net_return_bps"] = pass_avg
+        return result
+
+    async def find_order_link_id_by_exchange_order_id(self, exchange_order_id: str) -> str | None:
+        """Look up our order_link_id given an exchange orderId. Returns None if not found."""
+        if not exchange_order_id or not self.is_enabled:
+            return None
+        rows = await self._fetch(
+            "SELECT order_link_id FROM durable_order_state WHERE exchange_order_id = $1 ORDER BY updated_at DESC LIMIT 1",
+            exchange_order_id,
+        )
+        if rows:
+            return str(rows[0]["order_link_id"])
+        rows = await self._fetch(
+            "SELECT order_link_id FROM order_events WHERE exchange_order_id = $1 ORDER BY created_at DESC LIMIT 1",
+            exchange_order_id,
+        )
+        return str(rows[0]["order_link_id"]) if rows else None
+
     async def upsert_durable_order_state(
         self,
         *,
