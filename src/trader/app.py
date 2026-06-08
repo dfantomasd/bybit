@@ -1421,12 +1421,19 @@ class TradingApplication:
                     items = resp.get("result", {}).get("list", [])
                     # Bybit returns newest-first; reverse to oldest-first
                     items = list(reversed(items))
+                    now = datetime.now(tz=UTC)
                     count = 0
                     for row in items:
                         # row: [startTime, open, high, low, close, volume, turnover]
                         try:
                             ts_ms = int(row[0])
                             open_time = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+                            bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                            # A candle is confirmed only after its full interval has elapsed.
+                            # close_epoch_ms is the exclusive start of the next bar.
+                            close_epoch_ms = ts_ms + bar_ms
+                            close_time = datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC)
+                            confirmed = now.timestamp() * 1000 >= close_epoch_ms
                             candle = Candle(
                                 open_time=open_time,
                                 open=float(row[1]),
@@ -1434,12 +1441,13 @@ class TradingApplication:
                                 low=float(row[3]),
                                 close=float(row[4]),
                                 volume=float(row[5]),
-                                confirm=True,  # historical bars are confirmed
+                                confirm=confirmed,
                             )
                             self._candle_store.add(symbol, interval, candle)
-                            if self._trade_journal is not None and self._trade_journal.is_enabled:
-                                bar_ms = _INTERVAL_MS.get(interval, 60_000)
-                                close_time = datetime.fromtimestamp((ts_ms + bar_ms - 1) / 1000, tz=UTC)
+                            # Only persist confirmed candles — active REST candles
+                            # may carry intermediate prices and must not be stored as
+                            # confirmed=true in the training database.
+                            if confirmed and self._trade_journal is not None and self._trade_journal.is_enabled:
                                 await self._trade_journal.upsert_market_candle(
                                     symbol=symbol,
                                     interval=interval,
