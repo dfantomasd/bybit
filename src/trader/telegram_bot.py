@@ -1737,7 +1737,7 @@ class TelegramMonitorBot:
             await self._reply(
                 update,
                 "Формат: /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N\n"
-                "Фильтр модели: /limits model_gate on|off, /limits model_gate_threshold 0.60",
+                "Фильтр модели: /limits model_gate off (включение только через Render env), /limits model_gate_threshold 0.60",
             )
             return
         key = args[0].lower()
@@ -2147,7 +2147,7 @@ class TelegramMonitorBot:
             f"lift=<code>{gate_quality.get('gate_lift_vs_all_bps', 'n/a')}</code>\n\n"
             "Изменить: <code>/limits entries 1</code>, <code>/limits pending 1</code>, "
             "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>\n"
-            "Фильтр модели: <code>/limits model_gate on</code>, <code>/limits model_gate_threshold 0.60</code>"
+            "Фильтр модели: <code>/limits model_gate off</code>, <code>/limits model_gate_threshold 0.60</code> (включение только через Render env)"
         )
 
     def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
