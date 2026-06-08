@@ -85,6 +85,8 @@ services:
         value: "false"
       - key: MODEL_AUTO_TRAIN_ENABLED
         value: "true"
+      - key: MODEL_AUTO_PROMOTE_ENABLED
+        value: "false"
       - key: MODEL_AUTO_TRAIN_MIN_SAMPLES
         value: "1000"
       - key: MODEL_AUTO_TRAIN_INCREMENT_SAMPLES

@@ -1421,12 +1421,19 @@ class TradingApplication:
                     items = resp.get("result", {}).get("list", [])
                     # Bybit returns newest-first; reverse to oldest-first
                     items = list(reversed(items))
+                    now = datetime.now(tz=UTC)
                     count = 0
                     for row in items:
                         # row: [startTime, open, high, low, close, volume, turnover]
                         try:
                             ts_ms = int(row[0])
                             open_time = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+                            bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                            # A candle is confirmed only after its full interval has elapsed.
+                            # close_epoch_ms is the exclusive start of the next bar.
+                            close_epoch_ms = ts_ms + bar_ms
+                            close_time = datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC)
+                            confirmed = now.timestamp() * 1000 >= close_epoch_ms
                             candle = Candle(
                                 open_time=open_time,
                                 open=float(row[1]),
@@ -1434,12 +1441,13 @@ class TradingApplication:
                                 low=float(row[3]),
                                 close=float(row[4]),
                                 volume=float(row[5]),
-                                confirm=True,  # historical bars are confirmed
+                                confirm=confirmed,
                             )
                             self._candle_store.add(symbol, interval, candle)
-                            if self._trade_journal is not None and self._trade_journal.is_enabled:
-                                bar_ms = _INTERVAL_MS.get(interval, 60_000)
-                                close_time = datetime.fromtimestamp((ts_ms + bar_ms - 1) / 1000, tz=UTC)
+                            # Only persist confirmed candles — active REST candles
+                            # may carry intermediate prices and must not be stored as
+                            # confirmed=true in the training database.
+                            if confirmed and self._trade_journal is not None and self._trade_journal.is_enabled:
                                 await self._trade_journal.upsert_market_candle(
                                     symbol=symbol,
                                     interval=interval,
@@ -1663,10 +1671,13 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
-                        # Release pending entry count on terminal — exactly once per order
+                        # Release pending entry slot on terminal — exactly once per order.
+                        # Pass the exact order_link_id so only the correct slot is released.
+                        # _pending_released is shared with ExecutionUpdateEvent to prevent
+                        # double-release when both events arrive for the same fill.
                         if is_terminal and order_link_id not in _pending_released:
                             if self._execution_engine is not None:
-                                self._execution_engine.mark_entry_resolved()
+                                self._execution_engine.mark_entry_resolved(order_link_id)
                             _pending_released.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
@@ -1718,9 +1729,12 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
-                        # P0.3: Release pending entry slot for this order_link_id only
+                        # P0.3: Release pending entry slot for this order_link_id only.
+                        # Guard against double-release if OrderUpdateEvent(FILLED) already ran.
                         if self._execution_engine is not None and event.order_link_id:
-                            self._execution_engine.mark_entry_resolved(event.order_link_id)
+                            if event.order_link_id not in _pending_released:
+                                self._execution_engine.mark_entry_resolved(event.order_link_id)
+                                _pending_released.add(event.order_link_id)
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
@@ -2637,14 +2651,13 @@ class TradingApplication:
                     )
 
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+                # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    prediction = self._model_registry.score(vec.values)
-                    if prediction is not None:
+                    shadow_prediction = self._model_registry.score_shadow(vec.values)
+                    if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
-                        gate_decision = None
-                        gate_reason = "gate_disabled"
-                        canary_blocked = False
-                        canary_reason = "canary_disabled"
+                        shadow_gate_decision = None
+                        shadow_gate_reason = "shadow_gate_disabled"
                         regime_name = (
                             regime_ctx.regime.value
                             if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
@@ -2656,52 +2669,87 @@ class TradingApplication:
                             else "UNKNOWN"
                         )
                         if self._settings.MODEL_SHADOW_GATE_ENABLED:
-                            gate_decision = "GATE_PASS" if prediction.score >= threshold else "GATE_BLOCK"
-                            gate_reason = (
+                            shadow_gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                            shadow_gate_reason = (
                                 "score_meets_threshold"
-                                if gate_decision == "GATE_PASS"
+                                if shadow_gate_decision == "GATE_PASS"
                                 else "score_below_regime_threshold"
-                            )
-                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
-                                gate_decision,
-                                threshold,
-                                prediction.score,
                             )
                         if self._trade_journal is not None and self._trade_journal.is_enabled:
                             await self._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
+                                model_version=shadow_prediction.model_version,
+                                score=shadow_prediction.score,
                                 strategy_signal=proposal.side.value,
-                                decision=gate_decision,
+                                decision=shadow_gate_decision,
                                 feature_snapshot_id=snapshot_id,
                                 metadata={
-                                    "canary_blocked": canary_blocked,
-                                    "canary_reason": canary_reason,
-                                    "confidence": prediction.confidence,
-                                    "gate_reason": gate_reason,
+                                    "source": "shadow_challenger",
+                                    "confidence": shadow_prediction.confidence,
+                                    "gate_reason": shadow_gate_reason,
                                     "regime": regime_name,
-                                    "score": prediction.score,
+                                    "score": shadow_prediction.score,
                                     "threshold": threshold,
                                     "volatility": volatility_name,
                                 },
                             )
-                        if canary_blocked:
-                            self._record_diag("model_gate_canary_blocked")
-                            log.info(
-                                "model_gate.canary_blocked",
-                                symbol=proposal.symbol,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
-                                threshold=threshold,
-                                reason=canary_reason,
-                            )
-                            return
+                        # Challenger NEVER blocks a live trade — observational only
                     else:
                         log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
                 except Exception as _ml_exc:
                     log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
+
+                # --- Champion Canary gate: live blocking only when explicitly enabled ---
+                # score_live() returns None when no compatible directional_net_v1 Champion exists.
+                # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
+                if self._settings.MODEL_GATE_CANARY_ENABLED:
+                    try:
+                        live_prediction = self._model_registry.score_live(vec.values)
+                        if live_prediction is not None:
+                            canary_threshold = self._model_gate_threshold(regime_ctx)
+                            canary_gate_decision = (
+                                "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
+                            )
+                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
+                                canary_gate_decision,
+                                canary_threshold,
+                                live_prediction.score,
+                            )
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                await self._trade_journal.record_prediction_event(
+                                    symbol=proposal.symbol,
+                                    interval=_WS_INTERVAL,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    strategy_signal=proposal.side.value,
+                                    decision=canary_gate_decision,
+                                    feature_snapshot_id=snapshot_id,
+                                    metadata={
+                                        "source": "champion_canary",
+                                        "canary_blocked": canary_blocked,
+                                        "canary_reason": canary_reason,
+                                        "confidence": live_prediction.confidence,
+                                        "gate_reason": "canary_gate",
+                                        "threshold": canary_threshold,
+                                    },
+                                )
+                            if canary_blocked:
+                                self._record_diag("model_gate_canary_blocked")
+                                log.info(
+                                    "model_gate.canary_blocked",
+                                    symbol=proposal.symbol,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    threshold=canary_threshold,
+                                    reason=canary_reason,
+                                )
+                                return
+                        else:
+                            # No compatible Champion → do not block the trade
+                            log.debug("ml_canary.no_compatible_champion", symbol=proposal.symbol)
+                    except Exception as _canary_exc:
+                        log.debug("ml_canary.scoring_failed", symbol=proposal.symbol, error=str(_canary_exc))
 
             # Skip execution if operator paused trading
             if self._trading_paused:

@@ -137,7 +137,8 @@ def test_can_promote_success() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_score_uses_champion() -> None:
-    """Registry should use challenger over champion for shadow scoring (challenger preferred)."""
+    """score() is the legacy alias for score_live() — must return champion, not challenger.
+    app.py now calls score_shadow() directly for Challenger observational scoring."""
     registry = ModelRegistry()
 
     champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
@@ -153,7 +154,13 @@ async def test_registry_score_uses_champion() -> None:
 
     pred = registry.score([5.0])
     if pred is not None:
-        assert pred.model_version == "challenger_v2"
+        # score() = score_live() → champion only
+        assert pred.model_version == "champion_v1"
+
+    # score_shadow() should prefer challenger over champion
+    shadow_pred = registry.score_shadow([5.0])
+    if shadow_pred is not None:
+        assert shadow_pred.model_version == "challenger_v2"
 
 
 @pytest.mark.asyncio

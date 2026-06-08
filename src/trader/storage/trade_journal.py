@@ -376,6 +376,17 @@ class TradeJournal:
                     WHERE trade_id IS NULL;
                 ALTER TABLE account_transaction_events ADD COLUMN IF NOT EXISTS transaction_type text;
                 ALTER TABLE account_transaction_events ADD COLUMN IF NOT EXISTS category text;
+                -- Candle audit trail: track the last time a row was written or updated
+                ALTER TABLE market_candles
+                    ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+                -- Training eligibility: snapshots created before candle close may have
+                -- stale prices; the audit script marks them training_eligible = false.
+                ALTER TABLE feature_snapshots
+                    ADD COLUMN IF NOT EXISTS training_eligible boolean NOT NULL DEFAULT true;
+                ALTER TABLE feature_snapshots
+                    ADD COLUMN IF NOT EXISTS invalid_reason text;
+                ALTER TABLE feature_snapshots
+                    ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
             """)
 
     async def record_signal(
@@ -865,14 +876,16 @@ class TradeJournal:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT (symbol, interval, open_time) DO UPDATE SET
-                close_time = EXCLUDED.close_time,
-                open = EXCLUDED.open,
-                high = EXCLUDED.high,
-                low = EXCLUDED.low,
-                close = EXCLUDED.close,
-                volume = EXCLUDED.volume,
-                turnover = EXCLUDED.turnover,
-                confirmed = EXCLUDED.confirmed
+                close_time  = EXCLUDED.close_time,
+                open        = EXCLUDED.open,
+                high        = EXCLUDED.high,
+                low         = EXCLUDED.low,
+                close       = EXCLUDED.close,
+                volume      = EXCLUDED.volume,
+                turnover    = EXCLUDED.turnover,
+                confirmed   = EXCLUDED.confirmed,
+                source      = EXCLUDED.source,
+                updated_at  = now()
             WHERE NOT market_candles.confirmed OR EXCLUDED.confirmed
             """,
             symbol,
@@ -1179,6 +1192,7 @@ class TradeJournal:
                 WHERE po.horizon_minutes = 15
                   AND po.label IS NOT NULL
                   AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                 """
             )
