@@ -132,7 +132,8 @@ class ChallengerModel:
                 label=label,
                 confidence=confidence,
                 model_version=self.version,
-                is_live_decision=self.allow_live_decisions and self.status == ModelStatus.CHAMPION,
+                is_live_decision=self.allow_live_decisions
+                and self.status == ModelStatus.CHAMPION,
             )
         except Exception as exc:
             log.debug("challenger.predict_failed", exc_info=exc)
@@ -183,7 +184,9 @@ class ChallengerModel:
             version=version,
             feature_names=meta.get("feature_names", []),
             training_samples=meta.get("training_samples", 0),
-            label_schema_version=meta.get("label_schema_version", LEGACY_LABEL_SCHEMA_VERSION),
+            label_schema_version=meta.get(
+                "label_schema_version", LEGACY_LABEL_SCHEMA_VERSION
+            ),
         )
         model._clf = payload.get("clf")
         model._scaler = payload.get("scaler")
@@ -202,11 +205,20 @@ class ChallengerModel:
         """Check conservative offline and shadow-observation promotion criteria."""
 
         if self.label_schema_version != LABEL_SCHEMA_VERSION:
-            return False, f"incompatible_label_schema: {self.label_schema_version!r} != {LABEL_SCHEMA_VERSION!r}"
+            return (
+                False,
+                f"incompatible_label_schema: {self.label_schema_version!r} != {LABEL_SCHEMA_VERSION!r}",
+            )
         if self.training_samples < min_samples:
-            return False, f"insufficient_samples: {self.training_samples} < {min_samples}"
+            return (
+                False,
+                f"insufficient_samples: {self.training_samples} < {min_samples}",
+            )
         if resolved_observations < min_resolved_observations:
-            return False, f"insufficient_resolved_observations: {resolved_observations} < {min_resolved_observations}"
+            return (
+                False,
+                f"insufficient_resolved_observations: {resolved_observations} < {min_resolved_observations}",
+            )
         if required_quality and quality.upper() != required_quality.upper():
             return False, f"quality_not_{required_quality.lower()}: {quality or 'none'}"
         if walk_forward_expectancy <= 0:
@@ -313,17 +325,31 @@ class ModelRegistry:
             )
             if not rows:
                 self._champion = None
-                log.warning("model_registry.no_compatible_champion", required_schema=LABEL_SCHEMA_VERSION)
+                log.warning(
+                    "model_registry.no_compatible_champion",
+                    required_schema=LABEL_SCHEMA_VERSION,
+                )
                 return None
             row = rows[0]
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
-            model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
+            model = ChallengerModel.from_bytes(
+                bytes(row["artifact"]), version=str(row["version"])
+            )
             model.status = ModelStatus.CHAMPION
-            model.training_samples = int(_row_get(row, "training_samples", model.training_samples) or model.training_samples)
+            model.training_samples = int(
+                _row_get(row, "training_samples", model.training_samples)
+                or model.training_samples
+            )
             model.allow_live_decisions = True
-            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
+            model.label_schema_version = str(
+                metrics.get("label_schema_version") or model.label_schema_version
+            )
             self._champion = model
-            log.info("model_registry.champion_loaded", version=model.version, samples=model.training_samples)
+            log.info(
+                "model_registry.champion_loaded",
+                version=model.version,
+                samples=model.training_samples,
+            )
             return model
         except Exception as exc:
             log.debug("model_registry.load_champion_failed", exc_info=exc)
@@ -352,13 +378,24 @@ class ModelRegistry:
                 return None
             row = rows[0]
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
-            model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
+            model = ChallengerModel.from_bytes(
+                bytes(row["artifact"]), version=str(row["version"])
+            )
             model.status = str(_row_get(row, "status", ModelStatus.SHADOW_CHALLENGER))
-            model.training_samples = int(_row_get(row, "training_samples", model.training_samples) or model.training_samples)
+            model.training_samples = int(
+                _row_get(row, "training_samples", model.training_samples)
+                or model.training_samples
+            )
             model.allow_live_decisions = False
-            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
+            model.label_schema_version = str(
+                metrics.get("label_schema_version") or model.label_schema_version
+            )
             self._challenger = model
-            log.info("model_registry.challenger_loaded", version=model.version, samples=model.training_samples)
+            log.info(
+                "model_registry.challenger_loaded",
+                version=model.version,
+                samples=model.training_samples,
+            )
             return model
         except Exception as exc:
             log.debug("model_registry.load_challenger_failed", exc_info=exc)
