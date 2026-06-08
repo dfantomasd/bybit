@@ -1,8 +1,8 @@
 """Directional outcome resolver extension for :mod:`trade_journal`.
 
-The base journal is intentionally left intact.  This module overrides only the
+The base journal is intentionally left intact. This module overrides only the
 ML-outcome parts that must change together: schema migration, outcome writes,
-and candle-based resolution.  Installation is explicit from ``storage`` package
+and candle-based resolution. Installation is explicit from ``storage`` package
 initialisation so callers importing ``trader.storage.trade_journal.TradeJournal``
 receive the extended implementation without a risky full-file rewrite.
 """
@@ -26,7 +26,7 @@ def default_cost_model() -> CostModelBps:
     """Return the conservative round-trip cost model used by the resolver.
 
     Values match the current production defaults: two taker fees, full spread,
-    per-side slippage, and a small funding buffer.  A later configuration wiring
+    per-side slippage, and a small funding buffer. A later configuration wiring
     step may inject symbol-specific values without changing the label formula.
     """
 
@@ -54,6 +54,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 ALTER TABLE prediction_outcomes
                     ADD COLUMN IF NOT EXISTS gross_return_bps double precision,
                     ADD COLUMN IF NOT EXISTS cost_bps double precision,
+                    ADD COLUMN IF NOT EXISTS label_threshold_bps double precision,
                     ADD COLUMN IF NOT EXISTS label_schema_version text;
                 CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_schema_horizon
                     ON prediction_outcomes (label_schema_version, horizon_minutes);
@@ -71,6 +72,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         label: int,
         gross_return_bps: float = 0.0,
         cost_bps: float = 0.0,
+        label_threshold_bps: float = 5.0,
         label_schema_version: str = LABEL_SCHEMA_VERSION,
     ) -> None:
         """Write or replace one versioned directional outcome."""
@@ -79,14 +81,15 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """
             INSERT INTO prediction_outcomes (
                 prediction_id, horizon_minutes, gross_return_bps, cost_bps,
-                net_return_bps, max_favorable_excursion_bps,
-                max_adverse_excursion_bps, label, label_schema_version,
-                resolved_at
+                label_threshold_bps, net_return_bps,
+                max_favorable_excursion_bps, max_adverse_excursion_bps,
+                label, label_schema_version, resolved_at
             )
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, now())
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, $10, now())
             ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
                 gross_return_bps = EXCLUDED.gross_return_bps,
                 cost_bps = EXCLUDED.cost_bps,
+                label_threshold_bps = EXCLUDED.label_threshold_bps,
                 net_return_bps = EXCLUDED.net_return_bps,
                 max_favorable_excursion_bps = EXCLUDED.max_favorable_excursion_bps,
                 max_adverse_excursion_bps = EXCLUDED.max_adverse_excursion_bps,
@@ -98,6 +101,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             horizon_minutes,
             gross_return_bps,
             cost_bps,
+            label_threshold_bps,
             net_return_bps,
             max_favorable_excursion_bps,
             max_adverse_excursion_bps,
@@ -116,8 +120,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         """Resolve Buy and Sell outcomes from confirmed 1-minute candles.
 
         Legacy long-only outcomes are recalculated because the lookup joins only
-        rows carrying the current ``LABEL_SCHEMA_VERSION``.  The existing primary
-        key then updates the old row in place.  MFE and MAE use every confirmed
+        rows carrying the current ``LABEL_SCHEMA_VERSION``. The existing primary
+        key then updates the old row in place. MFE and MAE use every confirmed
         candle inside the horizon rather than only the final bar.
         """
 
@@ -135,6 +139,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 ON po.prediction_id = pe.prediction_id
                 AND po.horizon_minutes = $1
                 AND po.label_schema_version = $3
+                AND po.label_threshold_bps = $4
             WHERE po.prediction_id IS NULL
               AND pe.created_at < now() - ($1 * interval '1 minute')
               AND pe.feature_snapshot_id IS NOT NULL
@@ -145,6 +150,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             horizon_minutes,
             limit,
             LABEL_SCHEMA_VERSION,
+            label_bps_threshold,
         )
 
         resolved = 0
@@ -208,6 +214,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 horizon_minutes=horizon_minutes,
                 gross_return_bps=outcome.gross_return_bps,
                 cost_bps=costs.total_bps,
+                label_threshold_bps=label_bps_threshold,
                 net_return_bps=outcome.net_return_bps,
                 max_favorable_excursion_bps=outcome.max_favorable_excursion_bps,
                 max_adverse_excursion_bps=outcome.max_adverse_excursion_bps,
@@ -257,7 +264,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
 
         # Fail closed until gate statistics are recalculated with the new label
-        # schema.  Old long-only lift must never enable canary filtering.
+        # schema. Old long-only lift must never enable canary filtering.
         result["shadow_gate_15m"] = {}
         result["paper_pnl_15m"] = {}
         return result
