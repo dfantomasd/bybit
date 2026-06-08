@@ -792,13 +792,26 @@ class TradingApplication:
                 )
                 result = await self._start_model_promote(challenger_version)
 
+                # Auto-enable canary gate if model quality now allows it
+                canary_msg = ""
+                if self._settings is not None and not self._settings.MODEL_GATE_CANARY_ENABLED:
+                    quality_ok, _ = self._model_gate_quality_allows_canary()
+                    if quality_ok:
+                        self._settings.MODEL_GATE_CANARY_ENABLED = True
+                        log.info("model_auto_promote.canary_enabled", version=challenger_version)
+                        canary_msg = (
+                            "\n🚦 <b>Canary-фильтр включён</b> — модель начинает фильтровать слабые сигналы.\n"
+                            "Чтобы сохранить после перезапуска: задайте "
+                            "<code>MODEL_GATE_CANARY_ENABLED=true</code> в Render env vars."
+                        )
+
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
                         f"🤖 <b>Авто-промоут</b>\n"
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{result}"
+                        f"{result}{canary_msg}"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
