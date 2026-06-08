@@ -645,10 +645,6 @@ class ExecutionEngine:
         if not approved:
             return decision
 
-        # 5. Build OrderIntent ─────────────────────────────────────────
-        assert decision.approved_qty is not None
-        intent = self._build_intent(proposal, decision, instrument_info)
-
         # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
         if not self._shadow_mode:
             # Fail-closed: TP required for LIVE entries
@@ -725,6 +721,10 @@ class ExecutionEngine:
                     required_min_net_edge_pct=float(min_edge),
                 )
                 return None
+
+        # 5. Build OrderIntent ─────────────────────────────────────────
+        assert decision.approved_qty is not None
+        intent = self._build_intent(proposal, decision, instrument_info)
 
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:

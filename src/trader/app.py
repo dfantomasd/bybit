@@ -1200,6 +1200,7 @@ class TradingApplication:
             health_provider=self._health_checker.overall_health,
             adapter_factory=lambda: self._bybit_adapter,
             controller=controller,
+            net_results_provider=self._get_net_results,
         )
         await self._telegram_bot.start()
         log.info("telegram_bot_started")
@@ -1302,6 +1303,7 @@ class TradingApplication:
             expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
             funding_buffer_pct=self._settings.FUNDING_BUFFER_PCT,
             min_net_edge_pct=self._settings.MIN_EXPECTED_NET_EDGE_PCT,
+            net_edge_safety_margin_pct=self._settings.NET_EDGE_SAFETY_MARGIN_PCT,
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
@@ -2086,24 +2088,63 @@ class TradingApplication:
                 )
 
     async def _sync_transaction_log(self) -> None:
-        """Sync Bybit transaction log to database periodically."""
+        """Sync Bybit transaction log to database — supports pagination up to 5 pages."""
         assert self._settings is not None
         if self._trade_journal is None or self._bybit_adapter is None:
             return
+
+        log.info("transaction_log.sync_started")
+        total_fetched = 0
+        total_inserted = 0
+        cursor: str | None = None
+        max_pages = 5
+
         try:
-            resp = await self._bybit_adapter._rest.get_transaction_log(
-                account_type="UNIFIED",
-                category=self._settings.DEFAULT_MARKET_CATEGORY,
-                currency="USDT",
-                limit=50,
+            for _page in range(max_pages):
+                resp = await self._bybit_adapter._rest.get_transaction_log(
+                    account_type="UNIFIED",
+                    category=self._settings.DEFAULT_MARKET_CATEGORY,
+                    currency="USDT",
+                    limit=50,
+                    cursor=cursor,
+                )
+                result = resp.get("result") or {}
+                entries = result.get("list", [])
+                next_cursor = result.get("nextPageCursor") or ""
+
+                if entries:
+                    total_fetched += len(entries)
+                    log.info(
+                        "transaction_log.page_fetched",
+                        page=_page + 1,
+                        count=len(entries),
+                    )
+                    inserted = await self._trade_journal.record_transaction_log_entries(entries)
+                    total_inserted += inserted
+                    log.info(
+                        "transaction_log.entries_inserted",
+                        page=_page + 1,
+                        inserted=inserted,
+                        fetched=len(entries),
+                    )
+
+                if not next_cursor:
+                    break
+                cursor = next_cursor
+
+            log.info(
+                "transaction_log.sync_complete",
+                total_fetched=total_fetched,
+                total_inserted=total_inserted,
             )
-            entries = (resp.get("result") or {}).get("list", [])
-            if entries:
-                inserted = await self._trade_journal.record_transaction_log_entries(entries)
-                if inserted:
-                    log.info("transaction_log.synced", inserted=inserted)
         except Exception as exc:
-            log.debug("transaction_log.sync_failed", error=str(exc))
+            log.warning("transaction_log.sync_failed", error=str(exc))
+
+    async def _get_net_results(self) -> dict[str, Any]:
+        """Provide daily net PnL for Telegram /net command."""
+        if self._trade_journal is None:
+            return {}
+        return await self._trade_journal.get_daily_net_results()
 
     async def _sync_execution_positions(self) -> None:
         """Keep local execution/risk state aligned with Bybit TP/SL closures."""
@@ -2243,6 +2284,21 @@ class TradingApplication:
             ),
             "hour_order_failed": (
                 self._execution_engine.get_diag_counts().get("order_failed", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_net_edge_rejected": (
+                self._execution_engine.get_diag_counts().get("net_edge_rejected", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_no_take_profit_rejected": (
+                self._execution_engine.get_diag_counts().get("no_tp_rejected", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_fee_rate_unavailable_rejected": (
+                self._execution_engine.get_diag_counts().get("fee_unavailable_rejected", 0)
                 if self._execution_engine is not None
                 else 0
             ),
