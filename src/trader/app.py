@@ -795,6 +795,7 @@ class TradingApplication:
                 # Auto-enable canary gate if model quality now allows it
                 canary_msg = ""
                 if self._settings is not None and not self._settings.MODEL_GATE_CANARY_ENABLED:
+                    self._update_model_gate_quality_from_diag(diag)
                     quality_ok, _ = self._model_gate_quality_allows_canary()
                     if quality_ok:
                         self._settings.MODEL_GATE_CANARY_ENABLED = True

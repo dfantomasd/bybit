@@ -202,7 +202,6 @@ class ModelRegistry:
         champion = await self.load_champion()
         await self.load_latest_challenger()
         return champion or self._challenger
-        return await self.load_latest_challenger()
 
     async def save_checkpoint(self, model: ChallengerModel) -> None:
         """Persist model checkpoint to PostgreSQL."""
