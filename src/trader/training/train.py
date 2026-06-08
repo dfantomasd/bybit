@@ -1,4 +1,4 @@
-"""Offline trainer CLI — train a challenger model from feature_snapshots + prediction_outcomes.
+"""Offline trainer CLI for the directional, cost-aware challenger model.
 
 Usage:
     python -m trader.training.train [--min-samples 500]
@@ -6,8 +6,10 @@ Usage:
 Runs as a separate process (Render Cron Job at 03:00 UTC, or manually).
 NEVER runs inside the trading process.
 
-Label: 1 if net_return_bps > threshold (default 5 bps = 0.05%) at 15m horizon.
-No lookahead leakage: only uses features recorded BEFORE the candle close time.
+Labels are resolved by ``DirectionalTradeJournal``. Training accepts only the
+current label schema, the requested threshold, and one feature schema hash.
+The newest 10,000 compatible samples are retained and then ordered oldest-first
+for a chronological train/validation split.
 """
 
 from __future__ import annotations
@@ -22,6 +24,8 @@ from typing import Any
 import click
 import numpy as np
 
+from trader.training.labels import LABEL_SCHEMA_VERSION
+
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
@@ -35,11 +39,41 @@ def _fit_model(model: Any, x_arr: np.ndarray, y: np.ndarray) -> None:
             model.partial_fit(xi.tolist(), int(yi))
 
 
-def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bps: np.ndarray) -> dict[str, Any]:
+def _validation_metrics_by_side(
+    *,
+    sides: np.ndarray,
+    predicted_positive: np.ndarray,
+    returns_bps: np.ndarray,
+) -> dict[str, dict[str, Any]]:
+    """Return validation expectancy split by Buy and Sell."""
+
+    result: dict[str, dict[str, Any]] = {}
+    for side in ("Buy", "Sell"):
+        side_mask = sides == side
+        passed_mask = side_mask & predicted_positive
+        side_count = int(side_mask.sum())
+        pass_count = int(passed_mask.sum())
+        result[side.lower()] = {
+            "validation_count": side_count,
+            "pass_count": pass_count,
+            "avg_net_return_all_bps": float(np.mean(returns_bps[side_mask])) if side_count else None,
+            "avg_net_return_pass_bps": float(np.mean(returns_bps[passed_mask])) if pass_count else None,
+        }
+    return result
+
+
+def _evaluate_model(
+    model: Any,
+    x_val: np.ndarray,
+    y_val: np.ndarray,
+    returns_bps: np.ndarray,
+    sides: np.ndarray,
+) -> dict[str, Any]:
     if len(x_val) == 0:
         return {
             "quality": "n/a",
             "validation_samples": 0,
+            "validation_by_side": {},
         }
 
     scores: list[float] = []
@@ -95,12 +129,9 @@ def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bp
 
     quality = "INSUFFICIENT_VALIDATION"
     if len(x_val) >= 100:
-        # Primary: model precision beats base positive rate at default threshold
         good_default = precision > positive_rate and lift_bps is not None and lift_bps > 0
-        # Secondary: best threshold avg return beats all-signals avg (handles high positive_rate markets)
         good_best_threshold = (
             best_threshold_avg_bps is not None
-            and avg_all is not None
             and best_threshold_avg_bps > avg_all
             and best_threshold_pass_rate is not None
             and best_threshold_pass_rate >= 0.05
@@ -122,6 +153,11 @@ def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bp
         "quality": quality,
         "recall": recall,
         "threshold_metrics": threshold_metrics,
+        "validation_by_side": _validation_metrics_by_side(
+            sides=sides,
+            predicted_positive=predicted_positive,
+            returns_bps=returns_bps,
+        ),
         "validation_samples": int(len(x_val)),
         "walk_forward_expectancy_bps": avg_predicted_positive,
     }
@@ -141,38 +177,81 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
     run_started = datetime.now(tz=UTC)
 
     try:
-        # Record training run start
         await pool.execute(
             "INSERT INTO training_runs (run_id, mode, status) VALUES ($1, 'offline', 'RUNNING')",
             run_id,
         )
 
-        # Load labelled samples oldest-first, then use the newest 20% as holdout.
         rows = await pool.fetch(
             """
-            WITH labelled AS (
-                SELECT DISTINCT ON (fs.snapshot_id)
-                       fs.feature_names, fs.feature_values, po.net_return_bps, po.label, fs.created_at
+            WITH schema_counts AS (
+                SELECT
+                    fs.feature_schema_hash,
+                    count(DISTINCT fs.snapshot_id) AS sample_count,
+                    max(fs.created_at) AS latest_at
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                 WHERE po.horizon_minutes = $1
                   AND po.label IS NOT NULL
+                  AND po.label_schema_version = $2
+                  AND po.label_threshold_bps = $3
                   AND fs.feature_values IS NOT NULL
                   AND pe.model_version = 'RULE_BASELINE_V1'
-                ORDER BY fs.snapshot_id, fs.created_at ASC
+                GROUP BY fs.feature_schema_hash
+            ),
+            selected_schema AS (
+                SELECT feature_schema_hash
+                FROM schema_counts
+                WHERE sample_count >= $4
+                ORDER BY latest_at DESC
+                LIMIT 1
+            ),
+            labelled AS (
+                SELECT DISTINCT ON (fs.snapshot_id)
+                       fs.feature_names,
+                       fs.feature_values,
+                       fs.feature_schema_hash,
+                       po.net_return_bps,
+                       po.label,
+                       pe.strategy_signal,
+                       fs.created_at
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                JOIN selected_schema ss ON ss.feature_schema_hash = fs.feature_schema_hash
+                WHERE po.horizon_minutes = $1
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $2
+                  AND po.label_threshold_bps = $3
+                  AND fs.feature_values IS NOT NULL
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                ORDER BY fs.snapshot_id, fs.created_at DESC
+            ),
+            latest_window AS (
+                SELECT *
+                FROM labelled
+                ORDER BY created_at DESC
+                LIMIT 10000
             )
-            SELECT feature_names, feature_values, net_return_bps, label, created_at
-            FROM labelled
+            SELECT feature_names, feature_values, feature_schema_hash,
+                   net_return_bps, label, strategy_signal, created_at
+            FROM latest_window
             ORDER BY created_at ASC
-            LIMIT 10000
             """,
             horizon_minutes,
+            LABEL_SCHEMA_VERSION,
+            label_bps_threshold,
+            min_samples,
         )
-        rows = sorted(rows, key=lambda row: row["created_at"])
 
         if len(rows) < min_samples:
-            msg = f"Insufficient samples: {len(rows)} < {min_samples}"
+            msg = (
+                f"Insufficient compatible samples: {len(rows)} < {min_samples}; "
+                f"schema={LABEL_SCHEMA_VERSION}, threshold={label_bps_threshold:g}bps, "
+                f"horizon={horizon_minutes}m"
+            )
             click.echo(msg, err=True)
             await pool.execute(
                 "UPDATE training_runs SET status='FAILED', error=$1, finished_at=now() WHERE run_id=$2",
@@ -181,30 +260,56 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             )
             return 1
 
-        click.echo(f"Training on {len(rows)} samples (horizon={horizon_minutes}m)")
+        click.echo(
+            f"Training on {len(rows)} compatible samples "
+            f"(schema={LABEL_SCHEMA_VERSION}, threshold={label_bps_threshold:g}bps, horizon={horizon_minutes}m)"
+        )
 
-        # Build arrays
-        x_list = []
-        y_list = []
-        returns_list = []
+        x_list: list[list[float]] = []
+        y_list: list[int] = []
+        returns_list: list[float] = []
+        sides_list: list[str] = []
         feature_names: list[str] = []
+        feature_schema_hash = ""
+        expected_vector_size: int | None = None
 
         for row in rows:
             vals = row["feature_values"]
             labels_raw = row["label"]
+            row_schema_hash = str(row["feature_schema_hash"] or "")
             if vals is None:
                 continue
+            if not feature_schema_hash:
+                feature_schema_hash = row_schema_hash
+            elif row_schema_hash != feature_schema_hash:
+                raise RuntimeError("mixed feature schema hashes in selected training window")
+
             v = json.loads(vals) if isinstance(vals, str) else list(vals)
+            if expected_vector_size is None:
+                expected_vector_size = len(v)
+            elif len(v) != expected_vector_size:
+                raise RuntimeError("mixed feature vector lengths in selected training window")
+
+            current_names = row["feature_names"]
+            parsed_names = json.loads(current_names) if isinstance(current_names, str) else list(current_names)
+            if not feature_names:
+                feature_names = parsed_names
+            elif parsed_names != feature_names:
+                raise RuntimeError("mixed feature names or order in selected training window")
+
+            side = str(row["strategy_signal"])
+            if side not in {"Buy", "Sell"}:
+                raise RuntimeError(f"unsupported strategy signal in training data: {side!r}")
+
             x_list.append(v)
             y_list.append(int(labels_raw))
             returns_list.append(float(row["net_return_bps"] or 0.0))
-            if not feature_names and row["feature_names"]:
-                fn = row["feature_names"]
-                feature_names = json.loads(fn) if isinstance(fn, str) else list(fn)
+            sides_list.append(side)
 
         x_arr = np.array(x_list, dtype=np.float32)
         y = np.array(y_list, dtype=np.int32)
         returns_bps = np.array(returns_list, dtype=np.float32)
+        sides = np.array(sides_list, dtype=object)
         if len(x_arr) < min_samples:
             msg = f"Insufficient usable samples: {len(x_arr)} < {min_samples}"
             click.echo(msg, err=True)
@@ -222,12 +327,13 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         x_train, y_train = x_arr[:train_size], y[:train_size]
         x_val, y_val = x_arr[train_size:], y[train_size:]
         returns_val = returns_bps[train_size:]
+        sides_val = sides[train_size:]
 
-        version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m"
+        version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m_dnv1"
         model = ChallengerModel(version=version, feature_names=feature_names)
 
         _fit_model(model, x_train, y_train)
-        metrics = _evaluate_model(model, x_val, y_val, returns_val)
+        metrics = _evaluate_model(model, x_val, y_val, returns_val, sides_val)
         _fit_model(model, x_val, y_val)
 
         click.echo(f"Training complete: {model.training_samples} samples, version={version}")
@@ -238,8 +344,17 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             f"lift_bps={metrics.get('lift_bps')}"
         )
 
-        # Save checkpoint
         artifact = model.to_bytes()
+        stored_metrics = metrics | {
+            "features": len(feature_names),
+            "feature_schema_hash": feature_schema_hash,
+            "horizon_minutes": horizon_minutes,
+            "label_bps_threshold": label_bps_threshold,
+            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "sample_count": int(len(x_arr)),
+            "train_samples": int(len(x_train)),
+            "run_id": run_id,
+        }
         await pool.execute(
             """
             INSERT INTO model_versions (version, status, training_samples, feature_schema_hash, artifact, metrics,
@@ -257,19 +372,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             version,
             ModelStatus.SHADOW_CHALLENGER,
             model.training_samples,
-            model.feature_schema_hash,
+            feature_schema_hash,
             artifact,
-            json.dumps(
-                metrics
-                | {
-                    "features": len(feature_names),
-                    "horizon_minutes": horizon_minutes,
-                    "label_bps_threshold": label_bps_threshold,
-                    "sample_count": int(len(x_arr)),
-                    "train_samples": int(len(x_train)),
-                    "run_id": run_id,
-                }
-            ),
+            json.dumps(stored_metrics),
             run_started,
         )
 
@@ -281,7 +386,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             """,
             model.training_samples,
             version,
-            json.dumps(metrics),
+            json.dumps(stored_metrics),
             run_id,
         )
 
@@ -306,11 +411,12 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
 
 @click.command()
-@click.option("--min-samples", default=500, type=int, help="Minimum samples required")
-@click.option("--label-bps", default=5.0, type=float, help="Min net return bps for positive label")
+@click.option("--min-samples", default=500, type=int, help="Minimum compatible samples required")
+@click.option("--label-bps", default=5.0, type=float, help="Resolved net-return threshold in bps")
 @click.option("--horizon", default=15, type=int, help="Prediction horizon in minutes")
 def main(min_samples: int, label_bps: float, horizon: int) -> None:
-    """Train challenger model from historical feature snapshots."""
+    """Train a challenger from directional, cost-aware historical labels."""
+
     raise SystemExit(asyncio.run(_train(min_samples, label_bps, horizon)))
 
 
