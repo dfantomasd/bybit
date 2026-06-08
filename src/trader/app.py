@@ -2869,7 +2869,9 @@ class TradingApplication:
             self._background_tasks.append(auto_promoter_task)
 
             # Hourly model progress report via Telegram
-            model_reporter_task = asyncio.create_task(self._run_model_progress_reporter(), name="model-progress-reporter")
+            model_reporter_task = asyncio.create_task(
+                self._run_model_progress_reporter(), name="model-progress-reporter"
+            )
             self._background_tasks.append(model_reporter_task)
 
             # Adaptive load governor: narrows feature universe under memory/lag pressure
