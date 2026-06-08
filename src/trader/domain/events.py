@@ -210,6 +210,7 @@ class ExecutionUpdateEvent(BaseEvent):
     exec_value: Decimal = Decimal(0)
     is_maker: bool = False
     closed_size: Decimal = Decimal(0)
+    closed_pnl: Decimal = Decimal(0)
 
 
 # ---------------------------------------------------------------------------

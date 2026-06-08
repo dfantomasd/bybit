@@ -373,6 +373,7 @@ class BybitPrivateWebSocket:
                 exec_value=exec_value,
                 is_maker=item.get("isMaker", False),
                 closed_size=_d(item.get("closedSize", "0")),
+                closed_pnl=_d(item.get("closedPnl", "0")),
             )
             self._log.info(
                 "ws_private.execution",
