@@ -137,7 +137,7 @@ def test_can_promote_success() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_score_uses_champion() -> None:
-    """Registry should use champion over challenger for predictions."""
+    """Registry should use challenger over champion for shadow scoring (challenger preferred)."""
     registry = ModelRegistry()
 
     champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
@@ -153,7 +153,7 @@ async def test_registry_score_uses_champion() -> None:
 
     pred = registry.score([5.0])
     if pred is not None:
-        assert pred.model_version == "champion_v1"
+        assert pred.model_version == "challenger_v2"
 
 
 @pytest.mark.asyncio
@@ -173,20 +173,24 @@ async def test_registry_score_falls_back_to_challenger() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_load_active_prefers_champion() -> None:
-    """load_active_model should load CHAMPION before any shadow challenger."""
+    """load_active_model loads both champion and challenger; champion returned as primary."""
     champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
     for i in range(10):
         champion.partial_fit([float(i)], label=i % 2)
 
     journal = MagicMock()
     journal.is_enabled = True
+    # First call: champion query returns champion; second call: challenger query returns nothing
     journal._fetch = AsyncMock(
-        return_value=[
-            {
-                "version": "champion_v1",
-                "artifact": champion.to_bytes(),
-                "training_samples": champion.training_samples,
-            }
+        side_effect=[
+            [
+                {
+                    "version": "champion_v1",
+                    "artifact": champion.to_bytes(),
+                    "training_samples": champion.training_samples,
+                }
+            ],
+            [],
         ]
     )
 
@@ -198,7 +202,7 @@ async def test_registry_load_active_prefers_champion() -> None:
     assert loaded.status == ModelStatus.CHAMPION
     assert registry.champion is loaded
     assert registry.challenger is None
-    assert journal._fetch.await_count == 1
+    assert journal._fetch.await_count == 2
 
 
 @pytest.mark.asyncio
@@ -347,12 +351,15 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"cnt": 900}]
         if "metadata->>'gate_reason'" in query:
             return [{"reason": "score_below_regime_threshold", "cnt": 8}]
-        if "pe.model_version = 'RULE_BASELINE_V1'" in query and "GATE_PASS" in query:
+        if "pe.model_version = 'RULE_BASELINE_V1'" in query:
             return [
-                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": 1.0},
-                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": -2.0},
-                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 4.5},
-                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 3.5},
+                {"net_return_bps": 1.0},
+                {"net_return_bps": -2.0},
+            ]
+        if "pe.decision = 'GATE_PASS'" in query:
+            return [
+                {"net_return_bps": 4.5},
+                {"net_return_bps": 3.5},
             ]
         if "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in query:
             return [
