@@ -132,6 +132,14 @@ class TradingApplication:
         self._model_gate_quality: dict[str, Any] = {}
         self._model_gate_quality_checked_at: datetime | None = None
 
+    def _active_symbols(self) -> list[str]:
+        """Return screener's current active symbols, or fallback list if screener is absent/empty."""
+        if self._screener is not None:
+            symbols = self._screener.active_symbols
+            if symbols:
+                return symbols
+        return list(_SYMBOLS)
+
     def _market_data_intervals(self) -> list[str]:
         """Configured kline intervals with 1m kept first for strategy compatibility."""
         if self._settings is None or not self._settings.MULTITIMEFRAME_ENABLED:
@@ -1309,6 +1317,13 @@ class TradingApplication:
 
         # Sync open positions from exchange so we don't double-enter on restart
         await self._execution_engine.sync_positions()
+
+        # Reconcile restored pending entries against live exchange state
+        try:
+            await self._execution_engine.reconcile_restored_pending_entries()
+        except Exception as exc:
+            log.warning("execution_engine.reconcile_failed", error=str(exc))
+
         log.info("execution_engine.initialized", shadow_mode=shadow, is_canary=is_canary)
 
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
@@ -1349,6 +1364,10 @@ class TradingApplication:
             on_symbols_removed=self._on_screener_symbols_removed,
             has_open_position=lambda symbol: (
                 self._execution_engine is not None and self._execution_engine.has_open_position(symbol)
+            ),
+            has_pending_order=lambda symbol: (
+                self._execution_engine is not None
+                and self._execution_engine.has_pending_order_for_symbol(symbol)
             ),
         )
 
@@ -1908,7 +1927,7 @@ class TradingApplication:
 
         task = asyncio.create_task(
             self._feature_pipeline.run(
-                symbols=_SYMBOLS,  # fallback; screener overrides via symbol_source
+                symbols=self._active_symbols(),  # actual screener universe (fallback if absent)
                 intervals=[_WS_INTERVAL],
                 symbol_source=self._screener,
             ),
@@ -2208,6 +2227,33 @@ class TradingApplication:
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
             "hour_model_gate_canary_blocked": hour_counts.get("model_gate_canary_blocked", 0),
+            # Engine-level counters (cumulative since startup, read from execution engine)
+            "hour_skipped_pending_entries": (
+                self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_order_placed": (
+                self._execution_engine.get_diag_counts().get("order_placed", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_order_failed": (
+                self._execution_engine.get_diag_counts().get("order_failed", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            # Pending entry details for /diagnostics "why no trades" display
+            **(
+                self._execution_engine.pending_entry_diagnostics()
+                if self._execution_engine is not None
+                else {
+                    "pending_entry_count": 0,
+                    "pending_entry_ids": [],
+                    "pending_entry_symbols": [],
+                    "oldest_pending_age_s": None,
+                }
+            ),
             "model": {
                 "last_training": self._last_training_message,
                 "training_samples": (
@@ -2243,6 +2289,69 @@ class TradingApplication:
             if (now - last_heartbeat).total_seconds() >= _SUPERVISOR_HEARTBEAT_INTERVAL:
                 alive = [t.get_name() for t in self._background_tasks if not t.done()]
                 log.info("runtime_supervisor.heartbeat", alive_tasks=alive)
+                # Structured system heartbeat for observability
+                try:
+                    pending_diag = (
+                        self._execution_engine.pending_entry_diagnostics()
+                        if self._execution_engine is not None
+                        else {}
+                    )
+                    ws_age: float | None = None
+                    if (
+                        self._health_checker is not None
+                        and self._health_checker._last_ws_message_at is not None
+                    ):
+                        ws_age = (now - self._health_checker._last_ws_message_at).total_seconds()
+                    feat_age: float | None = None
+                    if self._health_checker is not None and hasattr(
+                        self._health_checker, "_last_feature_computed_at"
+                    ):
+                        fat = self._health_checker._last_feature_computed_at
+                        if fat is not None:
+                            feat_age = (now - fat).total_seconds()
+                    log.info(
+                        "system.heartbeat",
+                        status=(
+                            self._status.value
+                            if hasattr(self._status, "value")
+                            else str(self._status)
+                        ),
+                        trading_mode=(
+                            self._settings.TRADING_MODE.value
+                            if self._settings is not None
+                            and hasattr(self._settings.TRADING_MODE, "value")
+                            else "unknown"
+                        ),
+                        shadow_mode=(
+                            self._execution_engine._shadow_mode
+                            if self._execution_engine is not None
+                            else True
+                        ),
+                        last_strategy_loop_at=(
+                            self._last_strategy_loop_at.isoformat()
+                            if self._last_strategy_loop_at is not None
+                            else None
+                        ),
+                        last_ws_message_age_s=round(ws_age, 1) if ws_age is not None else None,
+                        last_feature_age_s=round(feat_age, 1) if feat_age is not None else None,
+                        active_symbols=self._active_symbols()[:10],
+                        pending_entry_count=pending_diag.get("pending_entry_count", 0),
+                        pending_entry_ids=pending_diag.get("pending_entry_ids", []),
+                        open_positions=(
+                            list(self._execution_engine._open_positions.keys())
+                            if self._execution_engine is not None
+                            else []
+                        ),
+                        model_version=(
+                            self._model_registry.champion.version
+                            if self._model_registry is not None
+                            and self._model_registry.champion is not None
+                            else "none"
+                        ),
+                        paused=self._trading_paused,
+                    )
+                except Exception as _hb_exc:
+                    log.debug("supervisor.heartbeat_failed", error=str(_hb_exc))
                 last_heartbeat = now
 
             for task in list(self._background_tasks):
@@ -2716,7 +2825,7 @@ class TradingApplication:
             risk_profile=self._settings.RISK_PROFILE,
             live_mode=self._settings.LIVE_MODE,
             shadow_mode=self._settings.SHADOW_MODE,
-            symbols=_SYMBOLS,
+            symbols=self._active_symbols(),
         )
 
         # Wait for shutdown

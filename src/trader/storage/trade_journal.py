@@ -620,6 +620,38 @@ class TradeJournal:
             log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
         return ids
 
+    async def get_pending_order_events(self) -> list[dict[str, Any]]:
+        """Return detailed pending order records for reconciliation.
+
+        Read-only. Used by ExecutionEngine.reconcile_restored_pending_entries().
+        """
+        rows = await self._fetch(
+            """
+            SELECT order_link_id, proposal_id, decision_id, symbol, side, qty,
+                   status, exchange_order_id, error, created_at
+            FROM order_events
+            WHERE status IN ('CREATED_LOCAL', 'SUBMITTING')
+            ORDER BY created_at ASC
+            """
+        )
+        return [dict(r) for r in rows]
+
+    async def mark_order_event_stale(self, order_link_id: str, reason: str) -> None:
+        """Mark a pending order event as FAILED_STALE (non-destructive terminal update).
+
+        Only transitions from CREATED_LOCAL or SUBMITTING; never touches terminal states.
+        """
+        await self._execute(
+            """
+            UPDATE order_events
+            SET status = 'FAILED_STALE', error = $2
+            WHERE order_link_id = $1
+              AND status IN ('CREATED_LOCAL', 'SUBMITTING')
+            """,
+            order_link_id,
+            reason,
+        )
+
     async def upsert_durable_order_state(
         self,
         *,
@@ -976,6 +1008,7 @@ class TradeJournal:
             "labelled_samples_15m": 0,
             "latest_training_run": {},
             "latest_model_version": {},
+            "active_model_version": {},
             "shadow_gate_15m": {},
             "paper_pnl_15m": {},
         }
@@ -1040,7 +1073,27 @@ class TradeJournal:
             )
             if rows:
                 result["latest_model_version"] = dict(rows[0])
-                latest_model_version = str(rows[0]["version"])
+
+            # Active model = latest CHAMPION; fallback to latest_model_version
+            champion_rows = await self._fetch(
+                """
+                SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+                  AND artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            if champion_rows:
+                result["active_model_version"] = dict(champion_rows[0])
+            else:
+                result["active_model_version"] = result.get("latest_model_version", {})
+
+            # Use active_model_version for gate/paper stats (not latest which may be challenger)
+            active_model_row = champion_rows[0] if champion_rows else (rows[0] if rows else None)
+            latest_model_version = str(active_model_row["version"]) if active_model_row else ""
+            if latest_model_version:
                 gate_rows = await self._fetch(
                     """
                     SELECT

@@ -211,6 +211,8 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
+        app.add_handler(CommandHandler("db", self._cmd_db_model))
+        app.add_handler(CommandHandler("model", self._cmd_db_model))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -773,7 +775,24 @@ class TelegramMonitorBot:
             f"Пропущено cooldown:     <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
             f"Пропущено после ошибки: <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
             f"Блоков фильтра модели:  <code>{diag.get('hour_model_gate_canary_blocked', 0)}</code>",
+            f"Пропущено pending-заявка:<code>{diag.get('hour_skipped_pending_entries', 0)}</code>",
+            f"Ордеров размещено:      <code>{diag.get('hour_order_placed', 0)}</code>",
+            f"Ордеров неудачно:       <code>{diag.get('hour_order_failed', 0)}</code>",
         ]
+
+        # Pending entry blocking warning
+        pending_ids = diag.get("pending_entry_ids") or []
+        pending_symbols = diag.get("pending_entry_symbols") or []
+        pending_count = diag.get("pending_entry_count") or 0
+        if pending_count > 0:
+            ids_str = ", ".join(f"<code>{pid[:16]}…</code>" for pid in pending_ids[:3])
+            sym_str = ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
+            lines.append(
+                f"\n⚠️ Новые входы <b>заблокированы</b> pending-заявкой:\n"
+                f"ID: {ids_str or 'нет'}, символ: {sym_str}\n"
+                f"Проверка stale pending выполняется автоматически при старте."
+            )
+
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1158,6 +1177,21 @@ class TelegramMonitorBot:
         text = str(value or "none")
         return _STATUS_RU.get(text, text)
 
+    @staticmethod
+    def _fmt_timestamp(ts: Any) -> str:
+        """Format a datetime or ISO string; returns 'нет' if absent."""
+        if ts is None:
+            return "нет"
+        from datetime import datetime as _dt
+
+        if isinstance(ts, _dt):
+            return ts.strftime("%H:%M:%S UTC")
+        try:
+            parsed = _dt.fromisoformat(str(ts))
+            return parsed.strftime("%H:%M:%S UTC")
+        except Exception:
+            return str(ts)[:19]
+
     async def _cmd_model_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Explain model/training screens in operator-friendly Russian."""
         del context
@@ -1231,7 +1265,7 @@ class TelegramMonitorBot:
             db_error_str = f"{db_error_str[:177]}..."
         candles = db_diag.get("candles_by_interval", {})
         latest_1m = db_diag.get("latest_candle_1m")
-        latest_str = latest_1m.strftime("%H:%M:%S UTC") if latest_1m else "нет"
+        latest_str = self._fmt_timestamp(latest_1m)
         outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
         labelled_15m = db_diag.get("labelled_samples_15m", 0)
         outcome_parts = [
@@ -1441,7 +1475,17 @@ class TelegramMonitorBot:
         if db_diag.get("error"):
             lines.append(f"\n<i>Ошибка: {html.escape(str(db_diag['error']))}</i>")
 
-        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+        try:
+            await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+        except Exception as exc:
+            log.warning("telegram.db_model_render_failed", error=str(exc), exc_info=True)
+            err_text = html.escape(str(exc))[:200]
+            await self._reply(
+                update,
+                f"<b>База и модель</b>\nНе удалось отправить диагностику.\n"
+                f"Ошибка: <code>{err_text}</code>",
+                reply_markup=self._main_menu(),
+            )
 
     # ------------------------------------------------------------------
     # Control commands
