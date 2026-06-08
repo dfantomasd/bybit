@@ -220,8 +220,8 @@ class ModelRegistry:
         return self._champion.predict(features)
 
     def score(self, features: list[float]) -> ModelPrediction | None:
-        """Backward-compatible alias for observational shadow scoring."""
-        return self.score_shadow(features)
+        """Backward-compatible alias for safe Champion-only live scoring."""
+        return self.score_live(features)
 
     def partial_fit_challenger(self, features: list[float], label: int) -> None:
         if self._challenger is not None:
