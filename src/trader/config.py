@@ -277,6 +277,12 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
+    MODEL_AUTO_PROMOTE_ENABLED: bool = True
+    """Auto-promote challenger to champion when it beats the current champion."""
+    MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
+    MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
+    MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
+    """Minimum live lift (bps) the challenger must show before auto-promotion."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55

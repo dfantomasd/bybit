@@ -686,6 +686,123 @@ class TradingApplication:
             except Exception as exc:
                 log.warning("model_auto_training.failed", error=str(exc))
 
+    async def _get_champion_walk_forward_bps(self) -> float:
+        """Return current champion's walk-forward expectancy stored in model_versions.metrics."""
+        if self._trade_journal is None:
+            return 0.0
+        try:
+            rows = await self._trade_journal._fetch(
+                """
+                SELECT metrics FROM model_versions
+                WHERE status = 'CHAMPION' AND metrics IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST
+                LIMIT 1
+                """
+            )
+            if not rows:
+                return 0.0
+            metrics_raw = rows[0]["metrics"] or {}
+            metrics = dict(metrics_raw) if not isinstance(metrics_raw, str) else json.loads(metrics_raw)
+            return float(
+                metrics.get("walk_forward_expectancy_bps")
+                or metrics.get("best_threshold_avg_net_return_bps")
+                or metrics.get("avg_net_return_predicted_positive_bps")
+                or 0.0
+            )
+        except Exception as exc:
+            log.debug("model_auto_promote.champion_metrics_failed", error=str(exc))
+            return 0.0
+
+    async def _run_auto_model_promoter(self) -> None:
+        """Promote challenger to champion automatically when it consistently beats the champion.
+
+        Conservative criteria (all must pass):
+          1. Challenger status is SHADOW_CHALLENGER (not already champion).
+          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions.
+          3. Live lift_vs_all_bps >= MODEL_AUTO_PROMOTE_MIN_LIFT_BPS.
+          4. Live lift_vs_all_bps > current champion's walk-forward expectancy (conservative).
+        """
+        assert self._settings is not None
+        if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
+            log.info("model_auto_promote.disabled")
+            return
+
+        check_seconds = max(120, int(self._settings.MODEL_AUTO_PROMOTE_CHECK_SECONDS))
+        min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
+        min_lift_bps = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=check_seconds)
+                break
+            except TimeoutError:
+                pass
+
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                continue
+
+            try:
+                diag = await self._trade_journal.get_db_diagnostics()
+                gate = diag.get("shadow_gate_15m", {}) or {}
+                latest_model = diag.get("latest_model_version", {}) or {}
+
+                challenger_version = str(latest_model.get("version", "") or "")
+                challenger_status = str(latest_model.get("status", "") or "")
+                total_count = int(gate.get("total_count", 0) or 0)
+                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
+
+                if challenger_status != "SHADOW_CHALLENGER" or not challenger_version:
+                    continue
+
+                if total_count < min_signals:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="insufficient_signals",
+                        total_count=total_count,
+                        min_signals=min_signals,
+                    )
+                    continue
+
+                if lift_bps < min_lift_bps:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="insufficient_lift",
+                        lift_bps=lift_bps,
+                        min_lift_bps=min_lift_bps,
+                    )
+                    continue
+
+                # Conservative: challenger must beat champion's own walk-forward expectancy
+                champion_wf_bps = await self._get_champion_walk_forward_bps()
+                if lift_bps <= champion_wf_bps:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="not_better_than_champion",
+                        lift_bps=lift_bps,
+                        champion_wf_bps=champion_wf_bps,
+                    )
+                    continue
+
+                log.info(
+                    "model_auto_promote.triggered",
+                    version=challenger_version,
+                    total_count=total_count,
+                    lift_bps=lift_bps,
+                    champion_wf_bps=champion_wf_bps,
+                )
+                result = await self._start_model_promote(challenger_version)
+
+                if self._telegram_bot is not None:
+                    await self._telegram_bot.notify(
+                        f"🤖 <b>Авто-промоут</b>\n"
+                        f"Версия: <code>{challenger_version}</code>\n"
+                        f"Сигналов: <code>{total_count}</code> | "
+                        f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
+                        f"{result}"
+                    )
+            except Exception as exc:
+                log.warning("model_auto_promote.failed", error=str(exc))
+
     def _model_gate_threshold(self, regime_context: Any | None) -> float:
         """Return a conservative threshold adjusted by market regime."""
         assert self._settings is not None
@@ -2649,6 +2766,10 @@ class TradingApplication:
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
             auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")
             self._background_tasks.append(auto_trainer_task)
+
+            # Auto-promotion: promotes challenger to champion when it consistently beats the champion
+            auto_promoter_task = asyncio.create_task(self._run_auto_model_promoter(), name="auto-model-promoter")
+            self._background_tasks.append(auto_promoter_task)
 
             # Adaptive load governor: narrows feature universe under memory/lag pressure
             load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
