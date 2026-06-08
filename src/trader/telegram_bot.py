@@ -366,15 +366,11 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
                 InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
             ],
-            [
-                InlineKeyboardButton("🔦 Shadow ON", callback_data="mode:shadow"),
-                InlineKeyboardButton("🚫 LIVE заблокирован", callback_data="mode:active"),
-            ],
+            [InlineKeyboardButton("🚫 LIVE заблокирован (только env vars)", callback_data="mode:active")],
             [
                 InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
                 InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
             ],
-            [InlineKeyboardButton("🧠🔁 Обучить ВСЕ примеры (5m/15m/30m)", callback_data="train:all")],
             [InlineKeyboardButton("🏆 Промоутировать кандидата → CHAMPION", callback_data="control:promote")],
             [
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
