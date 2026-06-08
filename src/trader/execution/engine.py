@@ -102,6 +102,8 @@ class ExecutionEngine:
         self._min_net_edge_pct = min_net_edge_pct
         self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
         self._entry_order_mode = entry_order_mode
+        if entry_order_mode != "MARKET":
+            raise ValueError(f"Only MARKET entry mode is supported during current rollout; got {entry_order_mode!r}")
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -668,6 +670,13 @@ class ExecutionEngine:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
 
         # 4. Risk evaluation ───────────────────────────────────────────
+        # Use configured max_spread_bps as conservative spread estimate (actual order-book
+        # spread not yet wired; this is fail-conservative — real spread is usually lower).
+        spread_estimate = (
+            Decimal(str(self._max_spread_bps))
+            / Decimal("10000")
+            * (proposal.entry_price if proposal.entry_price else Decimal("1"))
+        )
         try:
             decision = await self._risk_manager.evaluate(
                 proposal=proposal,
@@ -676,6 +685,7 @@ class ExecutionEngine:
                 instrument_info=instrument_info,
                 feature_vector=feature_vector,
                 regime_context=regime_context,
+                spread=spread_estimate,
             )
         except Exception as exc:
             log.error(
@@ -757,6 +767,7 @@ class ExecutionEngine:
             exit_fee_pct = taker * Decimal("100")
             round_trip_fee_pct = entry_fee_pct + exit_fee_pct
             spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
+            # expected_slippage_pct is per-side; applied once here to represent combined entry+exit
             slippage_pct = Decimal(str(self._expected_slippage_pct))
             funding_pct = Decimal(str(self._funding_buffer_pct))
             safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
