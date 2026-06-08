@@ -3,14 +3,10 @@
 Uses scikit-learn SGDClassifier (log_loss) for online learning.
 No torch, no RL, no LLM — stays within Render Starter memory limits.
 
-The model operates in shadow-scoring mode by default.
-MODEL_ALLOW_LIVE_DECISIONS=false (default) → rule-based strategy remains
-the authoritative signal source; model only provides model_score metadata.
-
-Champion/Challenger lifecycle:
-  SHADOW_CHALLENGER → VALIDATED → CHAMPION
-  CHAMPION → ROLLED_BACK (on regression)
-  Any → REJECTED (on failure criteria)
+The model operates in shadow-scoring mode by default. A challenger may be used
+for observational scoring only. Live gate decisions are sourced exclusively
+from a compatible CHAMPION model trained with the current directional label
+schema.
 """
 
 from __future__ import annotations
@@ -26,7 +22,11 @@ from typing import Any
 import joblib
 import numpy as np
 
+from trader.training.labels import LABEL_SCHEMA_VERSION
+
 log = logging.getLogger(__name__)
+
+LEGACY_LABEL_SCHEMA_VERSION = "legacy_unknown"
 
 try:
     from sklearn.linear_model import SGDClassifier
@@ -38,13 +38,27 @@ except ImportError:
     log.warning("scikit-learn not available; ChallengerModel disabled")
 
 
+def _parse_metrics(raw: Any) -> dict[str, Any]:
+    """Return JSON metrics as a plain dictionary."""
+
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
 @dataclass
 class ModelPrediction:
     score: float
     label: int  # 0 or 1
     confidence: float
     model_version: str
-    is_live_decision: bool = False  # True only after promotion
+    is_live_decision: bool = False
 
 
 class ModelStatus:
@@ -60,7 +74,7 @@ class ChallengerModel:
     """Online-updateable binary classifier for trade outcome prediction.
 
     Features: normalized float vector (RSI, EMA diff, volume ratio, etc.)
-    Labels: 1 if net_return_bps > threshold after horizon_minutes
+    Labels: 1 if directional net_return_bps > threshold after horizon_minutes
     """
 
     version: str = "v0.0"
@@ -69,6 +83,7 @@ class ChallengerModel:
     training_samples: int = 0
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     allow_live_decisions: bool = False
+    label_schema_version: str = LABEL_SCHEMA_VERSION
 
     _clf: Any = field(default=None, repr=False)
     _scaler: Any = field(default=None, repr=False)
@@ -90,6 +105,7 @@ class ChallengerModel:
 
     def predict(self, features: list[float]) -> ModelPrediction | None:
         """Score a feature vector. Returns None if model not fitted."""
+
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
         try:
@@ -100,7 +116,7 @@ class ChallengerModel:
             label = int(np.argmax(proba))
             confidence = float(proba[label])
             return ModelPrediction(
-                score=float(proba[1]),  # probability of class 1 (positive outcome)
+                score=float(proba[1]),
                 label=label,
                 confidence=confidence,
                 model_version=self.version,
@@ -112,6 +128,7 @@ class ChallengerModel:
 
     def partial_fit(self, features: list[float], label: int) -> None:
         """Online update with a single labelled sample."""
+
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return
         x = np.array(features, dtype=np.float32).reshape(1, -1)
@@ -126,6 +143,7 @@ class ChallengerModel:
 
     def to_bytes(self) -> bytes:
         """Serialize model to bytes for PostgreSQL storage."""
+
         buf = io.BytesIO()
         joblib.dump(
             {
@@ -135,6 +153,7 @@ class ChallengerModel:
                     "version": self.version,
                     "feature_names": self.feature_names,
                     "training_samples": self.training_samples,
+                    "label_schema_version": self.label_schema_version,
                 },
             },
             buf,
@@ -142,8 +161,9 @@ class ChallengerModel:
         return buf.getvalue()
 
     @classmethod
-    def from_bytes(cls, data: bytes, version: str) -> ChallengerModel:
+    def from_bytes(cls, data: bytes, version: str) -> "ChallengerModel":
         """Deserialize model from bytes."""
+
         buf = io.BytesIO(data)
         payload = joblib.load(buf)
         meta = payload.get("meta", {})
@@ -151,6 +171,7 @@ class ChallengerModel:
             version=version,
             feature_names=meta.get("feature_names", []),
             training_samples=meta.get("training_samples", 0),
+            label_schema_version=meta.get("label_schema_version", LEGACY_LABEL_SCHEMA_VERSION),
         )
         model._clf = payload.get("clf")
         model._scaler = payload.get("scaler")
@@ -158,20 +179,31 @@ class ChallengerModel:
 
     def can_promote(
         self,
+        *,
         min_samples: int = 500,
-        min_closed_trades: int = 50,
+        min_resolved_observations: int = 50,
+        resolved_observations: int = 0,
         walk_forward_expectancy: float = 0.0,
+        quality: str = "",
+        required_quality: str = "GOOD",
     ) -> tuple[bool, str]:
-        """Check promotion criteria."""
+        """Check conservative offline and shadow-observation promotion criteria."""
+
+        if self.label_schema_version != LABEL_SCHEMA_VERSION:
+            return False, f"incompatible_label_schema: {self.label_schema_version!r} != {LABEL_SCHEMA_VERSION!r}"
         if self.training_samples < min_samples:
             return False, f"insufficient_samples: {self.training_samples} < {min_samples}"
+        if resolved_observations < min_resolved_observations:
+            return False, f"insufficient_resolved_observations: {resolved_observations} < {min_resolved_observations}"
+        if quality.upper() != required_quality.upper():
+            return False, f"quality_not_{required_quality.lower()}: {quality or 'none'}"
         if walk_forward_expectancy <= 0:
             return False, f"negative_walk_forward: {walk_forward_expectancy:.4f}"
         return True, "criteria_met"
 
 
 class ModelRegistry:
-    """Manages champion/challenger lifecycle in memory + PostgreSQL."""
+    """Manage compatible champion/challenger lifecycle in memory + PostgreSQL."""
 
     def __init__(self, trade_journal: Any | None = None) -> None:
         self._journal = trade_journal
@@ -186,25 +218,39 @@ class ModelRegistry:
     def challenger(self) -> ChallengerModel | None:
         return self._challenger
 
-    def score(self, features: list[float]) -> ModelPrediction | None:
-        """Score with challenger if available (shadow eval), else champion."""
+    def score_shadow(self, features: list[float]) -> ModelPrediction | None:
+        """Score observationally with challenger first, then champion fallback."""
+
         model = self._challenger or self._champion
-        if model is None:
+        return model.predict(features) if model is not None else None
+
+    def score_live(self, features: list[float]) -> ModelPrediction | None:
+        """Score authoritatively with the compatible champion only."""
+
+        model = self._champion
+        if model is None or model.status != ModelStatus.CHAMPION:
             return None
         return model.predict(features)
+
+    def score(self, features: list[float]) -> ModelPrediction | None:
+        """Backward-compatible alias for shadow scoring."""
+
+        return self.score_shadow(features)
 
     def partial_fit_challenger(self, features: list[float], label: int) -> None:
         if self._challenger is not None:
             self._challenger.partial_fit(features, label)
 
     async def load_active_model(self) -> ChallengerModel | None:
-        """Load champion and challenger; challenger is preferred for shadow scoring."""
+        """Load compatible champion and challenger; return champion when present."""
+
         champion = await self.load_champion()
         await self.load_latest_challenger()
         return champion or self._challenger
 
     async def save_checkpoint(self, model: ChallengerModel) -> None:
         """Persist model checkpoint to PostgreSQL."""
+
         if self._journal is None or not self._journal.is_enabled:
             return
         try:
@@ -225,30 +271,45 @@ class ModelRegistry:
                 model.training_samples,
                 model.feature_schema_hash,
                 artifact,
-                json.dumps({"samples": model.training_samples}),
+                json.dumps(
+                    {
+                        "samples": model.training_samples,
+                        "label_schema_version": model.label_schema_version,
+                    }
+                ),
             )
         except Exception as exc:
             log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
-        """Load the latest CHAMPION model from PostgreSQL and set as active champion."""
+        """Load the latest compatible CHAMPION model."""
+
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
             rows = await self._journal._fetch(
                 """
-                SELECT version, artifact, training_samples
+                SELECT version, artifact, training_samples, metrics
                 FROM model_versions
-                WHERE status = 'CHAMPION' AND artifact IS NOT NULL
+                WHERE status = 'CHAMPION'
+                  AND artifact IS NOT NULL
+                  AND COALESCE(metrics->>'label_schema_version', '') = $1
                 ORDER BY training_finished_at DESC NULLS LAST
                 LIMIT 1
-                """
+                """,
+                LABEL_SCHEMA_VERSION,
             )
             if not rows:
+                self._champion = None
+                log.warning("model_registry.no_compatible_champion", required_schema=LABEL_SCHEMA_VERSION)
                 return None
             row = rows[0]
+            metrics = _parse_metrics(row["metrics"])
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = ModelStatus.CHAMPION
+            model.training_samples = int(row["training_samples"] or model.training_samples)
+            model.allow_live_decisions = True
+            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._champion = model
             log.info("model_registry.champion_loaded", version=model.version, samples=model.training_samples)
             return model
@@ -257,24 +318,33 @@ class ModelRegistry:
             return None
 
     async def load_latest_challenger(self) -> ChallengerModel | None:
-        """Load the latest challenger from PostgreSQL for non-authoritative scoring."""
+        """Load the latest compatible challenger for non-authoritative scoring."""
+
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
             rows = await self._journal._fetch(
                 """
-                SELECT version, status, artifact, training_samples
+                SELECT version, status, artifact, training_samples, metrics
                 FROM model_versions
-                WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER') AND artifact IS NOT NULL
+                WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
+                  AND artifact IS NOT NULL
+                  AND COALESCE(metrics->>'label_schema_version', '') = $1
                 ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
                 LIMIT 1
-                """
+                """,
+                LABEL_SCHEMA_VERSION,
             )
             if not rows:
+                self._challenger = None
                 return None
             row = rows[0]
+            metrics = _parse_metrics(row["metrics"])
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = str(row["status"]) if "status" in row else ModelStatus.SHADOW_CHALLENGER
+            model.training_samples = int(row["training_samples"] or model.training_samples)
+            model.allow_live_decisions = False
+            model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._challenger = model
             log.info("model_registry.challenger_loaded", version=model.version, samples=model.training_samples)
             return model
