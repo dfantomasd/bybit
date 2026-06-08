@@ -1,0 +1,269 @@
+"""Directional outcome resolver extension for :mod:`trade_journal`.
+
+The base journal is intentionally left intact.  This module overrides only the
+ML-outcome parts that must change together: schema migration, outcome writes,
+and candle-based resolution.  Installation is explicit from ``storage`` package
+initialisation so callers importing ``trader.storage.trade_journal.TradeJournal``
+receive the extended implementation without a risky full-file rewrite.
+"""
+
+from __future__ import annotations
+
+from datetime import timedelta
+from typing import Any
+
+from trader.storage import trade_journal as _base_module
+from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
+from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps, build_directional_outcome
+
+DEFAULT_TAKER_FEE_BPS = 5.5
+DEFAULT_SPREAD_BPS = 8.0
+DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0
+DEFAULT_FUNDING_BPS = 1.0
+
+
+def default_cost_model() -> CostModelBps:
+    """Return the conservative round-trip cost model used by the resolver.
+
+    Values match the current production defaults: two taker fees, full spread,
+    per-side slippage, and a small funding buffer.  A later configuration wiring
+    step may inject symbol-specific values without changing the label formula.
+    """
+
+    return CostModelBps(
+        entry_fee_bps=DEFAULT_TAKER_FEE_BPS,
+        exit_fee_bps=DEFAULT_TAKER_FEE_BPS,
+        spread_bps=DEFAULT_SPREAD_BPS,
+        entry_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
+        exit_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
+        funding_bps=DEFAULT_FUNDING_BPS,
+    )
+
+
+class DirectionalTradeJournal(_BaseTradeJournal):
+    """Trade journal with directional, cost-aware ML outcomes."""
+
+    async def _ensure_schema(self) -> None:
+        """Create the base schema, then migrate directional-label columns."""
+
+        await super()._ensure_schema()
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.execute(
+                """
+                ALTER TABLE prediction_outcomes
+                    ADD COLUMN IF NOT EXISTS gross_return_bps double precision,
+                    ADD COLUMN IF NOT EXISTS cost_bps double precision,
+                    ADD COLUMN IF NOT EXISTS label_schema_version text;
+                CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_schema_horizon
+                    ON prediction_outcomes (label_schema_version, horizon_minutes);
+                """
+            )
+
+    async def resolve_prediction_outcomes(
+        self,
+        *,
+        prediction_id: str,
+        horizon_minutes: int,
+        net_return_bps: float,
+        max_favorable_excursion_bps: float,
+        max_adverse_excursion_bps: float,
+        label: int,
+        gross_return_bps: float = 0.0,
+        cost_bps: float = 0.0,
+        label_schema_version: str = LABEL_SCHEMA_VERSION,
+    ) -> None:
+        """Write or replace one versioned directional outcome."""
+
+        await self._execute(
+            """
+            INSERT INTO prediction_outcomes (
+                prediction_id, horizon_minutes, gross_return_bps, cost_bps,
+                net_return_bps, max_favorable_excursion_bps,
+                max_adverse_excursion_bps, label, label_schema_version,
+                resolved_at
+            )
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, now())
+            ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
+                gross_return_bps = EXCLUDED.gross_return_bps,
+                cost_bps = EXCLUDED.cost_bps,
+                net_return_bps = EXCLUDED.net_return_bps,
+                max_favorable_excursion_bps = EXCLUDED.max_favorable_excursion_bps,
+                max_adverse_excursion_bps = EXCLUDED.max_adverse_excursion_bps,
+                label = EXCLUDED.label,
+                label_schema_version = EXCLUDED.label_schema_version,
+                resolved_at = now()
+            """,
+            prediction_id,
+            horizon_minutes,
+            gross_return_bps,
+            cost_bps,
+            net_return_bps,
+            max_favorable_excursion_bps,
+            max_adverse_excursion_bps,
+            label,
+            label_schema_version,
+        )
+
+    async def resolve_outcomes_from_candles(
+        self,
+        *,
+        horizon_minutes: int,
+        label_bps_threshold: float = 5.0,
+        limit: int = 200,
+        cost_model: CostModelBps | None = None,
+    ) -> int:
+        """Resolve Buy and Sell outcomes from confirmed 1-minute candles.
+
+        Legacy long-only outcomes are recalculated because the lookup joins only
+        rows carrying the current ``LABEL_SCHEMA_VERSION``.  The existing primary
+        key then updates the old row in place.  MFE and MAE use every confirmed
+        candle inside the horizon rather than only the final bar.
+        """
+
+        costs = cost_model or default_cost_model()
+        rows = await self._fetch(
+            """
+            SELECT
+                pe.prediction_id,
+                pe.symbol,
+                pe.strategy_signal,
+                fs.candle_open_time AS entry_time
+            FROM prediction_events pe
+            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+            LEFT JOIN prediction_outcomes po
+                ON po.prediction_id = pe.prediction_id
+                AND po.horizon_minutes = $1
+                AND po.label_schema_version = $3
+            WHERE po.prediction_id IS NULL
+              AND pe.created_at < now() - ($1 * interval '1 minute')
+              AND pe.feature_snapshot_id IS NOT NULL
+              AND pe.strategy_signal IN ('Buy', 'Sell')
+            ORDER BY pe.created_at ASC
+            LIMIT $2
+            """,
+            horizon_minutes,
+            limit,
+            LABEL_SCHEMA_VERSION,
+        )
+
+        resolved = 0
+        for row in rows:
+            prediction_id = str(row["prediction_id"])
+            symbol = str(row["symbol"])
+            side = str(row["strategy_signal"])
+            entry_time = row["entry_time"]
+
+            entry_rows = await self._fetch(
+                """
+                SELECT close
+                FROM market_candles
+                WHERE symbol = $1
+                  AND interval = '1'
+                  AND open_time <= $2
+                  AND confirmed = true
+                ORDER BY open_time DESC
+                LIMIT 1
+                """,
+                symbol,
+                entry_time,
+            )
+            if not entry_rows:
+                continue
+
+            entry_close = float(entry_rows[0]["close"])
+            if entry_close <= 0:
+                continue
+
+            horizon_time = entry_time + timedelta(minutes=horizon_minutes)
+            path_rows = await self._fetch(
+                """
+                SELECT close, high, low
+                FROM market_candles
+                WHERE symbol = $1
+                  AND interval = '1'
+                  AND open_time > $2
+                  AND open_time <= $3
+                  AND confirmed = true
+                ORDER BY open_time ASC
+                """,
+                symbol,
+                entry_time,
+                horizon_time,
+            )
+            if not path_rows:
+                continue
+
+            outcome = build_directional_outcome(
+                side=side,
+                entry_price=entry_close,
+                exit_price=float(path_rows[-1]["close"]),
+                highs=[float(item["high"]) for item in path_rows],
+                lows=[float(item["low"]) for item in path_rows],
+                cost_model=costs,
+                label_threshold_bps=label_bps_threshold,
+            )
+            await self.resolve_prediction_outcomes(
+                prediction_id=prediction_id,
+                horizon_minutes=horizon_minutes,
+                gross_return_bps=outcome.gross_return_bps,
+                cost_bps=costs.total_bps,
+                net_return_bps=outcome.net_return_bps,
+                max_favorable_excursion_bps=outcome.max_favorable_excursion_bps,
+                max_adverse_excursion_bps=outcome.max_adverse_excursion_bps,
+                label=outcome.label,
+                label_schema_version=outcome.label_schema_version,
+            )
+            resolved += 1
+
+        return resolved
+
+    async def get_db_diagnostics(self) -> dict[str, Any]:
+        """Expose only current-schema label counts to model diagnostics."""
+
+        result = await super().get_db_diagnostics()
+        result["label_schema_version"] = LABEL_SCHEMA_VERSION
+        if not self.is_enabled:
+            return result
+
+        rows = await self._fetch(
+            """
+            SELECT horizon_minutes, count(*) AS cnt
+            FROM prediction_outcomes
+            WHERE label IS NOT NULL
+              AND label_schema_version = $1
+            GROUP BY horizon_minutes
+            ORDER BY horizon_minutes
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
+        result["prediction_outcomes"] = sum(result["prediction_outcomes_by_horizon"].values())
+
+        rows = await self._fetch(
+            """
+            SELECT count(DISTINCT fs.snapshot_id) AS cnt
+            FROM feature_snapshots fs
+            JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+            WHERE po.horizon_minutes = 15
+              AND po.label IS NOT NULL
+              AND po.label_schema_version = $1
+              AND fs.feature_values IS NOT NULL
+              AND pe.model_version = 'RULE_BASELINE_V1'
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+
+        # Fail closed until gate statistics are recalculated with the new label
+        # schema.  Old long-only lift must never enable canary filtering.
+        result["shadow_gate_15m"] = {}
+        result["paper_pnl_15m"] = {}
+        return result
+
+
+def install_directional_trade_journal() -> None:
+    """Install the directional implementation for existing import paths."""
+
+    _base_module.TradeJournal = DirectionalTradeJournal
