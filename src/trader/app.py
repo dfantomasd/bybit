@@ -1366,8 +1366,7 @@ class TradingApplication:
                 self._execution_engine is not None and self._execution_engine.has_open_position(symbol)
             ),
             has_pending_order=lambda symbol: (
-                self._execution_engine is not None
-                and self._execution_engine.has_pending_order_for_symbol(symbol)
+                self._execution_engine is not None and self._execution_engine.has_pending_order_for_symbol(symbol)
             ),
         )
 
@@ -2292,45 +2291,29 @@ class TradingApplication:
                 # Structured system heartbeat for observability
                 try:
                     pending_diag = (
-                        self._execution_engine.pending_entry_diagnostics()
-                        if self._execution_engine is not None
-                        else {}
+                        self._execution_engine.pending_entry_diagnostics() if self._execution_engine is not None else {}
                     )
                     ws_age: float | None = None
-                    if (
-                        self._health_checker is not None
-                        and self._health_checker._last_ws_message_at is not None
-                    ):
+                    if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                         ws_age = (now - self._health_checker._last_ws_message_at).total_seconds()
                     feat_age: float | None = None
-                    if self._health_checker is not None and hasattr(
-                        self._health_checker, "_last_feature_computed_at"
-                    ):
+                    if self._health_checker is not None and hasattr(self._health_checker, "_last_feature_computed_at"):
                         fat = self._health_checker._last_feature_computed_at
                         if fat is not None:
                             feat_age = (now - fat).total_seconds()
                     log.info(
                         "system.heartbeat",
-                        status=(
-                            self._status.value
-                            if hasattr(self._status, "value")
-                            else str(self._status)
-                        ),
+                        status=(self._status.value if hasattr(self._status, "value") else str(self._status)),
                         trading_mode=(
                             self._settings.TRADING_MODE.value
-                            if self._settings is not None
-                            and hasattr(self._settings.TRADING_MODE, "value")
+                            if self._settings is not None and hasattr(self._settings.TRADING_MODE, "value")
                             else "unknown"
                         ),
                         shadow_mode=(
-                            self._execution_engine._shadow_mode
-                            if self._execution_engine is not None
-                            else True
+                            self._execution_engine._shadow_mode if self._execution_engine is not None else True
                         ),
                         last_strategy_loop_at=(
-                            self._last_strategy_loop_at.isoformat()
-                            if self._last_strategy_loop_at is not None
-                            else None
+                            self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at is not None else None
                         ),
                         last_ws_message_age_s=round(ws_age, 1) if ws_age is not None else None,
                         last_feature_age_s=round(feat_age, 1) if feat_age is not None else None,
@@ -2344,8 +2327,7 @@ class TradingApplication:
                         ),
                         model_version=(
                             self._model_registry.champion.version
-                            if self._model_registry is not None
-                            and self._model_registry.champion is not None
+                            if self._model_registry is not None and self._model_registry.champion is not None
                             else "none"
                         ),
                         paused=self._trading_paused,

@@ -1482,8 +1482,7 @@ class TelegramMonitorBot:
             err_text = html.escape(str(exc))[:200]
             await self._reply(
                 update,
-                f"<b>База и модель</b>\nНе удалось отправить диагностику.\n"
-                f"Ошибка: <code>{err_text}</code>",
+                f"<b>База и модель</b>\nНе удалось отправить диагностику.\nОшибка: <code>{err_text}</code>",
                 reply_markup=self._main_menu(),
             )
 

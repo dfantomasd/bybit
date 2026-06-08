@@ -251,11 +251,7 @@ class ExecutionEngine:
         # Fail-safe: keep all pending if exchange API is unavailable
         try:
             open_orders = await self._adapter.get_open_orders(self._category)
-            exchange_link_ids = {
-                str(o.get("orderLinkId"))
-                for o in open_orders
-                if o.get("orderLinkId")
-            }
+            exchange_link_ids = {str(o.get("orderLinkId")) for o in open_orders if o.get("orderLinkId")}
         except Exception as exc:
             log.warning(
                 "execution.pending_reconcile_failed",
