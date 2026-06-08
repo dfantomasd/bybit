@@ -187,8 +187,8 @@ class ModelRegistry:
         return self._challenger
 
     def score(self, features: list[float]) -> ModelPrediction | None:
-        """Score with champion if available, else challenger."""
-        model = self._champion or self._challenger
+        """Score with challenger if available (shadow eval), else champion."""
+        model = self._challenger or self._champion
         if model is None:
             return None
         return model.predict(features)
@@ -198,10 +198,10 @@ class ModelRegistry:
             self._challenger.partial_fit(features, label)
 
     async def load_active_model(self) -> ChallengerModel | None:
-        """Load champion first; fall back to latest non-authoritative challenger."""
+        """Load champion and challenger; challenger is preferred for shadow scoring."""
         champion = await self.load_champion()
-        if champion is not None:
-            return champion
+        await self.load_latest_challenger()
+        return champion or self._challenger
         return await self.load_latest_challenger()
 
     async def save_checkpoint(self, model: ChallengerModel) -> None:
