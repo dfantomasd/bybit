@@ -100,8 +100,12 @@ async def _promote(version: str, confirm: bool) -> None:
     from trader.ml.challenger import ChallengerModel, ModelStatus
 
     settings = Settings()
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    dsn = settings.POSTGRES_DSN.get_secret_value().replace(
+        "postgresql+asyncpg://", "postgresql://", 1
+    )
+    pool = await asyncpg.create_pool(
+        dsn=dsn, min_size=1, max_size=2, statement_cache_size=0
+    )
 
     try:
         row = await pool.fetchrow(
@@ -131,7 +135,9 @@ async def _promote(version: str, confirm: bool) -> None:
             return
 
         horizon_minutes = int(metrics.get("horizon_minutes") or 15)
-        gate = await _shadow_gate_stats(pool, version=version, horizon_minutes=horizon_minutes)
+        gate = await _shadow_gate_stats(
+            pool, version=version, horizon_minutes=horizon_minutes
+        )
         resolved_observations = int(gate.get("total_count") or 0)
         pass_count = int(gate.get("pass_count") or 0)
         expectancy = float(gate.get("pass_avg_net_return_bps") or 0.0)
@@ -156,10 +162,16 @@ async def _promote(version: str, confirm: bool) -> None:
 
         min_pass_count = max(10, settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION // 3)
         if pass_count < min_pass_count:
-            click.echo(f"Promotion criteria not met: insufficient_gate_passes: {pass_count} < {min_pass_count}", err=True)
+            click.echo(
+                f"Promotion criteria not met: insufficient_gate_passes: {pass_count} < {min_pass_count}",
+                err=True,
+            )
             return
         if lift_bps <= 0:
-            click.echo(f"Promotion criteria not met: non_positive_shadow_lift: {lift_bps:+.4f} bps", err=True)
+            click.echo(
+                f"Promotion criteria not met: non_positive_shadow_lift: {lift_bps:+.4f} bps",
+                err=True,
+            )
             return
 
         click.echo(
@@ -174,7 +186,9 @@ async def _promote(version: str, confirm: bool) -> None:
 
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE model_versions SET status='ROLLED_BACK' WHERE status='CHAMPION'")
+                await conn.execute(
+                    "UPDATE model_versions SET status='ROLLED_BACK' WHERE status='CHAMPION'"
+                )
                 await conn.execute(
                     "UPDATE model_versions SET status='CHAMPION' WHERE version=$1 AND status IN ('SHADOW_CHALLENGER','VALIDATED')",
                     version,
@@ -188,7 +202,9 @@ async def _promote(version: str, confirm: bool) -> None:
 
 @click.command()
 @click.option("--version", required=True, help="Model version to promote")
-@click.option("--confirm", is_flag=True, default=False, help="Actually execute promotion")
+@click.option(
+    "--confirm", is_flag=True, default=False, help="Actually execute promotion"
+)
 def main(version: str, confirm: bool) -> None:
     """Evaluate and promote a compatible challenger model."""
 
