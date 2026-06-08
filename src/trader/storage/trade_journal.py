@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Iterable
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any
 
@@ -371,6 +371,11 @@ class TradeJournal:
                 );
                 CREATE UNIQUE INDEX IF NOT EXISTS account_transaction_events_trade_id_idx
                     ON account_transaction_events (trade_id) WHERE trade_id IS NOT NULL;
+                CREATE UNIQUE INDEX IF NOT EXISTS account_transaction_events_hash_idx
+                    ON account_transaction_events (transaction_time, symbol, COALESCE(trade_id,''), COALESCE(fee::text,''))
+                    WHERE trade_id IS NULL;
+                ALTER TABLE account_transaction_events ADD COLUMN IF NOT EXISTS transaction_type text;
+                ALTER TABLE account_transaction_events ADD COLUMN IF NOT EXISTS category text;
             """)
 
     async def record_signal(
@@ -579,27 +584,30 @@ class TradeJournal:
                     INSERT INTO account_transaction_events
                         (transaction_time, symbol, side, funding, fee, fee_rate,
                          cash_flow, change, cash_balance, trade_price,
-                         trade_id, order_id, order_link_id, created_at)
-                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,now())
+                         trade_id, order_id, order_link_id, transaction_type, category,
+                         created_at)
+                    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,now())
                     ON CONFLICT (trade_id) DO NOTHING
                     """,
                     _parse_ts(entry.get("transactionTime")),
                     entry.get("symbol"),
                     entry.get("side"),
-                    _parse_dec(entry.get("funding")),
-                    _parse_dec(entry.get("fee")),
-                    _parse_dec(entry.get("feeRate")),
-                    _parse_dec(entry.get("cashFlow")),
-                    _parse_dec(entry.get("change")),
-                    _parse_dec(entry.get("cashBalance")),
-                    _parse_dec(entry.get("tradePrice")),
+                    _decimal_or_none(entry.get("funding")),
+                    _decimal_or_none(entry.get("fee")),
+                    _decimal_or_none(entry.get("feeRate")),
+                    _decimal_or_none(entry.get("cashFlow")),
+                    _decimal_or_none(entry.get("change")),
+                    _decimal_or_none(entry.get("cashBalance")),
+                    _decimal_or_none(entry.get("tradePrice")),
                     trade_id,
                     entry.get("orderId"),
                     entry.get("orderLinkId"),
+                    entry.get("type"),
+                    entry.get("category"),
                 )
                 inserted += 1
             except Exception as exc:
-                log.debug("trade_journal.transaction_log_insert_failed", error=str(exc))
+                log.info("trade_journal.transaction_log_insert_failed", error=str(exc))
         return inserted
 
     async def load_pending_from_db(self) -> list[str]:
@@ -619,6 +627,116 @@ class TradeJournal:
         if ids:
             log.info("trade_journal.pending_restored", count=len(ids), ids=ids)
         return ids
+
+    async def get_daily_net_results(
+        self,
+        day_utc: date | None = None,
+    ) -> dict[str, Any]:
+        """Compute today's net PnL from closed_pnl + account_transaction_events.
+
+        Sign convention: profit positive, loss negative, fees negative, funding as-is.
+        Returns an empty dict with zeros when DB is not enabled.
+        """
+
+        zero: dict[str, Any] = {
+            "closed_trade_count": 0,
+            "gross_closed_pnl_usd": 0.0,
+            "total_fees_usd": 0.0,
+            "total_funding_usd": 0.0,
+            "net_cash_flow_usd": 0.0,
+            "net_pnl_usd": 0.0,
+            "maker_fill_count": 0,
+            "taker_fill_count": 0,
+            "maker_fill_pct": 0.0,
+            "taker_fill_pct": 0.0,
+            "estimated_slippage_usd": 0.0,
+            "transaction_event_count": 0,
+            "latest_transaction_at": None,
+        }
+        if not self.is_enabled:
+            return zero
+
+        if day_utc is None:
+            day_utc = date.today()  # UTC
+
+        day_start = datetime(day_utc.year, day_utc.month, day_utc.day, tzinfo=UTC)
+        day_end = day_start + timedelta(days=1)
+
+        try:
+            # Closed PnL from closed_pnl table
+            pnl_rows = await self._fetch(
+                """
+                SELECT count(*) AS trade_count,
+                       COALESCE(sum(closed_pnl), 0) AS gross_pnl
+                FROM closed_pnl
+                WHERE created_at >= $1 AND created_at < $2
+                """,
+                day_start,
+                day_end,
+            )
+            trade_count = int(pnl_rows[0]["trade_count"]) if pnl_rows else 0
+            gross_pnl = float(pnl_rows[0]["gross_pnl"]) if pnl_rows else 0.0
+
+            # Fees, funding, cash flow from account_transaction_events
+            tx_rows = await self._fetch(
+                """
+                SELECT
+                    count(*)                                AS tx_count,
+                    COALESCE(sum(fee), 0)                   AS total_fees,
+                    COALESCE(sum(funding), 0)               AS total_funding,
+                    COALESCE(sum(COALESCE(cash_flow, change, 0)), 0) AS net_cash_flow,
+                    max(transaction_time)                   AS latest_tx
+                FROM account_transaction_events
+                WHERE transaction_time >= $1 AND transaction_time < $2
+                """,
+                day_start,
+                day_end,
+            )
+            tx_count = int(tx_rows[0]["tx_count"]) if tx_rows else 0
+            total_fees = float(tx_rows[0]["total_fees"]) if tx_rows else 0.0
+            total_funding = float(tx_rows[0]["total_funding"]) if tx_rows else 0.0
+            net_cash_flow = float(tx_rows[0]["net_cash_flow"]) if tx_rows else 0.0
+            latest_tx = tx_rows[0]["latest_tx"] if tx_rows else None
+
+            # Maker/taker from execution_events (same day)
+            exec_rows = await self._fetch(
+                """
+                SELECT
+                    count(*) FILTER (WHERE is_maker = true)  AS maker_count,
+                    count(*) FILTER (WHERE is_maker = false) AS taker_count
+                FROM execution_events
+                WHERE created_at >= $1 AND created_at < $2
+                """,
+                day_start,
+                day_end,
+            )
+            maker_count = int(exec_rows[0]["maker_count"]) if exec_rows else 0
+            taker_count = int(exec_rows[0]["taker_count"]) if exec_rows else 0
+            total_fills = maker_count + taker_count
+            maker_pct = (maker_count / total_fills * 100.0) if total_fills > 0 else 0.0
+            taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 100.0
+
+            # Net PnL = gross + fees (fees are negative from Bybit) + funding
+            net_pnl = gross_pnl + total_fees + total_funding
+
+            return {
+                "closed_trade_count": trade_count,
+                "gross_closed_pnl_usd": round(gross_pnl, 6),
+                "total_fees_usd": round(total_fees, 6),
+                "total_funding_usd": round(total_funding, 6),
+                "net_cash_flow_usd": round(net_cash_flow, 6),
+                "net_pnl_usd": round(net_pnl, 6),
+                "maker_fill_count": maker_count,
+                "taker_fill_count": taker_count,
+                "maker_fill_pct": round(maker_pct, 1),
+                "taker_fill_pct": round(taker_pct, 1),
+                "estimated_slippage_usd": 0.0,
+                "transaction_event_count": tx_count,
+                "latest_transaction_at": latest_tx,
+            }
+        except Exception as exc:
+            log.warning("trade_journal.get_daily_net_results_failed", error=str(exc))
+            return zero
 
     async def get_pending_order_events(self) -> list[dict[str, Any]]:
         """Return detailed pending order records for reconciliation.
