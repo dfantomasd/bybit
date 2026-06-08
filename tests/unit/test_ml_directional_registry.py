@@ -76,6 +76,7 @@ def test_promotion_rejects_legacy_schema() -> None:
         resolved_observations=100,
         walk_forward_expectancy=2.0,
         quality="GOOD",
+        required_quality="GOOD",
     )
 
     assert allowed is False
@@ -91,6 +92,7 @@ def test_promotion_requires_resolved_shadow_observations() -> None:
         resolved_observations=49,
         walk_forward_expectancy=2.0,
         quality="GOOD",
+        required_quality="GOOD",
     )
 
     assert allowed is False
@@ -106,6 +108,7 @@ def test_promotion_requires_good_quality_and_positive_expectancy() -> None:
         resolved_observations=100,
         walk_forward_expectancy=2.0,
         quality="WEAK",
+        required_quality="GOOD",
     )
     negative_allowed, negative_reason = model.can_promote(
         min_samples=500,
@@ -113,6 +116,7 @@ def test_promotion_requires_good_quality_and_positive_expectancy() -> None:
         resolved_observations=100,
         walk_forward_expectancy=-0.1,
         quality="GOOD",
+        required_quality="GOOD",
     )
 
     assert weak_allowed is False
@@ -130,6 +134,7 @@ def test_promotion_accepts_compatible_good_model() -> None:
         resolved_observations=100,
         walk_forward_expectancy=2.0,
         quality="GOOD",
+        required_quality="GOOD",
     )
 
     assert allowed is True
