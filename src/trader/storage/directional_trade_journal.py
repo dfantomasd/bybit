@@ -166,9 +166,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 FROM market_candles
                 WHERE symbol = $1
                   AND interval = '1'
-                  AND open_time <= $2
+                  AND open_time = $2
                   AND confirmed = true
-                ORDER BY open_time DESC
                 LIMIT 1
                 """,
                 symbol,
