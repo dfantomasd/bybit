@@ -33,6 +33,14 @@ jobs:
           cat ruff.log
           exit 0
 
+      - name: Collect ruff formatter output
+        run: |
+          set +e
+          ruff format --check src/ tests/ > ruff-format.log 2>&1
+          echo "$?" > ruff-format.exit
+          cat ruff-format.log
+          exit 0
+
       - name: Collect pytest output
         env:
           BYBIT_API_KEY: test-key
@@ -58,5 +66,7 @@ jobs:
           path: |
             ruff.log
             ruff.exit
+            ruff-format.log
+            ruff-format.exit
             pytest.log
             pytest.exit
