@@ -1198,7 +1198,7 @@ class TradeJournal:
             """
             SELECT symbol
             FROM closed_pnl
-            WHERE created_at >= now() - ($1::text || ' days')::interval
+            WHERE created_at >= now() - ($1 * interval '1 day')
             GROUP BY symbol
             HAVING count(*) >= $2 AND sum(closed_pnl) <= $3
             """,
