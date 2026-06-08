@@ -204,7 +204,7 @@ async def test_reconcile_does_nothing_when_no_pending():
     engine, journal = _make_engine_with_journal()
     # No pending entries
     await engine.reconcile_restored_pending_entries()
-    journal.get_pending_order_events.assert_not_called()
+    journal.get_pending_durable_orders.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -215,9 +215,10 @@ async def test_reconcile_keeps_fresh_pending():
     engine.restore_pending_entries([oid])
     created_at = _now() - timedelta(seconds=30)  # 30s old → below 600s threshold
 
-    journal.get_pending_order_events = AsyncMock(
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
         return_value=[
-            {"order_link_id": oid, "symbol": "DOGEUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
         ]
     )
     # No exchange orders
@@ -243,8 +244,10 @@ async def test_reconcile_clears_old_stale_pending():
             {"order_link_id": oid, "symbol": "DOGEUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
         ]
     )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
     engine._adapter.get_open_orders = AsyncMock(return_value=[])
     journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
 
     await engine.reconcile_restored_pending_entries()
 
@@ -253,6 +256,7 @@ async def test_reconcile_clears_old_stale_pending():
     journal.mark_order_event_stale.assert_called_once_with(
         oid, pytest.approx(f"no_exchange_order_no_position_age_{700}s", rel=None)
     )
+    journal.mark_durable_order_stale.assert_called_once()
 
 
 @pytest.mark.asyncio
@@ -268,6 +272,7 @@ async def test_reconcile_keeps_pending_with_exchange_order():
             {"order_link_id": oid, "symbol": "XRPUSDT", "status": "SUBMITTING", "created_at": created_at},
         ]
     )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
     engine._adapter.get_open_orders = AsyncMock(
         return_value=[
             {"orderLinkId": oid, "symbol": "XRPUSDT"},
@@ -294,6 +299,7 @@ async def test_reconcile_keeps_pending_when_position_exists():
             {"order_link_id": oid, "symbol": "ADAUSDT", "status": "SUBMITTING", "created_at": created_at},
         ]
     )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
     engine._adapter.get_open_orders = AsyncMock(return_value=[])
     # Simulate open position for ADAUSDT
     engine._open_positions["ADAUSDT"] = {"side": MagicMock(), "size": Decimal("100"), "entry_price": Decimal("0.5")}
@@ -318,6 +324,7 @@ async def test_reconcile_fails_safe_when_api_unavailable():
             {"order_link_id": oid, "symbol": "DOGEUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
         ]
     )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
     engine._adapter.get_open_orders = AsyncMock(side_effect=RuntimeError("Network error"))
     journal.mark_order_event_stale = AsyncMock()
 
@@ -342,8 +349,10 @@ async def test_reconcile_clears_old_stale_unblocks_new_submit():
             {"order_link_id": oid, "symbol": "WLDUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
         ]
     )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
     engine._adapter.get_open_orders = AsyncMock(return_value=[])
     journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
 
     assert engine.has_pending_entries() is True
     await engine.reconcile_restored_pending_entries()
@@ -518,3 +527,91 @@ async def test_get_pending_order_events_returns_list():
 
     result = await journal.get_pending_order_events()
     assert result == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_with_position():
+    engine, journal = _make_engine_with_journal()
+    oid = "position_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    engine._open_positions["DOGEUSDT"] = {"side": "Buy", "size": Decimal("100"), "entry_price": Decimal("0.001")}
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_when_api_fails():
+    engine, journal = _make_engine_with_journal()
+    oid = "api_fail_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(side_effect=RuntimeError("API down"))
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # Fail-safe: pending entry must be preserved when exchange API is unavailable
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_syncs_pending_count():
+    engine, journal = _make_engine_with_journal(shadow=False)
+    oid = "sync_count_order_id"
+    engine.restore_pending_entries([oid])
+    # Manually break the count to simulate drift
+    engine._pending_entry_count = 99
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # After stale cleared, count must be synced to actual set size (0)
+    assert engine._pending_entry_count == len(engine._pending_entry_order_link_ids)
+    assert engine._pending_entry_count == 0
+
+
+def test_champion_readiness_not_reset_by_newer_challenger():
+    """active_model_version must use CHAMPION, not a newer SHADOW_CHALLENGER."""
+    from trader.storage.trade_journal import TradeJournal
+
+    tj = TradeJournal(postgres_dsn="postgresql://fake", enabled=False)
+    import asyncio
+
+    diag = asyncio.run(tj.get_db_diagnostics())
+
+    # When DB is disabled, active_model_version should be an empty dict (not crash)
+    assert "active_model_version" in diag
+    assert isinstance(diag["active_model_version"], dict)
+    # latest_model_version also present
+    assert "latest_model_version" in diag

@@ -652,6 +652,19 @@ class TradeJournal:
             reason,
         )
 
+    async def mark_durable_order_stale(self, order_link_id: str, reason: str) -> None:
+        """Mark durable_order_state as FAILED for a stale pending order (non-destructive)."""
+        await self._execute(
+            """
+            UPDATE durable_order_state
+            SET state = 'FAILED', last_error = $2, updated_at = now()
+            WHERE order_link_id = $1
+              AND state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
+            """,
+            order_link_id,
+            reason,
+        )
+
     async def upsert_durable_order_state(
         self,
         *,

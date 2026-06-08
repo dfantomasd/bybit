@@ -113,6 +113,7 @@ class ExecutionEngine:
         self._pending_entry_order_link_ids: set[str] = set()
         # order_link_id → symbol mapping for screener has_pending_order support
         self._pending_entry_symbols: dict[str, str] = {}
+        self._pending_entry_created_at: dict[str, datetime] = {}
         # Legacy count — kept for compatibility with rate-limit check
         self._pending_entry_count: int = 0
         # Per-session diagnostic counters (cumulative, not windowed)
@@ -181,6 +182,7 @@ class ExecutionEngine:
             self._pending_entry_order_link_ids.add(order_link_id)
             if symbol:
                 self._pending_entry_symbols[order_link_id] = symbol
+            self._pending_entry_created_at[order_link_id] = datetime.now(tz=UTC)
         if not self._shadow_mode:
             self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
@@ -193,6 +195,7 @@ class ExecutionEngine:
         if order_link_id:
             self._pending_entry_order_link_ids.discard(order_link_id)
             self._pending_entry_symbols.pop(order_link_id, None)
+            self._pending_entry_created_at.pop(order_link_id, None)
         self._pending_entry_count = max(0, self._pending_entry_count - 1)
 
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
@@ -219,6 +222,9 @@ class ExecutionEngine:
                 self._pending_entry_order_link_ids.add(oid)
                 if symbol:
                     self._pending_entry_symbols[oid] = symbol
+                created_at = rec.get("created_at")
+                if isinstance(created_at, datetime):
+                    self._pending_entry_created_at[oid] = created_at
 
     def has_pending_entries(self) -> bool:
         return bool(self._pending_entry_order_link_ids)
@@ -228,6 +234,7 @@ class ExecutionEngine:
 
         Fail-safe: if Bybit API is unavailable, all pending entries are preserved.
         Age threshold: entries younger than _STALE_PENDING_THRESHOLD_S are always kept.
+        Uses durable_order_state as authoritative source; falls back to order_events.
         """
         if self._trade_journal is None or not self._pending_entry_order_link_ids:
             return
@@ -238,15 +245,24 @@ class ExecutionEngine:
             pending_ids=sorted(self._pending_entry_order_link_ids),
         )
 
+        # Build merged record dict — durable_order_state takes priority over order_events
+        merged: dict[str, dict] = {}
         try:
-            pending_records = await self._trade_journal.get_pending_order_events()
+            for rec in await self._trade_journal.get_pending_order_events():
+                oid = str(rec.get("order_link_id", ""))
+                if oid:
+                    merged[oid] = dict(rec)
         except Exception as exc:
-            log.warning(
-                "execution.pending_reconcile_failed",
-                reason="db_read_error",
-                error=str(exc),
-            )
-            return
+            log.warning("execution.pending_reconcile_failed", reason="order_events_read_error", error=str(exc))
+
+        try:
+            for rec in await self._trade_journal.get_pending_durable_orders():
+                oid = str(rec.get("order_link_id", ""))
+                if oid:
+                    merged[oid] = dict(rec)  # durable overrides
+        except Exception as exc:
+            log.warning("execution.pending_reconcile_failed", reason="durable_read_error", error=str(exc))
+            return  # fail-safe: keep all if we can't read durable state
 
         # Fail-safe: keep all pending if exchange API is unavailable
         try:
@@ -263,14 +279,11 @@ class ExecutionEngine:
         now = datetime.now(tz=UTC)
         threshold_s = _STALE_PENDING_THRESHOLD_S
 
-        for record in pending_records:
-            order_link_id = str(record.get("order_link_id", ""))
-            if not order_link_id or order_link_id not in self._pending_entry_order_link_ids:
-                continue
-
+        for order_link_id in list(self._pending_entry_order_link_ids):
+            record = merged.get(order_link_id, {})
             symbol = str(record.get("symbol", ""))
             created_at = record.get("created_at")
-            age_s = (now - created_at).total_seconds() if created_at else 0.0
+            age_s = (now - created_at).total_seconds() if isinstance(created_at, datetime) else 0.0
 
             if order_link_id in exchange_link_ids:
                 log.info(
@@ -304,6 +317,7 @@ class ExecutionEngine:
             stale_reason = f"no_exchange_order_no_position_age_{int(age_s)}s"
             try:
                 await self._trade_journal.mark_order_event_stale(order_link_id, stale_reason)
+                await self._trade_journal.mark_durable_order_stale(order_link_id, stale_reason)
             except Exception as exc:
                 log.warning(
                     "execution.pending_reconcile_failed",
@@ -315,12 +329,16 @@ class ExecutionEngine:
 
             self._pending_entry_order_link_ids.discard(order_link_id)
             self._pending_entry_symbols.pop(order_link_id, None)
+            self._pending_entry_created_at.pop(order_link_id, None)
             log.info(
                 "execution.pending_cleared_stale",
                 order_link_id=order_link_id,
                 symbol=symbol,
                 age_s=int(age_s),
             )
+
+        # Sync count with actual set size after cleanup
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
         log.info(
             "execution.pending_reconcile_complete",
@@ -977,9 +995,13 @@ class ExecutionEngine:
         ids = sorted(self._pending_entry_order_link_ids)
         symbols = [self._pending_entry_symbols.get(oid, "?") for oid in ids]
         oldest_age_s: float | None = None
-        if ids and self._trade_journal is not None:
-            # Best-effort: use started_at as a lower bound for age
-            oldest_age_s = (now - self._started_at).total_seconds()
+        if ids and self._pending_entry_created_at:
+            oldest_ts = min(
+                (self._pending_entry_created_at[oid] for oid in ids if oid in self._pending_entry_created_at),
+                default=None,
+            )
+            if oldest_ts is not None:
+                oldest_age_s = (now - oldest_ts).total_seconds()
         return {
             "pending_entry_count": len(ids),
             "pending_entry_ids": ids[:10],

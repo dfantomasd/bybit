@@ -1305,13 +1305,17 @@ class TradingApplication:
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
-        # P0.2: Restore pending entry IDs from durable storage before any new entries
+        # P0.2: Restore pending entries from durable storage before any new entries
         if self._trade_journal is not None:
             try:
-                pending_ids = await self._trade_journal.load_pending_from_db()
-                if pending_ids:
-                    self._execution_engine.restore_pending_entries(pending_ids)
-                    log.info("execution_engine.pending_restored", count=len(pending_ids))
+                pending_records = await self._trade_journal.get_pending_durable_orders()
+                if pending_records:
+                    self._execution_engine.restore_pending_entries_with_symbols(pending_records)
+                    log.info(
+                        "execution_engine.pending_restored",
+                        count=len(pending_records),
+                        ids=[r.get("order_link_id") for r in pending_records],
+                    )
             except Exception as exc:
                 log.warning("execution_engine.pending_restore_failed", error=str(exc))
 
@@ -2331,6 +2335,17 @@ class TradingApplication:
                             else "none"
                         ),
                         paused=self._trading_paused,
+                        execution_candidates=(
+                            len(self._screener.execution_candidates) if self._screener is not None else None
+                        ),
+                        last_inference_age_s=(
+                            round((now - self._model_gate_quality_checked_at).total_seconds(), 1)
+                            if self._model_gate_quality_checked_at is not None
+                            else None
+                        ),
+                        model_gate_quality=(
+                            self._model_gate_quality.get("quality") if self._model_gate_quality else None
+                        ),
                     )
                 except Exception as _hb_exc:
                     log.debug("supervisor.heartbeat_failed", error=str(_hb_exc))
