@@ -4,7 +4,12 @@ from __future__ import annotations
 
 import pytest
 
-from trader.training.labels import CostModelBps, build_directional_outcome, directional_excursions_bps, directional_return_bps
+from trader.training.labels import (
+    CostModelBps,
+    build_directional_outcome,
+    directional_excursions_bps,
+    directional_return_bps,
+)
 
 
 def test_buy_rise_is_profitable() -> None:
