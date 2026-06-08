@@ -307,12 +307,14 @@ def test_audit_script_dry_run_flag() -> None:
     """dry-run must default to False for --apply and True for default invocation."""
     import subprocess
     import sys
+    from pathlib import Path
 
+    repo_root = Path(__file__).parent.parent.parent
     result = subprocess.run(
         [sys.executable, "scripts/audit_repair_training_data.py", "--help"],
         capture_output=True,
         text=True,
-        cwd="/home/user/bybit",
+        cwd=str(repo_root),
     )
     assert "apply" in result.stdout.lower() or result.returncode == 0
 
@@ -324,7 +326,10 @@ def test_audit_script_dry_run_flag() -> None:
 
 def test_audit_script_contains_no_delete_statements() -> None:
     """The audit script must not contain any DELETE SQL statements."""
-    with open("/home/user/bybit/scripts/audit_repair_training_data.py") as f:
+    from pathlib import Path
+
+    script = Path(__file__).parent.parent.parent / "scripts" / "audit_repair_training_data.py"
+    with open(script) as f:
         source = f.read().upper()
     assert "DELETE FROM" not in source, "Audit script must not delete any rows"
     assert "DROP TABLE" not in source, "Audit script must not drop tables"
