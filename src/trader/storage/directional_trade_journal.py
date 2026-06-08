@@ -291,11 +291,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
         result["active_model_version"] = dict(rows[0]) if rows else {}
 
-        # Fail closed until app runtime explicitly separates Challenger shadow
-        # scoring from Champion-only Canary decisions. Old long-only lift must
-        # never enable live filtering.
-        result["shadow_gate_15m"] = {}
-        result["paper_pnl_15m"] = {}
+        # Preserve read-only UI diagnostics during recalibration. The legacy
+        # application loop must not use these values for live filtering until it
+        # is explicitly split into Challenger shadow scoring and Champion-only
+        # Canary decisions; ``runtime_compat`` enforces that fail-closed guard.
+        result["model_gate_canary_runtime_allowed"] = False
+        result["model_gate_canary_runtime_reason"] = "directional_runtime_split_pending"
         return result
 
 
