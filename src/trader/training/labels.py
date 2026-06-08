@@ -7,8 +7,8 @@ training, diagnostics, and promotion checks cannot drift apart.
 
 from __future__ import annotations
 
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Iterable
 
 LABEL_SCHEMA_VERSION = "directional_net_v1"
 
