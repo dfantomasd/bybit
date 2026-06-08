@@ -366,15 +366,11 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
                 InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
             ],
-            [
-                InlineKeyboardButton("🔦 Shadow ON", callback_data="mode:shadow"),
-                InlineKeyboardButton("🚫 LIVE заблокирован", callback_data="mode:active"),
-            ],
+            [InlineKeyboardButton("🚫 LIVE заблокирован (только env vars)", callback_data="mode:active")],
             [
                 InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
                 InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
             ],
-            [InlineKeyboardButton("🧠🔁 Обучить ВСЕ примеры (5m/15m/30m)", callback_data="train:all")],
             [InlineKeyboardButton("🏆 Промоутировать кандидата → CHAMPION", callback_data="control:promote")],
             [
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
@@ -927,12 +923,21 @@ class TelegramMonitorBot:
             "Нажмите 'Обучить 1000' или выполните python -m trader.training.train --min-samples 1000.",
             "10-20 минут после накопления 1000 примеров",
         )
-        require(
-            "SHADOW включен",
-            bool(is_shadow),
-            "ордера пока не отправляются" if is_shadow else "бот уже не в тени",
-            "Перед проверкой держите SHADOW включенным; CANARY включается только env vars на Render.",
-        )
+        in_canary_live = self._config.trading_mode == "CANARY_LIVE"
+        if in_canary_live:
+            require(
+                "Режим CANARY_LIVE активен",
+                True,
+                "бот торгует реальными деньгами через модель-фильтр",
+                "",
+            )
+        else:
+            require(
+                "SHADOW включен",
+                bool(is_shadow),
+                "ордера пока не отправляются" if is_shadow else "бот уже не в тени",
+                "Перед проверкой держите SHADOW включенным; CANARY включается только env vars на Render.",
+            )
         require(
             "Пауза снята",
             not bool(is_paused),
@@ -1015,11 +1020,20 @@ class TelegramMonitorBot:
         failed = [item for item in checks if not item[1]]
         passed_count = len(checks) - len(failed)
         if failed:
-            status = f"❌ НЕ ГОТОВО — {passed_count} из {len(checks)} условий выполнено"
+            if in_canary_live:
+                status = f"⚠️ CANARY_LIVE активен, но {len(failed)} условий нарушено"
+            else:
+                status = f"❌ НЕ ГОТОВО — {passed_count} из {len(checks)} условий выполнено"
         elif warnings:
-            status = f"⚠️ ПОЧТИ — мешают только предупреждения: {len(warnings)}"
+            if in_canary_live:
+                status = f"✅ CANARY_LIVE работает — {len(warnings)} предупреждений (некритично)"
+            else:
+                status = f"⚠️ ПОЧТИ — мешают только предупреждения: {len(warnings)}"
         else:
-            status = "✅ ГОТОВО — можно включать CANARY_LIVE"
+            if in_canary_live:
+                status = "✅ CANARY_LIVE работает штатно"
+            else:
+                status = "✅ ГОТОВО — можно включать CANARY_LIVE"
 
         for _label, _ok, _detail, _fix, eta in failed:
             if eta:

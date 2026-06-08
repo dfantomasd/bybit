@@ -378,6 +378,9 @@ class Settings(BaseSettings):
                 raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set.")
             if not self.LIVE_ARMED:
                 raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set.")
+            # SHADOW_MODE defaults to True but must be False in CANARY_LIVE so orders are
+            # actually submitted. Auto-clear it here so operators don't need a separate env var.
+            self.SHADOW_MODE = False
 
 
 # ---------------------------------------------------------------------------
