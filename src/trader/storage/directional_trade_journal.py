@@ -144,6 +144,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
               AND pe.created_at < now() - ($1 * interval '1 minute')
               AND pe.feature_snapshot_id IS NOT NULL
               AND pe.strategy_signal IN ('Buy', 'Sell')
+              AND fs.training_eligible = true
             ORDER BY pe.created_at ASC
             LIMIT $2
             """,

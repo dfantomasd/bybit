@@ -45,11 +45,13 @@ async def _shadow_gate_stats(
             avg(po.label::double precision) AS precision
         FROM prediction_events pe
         JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+        LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
         WHERE pe.model_version = $1
           AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
           AND po.horizon_minutes = $2
           AND po.label IS NOT NULL
           AND po.label_schema_version = $3
+          AND COALESCE(fs.training_eligible, true) = true
         GROUP BY pe.decision
         """,
         version,

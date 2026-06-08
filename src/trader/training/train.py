@@ -197,6 +197,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND po.label_schema_version = $2
                   AND po.label_threshold_bps = $3
                   AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                 GROUP BY fs.feature_schema_hash
             ),
@@ -225,6 +226,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND po.label_schema_version = $2
                   AND po.label_threshold_bps = $3
                   AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
                 ORDER BY fs.snapshot_id, fs.created_at DESC
