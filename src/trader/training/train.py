@@ -95,7 +95,17 @@ def _evaluate_model(model: Any, x_val: np.ndarray, y_val: np.ndarray, returns_bp
 
     quality = "INSUFFICIENT_VALIDATION"
     if len(x_val) >= 100:
-        quality = "GOOD" if precision > positive_rate and lift_bps is not None and lift_bps > 0 else "WEAK"
+        # Primary: model precision beats base positive rate at default threshold
+        good_default = precision > positive_rate and lift_bps is not None and lift_bps > 0
+        # Secondary: best threshold avg return beats all-signals avg (handles high positive_rate markets)
+        good_best_threshold = (
+            best_threshold_avg_bps is not None
+            and avg_all is not None
+            and best_threshold_avg_bps > avg_all
+            and best_threshold_pass_rate is not None
+            and best_threshold_pass_rate >= 0.05
+        )
+        quality = "GOOD" if good_default or good_best_threshold else "WEAK"
 
     return {
         "accuracy": accuracy,
