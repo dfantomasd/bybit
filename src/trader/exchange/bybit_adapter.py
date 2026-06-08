@@ -410,7 +410,9 @@ class BybitAdapter:
             OrderStatus.EXPIRED,
         }
 
-        order_link_id = getattr(event, "order_link_id", None) or getattr(event, "order_id", "")
+        # Do NOT fall back to exchange orderId — they are different ID spaces.
+        # Caller is responsible for reverse lookup before calling this method.
+        order_link_id = getattr(event, "order_link_id", None) or ""
         order_status: OrderStatus | None = getattr(event, "status", None) or getattr(event, "order_status", None)
 
         if not order_link_id or order_status is None:
