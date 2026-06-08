@@ -168,11 +168,13 @@ class TelegramMonitorBot:
         health_provider: HealthProvider,
         adapter_factory: AdapterFactory,
         controller: TradingController | None = None,
+        net_results_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None,
     ) -> None:
         self._config = config
         self._health_provider = health_provider
         self._adapter_factory = adapter_factory
         self._controller = controller
+        self._net_results_provider = net_results_provider
         self._app: Application[Any, Any, Any, Any, Any, Any] | None = None
 
         # Pre-populate subscribed set so allowed chats receive push notifications
@@ -208,6 +210,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("symbols", self._cmd_symbols))
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         app.add_handler(CommandHandler("net", self._cmd_net_results))
+        app.add_handler(CommandHandler("costs", self._cmd_costs))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -350,6 +353,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
+            [InlineKeyboardButton("💸 Издержки", callback_data="view:costs")],
             [
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                 InlineKeyboardButton("🖥 Нагрузка", callback_data="view:diagnostics"),
@@ -707,36 +711,105 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
-        # Delegate to health provider for stats
+        net_stats: dict[str, Any] = {}
         try:
-            stats = await self._health_provider() if callable(self._health_provider) else {}
-            net_stats = stats.get("net_results", {}) if stats else {}
+            if self._net_results_provider is not None:
+                net_stats = await self._net_results_provider()
+            else:
+                # Fallback: try health_provider for backwards compat
+                stats = await self._health_provider() if callable(self._health_provider) else None
+                if stats is not None and isinstance(stats, dict):
+                    net_stats = stats.get("net_results", {}) or {}
         except Exception as exc:
             log.warning("telegram.net_results_failed", error=str(exc))
             net_stats = {}
 
-        gross = net_stats.get("gross_pnl_usd", 0.0)
-        fees = net_stats.get("total_fees_usd", 0.0)
-        funding = net_stats.get("total_funding_usd", 0.0)
-        slippage_est = net_stats.get("estimated_slippage_usd", 0.0)
-        net = net_stats.get("net_pnl_usd", gross - fees - funding)
-        maker_pct = net_stats.get("maker_fill_pct", 0.0)
-        taker_pct = net_stats.get("taker_fill_pct", 100.0)
+        gross = float(net_stats.get("gross_closed_pnl_usd") or net_stats.get("gross_pnl_usd") or 0.0)
+        fees = float(net_stats.get("total_fees_usd") or 0.0)
+        funding = float(net_stats.get("total_funding_usd") or 0.0)
+        slippage_est = float(net_stats.get("estimated_slippage_usd") or 0.0)
+        net = float(net_stats.get("net_pnl_usd") or (gross + fees + funding))
+        maker_pct = float(net_stats.get("maker_fill_pct") or 0.0)
+        taker_pct = float(net_stats.get("taker_fill_pct") or 100.0)
         fee_drag = abs(fees) + abs(funding) + abs(slippage_est)
+        trade_count = int(net_stats.get("closed_trade_count") or 0)
+        tx_count = int(net_stats.get("transaction_event_count") or 0)
+        latest_tx = net_stats.get("latest_transaction_at")
+        latest_tx_str = self._fmt_timestamp(latest_tx) if latest_tx else "нет"
 
         text = (
-            "📈 <b>Чистый результат за сегодня</b>\n\n"
-            f"Валовый PnL:      <code>{gross:+.4f} USDT</code>\n"
-            f"Комиссии:         <code>{fees:+.4f} USDT</code>\n"
-            f"Фандинг:          <code>{funding:+.4f} USDT</code>\n"
+            "📈 <b>Чистый результат за сегодня UTC</b>\n\n"
+            f"Закрытых сделок:   <code>{trade_count}</code>\n"
+            f"Валовый PnL:       <code>{gross:+.4f} USDT</code>\n"
+            f"Комиссии:          <code>{fees:+.4f} USDT</code>\n"
+            f"Фандинг:           <code>{funding:+.4f} USDT</code>\n"
             f"Оценка проскальз.: <code>{slippage_est:+.4f} USDT</code>\n"
-            f"─────────────────────────────\n"
-            f"Чистый PnL:       <code>{net:+.4f} USDT</code>\n"
-            f"Съели издержки:   <code>{fee_drag:.4f} USDT</code>\n\n"
+            "────────────────────────────\n"
+            f"Чистый PnL:        <code>{net:+.4f} USDT</code>\n"
+            f"Съели издержки:    <code>{fee_drag:.4f} USDT</code>\n\n"
+            f"Transaction events: <code>{tx_count}</code>\n"
+            f"Последняя транзакция: <code>{latest_tx_str}</code>\n\n"
             f"Maker исполнения: <code>{maker_pct:.1f}%</code>\n"
             f"Taker исполнения: <code>{taker_pct:.1f}%</code>"
         )
+
+        if trade_count > 0 and tx_count == 0:
+            text += (
+                "\n\n⚠️ <b>Комиссии не загружены из Bybit.</b>\n"
+                "Чистый PnL может быть завышен.\n"
+                "Проверьте <code>transaction_log.sync_failed</code> в Render."
+            )
+
         await self._reply(update, text)
+
+    async def _cmd_costs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show execution cost breakdown for today."""
+        del context
+        if not await self._authorised(update):
+            return
+        net_stats: dict[str, Any] = {}
+        try:
+            if self._net_results_provider is not None:
+                net_stats = await self._net_results_provider()
+        except Exception as exc:
+            log.warning("telegram.costs_failed", error=str(exc))
+
+        trade_count = int(net_stats.get("closed_trade_count") or 0)
+        gross = float(net_stats.get("gross_closed_pnl_usd") or 0.0)
+        fees = float(net_stats.get("total_fees_usd") or 0.0)
+        funding = float(net_stats.get("total_funding_usd") or 0.0)
+        net = float(net_stats.get("net_pnl_usd") or 0.0)
+        maker_pct = float(net_stats.get("maker_fill_pct") or 0.0)
+        taker_pct = float(net_stats.get("taker_fill_pct") or 100.0)
+
+        diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.diagnostics_provider is not None:
+            try:
+                diag = self._controller.diagnostics_provider()
+            except Exception as _diag_exc:
+                log.debug("telegram.costs_diag_failed", error=str(_diag_exc))
+
+        net_edge_rejected = diag.get("hour_net_edge_rejected", 0)
+        no_tp_rejected = diag.get("hour_no_take_profit_rejected", 0)
+        fee_unavail_rejected = diag.get("hour_fee_rate_unavailable_rejected", 0)
+
+        text = (
+            "💸 <b>Экономика исполнения за сегодня UTC</b>\n\n"
+            f"Закрытых сделок:   <code>{trade_count}</code>\n"
+            f"Валовый PnL:       <code>{gross:+.4f} USDT</code>\n"
+            f"Комиссии (факт):   <code>{fees:+.4f} USDT</code>\n"
+            f"Фандинг:           <code>{funding:+.4f} USDT</code>\n"
+            f"Чистый PnL:        <code>{net:+.4f} USDT</code>\n\n"
+            f"Maker / Taker:     <code>{maker_pct:.1f}% / {taker_pct:.1f}%</code>\n\n"
+            f"Отклонено (edge мал):     <code>{net_edge_rejected}</code>\n"
+            f"Отклонено (нет TP):       <code>{no_tp_rejected}</code>\n"
+            f"Отклонено (нет fee rate): <code>{fee_unavail_rejected}</code>"
+        )
+
+        if taker_pct > 80:
+            text += "\n\n⚠️ <b>Большинство исполнений taker.</b>\nДля скальпинга комиссии критичны."
+
+        await self._reply(update, text, reply_markup=self._main_menu())
 
     async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1762,6 +1835,7 @@ class TelegramMonitorBot:
             "symbols": self._cmd_symbols,
             "pnl": self._cmd_pnl,
             "diagnostics": self._cmd_diagnostics,
+            "costs": self._cmd_costs,
         }
         if action == "db_model":
             await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]

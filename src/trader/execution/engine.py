@@ -82,6 +82,7 @@ class ExecutionEngine:
         expected_slippage_pct: float = 0.03,
         funding_buffer_pct: float = 0.01,
         min_net_edge_pct: float = 0.15,
+        net_edge_safety_margin_pct: float = 0.05,
         entry_order_mode: str = "MARKET",
     ) -> None:
         self._adapter = adapter
@@ -99,6 +100,7 @@ class ExecutionEngine:
         self._expected_slippage_pct = expected_slippage_pct
         self._funding_buffer_pct = funding_buffer_pct
         self._min_net_edge_pct = min_net_edge_pct
+        self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
         self._entry_order_mode = entry_order_mode
 
         # Burst / rate limiting
@@ -120,6 +122,9 @@ class ExecutionEngine:
         self._diag_skip_pending: int = 0
         self._diag_order_placed: int = 0
         self._diag_order_failed: int = 0
+        self._diag_net_edge_rejected: int = 0
+        self._diag_no_tp_rejected: int = 0
+        self._diag_fee_unavailable_rejected: int = 0
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -640,51 +645,86 @@ class ExecutionEngine:
         if not approved:
             return decision
 
+        # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
+        if not self._shadow_mode:
+            # Fail-closed: TP required for LIVE entries
+            if proposal.take_profit is None:
+                self._diag_no_tp_rejected += 1
+                log.warning(
+                    "execution.rejected_no_take_profit",
+                    symbol=symbol,
+                    side=proposal.side.value,
+                )
+                return None
+
+            # Fetch fee rates; fall back to conservative default if unavailable
+            taker_default = Decimal("0.00055")  # 0.055% Bybit taker standard
+            if self._fee_provider is not None:
+                try:
+                    fee_rates_obj = await self._fee_provider.get(symbol)
+                    if fee_rates_obj is not None:
+                        taker_default = Decimal(str(fee_rates_obj.taker_fee_rate))
+                    else:
+                        self._diag_fee_unavailable_rejected += 1
+                        log.warning("execution.fee_rate_unavailable_using_default", symbol=symbol)
+                except Exception as _fee_exc:
+                    self._diag_fee_unavailable_rejected += 1
+                    log.warning("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
+            else:
+                log.warning("execution.fee_provider_none_using_default", symbol=symbol)
+            taker = taker_default
+
+            entry_price_d = proposal.entry_price
+            tp_d = proposal.take_profit
+            if proposal.side == OrderSide.BUY:
+                gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
+            else:
+                gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
+            entry_fee_pct = taker * Decimal("100")
+            exit_fee_pct = taker * Decimal("100")
+            round_trip_fee_pct = entry_fee_pct + exit_fee_pct
+            spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
+            slippage_pct = Decimal(str(self._expected_slippage_pct))
+            funding_pct = Decimal(str(self._funding_buffer_pct))
+            safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
+            net_edge_pct = (
+                gross_edge_pct - round_trip_fee_pct - spread_pct - slippage_pct - funding_pct - safety_margin_pct
+            )
+            min_edge = Decimal(str(self._min_net_edge_pct))
+
+            log.info(
+                "execution.net_edge_check",
+                symbol=symbol,
+                side=proposal.side.value,
+                entry_price=float(entry_price_d),
+                take_profit=float(tp_d),
+                gross_edge_pct=float(round(gross_edge_pct, 4)),
+                entry_fee_pct=float(round(entry_fee_pct, 4)),
+                exit_fee_pct=float(round(exit_fee_pct, 4)),
+                round_trip_fee_pct=float(round(round_trip_fee_pct, 4)),
+                spread_bps=float(self._max_spread_bps),
+                spread_cost_pct=float(round(spread_pct, 4)),
+                slippage_cost_pct=float(round(slippage_pct, 4)),
+                funding_buffer_pct=float(round(funding_pct, 4)),
+                safety_margin_pct=float(round(safety_margin_pct, 4)),
+                net_edge_pct=float(round(net_edge_pct, 4)),
+                required_min_net_edge_pct=float(min_edge),
+                decision="allow" if net_edge_pct >= min_edge else "reject",
+            )
+
+            if net_edge_pct < min_edge:
+                self._diag_net_edge_rejected += 1
+                log.warning(
+                    "execution.net_edge_too_low",
+                    symbol=symbol,
+                    net_edge_pct=float(round(net_edge_pct, 4)),
+                    required_min_net_edge_pct=float(min_edge),
+                )
+                return None
+
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
-
-        # 5b. Fee-aware entry filter: reject if net edge after all costs is below threshold
-        if not self._shadow_mode and self._fee_provider is not None and proposal.take_profit is not None:
-            fee_rates = None
-            try:
-                fee_rates = await self._fee_provider.get(symbol)
-            except Exception as _fee_exc:
-                log.debug("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
-            if fee_rates is not None:
-                entry_price_d = proposal.entry_price
-                tp_d = proposal.take_profit
-                taker = Decimal(str(fee_rates.taker_fee_rate))
-                # gross edge as % of entry
-                if proposal.side == OrderSide.BUY:
-                    gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
-                else:
-                    gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
-                fee_pct = taker * Decimal("200")  # entry + exit
-                spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
-                slippage_pct = Decimal(str(self._expected_slippage_pct))
-                funding_pct = Decimal(str(self._funding_buffer_pct))
-                net_edge_pct = gross_edge_pct - fee_pct - spread_pct - slippage_pct - funding_pct
-                min_edge = Decimal(str(self._min_net_edge_pct))
-                log.info(
-                    "execution.net_edge_check",
-                    symbol=symbol,
-                    gross_edge_pct=float(round(gross_edge_pct, 4)),
-                    fee_pct=float(round(fee_pct, 4)),
-                    spread_pct=float(round(spread_pct, 4)),
-                    slippage_pct=float(round(slippage_pct, 4)),
-                    funding_pct=float(round(funding_pct, 4)),
-                    net_edge_pct=float(round(net_edge_pct, 4)),
-                    decision="allow" if net_edge_pct >= min_edge else "reject",
-                )
-                if net_edge_pct < min_edge:
-                    log.warning(
-                        "execution.net_edge_too_low",
-                        symbol=symbol,
-                        net_edge_pct=float(round(net_edge_pct, 4)),
-                        min_edge_pct=float(min_edge),
-                    )
-                    return None
 
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
@@ -987,6 +1027,9 @@ class ExecutionEngine:
             "order_placed": self._diag_order_placed,
             "order_failed": self._diag_order_failed,
             "pending_entry_count": len(self._pending_entry_order_link_ids),
+            "net_edge_rejected": self._diag_net_edge_rejected,
+            "no_tp_rejected": self._diag_no_tp_rejected,
+            "fee_unavailable_rejected": self._diag_fee_unavailable_rejected,
         }
 
     def pending_entry_diagnostics(self) -> dict[str, Any]:

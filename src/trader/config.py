@@ -89,8 +89,10 @@ class Settings(BaseSettings):
     DEFAULT_LINEAR_TAKER_FEE_RATE: float = 0.00055
     """Fallback fee rates when API is unavailable (SHADOW only)."""
 
-    MIN_EXPECTED_NET_EDGE_PCT: float = 0.15
+    MIN_EXPECTED_NET_EDGE_PCT: float = 0.25
     """Minimum expected net edge (after all costs) required to enter a trade."""
+    NET_EDGE_SAFETY_MARGIN_PCT: float = 0.05
+    """Extra safety margin subtracted from net edge before comparing to MIN_EXPECTED_NET_EDGE_PCT."""
     FUNDING_BUFFER_PCT: float = 0.01
     """Estimated funding cost buffer per position."""
 
