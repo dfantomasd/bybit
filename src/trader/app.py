@@ -817,7 +817,88 @@ class TradingApplication:
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
 
-    def _model_gate_threshold(self, regime_context: Any | None) -> float:
+    async def _run_model_progress_reporter(self) -> None:
+        """Send an hourly Telegram report on model training progress and promotion readiness."""
+        assert self._settings is not None
+        if self._telegram_bot is None:
+            return
+
+        report_interval = 3600  # 1 hour
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=report_interval)
+                break
+            except TimeoutError:
+                pass
+
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                continue
+
+            try:
+                diag = await self._trade_journal.get_db_diagnostics()
+                self._update_model_gate_quality_from_diag(diag)
+
+                gate = diag.get("shadow_gate_15m", {}) or {}
+                latest_model = diag.get("latest_model_version", {}) or {}
+                champion_wf_bps = await self._get_champion_walk_forward_bps()
+
+                version = str(latest_model.get("version", "—") or "—")
+                status = str(latest_model.get("status", "—") or "—")
+                training_samples = int(latest_model.get("training_samples", 0) or 0)
+                total_count = int(gate.get("total_count", 0) or 0)
+                lift_bps = gate.get("lift_vs_all_bps")
+                pass_precision = gate.get("pass_precision")
+                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+
+                min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
+                min_lift = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
+
+                # Build promotion checklist
+                def check(ok: bool, label: str) -> str:
+                    return f"{'✅' if ok else '❌'} {label}"
+
+                has_signals = total_count >= min_signals
+                has_lift = lift_bps is not None and float(lift_bps) >= min_lift
+                beats_champion = lift_bps is not None and float(lift_bps) > champion_wf_bps
+                is_challenger = status == "SHADOW_CHALLENGER"
+
+                lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "н/д"
+                precision_str = f"{float(pass_precision) * 100:.1f}%" if pass_precision is not None else "н/д"
+
+                lines = [
+                    "📊 <b>Прогресс модели</b>",
+                    f"Версия: <code>{version}</code> [{status}]",
+                    f"Обучено на: <code>{training_samples}</code> примерах | Доступно: <code>{labelled}</code>",
+                    "",
+                    "<b>Условия для авто-промоута:</b>",
+                    check(is_challenger, f"Статус SHADOW_CHALLENGER → {status}"),
+                    check(has_signals, f"Сигналов ≥ {min_signals} → сейчас {total_count}"),
+                    check(has_lift, f"Lift ≥ {min_lift:+.1f} bps → сейчас {lift_str}"),
+                    check(beats_champion, f"Лучше чемпиона ({champion_wf_bps:+.2f} bps) → {lift_str}"),
+                    "",
+                    f"Точность GATE_PASS: <code>{precision_str}</code>",
+                    f"Canary: <code>{'включён' if self._settings.MODEL_GATE_CANARY_ENABLED else 'выключен'}</code>",
+                ]
+
+                if all([is_challenger, has_signals, has_lift, beats_champion]):
+                    lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")
+                elif not is_challenger and status == "CHAMPION":
+                    lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
+                else:
+                    missing = []
+                    if not has_signals:
+                        missing.append(f"ещё {min_signals - total_count} сигналов")
+                    if not has_lift:
+                        missing.append("lift > 0")
+                    if not beats_champion and has_lift:
+                        missing.append(f"обогнать чемпиона на {champion_wf_bps - float(lift_bps or 0):+.2f} bps")
+                    lines.append(f"\n⏳ Не хватает: {', '.join(missing)}")
+
+                await self._telegram_bot.notify("\n".join(lines))
+
+            except Exception as exc:
+                log.debug("model_progress_reporter.failed", error=str(exc))
         """Return a conservative threshold adjusted by market regime."""
         assert self._settings is not None
         best_threshold = self._model_gate_quality.get("best_threshold")
@@ -2784,6 +2865,10 @@ class TradingApplication:
             # Auto-promotion: promotes challenger to champion when it consistently beats the champion
             auto_promoter_task = asyncio.create_task(self._run_auto_model_promoter(), name="auto-model-promoter")
             self._background_tasks.append(auto_promoter_task)
+
+            # Hourly model progress report via Telegram
+            model_reporter_task = asyncio.create_task(self._run_model_progress_reporter(), name="model-progress-reporter")
+            self._background_tasks.append(model_reporter_task)
 
             # Adaptive load governor: narrows feature universe under memory/lag pressure
             load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
