@@ -60,7 +60,7 @@ class ChallengerModel:
     """Online-updateable binary classifier for trade outcome prediction.
 
     Features: normalized float vector (RSI, EMA diff, volume ratio, etc.)
-    Labels: 1 if net_return_bps > threshold after horizon_minutes
+    Labels: 1 if direction-aware net_return_bps >= threshold after horizon_minutes
     """
 
     version: str = "v0.0"
@@ -92,6 +92,14 @@ class ChallengerModel:
         """Score a feature vector. Returns None if model not fitted."""
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
+        if self.feature_names and len(features) != len(self.feature_names):
+            log.warning(
+                "challenger.feature_count_mismatch",
+                expected=len(self.feature_names),
+                actual=len(features),
+                version=self.version,
+            )
+            return None
         try:
             x = np.array(features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
@@ -113,6 +121,14 @@ class ChallengerModel:
     def partial_fit(self, features: list[float], label: int) -> None:
         """Online update with a single labelled sample."""
         if not _SKLEARN_AVAILABLE or self._clf is None:
+            return
+        if self.feature_names and len(features) != len(self.feature_names):
+            log.warning(
+                "challenger.partial_fit_feature_count_mismatch",
+                expected=len(self.feature_names),
+                actual=len(features),
+                version=self.version,
+            )
             return
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
@@ -171,7 +187,11 @@ class ChallengerModel:
 
 
 class ModelRegistry:
-    """Manages champion/challenger lifecycle in memory + PostgreSQL."""
+    """Manage champion/challenger lifecycle in memory + PostgreSQL.
+
+    Shadow scoring may use the newest challenger to collect observational
+    statistics. Live gating must use only a promoted champion.
+    """
 
     def __init__(self, trade_journal: Any | None = None) -> None:
         self._journal = trade_journal
@@ -186,19 +206,29 @@ class ModelRegistry:
     def challenger(self) -> ChallengerModel | None:
         return self._challenger
 
-    def score(self, features: list[float]) -> ModelPrediction | None:
-        """Score with challenger if available (shadow eval), else champion."""
+    def score_shadow(self, features: list[float]) -> ModelPrediction | None:
+        """Score observationally with challenger first, falling back to champion."""
         model = self._challenger or self._champion
         if model is None:
             return None
         return model.predict(features)
+
+    def score_live(self, features: list[float]) -> ModelPrediction | None:
+        """Score an authoritative live gate with the promoted champion only."""
+        if self._champion is None:
+            return None
+        return self._champion.predict(features)
+
+    def score(self, features: list[float]) -> ModelPrediction | None:
+        """Backward-compatible alias for observational shadow scoring."""
+        return self.score_shadow(features)
 
     def partial_fit_challenger(self, features: list[float], label: int) -> None:
         if self._challenger is not None:
             self._challenger.partial_fit(features, label)
 
     async def load_active_model(self) -> ChallengerModel | None:
-        """Load champion and challenger; challenger is preferred for shadow scoring."""
+        """Load champion and challenger while keeping their responsibilities separate."""
         champion = await self.load_champion()
         await self.load_latest_challenger()
         return champion or self._challenger
@@ -231,7 +261,7 @@ class ModelRegistry:
             log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
-        """Load the latest CHAMPION model from PostgreSQL and set as active champion."""
+        """Load the latest CHAMPION model from PostgreSQL and set it as live-authoritative."""
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
@@ -245,10 +275,12 @@ class ModelRegistry:
                 """
             )
             if not rows:
+                self._champion = None
                 return None
             row = rows[0]
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = ModelStatus.CHAMPION
+            model.allow_live_decisions = True
             self._champion = model
             log.info("model_registry.champion_loaded", version=model.version, samples=model.training_samples)
             return model
@@ -257,7 +289,7 @@ class ModelRegistry:
             return None
 
     async def load_latest_challenger(self) -> ChallengerModel | None:
-        """Load the latest challenger from PostgreSQL for non-authoritative scoring."""
+        """Load the latest challenger for observational scoring only."""
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
@@ -271,10 +303,12 @@ class ModelRegistry:
                 """
             )
             if not rows:
+                self._challenger = None
                 return None
             row = rows[0]
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = str(row["status"]) if "status" in row else ModelStatus.SHADOW_CHALLENGER
+            model.allow_live_decisions = False
             self._challenger = model
             log.info("model_registry.challenger_loaded", version=model.version, samples=model.training_samples)
             return model
