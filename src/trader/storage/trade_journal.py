@@ -1100,33 +1100,35 @@ class TradeJournal:
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
-                paper_rows = await self._fetch(
+                paper_baseline_rows = await self._fetch(
                     """
-                    SELECT pe.model_version, pe.decision, po.net_return_bps, pe.created_at
+                    SELECT po.net_return_bps
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE po.horizon_minutes = 15
                       AND po.label IS NOT NULL
-                      AND (
-                        pe.model_version = 'RULE_BASELINE_V1'
-                        OR (pe.model_version = $1 AND pe.decision = 'GATE_PASS')
-                      )
+                      AND pe.model_version = 'RULE_BASELINE_V1'
+                    ORDER BY pe.created_at ASC
+                    LIMIT 1000
+                    """,
+                )
+                paper_gate_rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE po.horizon_minutes = 15
+                      AND po.label IS NOT NULL
+                      AND pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
                     ORDER BY pe.created_at ASC
                     LIMIT 1000
                     """,
                     latest_model_version,
                 )
 
-                def _paper_stats(kind: str) -> dict[str, Any]:
-                    returns: list[float] = []
-                    for row in paper_rows:
-                        if kind == "baseline" and row["model_version"] != "RULE_BASELINE_V1":
-                            continue
-                        if kind == "gate" and not (
-                            row["model_version"] == latest_model_version and row["decision"] == "GATE_PASS"
-                        ):
-                            continue
-                        returns.append(float(row["net_return_bps"] or 0.0))
+                def _paper_stats(rows: list[Any]) -> dict[str, Any]:
+                    returns = [float(row["net_return_bps"] or 0.0) for row in rows]
                     equity = 0.0
                     peak = 0.0
                     max_drawdown = 0.0
@@ -1143,8 +1145,8 @@ class TradeJournal:
 
                 result["paper_pnl_15m"] = {
                     "model_version": latest_model_version,
-                    "baseline": _paper_stats("baseline"),
-                    "model_gate": _paper_stats("gate"),
+                    "baseline": _paper_stats(paper_baseline_rows),
+                    "model_gate": _paper_stats(paper_gate_rows),
                 }
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
