@@ -1663,10 +1663,13 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
-                        # Release pending entry count on terminal — exactly once per order
+                        # Release pending entry slot on terminal — exactly once per order.
+                        # Pass the exact order_link_id so only the correct slot is released.
+                        # _pending_released is shared with ExecutionUpdateEvent to prevent
+                        # double-release when both events arrive for the same fill.
                         if is_terminal and order_link_id not in _pending_released:
                             if self._execution_engine is not None:
-                                self._execution_engine.mark_entry_resolved()
+                                self._execution_engine.mark_entry_resolved(order_link_id)
                             _pending_released.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
@@ -1718,9 +1721,12 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
-                        # P0.3: Release pending entry slot for this order_link_id only
+                        # P0.3: Release pending entry slot for this order_link_id only.
+                        # Guard against double-release if OrderUpdateEvent(FILLED) already ran.
                         if self._execution_engine is not None and event.order_link_id:
-                            self._execution_engine.mark_entry_resolved(event.order_link_id)
+                            if event.order_link_id not in _pending_released:
+                                self._execution_engine.mark_entry_resolved(event.order_link_id)
+                                _pending_released.add(event.order_link_id)
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()

@@ -182,54 +182,127 @@ class ExecutionEngine:
         return None
 
     def mark_entry_submitted(self, order_link_id: str = "", symbol: str = "") -> None:
-        """Register order_link_id as pending and bump rate-limit counters."""
+        """Register order_link_id as pending and bump rate-limit counters.
+
+        Idempotent: duplicate IDs are silently ignored without double-counting.
+        Empty ID in live mode is rejected with a warning.
+        """
         if order_link_id:
+            already_pending = order_link_id in self._pending_entry_order_link_ids
+            if already_pending:
+                log.warning(
+                    "execution.submit_duplicate_id",
+                    order_link_id=order_link_id,
+                    pending_count=len(self._pending_entry_order_link_ids),
+                )
+                # Do not increment — idempotent, count stays the same
+                return
             self._pending_entry_order_link_ids.add(order_link_id)
             if symbol:
                 self._pending_entry_symbols[order_link_id] = symbol
             self._pending_entry_created_at[order_link_id] = datetime.now(tz=UTC)
+        elif not self._shadow_mode:
+            log.warning(
+                "execution.submit_empty_id_live_mode",
+                pending_count=len(self._pending_entry_order_link_ids),
+            )
+            # Refuse to track an un-identified live order — would corrupt count
+            return
         if not self._shadow_mode:
-            self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def mark_entry_resolved(self, order_link_id: str = "") -> None:
-        """Remove order_link_id from pending set (idempotent).
+        """Remove order_link_id from pending set (idempotent, fail-closed).
 
-        Only removes the exact ID — never releases an unrelated slot.
+        Rules:
+        - Known ID → remove and sync count. Safe to call multiple times.
+        - Unknown ID → warn, do NOT change count (fail-closed).
+        - Empty ID, 0 pending → no-op.
+        - Empty ID, 1 pending → safe backwards-compat fallback, warns.
+        - Empty ID, ≥2 pending → ambiguous, log and stay fail-closed.
         """
         if order_link_id:
-            self._pending_entry_order_link_ids.discard(order_link_id)
-            self._pending_entry_symbols.pop(order_link_id, None)
-            self._pending_entry_created_at.pop(order_link_id, None)
-        self._pending_entry_count = max(0, self._pending_entry_count - 1)
+            was_pending = order_link_id in self._pending_entry_order_link_ids
+            if was_pending:
+                self._pending_entry_order_link_ids.discard(order_link_id)
+                self._pending_entry_symbols.pop(order_link_id, None)
+                self._pending_entry_created_at.pop(order_link_id, None)
+            else:
+                log.warning(
+                    "execution.resolve_unknown_id",
+                    order_link_id=order_link_id,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+                # Do not change count — the ID was never registered
+        else:
+            n = len(self._pending_entry_order_link_ids)
+            if n == 0:
+                log.debug("execution.resolve_empty_id_no_pending")
+            elif n == 1:
+                # Backwards-compat fallback: release the single known pending slot
+                lone_id = next(iter(self._pending_entry_order_link_ids))
+                log.warning(
+                    "execution.resolve_empty_id_fallback",
+                    lone_id=lone_id,
+                )
+                self._pending_entry_order_link_ids.discard(lone_id)
+                self._pending_entry_symbols.pop(lone_id, None)
+                self._pending_entry_created_at.pop(lone_id, None)
+            else:
+                # Multiple pending — ambiguous which slot to release; stay fail-closed
+                log.warning(
+                    "execution.resolve_empty_id_ambiguous",
+                    pending_count=n,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
         return symbol in self._pending_entry_symbols.values()
 
     def restore_pending_entries(self, order_link_ids: list[str]) -> None:
-        """Restore pending entry IDs from durable storage at startup."""
-        for oid in order_link_ids:
+        """Restore pending entry IDs from durable storage at startup.
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        """
+        valid_ids = [oid for oid in order_link_ids if oid]
+        unique_ids = sorted(set(valid_ids))
+        for oid in unique_ids:
             self._pending_entry_order_link_ids.add(oid)
-        if order_link_ids:
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+        if unique_ids:
             log.info(
                 "execution.pending_entries_restored",
-                count=len(order_link_ids),
-                ids=order_link_ids,
+                count=len(unique_ids),
+                ids=unique_ids,
+                total_pending=self._pending_entry_count,
             )
 
     def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
-        """Restore pending entries from detailed records (includes symbol mapping)."""
+        """Restore pending entries from detailed records (includes symbol mapping).
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        """
+        seen: set[str] = set()
         for rec in records:
-            oid = str(rec.get("order_link_id", ""))
+            oid = str(rec.get("order_link_id", "")).strip()
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
             symbol = str(rec.get("symbol", ""))
-            if oid:
-                self._pending_entry_order_link_ids.add(oid)
-                if symbol:
-                    self._pending_entry_symbols[oid] = symbol
-                created_at = rec.get("created_at")
-                if isinstance(created_at, datetime):
-                    self._pending_entry_created_at[oid] = created_at
+            self._pending_entry_order_link_ids.add(oid)
+            if symbol:
+                self._pending_entry_symbols[oid] = symbol
+            created_at = rec.get("created_at")
+            if isinstance(created_at, datetime):
+                self._pending_entry_created_at[oid] = created_at
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def has_pending_entries(self) -> bool:
         return bool(self._pending_entry_order_link_ids)
