@@ -851,6 +851,58 @@ class TradeJournal:
         )
         return [dict(r) for r in rows]
 
+    async def find_order_link_id_by_exchange_order_id(
+        self,
+        exchange_order_id: str,
+    ) -> str | None:
+        """Reverse lookup: find order_link_id by exchange_order_id.
+
+        Searches durable_order_state first (authoritative), then order_events as fallback.
+        Returns None if not found.
+        """
+        if not self.is_enabled or not exchange_order_id:
+            return None
+
+        try:
+            # Try durable_order_state first (authoritative for in-flight orders)
+            rows = await self._fetch(
+                """
+                SELECT order_link_id
+                FROM durable_order_state
+                WHERE exchange_order_id = $1
+                ORDER BY updated_at DESC
+                LIMIT 1
+                """,
+                exchange_order_id,
+            )
+            if rows:
+                return str(rows[0]["order_link_id"])
+
+            # Fallback to order_events
+            rows = await self._fetch(
+                """
+                SELECT order_link_id
+                FROM order_events
+                WHERE exchange_order_id = $1
+                ORDER BY created_at DESC
+                LIMIT 1
+                """,
+                exchange_order_id,
+            )
+            if rows:
+                return str(rows[0]["order_link_id"])
+
+            return None
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug(
+                "trade_journal.reverse_lookup_failed",
+                exchange_order_id=exchange_order_id,
+                error=str(exc),
+            )
+            return None
+
     async def upsert_market_candle(
         self,
         *,
@@ -1133,6 +1185,104 @@ class TradeJournal:
             exchange_order_id=exchange_order_id,
             last_error=error,
         )
+
+    async def get_shadow_gate_stats(
+        self,
+        model_version: str,
+        horizon_minutes: int,
+        label_schema_version: str,
+    ) -> dict[str, Any]:
+        """Return shadow gate statistics for a specific model version.
+
+        Filters by exact model_version, horizon_minutes, and label_schema_version.
+        Only includes resolved outcomes with GATE_PASS/GATE_BLOCK decisions.
+        """
+        if not self.is_enabled:
+            return {}
+
+        try:
+            # First verify the model exists and get its feature schema
+            model_rows = await self._fetch(
+                """
+                SELECT feature_schema_hash, metrics
+                FROM model_versions
+                WHERE version = $1
+                LIMIT 1
+                """,
+                model_version,
+            )
+            feature_schema_hash = ""
+            if model_rows:
+                feature_schema_hash = model_rows[0].get("feature_schema_hash", "") or ""
+
+            gate_rows = await self._fetch(
+                """
+                SELECT
+                    pe.decision,
+                    count(*) AS cnt,
+                    avg(po.net_return_bps) AS avg_net_return_bps,
+                    avg(po.label::double precision) AS precision
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                WHERE pe.model_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.label IS NOT NULL
+                  AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                  AND fs.feature_values IS NOT NULL
+                GROUP BY pe.decision
+                """,
+                model_version,
+                horizon_minutes,
+            )
+
+            gate: dict[str, Any] = {"model_version": model_version}
+            total_count = 0
+            weighted_return = 0.0
+            for row in gate_rows:
+                decision = str(row["decision"])
+                count = int(row["cnt"])
+                avg_return = float(row["avg_net_return_bps"] or 0.0)
+                precision = float(row["precision"] or 0.0)
+                total_count += count
+                weighted_return += avg_return * count
+                key = "pass" if decision == "GATE_PASS" else "block"
+                gate[f"{key}_count"] = count
+                gate[f"{key}_avg_net_return_bps"] = avg_return
+                gate[f"{key}_precision"] = precision
+
+            if total_count:
+                all_avg = weighted_return / total_count
+                pass_avg = gate.get("pass_avg_net_return_bps")
+                block_avg = gate.get("block_avg_net_return_bps")
+                gate["total_count"] = total_count
+                gate["all_avg_net_return_bps"] = all_avg
+                gate["lift_vs_all_bps"] = (float(pass_avg) - all_avg) if pass_avg is not None else None
+                gate["pass_vs_block_bps"] = (
+                    (float(pass_avg) - float(block_avg)) if pass_avg is not None and block_avg is not None else None
+                )
+
+            # Quality check from model metrics
+            quality = "UNKNOWN"
+            if model_rows:
+                metrics_raw = model_rows[0].get("metrics")
+                if isinstance(metrics_raw, str):
+                    import json
+                    metrics = json.loads(metrics_raw)
+                else:
+                    metrics = metrics_raw or {}
+                quality = metrics.get("quality", "UNKNOWN")
+
+            gate["quality"] = quality
+            gate["feature_schema_hash"] = feature_schema_hash
+
+            return gate
+
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug("trade_journal.shadow_gate_stats_failed", error=str(exc))
+            return {}
 
     async def get_db_diagnostics(self) -> dict[str, Any]:
         """Return read-only diagnostics for Telegram 🗄 screen."""

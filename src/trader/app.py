@@ -726,9 +726,10 @@ class TradingApplication:
 
         Conservative criteria (all must pass):
           1. Challenger status is SHADOW_CHALLENGER (not already champion).
-          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions.
+          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions FOR THIS SPECIFIC MODEL VERSION.
           3. Live lift_vs_all_bps >= MODEL_AUTO_PROMOTE_MIN_LIFT_BPS.
           4. Live lift_vs_all_bps > current champion's walk-forward expectancy (conservative).
+          5. Model quality is GOOD.
         """
         assert self._settings is not None
         if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
@@ -751,21 +752,29 @@ class TradingApplication:
 
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
-                gate = diag.get("shadow_gate_15m", {}) or {}
                 latest_model = diag.get("latest_model_version", {}) or {}
 
                 challenger_version = str(latest_model.get("version", "") or "")
                 challenger_status = str(latest_model.get("status", "") or "")
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
 
                 if challenger_status != "SHADOW_CHALLENGER" or not challenger_version:
                     continue
+
+                # Get gate stats specific to this challenger model version
+                gate = await self._trade_journal.get_shadow_gate_stats(
+                    model_version=challenger_version,
+                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
+                    label_schema_version="directional_net_v1",
+                )
+                total_count = int(gate.get("total_count", 0) or 0)
+                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
+                quality = str(gate.get("quality", "") or "").upper()
 
                 if total_count < min_signals:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="insufficient_signals",
+                        version=challenger_version,
                         total_count=total_count,
                         min_signals=min_signals,
                     )
@@ -775,8 +784,19 @@ class TradingApplication:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="insufficient_lift",
+                        version=challenger_version,
                         lift_bps=lift_bps,
                         min_lift_bps=min_lift_bps,
+                    )
+                    continue
+
+                # Quality must be GOOD
+                if quality != "GOOD":
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="quality_not_good",
+                        version=challenger_version,
+                        quality=quality,
                     )
                     continue
 
@@ -786,6 +806,7 @@ class TradingApplication:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="not_better_than_champion",
+                        version=challenger_version,
                         lift_bps=lift_bps,
                         champion_wf_bps=champion_wf_bps,
                     )
@@ -797,22 +818,12 @@ class TradingApplication:
                     total_count=total_count,
                     lift_bps=lift_bps,
                     champion_wf_bps=champion_wf_bps,
+                    quality=quality,
                 )
                 result = await self._start_model_promote(challenger_version)
 
-                # Auto-enable canary gate if model quality now allows it
-                canary_msg = ""
-                if self._settings is not None and not self._settings.MODEL_GATE_CANARY_ENABLED:
-                    self._update_model_gate_quality_from_diag(diag)
-                    quality_ok, _ = self._model_gate_quality_allows_canary()
-                    if quality_ok:
-                        self._settings.MODEL_GATE_CANARY_ENABLED = True
-                        log.info("model_auto_promote.canary_enabled", version=challenger_version)
-                        canary_msg = (
-                            "\n🚦 <b>Canary-фильтр включён</b> — модель начинает фильтровать слабые сигналы.\n"
-                            "Чтобы сохранить после перезапуска: задайте "
-                            "<code>MODEL_GATE_CANARY_ENABLED=true</code> в Render env vars."
-                        )
+                # Promote and Canary are separate manual steps — no auto-enable Canary
+                # MODEL_GATE_CANARY_ENABLED remains false by default
 
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
@@ -820,7 +831,8 @@ class TradingApplication:
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{result}{canary_msg}"
+                        f"Качество: <code>{quality}</code>\n"
+                        f"{result}"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
@@ -1084,8 +1096,12 @@ class TradingApplication:
             sval = str(value).strip().lower()
             if sval not in {"on", "off", "true", "false", "1", "0"}:
                 raise ValueError("model_gate must be on/off")
-            self._settings.MODEL_GATE_CANARY_ENABLED = sval in {"on", "true", "1"}
-            return f"Model gate canary set to {'ON' if self._settings.MODEL_GATE_CANARY_ENABLED else 'OFF'}"
+            if sval in {"on", "true", "1"}:
+                raise ValueError(
+                    "Canary model gate can only be enabled through environment configuration after manual readiness review."
+                )
+            self._settings.MODEL_GATE_CANARY_ENABLED = False
+            return "Model gate canary remains OFF (runtime enable blocked — use env vars)"
         if key == "model_gate_threshold":
             fvalue = float(value)
             if not 0.50 <= fvalue <= 0.80:
@@ -1640,11 +1656,23 @@ class TradingApplication:
                         )
                     elif isinstance(event, OrderUpdateEvent):
                         # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
-                        order_link_id = event.order_link_id or event.order_id
+                        # P0: Never use exchange orderId directly as pending-ID.
+                        # Use order_link_id if present, otherwise reverse-lookup via exchange_order_id.
+                        order_link_id = event.order_link_id
+                        exchange_order_id = event.order_id
+                        if order_link_id is None and exchange_order_id:
+                            if self._trade_journal is not None:
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(exchange_order_id)
+                            # If lookup fails, we still process the event but can't tie it to a pending slot
+                        if order_link_id is None:
+                            # Generate a fallback ID for logging only — never used for pending slot
+                            order_link_id = f"unknown:{exchange_order_id or 'no_exchange_id'}"
+
                         order_status = event.status  # OrderUpdateEvent.status is the correct field
                         log.info(
                             "private_ws.order_update",
                             order_link_id=order_link_id,
+                            exchange_order_id=exchange_order_id,
                             symbol=event.symbol,
                             status=order_status.value if order_status else "unknown",
                             side=event.side.value if event.side else "unknown",
@@ -1662,7 +1690,7 @@ class TradingApplication:
                                 try:
                                     await self._trade_journal.record_order_update_event(
                                         order_link_id=order_link_id,
-                                        exchange_order_id=event.order_id,
+                                        exchange_order_id=exchange_order_id,
                                         symbol=event.symbol,
                                         side=event.side.value if event.side else "unknown",
                                         qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
@@ -1671,12 +1699,14 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
+<<<<<<< HEAD
                         # Release pending entry slot on terminal — exactly once per order.
                         # Pass the exact order_link_id so only the correct slot is released.
                         # _pending_released is shared with ExecutionUpdateEvent to prevent
                         # double-release when both events arrive for the same fill.
-                        if is_terminal and order_link_id not in _pending_released:
-                            if self._execution_engine is not None:
+                        # Skip "unknown:" prefix IDs — they are fallback logging IDs, not real pending slots.
+                        if is_terminal and order_link_id and order_link_id not in _pending_released:
+                            if self._execution_engine is not None and not order_link_id.startswith("unknown:"):
                                 self._execution_engine.mark_entry_resolved(order_link_id)
                             _pending_released.add(order_link_id)
                         # Trigger position sync on fill
@@ -1689,6 +1719,13 @@ class TradingApplication:
                         if event.exec_id in seen_exec_ids:
                             continue
                         seen_exec_ids.add(event.exec_id)
+                        # P0: Reverse lookup order_link_id if not present
+                        order_link_id = event.order_link_id
+                        exchange_order_id = event.order_id
+                        if order_link_id is None and exchange_order_id:
+                            if self._trade_journal is not None:
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(exchange_order_id)
+
                         log.info(
                             "private_ws.execution_fill",
                             exec_id=event.exec_id,
@@ -1696,14 +1733,16 @@ class TradingApplication:
                             exec_price=str(event.exec_price),
                             exec_qty=str(event.exec_qty),
                             side=event.side.value,
+                            order_link_id=order_link_id,
+                            exchange_order_id=exchange_order_id,
                         )
                         if self._trade_journal is not None:
                             try:
                                 # P0.5: persist to execution_events (nullable proposal/decision)
                                 await self._trade_journal.record_execution_event(
                                     exec_id=event.exec_id,
-                                    order_link_id=event.order_link_id or None,
-                                    exchange_order_id=event.order_id,
+                                    order_link_id=order_link_id if order_link_id and not order_link_id.startswith("unknown:") else None,
+                                    exchange_order_id=exchange_order_id,
                                     symbol=event.symbol,
                                     side=event.side.value,
                                     exec_price=event.exec_price,
@@ -1714,14 +1753,14 @@ class TradingApplication:
                                     closed_size=event.closed_size if event.closed_size else None,
                                 )
                                 await self._trade_journal.record_order_event(
-                                    order_link_id=event.order_link_id or event.exec_id,
+                                    order_link_id=order_link_id if order_link_id and not order_link_id.startswith("unknown:") else event.exec_id,
                                     proposal_id=None,
                                     decision_id=None,
                                     symbol=event.symbol,
                                     side=event.side.value,
                                     qty=event.exec_qty,
                                     status="FILLED",
-                                    exchange_order_id=event.order_id,
+                                    exchange_order_id=exchange_order_id,
                                 )
                             except Exception as _journal_exc:
                                 log.warning(
@@ -1730,11 +1769,12 @@ class TradingApplication:
                                     error=str(_journal_exc),
                                 )
                         # P0.3: Release pending entry slot for this order_link_id only.
-                        # Guard against double-release if OrderUpdateEvent(FILLED) already ran.
-                        if self._execution_engine is not None and event.order_link_id:
-                            if event.order_link_id not in _pending_released:
-                                self._execution_engine.mark_entry_resolved(event.order_link_id)
-                                _pending_released.add(event.order_link_id)
+                        # Use the resolved order_link_id (after reverse lookup), skip "unknown:" prefixes.
+                        # Guard against double-release via shared _pending_released set.
+                        if self._execution_engine is not None and order_link_id and not order_link_id.startswith("unknown:"):
+                            if order_link_id not in _pending_released:
+                                self._execution_engine.mark_entry_resolved(order_link_id)
+                                _pending_released.add(order_link_id)
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
