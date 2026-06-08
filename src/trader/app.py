@@ -2643,14 +2643,13 @@ class TradingApplication:
                     )
 
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+                # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    prediction = self._model_registry.score(vec.values)
-                    if prediction is not None:
+                    shadow_prediction = self._model_registry.score_shadow(vec.values)
+                    if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
-                        gate_decision = None
-                        gate_reason = "gate_disabled"
-                        canary_blocked = False
-                        canary_reason = "canary_disabled"
+                        shadow_gate_decision = None
+                        shadow_gate_reason = "shadow_gate_disabled"
                         regime_name = (
                             regime_ctx.regime.value
                             if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
@@ -2662,52 +2661,87 @@ class TradingApplication:
                             else "UNKNOWN"
                         )
                         if self._settings.MODEL_SHADOW_GATE_ENABLED:
-                            gate_decision = "GATE_PASS" if prediction.score >= threshold else "GATE_BLOCK"
-                            gate_reason = (
+                            shadow_gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                            shadow_gate_reason = (
                                 "score_meets_threshold"
-                                if gate_decision == "GATE_PASS"
+                                if shadow_gate_decision == "GATE_PASS"
                                 else "score_below_regime_threshold"
-                            )
-                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
-                                gate_decision,
-                                threshold,
-                                prediction.score,
                             )
                         if self._trade_journal is not None and self._trade_journal.is_enabled:
                             await self._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
+                                model_version=shadow_prediction.model_version,
+                                score=shadow_prediction.score,
                                 strategy_signal=proposal.side.value,
-                                decision=gate_decision,
+                                decision=shadow_gate_decision,
                                 feature_snapshot_id=snapshot_id,
                                 metadata={
-                                    "canary_blocked": canary_blocked,
-                                    "canary_reason": canary_reason,
-                                    "confidence": prediction.confidence,
-                                    "gate_reason": gate_reason,
+                                    "source": "shadow_challenger",
+                                    "confidence": shadow_prediction.confidence,
+                                    "gate_reason": shadow_gate_reason,
                                     "regime": regime_name,
-                                    "score": prediction.score,
+                                    "score": shadow_prediction.score,
                                     "threshold": threshold,
                                     "volatility": volatility_name,
                                 },
                             )
-                        if canary_blocked:
-                            self._record_diag("model_gate_canary_blocked")
-                            log.info(
-                                "model_gate.canary_blocked",
-                                symbol=proposal.symbol,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
-                                threshold=threshold,
-                                reason=canary_reason,
-                            )
-                            return
+                        # Challenger NEVER blocks a live trade — observational only
                     else:
                         log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
                 except Exception as _ml_exc:
                     log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
+
+                # --- Champion Canary gate: live blocking only when explicitly enabled ---
+                # score_live() returns None when no compatible directional_net_v1 Champion exists.
+                # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
+                if self._settings.MODEL_GATE_CANARY_ENABLED:
+                    try:
+                        live_prediction = self._model_registry.score_live(vec.values)
+                        if live_prediction is not None:
+                            canary_threshold = self._model_gate_threshold(regime_ctx)
+                            canary_gate_decision = (
+                                "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
+                            )
+                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
+                                canary_gate_decision,
+                                canary_threshold,
+                                live_prediction.score,
+                            )
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                await self._trade_journal.record_prediction_event(
+                                    symbol=proposal.symbol,
+                                    interval=_WS_INTERVAL,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    strategy_signal=proposal.side.value,
+                                    decision=canary_gate_decision,
+                                    feature_snapshot_id=snapshot_id,
+                                    metadata={
+                                        "source": "champion_canary",
+                                        "canary_blocked": canary_blocked,
+                                        "canary_reason": canary_reason,
+                                        "confidence": live_prediction.confidence,
+                                        "gate_reason": "canary_gate",
+                                        "threshold": canary_threshold,
+                                    },
+                                )
+                            if canary_blocked:
+                                self._record_diag("model_gate_canary_blocked")
+                                log.info(
+                                    "model_gate.canary_blocked",
+                                    symbol=proposal.symbol,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    threshold=canary_threshold,
+                                    reason=canary_reason,
+                                )
+                                return
+                        else:
+                            # No compatible Champion → do not block the trade
+                            log.debug("ml_canary.no_compatible_champion", symbol=proposal.symbol)
+                    except Exception as _canary_exc:
+                        log.debug("ml_canary.scoring_failed", symbol=proposal.symbol, error=str(_canary_exc))
 
             # Skip execution if operator paused trading
             if self._trading_paused:

@@ -54,8 +54,10 @@ def test_live_scoring_fails_closed_without_champion() -> None:
     assert registry.score_live([1.0]) is None
 
 
-def test_legacy_runtime_alias_remains_observational_during_transition() -> None:
-    """Package init keeps legacy app scoring observational until app loop split."""
+def test_legacy_score_alias_uses_champion_after_split() -> None:
+    """After the direct score_shadow()/score_live() split in app.py, the legacy
+    score() alias is champion-only (score_live). app.py now calls score_shadow()
+    explicitly for Challenger observation."""
 
     registry = ModelRegistry()
     registry._champion = _StubModel("champion", ModelStatus.CHAMPION, 0.80)  # type: ignore[assignment]
@@ -63,8 +65,9 @@ def test_legacy_runtime_alias_remains_observational_during_transition() -> None:
 
     prediction = registry.score([1.0])
 
+    # score() is score_live() — must return champion, not challenger
     assert prediction is not None
-    assert prediction.model_version == "challenger"
+    assert prediction.model_version == "champion"
 
 
 def test_promotion_rejects_legacy_schema() -> None:
