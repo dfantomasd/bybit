@@ -143,9 +143,6 @@ async def _report(pool: object, *, apply: bool) -> None:
     suspicious = int(rows[0]["suspicious_snapshots"])
     click.echo(f"\n  snapshots created before candle close (still eligible): {suspicious}")
 
-    if rows[0]["invalid_reason"] if False else False:
-        pass  # type hint workaround
-
     rows = await pool.fetch(
         """
         SELECT invalid_reason, count(*) AS cnt
@@ -161,6 +158,34 @@ async def _report(pool: object, *, apply: bool) -> None:
             click.echo(f"    reason={r['invalid_reason']}  count={r['cnt']}")
 
     click.echo(f"\n  to-be-invalidated in this run: {suspicious}")
+
+    # ------------------------------------------------------------------
+    # 3b. Duplicate feature snapshots (same symbol, interval, candle, schema)
+    # ------------------------------------------------------------------
+    click.echo("\n--- duplicate feature snapshots (same symbol, interval, candle_open_time, feature_schema_hash) ---")
+    rows = await pool.fetch(
+        """
+        SELECT symbol, interval, candle_open_time, feature_schema_hash, count(*) AS dup_count
+        FROM feature_snapshots
+        WHERE training_eligible = true
+        GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+        HAVING count(*) > 1
+        ORDER BY dup_count DESC
+        """
+    )
+    duplicate_groups = len(rows)
+    total_duplicates = sum(r["dup_count"] - 1 for r in rows)
+    click.echo(f"  duplicate groups: {duplicate_groups}")
+    click.echo(f"  extra snapshots to invalidate: {total_duplicates}")
+    if rows:
+        for r in rows[:10]:  # show first 10 groups
+            click.echo(
+                f"    symbol={r['symbol']} interval={r['interval']} "
+                f"candle_open_time={r['candle_open_time']} schema={r['feature_schema_hash']} "
+                f"count={r['dup_count']}"
+            )
+        if len(rows) > 10:
+            click.echo(f"    ... and {len(rows) - 10} more groups")
 
     # ------------------------------------------------------------------
     # 4. Apply (or report) the invalidation
@@ -186,6 +211,35 @@ async def _report(pool: object, *, apply: bool) -> None:
         click.echo("\n[DRY-RUN] No changes made. Re-run with --apply to invalidate.")
 
     # ------------------------------------------------------------------
+    # 4b. Apply (or report) duplicate invalidation
+    # ------------------------------------------------------------------
+    if apply and total_duplicates > 0:
+        click.echo("\n[APPLY] Marking duplicate snapshots training_eligible=false ...")
+        result = await pool.execute(
+            """
+            UPDATE feature_snapshots fs
+            SET training_eligible = false,
+                invalid_reason    = 'duplicate_snapshot_same_candle',
+                invalidated_at    = now()
+            WHERE snapshot_id IN (
+                SELECT snapshot_id FROM (
+                    SELECT snapshot_id,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY symbol, interval, candle_open_time, feature_schema_hash
+                               ORDER BY created_at ASC
+                           ) AS rn
+                    FROM feature_snapshots
+                    WHERE training_eligible = true
+                ) sub
+                WHERE rn > 1
+            )
+            """
+        )
+        click.echo(f"[APPLY] Done: {result}")
+    elif not apply and total_duplicates > 0:
+        click.echo("\n[DRY-RUN] No changes made. Re-run with --apply to invalidate duplicates.")
+
+    # ------------------------------------------------------------------
     # 5. Final eligible snapshot count
     # ------------------------------------------------------------------
     rows = await pool.fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE training_eligible = true")
@@ -205,7 +259,7 @@ SELECT count(*) AS suspicious_candles,
 FROM market_candles
 WHERE created_at < close_time;
 
--- 2. Suspicious snapshots
+-- 2. Suspicious snapshots (created before candle close)
 SELECT count(*) AS suspicious_snapshots
 FROM feature_snapshots fs
 JOIN market_candles mc
@@ -213,13 +267,21 @@ JOIN market_candles mc
     AND mc.open_time = fs.candle_open_time
 WHERE fs.created_at < mc.close_time;
 
--- 3. Excluded snapshots by reason
+-- 3. Duplicate feature snapshots (same symbol, interval, candle_open_time, feature_schema_hash)
+SELECT symbol, interval, candle_open_time, feature_schema_hash, count(*) AS dup_count
+FROM feature_snapshots
+WHERE training_eligible = true
+GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+HAVING count(*) > 1
+ORDER BY dup_count DESC;
+
+-- 4. Excluded snapshots by reason
 SELECT invalid_reason, count(*) AS cnt
 FROM feature_snapshots
 WHERE training_eligible = false
 GROUP BY invalid_reason ORDER BY cnt DESC;
 
--- 4. Eligible snapshots for training
+-- 5. Eligible snapshots for training
 SELECT count(*) AS eligible_snapshots
 FROM feature_snapshots WHERE training_eligible = true;
 """)
