@@ -66,7 +66,7 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
         if vec is None:
             return None
 
-        candles = self._store.confirmed(symbol, interval, limit=1)
+        candles = self._store.latest(symbol, interval, 1)
         if not candles:
             log.warning(
                 "feature_pipeline.source_candle_missing",
@@ -89,7 +89,7 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
             return None
 
         binding = source_candle_for_feature(vec.feature_id)
-        candles = self._store.confirmed(symbol, interval, limit=1)
+        candles = self._store.latest(symbol, interval, 1)
         latest_open_time = candles[-1].open_time if candles else None
         expected = (_normalise_symbol(symbol), str(interval), latest_open_time)
 
