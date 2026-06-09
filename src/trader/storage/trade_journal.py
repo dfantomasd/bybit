@@ -1202,7 +1202,8 @@ class TradeJournal:
     ) -> dict[str, Any]:
         """Return shadow gate statistics for a specific model version.
 
-        Filters by exact model_version, horizon_minutes, and label_schema_version.
+        Filters by exact model_version, horizon_minutes, label_schema_version,
+        and feature_schema_hash (to exclude incompatible feature snapshots).
         Only includes resolved outcomes with GATE_PASS/GATE_BLOCK decisions.
         """
         if not self.is_enabled:
@@ -1223,6 +1224,15 @@ class TradeJournal:
             if model_rows:
                 feature_schema_hash = model_rows[0].get("feature_schema_hash", "") or ""
 
+            # Fail-safe: if the model has no feature schema hash, don't mix incompatible snapshots
+            if not feature_schema_hash:
+                log.warning(
+                    "trade_journal.shadow_gate_stats_no_schema_hash",
+                    model_version=model_version,
+                    message="Model has no feature_schema_hash; returning empty stats to avoid mixing incompatible snapshots",
+                )
+                return {"model_version": model_version, "feature_schema_hash": ""}
+
             gate_rows = await self._fetch(
                 """
                 SELECT
@@ -1239,11 +1249,13 @@ class TradeJournal:
                   AND po.label_schema_version = $3
                   AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
                   AND fs.feature_values IS NOT NULL
+                  AND fs.feature_schema_hash = $4
                 GROUP BY pe.decision
                 """,
                 model_version,
                 horizon_minutes,
                 label_schema_version,
+                feature_schema_hash,
             )
 
             gate: dict[str, Any] = {"model_version": model_version}

@@ -132,3 +132,64 @@ class TestRestorePendingEntriesWithSymbolsExcludesUnknown:
         assert ee._pending_entry_count == 1
         # First symbol should win
         assert ee._pending_entry_symbols["valid-id"] == "BTCUSDT"
+
+
+class TestShadowGateStatsFeatureSchemaFilter:
+    """Test that get_shadow_gate_stats() filters by feature_schema_hash."""
+
+    def test_sql_contains_schema_filter(self) -> None:
+        import inspect
+
+        src = inspect.getsource(TradeJournal.get_shadow_gate_stats)
+        # Verify the feature_schema_hash filter exists in WHERE clause
+        assert "fs.feature_schema_hash = $4" in src
+        # Verify the parameter is passed
+        assert "feature_schema_hash," in src
+
+    def test_returns_empty_when_model_has_no_schema_hash(self) -> None:
+        """If model has no feature_schema_hash, stats should be empty to avoid mixing."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        # Mock model with no feature_schema_hash
+        async def mock_fetch(query, *args):
+            if "model_versions" in query:
+                return [{"feature_schema_hash": None, "metrics": None}]
+            return []
+
+        journal._fetch = mock_fetch
+
+        result = asyncio.run(journal.get_shadow_gate_stats("test-model", 15, "directional_net_v1"))
+
+        assert result == {"model_version": "test-model", "feature_schema_hash": ""}
+
+    def test_includes_schema_hash_in_query_params(self) -> None:
+        """The query should use the model's feature_schema_hash as a parameter."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        captured_params = {}
+
+        async def mock_fetch(query, *args):
+            captured_params["query"] = query
+            captured_params["args"] = args
+            if "model_versions" in query:
+                return [{"feature_schema_hash": "abc123", "metrics": None}]
+            return []
+
+        journal._fetch = mock_fetch
+
+        asyncio.run(journal.get_shadow_gate_stats("test-model", 15, "directional_net_v1"))
+
+        # Verify feature_schema_hash is passed as 4th parameter
+        assert captured_params["args"][3] == "abc123"
+        # Verify the SQL uses $4 for the schema hash
+        assert "fs.feature_schema_hash = $4" in captured_params["query"]
