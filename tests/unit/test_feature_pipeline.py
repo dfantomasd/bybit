@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from trader.data.candles import Candle, CandleStore
 from trader.features.pipeline import _MIN_BARS, FeaturePipeline
+from trader.features.source_candle_guard import SourceCandleFeaturePipeline, source_candle_for_feature
 
 
 def _make_store(n: int = 60, symbol: str = "BTCUSDT", interval: str = "1") -> CandleStore:
@@ -113,4 +114,38 @@ class TestFeaturePipeline:
     def test_latest_returns_none_before_compute(self):
         store = _make_store(60)
         pipeline = FeaturePipeline(store)
+        assert pipeline.latest("BTCUSDT", "1") is None
+
+    def test_source_guard_registers_last_confirmed_candle(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+
+        vec = pipeline.compute("BTCUSDT", "1")
+
+        assert vec is not None
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
+        assert source_candle_for_feature(vec.feature_id) == ("BTCUSDT", "1", latest.open_time)
+
+    async def test_source_guard_rejects_cached_vector_after_new_candle(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+        vec = await pipeline.on_confirmed_candle("BTCUSDT", "1")
+        assert vec is not None
+        assert pipeline.latest("BTCUSDT", "1") is vec
+
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
+        store.add(
+            "BTCUSDT",
+            "1",
+            Candle(
+                open_time=latest.open_time + timedelta(minutes=1),
+                open=50000.0,
+                high=50010.0,
+                low=49990.0,
+                close=50005.0,
+                volume=1000.0,
+                confirm=True,
+            ),
+        )
+
         assert pipeline.latest("BTCUSDT", "1") is None
