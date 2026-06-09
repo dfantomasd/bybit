@@ -918,7 +918,7 @@ class TelegramMonitorBot:
         paper_baseline = paper.get("baseline", {}) or {}
         paper_gate = paper.get("model_gate", {}) or {}
 
-        trainable_15m = int(db_diag.get("labelled_samples_15m") or 0)
+        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)

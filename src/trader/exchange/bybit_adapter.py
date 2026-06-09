@@ -402,6 +402,9 @@ class BybitAdapter:
         Updates the in-memory idempotency store and persists to durable order state.
         Returns True if the new status is terminal (caller should release pending count
         exactly once via a guard set).
+
+        P0: Never use exchange orderId directly as pending-ID.
+        Use order_link_id if present, otherwise reverse-lookup via exchange_order_id.
         """
         _terminal_states = {
             OrderStatus.FILLED,
@@ -410,45 +413,74 @@ class BybitAdapter:
             OrderStatus.EXPIRED,
         }
 
-        order_link_id = getattr(event, "order_link_id", None) or getattr(event, "order_id", "")
+        raw_order_link_id = getattr(event, "order_link_id", None)
+        exchange_order_id = getattr(event, "order_id", None)
         order_status: OrderStatus | None = getattr(event, "status", None) or getattr(event, "order_status", None)
 
-        if not order_link_id or order_status is None:
+        if order_status is None:
             return False
+
+        # Normalize order_link_id per business rules:
+        # 1. If payload has orderLinkId -> str, strip, validate non-empty
+        # 2. If missing but exchange orderId exists -> lookup via journal
+        # 3. If still no local order_link_id -> skip idempotency updates
+        order_link_id: str | None = None
+
+        if raw_order_link_id is not None:
+            candidate = str(raw_order_link_id).strip()
+            if candidate:
+                order_link_id = candidate
+            else:
+                logger.warning("handle_order_update.empty_order_link_id", exchange_order_id=exchange_order_id)
+
+        if order_link_id is None and exchange_order_id:
+            if self._journal is not None:
+                lookup = await self._journal.find_order_link_id_by_exchange_order_id(str(exchange_order_id))
+                if lookup and str(lookup).strip():
+                    order_link_id = str(lookup).strip()
+                else:
+                    logger.warning(
+                        "handle_order_update.reverse_lookup_failed",
+                        exchange_order_id=exchange_order_id,
+                    )
 
         is_terminal = order_status in _terminal_states
 
-        # Update in-memory idempotency
-        try:
-            current = await self._idempotency.get_state(order_link_id)
-            if current is not None and current not in _terminal_states:
-                if order_status == OrderStatus.FILLED:
-                    await self._idempotency.mark_filled(order_link_id)
-                elif order_status == OrderStatus.CANCELLED:
-                    await self._idempotency.mark_cancelled(order_link_id)
-                elif order_status == OrderStatus.WS_CONFIRMED and current in {
-                    OrderStatus.REST_ACCEPTED,
-                    OrderStatus.SUBMITTING,
-                }:
-                    self._idempotency._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
-                elif order_status == OrderStatus.PARTIALLY_FILLED and current in {
-                    OrderStatus.WS_CONFIRMED,
-                    OrderStatus.REST_ACCEPTED,
-                }:
-                    self._idempotency._store[order_link_id]["status"] = OrderStatus.PARTIALLY_FILLED
-        except Exception as exc:
-            logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
+        # Update in-memory idempotency (only if we have valid order_link_id)
+        if order_link_id is not None:
+            try:
+                current = await self._idempotency.get_state(order_link_id)
+                if current is not None and current not in _terminal_states:
+                    if order_status == OrderStatus.FILLED:
+                        await self._idempotency.mark_filled(order_link_id)
+                    elif order_status == OrderStatus.CANCELLED:
+                        await self._idempotency.mark_cancelled(order_link_id)
+                    elif order_status == OrderStatus.WS_CONFIRMED and current in {
+                        OrderStatus.REST_ACCEPTED,
+                        OrderStatus.SUBMITTING,
+                    }:
+                        self._idempotency._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+                    elif order_status == OrderStatus.PARTIALLY_FILLED and current in {
+                        OrderStatus.WS_CONFIRMED,
+                        OrderStatus.REST_ACCEPTED,
+                    }:
+                        self._idempotency._store[order_link_id]["status"] = OrderStatus.PARTIALLY_FILLED
+            except Exception as exc:
+                logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
 
-        # Persist to durable state
+        # Persist to durable state — use order_link_id if available, otherwise generate fallback
+        durable_order_link_id = order_link_id or (
+            f"unknown:{exchange_order_id}" if exchange_order_id else "unknown:no_exchange_id"
+        )
         if self._journal is not None:
             try:
                 await self._journal.upsert_durable_order_state(
-                    order_link_id=order_link_id,
+                    order_link_id=durable_order_link_id,
                     symbol=getattr(event, "symbol", ""),
                     side=event.side.value if getattr(event, "side", None) else "unknown",
                     qty=getattr(event, "qty", Decimal("0")),
                     state=order_status.value,
-                    exchange_order_id=getattr(event, "order_id", None),
+                    exchange_order_id=exchange_order_id,
                 )
             except Exception as exc:
                 logger.debug("handle_order_update.durable_write_failed", error=str(exc))

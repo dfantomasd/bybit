@@ -103,6 +103,11 @@ class ExecutionEngine:
         self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
         self._entry_order_mode = entry_order_mode
 
+        # P0: Hard block non-MARKET entry modes — only MARKET is supported during current rollout
+        normalized_entry_mode = str(self._entry_order_mode).strip().upper()
+        if normalized_entry_mode != "MARKET":
+            raise ValueError("Only MARKET entry mode is supported during current rollout")
+
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
         self._max_concurrent_pending = max_concurrent_pending_entries
@@ -182,54 +187,127 @@ class ExecutionEngine:
         return None
 
     def mark_entry_submitted(self, order_link_id: str = "", symbol: str = "") -> None:
-        """Register order_link_id as pending and bump rate-limit counters."""
+        """Register order_link_id as pending and bump rate-limit counters.
+
+        Idempotent: duplicate IDs are silently ignored without double-counting.
+        Empty ID in live mode is rejected with a warning.
+        """
         if order_link_id:
+            already_pending = order_link_id in self._pending_entry_order_link_ids
+            if already_pending:
+                log.warning(
+                    "execution.submit_duplicate_id",
+                    order_link_id=order_link_id,
+                    pending_count=len(self._pending_entry_order_link_ids),
+                )
+                # Do not increment — idempotent, count stays the same
+                return
             self._pending_entry_order_link_ids.add(order_link_id)
             if symbol:
                 self._pending_entry_symbols[order_link_id] = symbol
             self._pending_entry_created_at[order_link_id] = datetime.now(tz=UTC)
+        elif not self._shadow_mode:
+            log.warning(
+                "execution.submit_empty_id_live_mode",
+                pending_count=len(self._pending_entry_order_link_ids),
+            )
+            # Refuse to track an un-identified live order — would corrupt count
+            return
         if not self._shadow_mode:
-            self._pending_entry_count += 1
             self._recent_entries.append(datetime.now(tz=UTC))
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def mark_entry_resolved(self, order_link_id: str = "") -> None:
-        """Remove order_link_id from pending set (idempotent).
+        """Remove order_link_id from pending set (idempotent, fail-closed).
 
-        Only removes the exact ID — never releases an unrelated slot.
+        Rules:
+        - Known ID → remove and sync count. Safe to call multiple times.
+        - Unknown ID → warn, do NOT change count (fail-closed).
+        - Empty ID, 0 pending → no-op.
+        - Empty ID, 1 pending → safe backwards-compat fallback, warns.
+        - Empty ID, ≥2 pending → ambiguous, log and stay fail-closed.
         """
         if order_link_id:
-            self._pending_entry_order_link_ids.discard(order_link_id)
-            self._pending_entry_symbols.pop(order_link_id, None)
-            self._pending_entry_created_at.pop(order_link_id, None)
-        self._pending_entry_count = max(0, self._pending_entry_count - 1)
+            was_pending = order_link_id in self._pending_entry_order_link_ids
+            if was_pending:
+                self._pending_entry_order_link_ids.discard(order_link_id)
+                self._pending_entry_symbols.pop(order_link_id, None)
+                self._pending_entry_created_at.pop(order_link_id, None)
+            else:
+                log.warning(
+                    "execution.resolve_unknown_id",
+                    order_link_id=order_link_id,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+                # Do not change count — the ID was never registered
+        else:
+            n = len(self._pending_entry_order_link_ids)
+            if n == 0:
+                log.debug("execution.resolve_empty_id_no_pending")
+            elif n == 1:
+                # Backwards-compat fallback: release the single known pending slot
+                lone_id = next(iter(self._pending_entry_order_link_ids))
+                log.warning(
+                    "execution.resolve_empty_id_fallback",
+                    lone_id=lone_id,
+                )
+                self._pending_entry_order_link_ids.discard(lone_id)
+                self._pending_entry_symbols.pop(lone_id, None)
+                self._pending_entry_created_at.pop(lone_id, None)
+            else:
+                # Multiple pending — ambiguous which slot to release; stay fail-closed
+                log.warning(
+                    "execution.resolve_empty_id_ambiguous",
+                    pending_count=n,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
         return symbol in self._pending_entry_symbols.values()
 
     def restore_pending_entries(self, order_link_ids: list[str]) -> None:
-        """Restore pending entry IDs from durable storage at startup."""
-        for oid in order_link_ids:
+        """Restore pending entry IDs from durable storage at startup.
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        """
+        valid_ids = [oid for oid in order_link_ids if oid]
+        unique_ids = sorted(set(valid_ids))
+        for oid in unique_ids:
             self._pending_entry_order_link_ids.add(oid)
-        if order_link_ids:
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+        if unique_ids:
             log.info(
                 "execution.pending_entries_restored",
-                count=len(order_link_ids),
-                ids=order_link_ids,
+                count=len(unique_ids),
+                ids=unique_ids,
+                total_pending=self._pending_entry_count,
             )
 
     def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
-        """Restore pending entries from detailed records (includes symbol mapping)."""
+        """Restore pending entries from detailed records (includes symbol mapping).
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        """
+        seen: set[str] = set()
         for rec in records:
-            oid = str(rec.get("order_link_id", ""))
+            oid = str(rec.get("order_link_id", "")).strip()
+            if not oid or oid in seen:
+                continue
+            seen.add(oid)
             symbol = str(rec.get("symbol", ""))
-            if oid:
-                self._pending_entry_order_link_ids.add(oid)
-                if symbol:
-                    self._pending_entry_symbols[oid] = symbol
-                created_at = rec.get("created_at")
-                if isinstance(created_at, datetime):
-                    self._pending_entry_created_at[oid] = created_at
+            self._pending_entry_order_link_ids.add(oid)
+            if symbol:
+                self._pending_entry_symbols[oid] = symbol
+            created_at = rec.get("created_at")
+            if isinstance(created_at, datetime):
+                self._pending_entry_created_at[oid] = created_at
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def has_pending_entries(self) -> bool:
         return bool(self._pending_entry_order_link_ids)
@@ -595,6 +673,18 @@ class ExecutionEngine:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
 
         # 4. Risk evaluation ───────────────────────────────────────────
+        # Extract spread and ATR for RiskManager sizing
+        spread: Decimal | None = None
+        atr: Decimal | None = None
+        if regime_context is not None and regime_context.spread_bps is not None:
+            spread = Decimal(str(regime_context.spread_bps)) / Decimal("10000")
+        if feature_vector is not None:
+            # ATR is computed as atr_14_pct in feature pipeline (ATR / price as fraction)
+            try:
+                idx = feature_vector.feature_names.index("atr_14_pct")
+                atr = Decimal(str(feature_vector.values[idx]))
+            except (ValueError, IndexError):
+                pass
         try:
             decision = await self._risk_manager.evaluate(
                 proposal=proposal,
@@ -603,6 +693,8 @@ class ExecutionEngine:
                 instrument_info=instrument_info,
                 feature_vector=feature_vector,
                 regime_context=regime_context,
+                spread=spread,
+                atr=atr,
             )
         except Exception as exc:
             log.error(
@@ -684,11 +776,19 @@ class ExecutionEngine:
             exit_fee_pct = taker * Decimal("100")
             round_trip_fee_pct = entry_fee_pct + exit_fee_pct
             spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
-            slippage_pct = Decimal(str(self._expected_slippage_pct))
+            # P1: Round-trip slippage = entry slippage + exit slippage = 2 * EXPECTED_SLIPPAGE_PCT
+            entry_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            exit_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            round_trip_slippage_pct = entry_slippage_pct + exit_slippage_pct
             funding_pct = Decimal(str(self._funding_buffer_pct))
             safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
             net_edge_pct = (
-                gross_edge_pct - round_trip_fee_pct - spread_pct - slippage_pct - funding_pct - safety_margin_pct
+                gross_edge_pct
+                - round_trip_fee_pct
+                - spread_pct
+                - round_trip_slippage_pct
+                - funding_pct
+                - safety_margin_pct
             )
             min_edge = Decimal(str(self._min_net_edge_pct))
 
@@ -704,7 +804,9 @@ class ExecutionEngine:
                 round_trip_fee_pct=float(round(round_trip_fee_pct, 4)),
                 spread_bps=float(self._max_spread_bps),
                 spread_cost_pct=float(round(spread_pct, 4)),
-                slippage_cost_pct=float(round(slippage_pct, 4)),
+                entry_slippage_cost_pct=float(round(entry_slippage_pct, 4)),
+                exit_slippage_cost_pct=float(round(exit_slippage_pct, 4)),
+                round_trip_slippage_cost_pct=float(round(round_trip_slippage_pct, 4)),
                 funding_buffer_pct=float(round(funding_pct, 4)),
                 safety_margin_pct=float(round(safety_margin_pct, 4)),
                 net_edge_pct=float(round(net_edge_pct, 4)),

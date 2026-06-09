@@ -30,7 +30,7 @@ async def test_seed_candle_store_fetches_and_persists_configured_intervals() -> 
                 "result": {
                     "list": [
                         [
-                            "1798761600000",
+                            "1700000000000",
                             "1.0",
                             "1.1",
                             "0.9",

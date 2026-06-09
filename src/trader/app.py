@@ -668,7 +668,7 @@ class TradingApplication:
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
-                trainable = int(diag.get("labelled_samples_15m", 0) or 0)
+                trainable = int(diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)) or 0)
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
@@ -726,9 +726,10 @@ class TradingApplication:
 
         Conservative criteria (all must pass):
           1. Challenger status is SHADOW_CHALLENGER (not already champion).
-          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions.
+          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions FOR THIS SPECIFIC MODEL VERSION.
           3. Live lift_vs_all_bps >= MODEL_AUTO_PROMOTE_MIN_LIFT_BPS.
           4. Live lift_vs_all_bps > current champion's walk-forward expectancy (conservative).
+          5. Model quality is GOOD.
         """
         assert self._settings is not None
         if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
@@ -751,21 +752,29 @@ class TradingApplication:
 
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
-                gate = diag.get("shadow_gate_15m", {}) or {}
                 latest_model = diag.get("latest_model_version", {}) or {}
 
                 challenger_version = str(latest_model.get("version", "") or "")
                 challenger_status = str(latest_model.get("status", "") or "")
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
 
                 if challenger_status != "SHADOW_CHALLENGER" or not challenger_version:
                     continue
+
+                # Get gate stats specific to this challenger model version
+                gate = await self._trade_journal.get_shadow_gate_stats(
+                    model_version=challenger_version,
+                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
+                    label_schema_version="directional_net_v1",
+                )
+                total_count = int(gate.get("total_count", 0) or 0)
+                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
+                quality = str(gate.get("quality", "") or "").upper()
 
                 if total_count < min_signals:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="insufficient_signals",
+                        version=challenger_version,
                         total_count=total_count,
                         min_signals=min_signals,
                     )
@@ -775,8 +784,19 @@ class TradingApplication:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="insufficient_lift",
+                        version=challenger_version,
                         lift_bps=lift_bps,
                         min_lift_bps=min_lift_bps,
+                    )
+                    continue
+
+                # Quality must be GOOD
+                if quality != "GOOD":
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="quality_not_good",
+                        version=challenger_version,
+                        quality=quality,
                     )
                     continue
 
@@ -786,6 +806,7 @@ class TradingApplication:
                     log.debug(
                         "model_auto_promote.waiting",
                         reason="not_better_than_champion",
+                        version=challenger_version,
                         lift_bps=lift_bps,
                         champion_wf_bps=champion_wf_bps,
                     )
@@ -797,22 +818,12 @@ class TradingApplication:
                     total_count=total_count,
                     lift_bps=lift_bps,
                     champion_wf_bps=champion_wf_bps,
+                    quality=quality,
                 )
                 result = await self._start_model_promote(challenger_version)
 
-                # Auto-enable canary gate if model quality now allows it
-                canary_msg = ""
-                if self._settings is not None and not self._settings.MODEL_GATE_CANARY_ENABLED:
-                    self._update_model_gate_quality_from_diag(diag)
-                    quality_ok, _ = self._model_gate_quality_allows_canary()
-                    if quality_ok:
-                        self._settings.MODEL_GATE_CANARY_ENABLED = True
-                        log.info("model_auto_promote.canary_enabled", version=challenger_version)
-                        canary_msg = (
-                            "\n🚦 <b>Canary-фильтр включён</b> — модель начинает фильтровать слабые сигналы.\n"
-                            "Чтобы сохранить после перезапуска: задайте "
-                            "<code>MODEL_GATE_CANARY_ENABLED=true</code> в Render env vars."
-                        )
+                # Promote and Canary are separate manual steps — no auto-enable Canary
+                # MODEL_GATE_CANARY_ENABLED remains false by default
 
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
@@ -820,7 +831,8 @@ class TradingApplication:
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{result}{canary_msg}"
+                        f"Качество: <code>{quality}</code>\n"
+                        f"{result}"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
@@ -1084,8 +1096,12 @@ class TradingApplication:
             sval = str(value).strip().lower()
             if sval not in {"on", "off", "true", "false", "1", "0"}:
                 raise ValueError("model_gate must be on/off")
-            self._settings.MODEL_GATE_CANARY_ENABLED = sval in {"on", "true", "1"}
-            return f"Model gate canary set to {'ON' if self._settings.MODEL_GATE_CANARY_ENABLED else 'OFF'}"
+            if sval in {"on", "true", "1"}:
+                raise ValueError(
+                    "Canary model gate can only be enabled through environment configuration after manual readiness review."
+                )
+            self._settings.MODEL_GATE_CANARY_ENABLED = False
+            return "Model gate canary remains OFF (runtime enable blocked — use env vars)"
         if key == "model_gate_threshold":
             fvalue = float(value)
             if not 0.50 <= fvalue <= 0.80:
@@ -1245,7 +1261,10 @@ class TradingApplication:
         )
 
     async def _refresh_balance(self) -> Decimal:
-        """Fetch current available balance from exchange; fall back to cached value."""
+        """Fetch current available balance from exchange; fall back to cached value.
+
+        Also updates ExposureTracker capital when balance changes.
+        """
         assert self._settings is not None
         has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         if not has_key or self._bybit_adapter is None:
@@ -1258,6 +1277,7 @@ class TradingApplication:
             if available <= Decimal("0") and balance.wallet_balance > Decimal("0"):
                 available = balance.wallet_balance
             if available > Decimal("0"):
+                old_capital = self._cached_balance
                 self._cached_balance = available
                 self._balance_refreshed_at = datetime.now(tz=UTC)
                 log.info(
@@ -1265,6 +1285,15 @@ class TradingApplication:
                     available_usd=str(available),
                     wallet_usd=str(balance.wallet_balance),
                 )
+                # P1: Update ExposureTracker capital so exposure_pct is always current
+                if self._exposure_tracker is not None and available != old_capital:
+                    self._exposure_tracker.update_capital(available)
+                    log.debug(
+                        "exposure.capital_updated",
+                        old_capital=old_capital,
+                        new_capital=available,
+                        total_exposure_pct=str(self._exposure_tracker.total_exposure_pct),
+                    )
             return self._cached_balance
         except Exception as exc:
             log.warning("balance.refresh_failed", error=str(exc))
@@ -1421,12 +1450,19 @@ class TradingApplication:
                     items = resp.get("result", {}).get("list", [])
                     # Bybit returns newest-first; reverse to oldest-first
                     items = list(reversed(items))
+                    now = datetime.now(tz=UTC)
                     count = 0
                     for row in items:
                         # row: [startTime, open, high, low, close, volume, turnover]
                         try:
                             ts_ms = int(row[0])
                             open_time = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+                            bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                            # A candle is confirmed only after its full interval has elapsed.
+                            # close_epoch_ms is the exclusive start of the next bar.
+                            close_epoch_ms = ts_ms + bar_ms
+                            close_time = datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC)
+                            confirmed = now.timestamp() * 1000 >= close_epoch_ms
                             candle = Candle(
                                 open_time=open_time,
                                 open=float(row[1]),
@@ -1434,12 +1470,13 @@ class TradingApplication:
                                 low=float(row[3]),
                                 close=float(row[4]),
                                 volume=float(row[5]),
-                                confirm=True,  # historical bars are confirmed
+                                confirm=confirmed,
                             )
                             self._candle_store.add(symbol, interval, candle)
-                            if self._trade_journal is not None and self._trade_journal.is_enabled:
-                                bar_ms = _INTERVAL_MS.get(interval, 60_000)
-                                close_time = datetime.fromtimestamp((ts_ms + bar_ms - 1) / 1000, tz=UTC)
+                            # Only persist confirmed candles — active REST candles
+                            # may carry intermediate prices and must not be stored as
+                            # confirmed=true in the training database.
+                            if confirmed and self._trade_journal is not None and self._trade_journal.is_enabled:
                                 await self._trade_journal.upsert_market_candle(
                                     symbol=symbol,
                                     interval=interval,
@@ -1624,19 +1661,43 @@ class TradingApplication:
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
                     if isinstance(event, BalanceUpdateEvent) and event.available_balance > Decimal("0"):
+                        old_capital = self._cached_balance
                         self._cached_balance = event.available_balance
                         self._balance_refreshed_at = datetime.now(tz=UTC)
+                        # P1: Update ExposureTracker capital from WS balance push
+                        if self._exposure_tracker is not None and event.available_balance != old_capital:
+                            self._exposure_tracker.update_capital(event.available_balance)
+                            log.debug(
+                                "exposure.capital_updated_ws",
+                                old_capital=old_capital,
+                                new_capital=event.available_balance,
+                                total_exposure_pct=str(self._exposure_tracker.total_exposure_pct),
+                            )
                         log.debug(
                             "private_ws.balance_update",
                             available=str(event.available_balance),
                         )
                     elif isinstance(event, OrderUpdateEvent):
                         # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
-                        order_link_id = event.order_link_id or event.order_id
+                        # P0: Never use exchange orderId directly as pending-ID.
+                        # Use order_link_id if present, otherwise reverse-lookup via exchange_order_id.
+                        order_link_id = event.order_link_id
+                        exchange_order_id = event.order_id
+                        if order_link_id is None and exchange_order_id:
+                            if self._trade_journal is not None:
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(
+                                    exchange_order_id
+                                )
+                            # If lookup fails, we still process the event but can't tie it to a pending slot
+                        if order_link_id is None:
+                            # Generate a fallback ID for logging only — never used for pending slot
+                            order_link_id = f"unknown:{exchange_order_id or 'no_exchange_id'}"
+
                         order_status = event.status  # OrderUpdateEvent.status is the correct field
                         log.info(
                             "private_ws.order_update",
                             order_link_id=order_link_id,
+                            exchange_order_id=exchange_order_id,
                             symbol=event.symbol,
                             status=order_status.value if order_status else "unknown",
                             side=event.side.value if event.side else "unknown",
@@ -1654,7 +1715,7 @@ class TradingApplication:
                                 try:
                                     await self._trade_journal.record_order_update_event(
                                         order_link_id=order_link_id,
-                                        exchange_order_id=event.order_id,
+                                        exchange_order_id=exchange_order_id,
                                         symbol=event.symbol,
                                         side=event.side.value if event.side else "unknown",
                                         qty=event.qty if hasattr(event, "qty") and event.qty else Decimal("0"),
@@ -1663,10 +1724,15 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
-                        # Release pending entry count on terminal — exactly once per order
-                        if is_terminal and order_link_id not in _pending_released:
-                            if self._execution_engine is not None:
-                                self._execution_engine.mark_entry_resolved()
+
+                        # Release pending entry slot on terminal — exactly once per order.
+                        # Pass the exact order_link_id so only the correct slot is released.
+                        # _pending_released is shared with ExecutionUpdateEvent to prevent
+                        # double-release when both events arrive for the same fill.
+                        # Skip "unknown:" prefix IDs — they are fallback logging IDs, not real pending slots.
+                        if is_terminal and order_link_id and order_link_id not in _pending_released:
+                            if self._execution_engine is not None and not order_link_id.startswith("unknown:"):
+                                self._execution_engine.mark_entry_resolved(order_link_id)
                             _pending_released.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
@@ -1678,6 +1744,15 @@ class TradingApplication:
                         if event.exec_id in seen_exec_ids:
                             continue
                         seen_exec_ids.add(event.exec_id)
+                        # P0: Reverse lookup order_link_id if not present
+                        order_link_id = event.order_link_id
+                        exchange_order_id = event.order_id
+                        if order_link_id is None and exchange_order_id:
+                            if self._trade_journal is not None:
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(
+                                    exchange_order_id
+                                )
+
                         log.info(
                             "private_ws.execution_fill",
                             exec_id=event.exec_id,
@@ -1685,14 +1760,18 @@ class TradingApplication:
                             exec_price=str(event.exec_price),
                             exec_qty=str(event.exec_qty),
                             side=event.side.value,
+                            order_link_id=order_link_id,
+                            exchange_order_id=exchange_order_id,
                         )
                         if self._trade_journal is not None:
                             try:
                                 # P0.5: persist to execution_events (nullable proposal/decision)
                                 await self._trade_journal.record_execution_event(
                                     exec_id=event.exec_id,
-                                    order_link_id=event.order_link_id or None,
-                                    exchange_order_id=event.order_id,
+                                    order_link_id=order_link_id
+                                    if order_link_id and not order_link_id.startswith("unknown:")
+                                    else None,
+                                    exchange_order_id=exchange_order_id,
                                     symbol=event.symbol,
                                     side=event.side.value,
                                     exec_price=event.exec_price,
@@ -1703,14 +1782,16 @@ class TradingApplication:
                                     closed_size=event.closed_size if event.closed_size else None,
                                 )
                                 await self._trade_journal.record_order_event(
-                                    order_link_id=event.order_link_id or event.exec_id,
+                                    order_link_id=order_link_id
+                                    if order_link_id and not order_link_id.startswith("unknown:")
+                                    else event.exec_id,
                                     proposal_id=None,
                                     decision_id=None,
                                     symbol=event.symbol,
                                     side=event.side.value,
                                     qty=event.exec_qty,
                                     status="FILLED",
-                                    exchange_order_id=event.order_id,
+                                    exchange_order_id=exchange_order_id,
                                 )
                             except Exception as _journal_exc:
                                 log.warning(
@@ -1718,9 +1799,19 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
-                        # P0.3: Release pending entry slot for this order_link_id only
-                        if self._execution_engine is not None and event.order_link_id:
-                            self._execution_engine.mark_entry_resolved(event.order_link_id)
+
+                        # P0.3: Release pending entry slot for this order_link_id only.
+                        # Use the resolved order_link_id (after reverse lookup), skip "unknown:" prefixes.
+                        # Guard against double-release via shared _pending_released set.
+                        if (
+                            self._execution_engine is not None
+                            and order_link_id
+                            and not order_link_id.startswith("unknown:")
+                        ):
+                            if order_link_id not in _pending_released:
+                                self._execution_engine.mark_entry_resolved(order_link_id)
+                                _pending_released.add(order_link_id)
+
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
@@ -1730,6 +1821,7 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_sync_exc),
                                 )
+
                         if self._bybit_adapter is not None and not self._initial_shadow_mode():
                             try:
                                 await self._bybit_adapter.reconcile()
@@ -1868,7 +1960,48 @@ class TradingApplication:
                     except Exception as exc:
                         log.debug("risk_monitor.balance_update_failed", error=str(exc))
 
-                # Check WS freshness and alert if stale
+                # P1: Fetch daily realized PnL and feed to RiskManager for daily loss limit tracking
+                if self._trade_journal is not None and self._risk_manager is not None:
+                    try:
+                        net_results = await self._trade_journal.get_daily_net_results()
+                        net_pnl = Decimal(str(net_results.get("net_pnl_usd", 0)))
+                        # Replace daily_pnl entirely (get_daily_net_results returns today's total)
+                        # RiskManager.update_daily_pnl is additive, so we track the delta
+                        old_daily_pnl = self._risk_manager.daily_pnl
+                        delta = net_pnl - old_daily_pnl
+                        if delta != Decimal("0"):
+                            await self._risk_manager.update_daily_pnl(delta)
+                            log.debug("risk_monitor.daily_pnl_synced", old=old_daily_pnl, new=net_pnl, delta=delta)
+                    except Exception as exc:
+                        log.debug("risk_monitor.daily_pnl_sync_failed", error=str(exc))
+
+                # P1: Evaluate circuit breakers
+                if self._risk_manager is not None and self._risk_manager._breakers is not None:
+                    breakers = self._risk_manager._breakers
+                    # Daily loss limit
+                    await breakers.check_daily_loss(
+                        self._risk_manager.daily_pnl,
+                        self._cached_balance,
+                    )
+                    # Max drawdown
+                    await breakers.check_drawdown(self._risk_manager._drawdown.drawdown_pct)
+                    # WebSocket staleness
+                    if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
+                        age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
+                        await breakers.check_websocket_staleness(age)
+                    # REST error rate (track from adapter if available)
+                    if self._bybit_adapter is not None and hasattr(self._bybit_adapter, "_rest_errors_last_minute"):
+                        await breakers.check_rest_error_rate(self._bybit_adapter._rest_errors_last_minute)
+                    # Feature quality
+                    if self._feature_pipeline is not None and hasattr(self._feature_pipeline, "quality_score"):
+                        await breakers.check_feature_quality(self._feature_pipeline.quality_score)
+                    # NTP drift
+                    if self._bybit_adapter is not None and hasattr(self._bybit_adapter, "ntp_drift_seconds"):
+                        await breakers.check_ntp_drift(self._bybit_adapter.ntp_drift_seconds)
+                    # Auto-reset eligible breakers
+                    await breakers.reset_all_auto()
+
+                # Check WS freshness and alert if stale (legacy logging)
                 if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                     age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                     if age > 60.0:
@@ -2637,14 +2770,13 @@ class TradingApplication:
                     )
 
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+                # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    prediction = self._model_registry.score(vec.values)
-                    if prediction is not None:
+                    shadow_prediction = self._model_registry.score_shadow(vec.values)
+                    if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
-                        gate_decision = None
-                        gate_reason = "gate_disabled"
-                        canary_blocked = False
-                        canary_reason = "canary_disabled"
+                        shadow_gate_decision = None
+                        shadow_gate_reason = "shadow_gate_disabled"
                         regime_name = (
                             regime_ctx.regime.value
                             if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
@@ -2656,52 +2788,87 @@ class TradingApplication:
                             else "UNKNOWN"
                         )
                         if self._settings.MODEL_SHADOW_GATE_ENABLED:
-                            gate_decision = "GATE_PASS" if prediction.score >= threshold else "GATE_BLOCK"
-                            gate_reason = (
+                            shadow_gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                            shadow_gate_reason = (
                                 "score_meets_threshold"
-                                if gate_decision == "GATE_PASS"
+                                if shadow_gate_decision == "GATE_PASS"
                                 else "score_below_regime_threshold"
-                            )
-                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
-                                gate_decision,
-                                threshold,
-                                prediction.score,
                             )
                         if self._trade_journal is not None and self._trade_journal.is_enabled:
                             await self._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
+                                model_version=shadow_prediction.model_version,
+                                score=shadow_prediction.score,
                                 strategy_signal=proposal.side.value,
-                                decision=gate_decision,
+                                decision=shadow_gate_decision,
                                 feature_snapshot_id=snapshot_id,
                                 metadata={
-                                    "canary_blocked": canary_blocked,
-                                    "canary_reason": canary_reason,
-                                    "confidence": prediction.confidence,
-                                    "gate_reason": gate_reason,
+                                    "source": "shadow_challenger",
+                                    "confidence": shadow_prediction.confidence,
+                                    "gate_reason": shadow_gate_reason,
                                     "regime": regime_name,
-                                    "score": prediction.score,
+                                    "score": shadow_prediction.score,
                                     "threshold": threshold,
                                     "volatility": volatility_name,
                                 },
                             )
-                        if canary_blocked:
-                            self._record_diag("model_gate_canary_blocked")
-                            log.info(
-                                "model_gate.canary_blocked",
-                                symbol=proposal.symbol,
-                                model_version=prediction.model_version,
-                                score=prediction.score,
-                                threshold=threshold,
-                                reason=canary_reason,
-                            )
-                            return
+                        # Challenger NEVER blocks a live trade — observational only
                     else:
                         log.debug("ml_shadow.no_challenger", symbol=proposal.symbol)
                 except Exception as _ml_exc:
                     log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
+
+                # --- Champion Canary gate: live blocking only when explicitly enabled ---
+                # score_live() returns None when no compatible directional_net_v1 Champion exists.
+                # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
+                if self._settings.MODEL_GATE_CANARY_ENABLED:
+                    try:
+                        live_prediction = self._model_registry.score_live(vec.values)
+                        if live_prediction is not None:
+                            canary_threshold = self._model_gate_threshold(regime_ctx)
+                            canary_gate_decision = (
+                                "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
+                            )
+                            canary_blocked, canary_reason = self._model_gate_canary_blocks(
+                                canary_gate_decision,
+                                canary_threshold,
+                                live_prediction.score,
+                            )
+                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                                await self._trade_journal.record_prediction_event(
+                                    symbol=proposal.symbol,
+                                    interval=_WS_INTERVAL,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    strategy_signal=proposal.side.value,
+                                    decision=canary_gate_decision,
+                                    feature_snapshot_id=snapshot_id,
+                                    metadata={
+                                        "source": "champion_canary",
+                                        "canary_blocked": canary_blocked,
+                                        "canary_reason": canary_reason,
+                                        "confidence": live_prediction.confidence,
+                                        "gate_reason": "canary_gate",
+                                        "threshold": canary_threshold,
+                                    },
+                                )
+                            if canary_blocked:
+                                self._record_diag("model_gate_canary_blocked")
+                                log.info(
+                                    "model_gate.canary_blocked",
+                                    symbol=proposal.symbol,
+                                    model_version=live_prediction.model_version,
+                                    score=live_prediction.score,
+                                    threshold=canary_threshold,
+                                    reason=canary_reason,
+                                )
+                                return
+                        else:
+                            # No compatible Champion → do not block the trade
+                            log.debug("ml_canary.no_compatible_champion", symbol=proposal.symbol)
+                    except Exception as _canary_exc:
+                        log.debug("ml_canary.scoring_failed", symbol=proposal.symbol, error=str(_canary_exc))
 
             # Skip execution if operator paused trading
             if self._trading_paused:
