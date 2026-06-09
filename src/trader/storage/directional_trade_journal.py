@@ -9,17 +9,34 @@ receive the extended implementation without a risky full-file rewrite.
 
 from __future__ import annotations
 
-from datetime import timedelta
+from contextvars import ContextVar
+from datetime import datetime, timedelta
 from typing import Any
 
+import structlog
+
+from trader.domain.models import FeatureVector, RegimeContext, TradeProposal
+from trader.features.source_candle_guard import source_candle_for_feature
 from trader.storage import trade_journal as _base_module
 from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
 from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps, build_directional_outcome
+
+log = structlog.get_logger(__name__)
 
 DEFAULT_TAKER_FEE_BPS = 5.5
 DEFAULT_SPREAD_BPS = 8.0
 DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0
 DEFAULT_FUNDING_BPS = 1.0
+
+_SourceBinding = tuple[str, str, datetime]
+_CURRENT_SOURCE_BINDING: ContextVar[_SourceBinding | None] = ContextVar(
+    "current_training_snapshot_source_candle",
+    default=None,
+)
+
+
+def _normalise_symbol(symbol: str) -> str:
+    return str(symbol).strip().upper()
 
 
 def default_cost_model() -> CostModelBps:
@@ -29,7 +46,6 @@ def default_cost_model() -> CostModelBps:
     per-side slippage, and a small funding buffer. A later configuration wiring
     step may inject symbol-specific values without changing the label formula.
     """
-
     return CostModelBps(
         entry_fee_bps=DEFAULT_TAKER_FEE_BPS,
         exit_fee_bps=DEFAULT_TAKER_FEE_BPS,
@@ -42,6 +58,60 @@ def default_cost_model() -> CostModelBps:
 
 class DirectionalTradeJournal(_BaseTradeJournal):
     """Trade journal with directional, cost-aware ML outcomes."""
+
+    async def record_signal(
+        self,
+        proposal: TradeProposal,
+        feature_vector: FeatureVector | None,
+        regime_context: RegimeContext | None,
+    ) -> None:
+        """Persist a signal and bind its vector to the current async task."""
+
+        binding = source_candle_for_feature(feature_vector.feature_id) if feature_vector is not None else None
+        _CURRENT_SOURCE_BINDING.set(binding)
+        try:
+            await super().record_signal(proposal, feature_vector, regime_context)
+        except Exception:
+            _CURRENT_SOURCE_BINDING.set(None)
+            raise
+
+    async def record_feature_snapshot(
+        self,
+        *,
+        symbol: str,
+        interval: str,
+        candle_open_time: datetime,
+        feature_schema_hash: str,
+        feature_names: list[str],
+        feature_values: list[float],
+    ) -> str:
+        """Reject stale vector-to-candle associations before snapshot persistence."""
+
+        binding = _CURRENT_SOURCE_BINDING.get()
+        try:
+            if binding is not None:
+                expected_symbol, expected_interval, expected_open_time = binding
+                actual = (_normalise_symbol(symbol), str(interval), candle_open_time)
+                if actual != (expected_symbol, expected_interval, expected_open_time):
+                    log.warning(
+                        "trade_journal.feature_snapshot_source_mismatch",
+                        symbol=symbol,
+                        interval=interval,
+                        requested_candle_open_time=candle_open_time,
+                        expected_binding=binding,
+                    )
+                    return ""
+
+            return await super().record_feature_snapshot(
+                symbol=symbol,
+                interval=interval,
+                candle_open_time=candle_open_time,
+                feature_schema_hash=feature_schema_hash,
+                feature_names=feature_names,
+                feature_values=feature_values,
+            )
+        finally:
+            _CURRENT_SOURCE_BINDING.set(None)
 
     async def _ensure_schema(self) -> None:
         """Create the base schema, then migrate directional-label columns."""
