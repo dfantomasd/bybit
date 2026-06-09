@@ -1685,7 +1685,9 @@ class TradingApplication:
                         exchange_order_id = event.order_id
                         if order_link_id is None and exchange_order_id:
                             if self._trade_journal is not None:
-                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(exchange_order_id)
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(
+                                    exchange_order_id
+                                )
                             # If lookup fails, we still process the event but can't tie it to a pending slot
                         if order_link_id is None:
                             # Generate a fallback ID for logging only — never used for pending slot
@@ -1722,7 +1724,7 @@ class TradingApplication:
                                 except Exception as _j_exc:
                                     log.debug("private_ws.order_update_journal_failed", error=str(_j_exc))
                             is_terminal = order_status in _terminal_order_states
-<<<<<<< HEAD
+
                         # Release pending entry slot on terminal — exactly once per order.
                         # Pass the exact order_link_id so only the correct slot is released.
                         # _pending_released is shared with ExecutionUpdateEvent to prevent
@@ -1747,7 +1749,9 @@ class TradingApplication:
                         exchange_order_id = event.order_id
                         if order_link_id is None and exchange_order_id:
                             if self._trade_journal is not None:
-                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(exchange_order_id)
+                                order_link_id = await self._trade_journal.find_order_link_id_by_exchange_order_id(
+                                    exchange_order_id
+                                )
 
                         log.info(
                             "private_ws.execution_fill",
@@ -1764,7 +1768,9 @@ class TradingApplication:
                                 # P0.5: persist to execution_events (nullable proposal/decision)
                                 await self._trade_journal.record_execution_event(
                                     exec_id=event.exec_id,
-                                    order_link_id=order_link_id if order_link_id and not order_link_id.startswith("unknown:") else None,
+                                    order_link_id=order_link_id
+                                    if order_link_id and not order_link_id.startswith("unknown:")
+                                    else None,
                                     exchange_order_id=exchange_order_id,
                                     symbol=event.symbol,
                                     side=event.side.value,
@@ -1776,7 +1782,9 @@ class TradingApplication:
                                     closed_size=event.closed_size if event.closed_size else None,
                                 )
                                 await self._trade_journal.record_order_event(
-                                    order_link_id=order_link_id if order_link_id and not order_link_id.startswith("unknown:") else event.exec_id,
+                                    order_link_id=order_link_id
+                                    if order_link_id and not order_link_id.startswith("unknown:")
+                                    else event.exec_id,
                                     proposal_id=None,
                                     decision_id=None,
                                     symbol=event.symbol,
@@ -1791,13 +1799,19 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_journal_exc),
                                 )
+
                         # P0.3: Release pending entry slot for this order_link_id only.
                         # Use the resolved order_link_id (after reverse lookup), skip "unknown:" prefixes.
                         # Guard against double-release via shared _pending_released set.
-                        if self._execution_engine is not None and order_link_id and not order_link_id.startswith("unknown:"):
+                        if (
+                            self._execution_engine is not None
+                            and order_link_id
+                            and not order_link_id.startswith("unknown:")
+                        ):
                             if order_link_id not in _pending_released:
                                 self._execution_engine.mark_entry_resolved(order_link_id)
                                 _pending_released.add(order_link_id)
+
                         if self._execution_engine is not None:
                             try:
                                 await self._execution_engine.sync_positions()
@@ -1807,6 +1821,7 @@ class TradingApplication:
                                     exec_id=event.exec_id,
                                     error=str(_sync_exc),
                                 )
+
                         if self._bybit_adapter is not None and not self._initial_shadow_mode():
                             try:
                                 await self._bybit_adapter.reconcile()

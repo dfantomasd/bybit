@@ -455,7 +455,9 @@ class BybitAdapter:
                 logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
 
         # Persist to durable state — use order_link_id if available, otherwise generate fallback
-        durable_order_link_id = order_link_id or (f"unknown:{exchange_order_id}" if exchange_order_id else "unknown:no_exchange_id")
+        durable_order_link_id = order_link_id or (
+            f"unknown:{exchange_order_id}" if exchange_order_id else "unknown:no_exchange_id"
+        )
         if self._journal is not None:
             try:
                 await self._journal.upsert_durable_order_state(

@@ -779,15 +779,21 @@ class ExecutionEngine:
             round_trip_fee_pct = entry_fee_pct + exit_fee_pct
             spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
             # P1: Round-trip slippage = entry slippage + exit slippage = 2 * EXPECTED_SLIPPAGE_PCT
-            round_trip_slippage_pct = Decimal("2") * Decimal(str(self._expected_slippage_pct))
+            entry_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            exit_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            round_trip_slippage_pct = entry_slippage_pct + exit_slippage_pct
             funding_pct = Decimal(str(self._funding_buffer_pct))
             safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
             net_edge_pct = (
-                gross_edge_pct - round_trip_fee_pct - spread_pct - round_trip_slippage_pct - funding_pct - safety_margin_pct
+                gross_edge_pct
+                - round_trip_fee_pct
+                - spread_pct
+                - round_trip_slippage_pct
+                - funding_pct
+                - safety_margin_pct
             )
             min_edge = Decimal(str(self._min_net_edge_pct))
 
-            round_trip_slippage_pct = Decimal("2") * Decimal(str(self._expected_slippage_pct))
             log.info(
                 "execution.net_edge_check",
                 symbol=symbol,
@@ -800,6 +806,8 @@ class ExecutionEngine:
                 round_trip_fee_pct=float(round(round_trip_fee_pct, 4)),
                 spread_bps=float(self._max_spread_bps),
                 spread_cost_pct=float(round(spread_pct, 4)),
+                entry_slippage_cost_pct=float(round(entry_slippage_pct, 4)),
+                exit_slippage_cost_pct=float(round(exit_slippage_pct, 4)),
                 round_trip_slippage_cost_pct=float(round(round_trip_slippage_pct, 4)),
                 funding_buffer_pct=float(round(funding_pct, 4)),
                 safety_margin_pct=float(round(safety_margin_pct, 4)),

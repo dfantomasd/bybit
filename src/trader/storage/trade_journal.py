@@ -296,8 +296,11 @@ class TradeJournal:
                 max_adverse_excursion_bps double precision,
                 label integer,
                 resolved_at timestamptz,
+                label_schema_version text DEFAULT 'directional_net_v1',
                 PRIMARY KEY (prediction_id, horizon_minutes)
             );
+            CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema
+                ON prediction_outcomes (label_schema_version);
 
             -- ML model registry
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -1050,6 +1053,7 @@ class TradeJournal:
         max_favorable_excursion_bps: float,
         max_adverse_excursion_bps: float,
         label: int,
+        label_schema_version: str = "directional_net_v1",
     ) -> None:
         """Write or update outcome label for a prediction."""
         await self._execute(
@@ -1057,13 +1061,14 @@ class TradeJournal:
             INSERT INTO prediction_outcomes (
                 prediction_id, horizon_minutes, net_return_bps,
                 max_favorable_excursion_bps, max_adverse_excursion_bps,
-                label, resolved_at
+                label, resolved_at, label_schema_version
             )
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, now())
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, now(), $7)
             ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
                 net_return_bps = EXCLUDED.net_return_bps,
                 label = EXCLUDED.label,
-                resolved_at = now()
+                resolved_at = now(),
+                label_schema_version = EXCLUDED.label_schema_version
             """,
             prediction_id,
             horizon_minutes,
@@ -1071,6 +1076,7 @@ class TradeJournal:
             max_favorable_excursion_bps,
             max_adverse_excursion_bps,
             label,
+            label_schema_version,
         )
 
     async def resolve_outcomes_from_candles(
@@ -1159,6 +1165,7 @@ class TradeJournal:
                 max_favorable_excursion_bps=max_fav,
                 max_adverse_excursion_bps=max_adv,
                 label=label,
+                label_schema_version="directional_net_v1",
             )
             resolved += 1
 
@@ -1228,12 +1235,14 @@ class TradeJournal:
                 WHERE pe.model_version = $1
                   AND po.horizon_minutes = $2
                   AND po.label IS NOT NULL
+                  AND po.label_schema_version = $3
                   AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
                   AND fs.feature_values IS NOT NULL
                 GROUP BY pe.decision
                 """,
                 model_version,
                 horizon_minutes,
+                label_schema_version,
             )
 
             gate: dict[str, Any] = {"model_version": model_version}
@@ -1268,6 +1277,7 @@ class TradeJournal:
                 metrics_raw = model_rows[0].get("metrics")
                 if isinstance(metrics_raw, str):
                     import json
+
                     metrics = json.loads(metrics_raw)
                 else:
                     metrics = metrics_raw or {}
@@ -1409,6 +1419,7 @@ class TradeJournal:
                       AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
                       AND po.horizon_minutes = 15
                       AND po.label IS NOT NULL
+                      AND po.label_schema_version = 'directional_net_v1'
                     GROUP BY pe.decision
                     """,
                     latest_model_version,
@@ -1474,6 +1485,7 @@ class TradeJournal:
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE po.horizon_minutes = 15
                       AND po.label IS NOT NULL
+                      AND po.label_schema_version = 'directional_net_v1'
                       AND pe.model_version = $1
                       AND pe.decision = 'GATE_PASS'
                     ORDER BY pe.created_at ASC
