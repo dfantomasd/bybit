@@ -668,7 +668,7 @@ class TradingApplication:
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
-                trainable = int(diag.get("labelled_samples_15m", 0) or 0)
+                trainable = int(diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)) or 0)
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
@@ -1261,7 +1261,10 @@ class TradingApplication:
         )
 
     async def _refresh_balance(self) -> Decimal:
-        """Fetch current available balance from exchange; fall back to cached value."""
+        """Fetch current available balance from exchange; fall back to cached value.
+
+        Also updates ExposureTracker capital when balance changes.
+        """
         assert self._settings is not None
         has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         if not has_key or self._bybit_adapter is None:
@@ -1274,6 +1277,7 @@ class TradingApplication:
             if available <= Decimal("0") and balance.wallet_balance > Decimal("0"):
                 available = balance.wallet_balance
             if available > Decimal("0"):
+                old_capital = self._cached_balance
                 self._cached_balance = available
                 self._balance_refreshed_at = datetime.now(tz=UTC)
                 log.info(
@@ -1281,6 +1285,15 @@ class TradingApplication:
                     available_usd=str(available),
                     wallet_usd=str(balance.wallet_balance),
                 )
+                # P1: Update ExposureTracker capital so exposure_pct is always current
+                if self._exposure_tracker is not None and available != old_capital:
+                    self._exposure_tracker.update_capital(available)
+                    log.debug(
+                        "exposure.capital_updated",
+                        old_capital=old_capital,
+                        new_capital=available,
+                        total_exposure_pct=str(self._exposure_tracker.total_exposure_pct),
+                    )
             return self._cached_balance
         except Exception as exc:
             log.warning("balance.refresh_failed", error=str(exc))
@@ -1648,8 +1661,18 @@ class TradingApplication:
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
                     if isinstance(event, BalanceUpdateEvent) and event.available_balance > Decimal("0"):
+                        old_capital = self._cached_balance
                         self._cached_balance = event.available_balance
                         self._balance_refreshed_at = datetime.now(tz=UTC)
+                        # P1: Update ExposureTracker capital from WS balance push
+                        if self._exposure_tracker is not None and event.available_balance != old_capital:
+                            self._exposure_tracker.update_capital(event.available_balance)
+                            log.debug(
+                                "exposure.capital_updated_ws",
+                                old_capital=old_capital,
+                                new_capital=event.available_balance,
+                                total_exposure_pct=str(self._exposure_tracker.total_exposure_pct),
+                            )
                         log.debug(
                             "private_ws.balance_update",
                             available=str(event.available_balance),
@@ -1922,7 +1945,48 @@ class TradingApplication:
                     except Exception as exc:
                         log.debug("risk_monitor.balance_update_failed", error=str(exc))
 
-                # Check WS freshness and alert if stale
+                # P1: Fetch daily realized PnL and feed to RiskManager for daily loss limit tracking
+                if self._trade_journal is not None and self._risk_manager is not None:
+                    try:
+                        net_results = await self._trade_journal.get_daily_net_results()
+                        net_pnl = Decimal(str(net_results.get("net_pnl_usd", 0)))
+                        # Replace daily_pnl entirely (get_daily_net_results returns today's total)
+                        # RiskManager.update_daily_pnl is additive, so we track the delta
+                        old_daily_pnl = self._risk_manager.daily_pnl
+                        delta = net_pnl - old_daily_pnl
+                        if delta != Decimal("0"):
+                            await self._risk_manager.update_daily_pnl(delta)
+                            log.debug("risk_monitor.daily_pnl_synced", old=old_daily_pnl, new=net_pnl, delta=delta)
+                    except Exception as exc:
+                        log.debug("risk_monitor.daily_pnl_sync_failed", error=str(exc))
+
+                # P1: Evaluate circuit breakers
+                if self._risk_manager is not None and self._risk_manager._breakers is not None:
+                    breakers = self._risk_manager._breakers
+                    # Daily loss limit
+                    await breakers.check_daily_loss(
+                        self._risk_manager.daily_pnl,
+                        self._cached_balance,
+                    )
+                    # Max drawdown
+                    await breakers.check_drawdown(self._risk_manager._drawdown.drawdown_pct)
+                    # WebSocket staleness
+                    if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
+                        age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
+                        await breakers.check_websocket_staleness(age)
+                    # REST error rate (track from adapter if available)
+                    if self._bybit_adapter is not None and hasattr(self._bybit_adapter, "_rest_errors_last_minute"):
+                        await breakers.check_rest_error_rate(self._bybit_adapter._rest_errors_last_minute)
+                    # Feature quality
+                    if self._feature_pipeline is not None and hasattr(self._feature_pipeline, "quality_score"):
+                        await breakers.check_feature_quality(self._feature_pipeline.quality_score)
+                    # NTP drift
+                    if self._bybit_adapter is not None and hasattr(self._bybit_adapter, "ntp_drift_seconds"):
+                        await breakers.check_ntp_drift(self._bybit_adapter.ntp_drift_seconds)
+                    # Auto-reset eligible breakers
+                    await breakers.reset_all_auto()
+
+                # Check WS freshness and alert if stale (legacy logging)
                 if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                     age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                     if age > 60.0:

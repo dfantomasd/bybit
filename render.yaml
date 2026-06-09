@@ -93,6 +93,15 @@ services:
         value: "1000"
       - key: MODEL_AUTO_TRAIN_CHECK_SECONDS
         value: "300"
+      # Auto-promotion (disabled by default — requires explicit opt-in)
+      - key: MODEL_AUTO_PROMOTE_ENABLED
+        value: "false"
+      - key: MODEL_AUTO_PROMOTE_CHECK_SECONDS
+        value: "600"
+      - key: MODEL_AUTO_PROMOTE_MIN_SIGNALS
+        value: "50"
+      - key: MODEL_AUTO_PROMOTE_MIN_LIFT_BPS
+        value: "1.0"
       - key: MODEL_SHADOW_GATE_ENABLED
         value: "true"
       - key: MODEL_SHADOW_GATE_THRESHOLD

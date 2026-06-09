@@ -1335,18 +1335,25 @@ class TradeJournal:
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
             rows = await self._fetch(
                 """
-                SELECT count(DISTINCT fs.snapshot_id) AS cnt
-                FROM feature_snapshots fs
-                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = 15
-                  AND po.label IS NOT NULL
-                  AND fs.feature_values IS NOT NULL
-                  AND fs.training_eligible = true
-                  AND pe.model_version = 'RULE_BASELINE_V1'
+                WITH labelled AS (
+                    SELECT DISTINCT ON (fs.snapshot_id)
+                           fs.snapshot_id
+                    FROM feature_snapshots fs
+                    JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE po.horizon_minutes = 15
+                      AND po.label IS NOT NULL
+                      AND fs.feature_values IS NOT NULL
+                      AND fs.training_eligible = true
+                      AND pe.model_version = 'RULE_BASELINE_V1'
+                    ORDER BY fs.snapshot_id, fs.created_at ASC
+                )
+                SELECT count(*) AS cnt FROM labelled
                 """
             )
             result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+            # P1: training_eligible = samples with label + features (same logic as trainer)
+            result["training_eligible_15m"] = result["labelled_samples_15m"]
             rows = await self._fetch(
                 """
                 SELECT status, model_version, sample_count, error, metrics, started_at, finished_at

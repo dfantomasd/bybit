@@ -675,6 +675,18 @@ class ExecutionEngine:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
 
         # 4. Risk evaluation ───────────────────────────────────────────
+        # Extract spread and ATR for RiskManager sizing
+        spread: Decimal | None = None
+        atr: Decimal | None = None
+        if regime_context is not None and regime_context.spread_bps is not None:
+            spread = Decimal(str(regime_context.spread_bps)) / Decimal("10000")
+        if feature_vector is not None:
+            # ATR is computed as atr_14_pct in feature pipeline (ATR / price as fraction)
+            try:
+                idx = feature_vector.feature_names.index("atr_14_pct")
+                atr = Decimal(str(feature_vector.values[idx]))
+            except (ValueError, IndexError):
+                pass
         try:
             decision = await self._risk_manager.evaluate(
                 proposal=proposal,
@@ -683,6 +695,8 @@ class ExecutionEngine:
                 instrument_info=instrument_info,
                 feature_vector=feature_vector,
                 regime_context=regime_context,
+                spread=spread,
+                atr=atr,
             )
         except Exception as exc:
             log.error(
@@ -764,14 +778,16 @@ class ExecutionEngine:
             exit_fee_pct = taker * Decimal("100")
             round_trip_fee_pct = entry_fee_pct + exit_fee_pct
             spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
-            slippage_pct = Decimal(str(self._expected_slippage_pct))
+            # P1: Round-trip slippage = entry slippage + exit slippage = 2 * EXPECTED_SLIPPAGE_PCT
+            round_trip_slippage_pct = Decimal("2") * Decimal(str(self._expected_slippage_pct))
             funding_pct = Decimal(str(self._funding_buffer_pct))
             safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
             net_edge_pct = (
-                gross_edge_pct - round_trip_fee_pct - spread_pct - slippage_pct - funding_pct - safety_margin_pct
+                gross_edge_pct - round_trip_fee_pct - spread_pct - round_trip_slippage_pct - funding_pct - safety_margin_pct
             )
             min_edge = Decimal(str(self._min_net_edge_pct))
 
+            round_trip_slippage_pct = Decimal("2") * Decimal(str(self._expected_slippage_pct))
             log.info(
                 "execution.net_edge_check",
                 symbol=symbol,
@@ -784,7 +800,7 @@ class ExecutionEngine:
                 round_trip_fee_pct=float(round(round_trip_fee_pct, 4)),
                 spread_bps=float(self._max_spread_bps),
                 spread_cost_pct=float(round(spread_pct, 4)),
-                slippage_cost_pct=float(round(slippage_pct, 4)),
+                round_trip_slippage_cost_pct=float(round(round_trip_slippage_pct, 4)),
                 funding_buffer_pct=float(round(funding_pct, 4)),
                 safety_margin_pct=float(round(safety_margin_pct, 4)),
                 net_edge_pct=float(round(net_edge_pct, 4)),
