@@ -413,27 +413,41 @@ class BybitAdapter:
             OrderStatus.EXPIRED,
         }
 
-        order_link_id = getattr(event, "order_link_id", None)
+        raw_order_link_id = getattr(event, "order_link_id", None)
         exchange_order_id = getattr(event, "order_id", None)
         order_status: OrderStatus | None = getattr(event, "status", None) or getattr(event, "order_status", None)
 
         if order_status is None:
             return False
 
-        # P0: Reverse lookup if order_link_id is missing
+        # Normalize order_link_id per business rules:
+        # 1. If payload has orderLinkId -> str, strip, validate non-empty
+        # 2. If missing but exchange orderId exists -> lookup via journal
+        # 3. If still no local order_link_id -> skip idempotency updates
+        order_link_id: str | None = None
+
+        if raw_order_link_id is not None:
+            candidate = str(raw_order_link_id).strip()
+            if candidate:
+                order_link_id = candidate
+            else:
+                logger.warning("handle_order_update.empty_order_link_id", exchange_order_id=exchange_order_id)
+
         if order_link_id is None and exchange_order_id:
             if self._journal is not None:
-                order_link_id = await self._journal.find_order_link_id_by_exchange_order_id(exchange_order_id)
-            # If lookup fails, we still process the event but can't tie it to a pending slot
-
-        # If we still don't have an order_link_id, we can't update idempotency state
-        # but we can still log/persist to durable state if journal is available
-        has_order_link_id = order_link_id is not None
+                lookup = await self._journal.find_order_link_id_by_exchange_order_id(str(exchange_order_id))
+                if lookup and str(lookup).strip():
+                    order_link_id = str(lookup).strip()
+                else:
+                    logger.warning(
+                        "handle_order_update.reverse_lookup_failed",
+                        exchange_order_id=exchange_order_id,
+                    )
 
         is_terminal = order_status in _terminal_states
 
-        # Update in-memory idempotency (only if we have order_link_id)
-        if has_order_link_id:
+        # Update in-memory idempotency (only if we have valid order_link_id)
+        if order_link_id is not None:
             try:
                 current = await self._idempotency.get_state(order_link_id)
                 if current is not None and current not in _terminal_states:
