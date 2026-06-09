@@ -41,12 +41,11 @@ def test_snapshot_source_guard_rejects_mismatch_at_runtime() -> None:
             self.called = True
             return [{"snapshot_id": "snapshot-1"}]
 
-    source_time = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
-    journal = FakeJournal()
-    _CURRENT_SOURCE_BINDING.set(("BTCUSDT", "1", source_time))
-
-    snapshot_id = asyncio.run(
-        journal.record_feature_snapshot(
+    async def exercise() -> tuple[str, bool, object]:
+        source_time = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
+        journal = FakeJournal()
+        _CURRENT_SOURCE_BINDING.set(("BTCUSDT", "1", source_time))
+        snapshot_id = await journal.record_feature_snapshot(
             symbol="BTCUSDT",
             interval="1",
             candle_open_time=source_time + timedelta(minutes=1),
@@ -54,11 +53,12 @@ def test_snapshot_source_guard_rejects_mismatch_at_runtime() -> None:
             feature_names=["rsi"],
             feature_values=[0.5],
         )
-    )
+        return snapshot_id, journal.called, _CURRENT_SOURCE_BINDING.get()
 
+    snapshot_id, called, binding = asyncio.run(exercise())
     assert snapshot_id == ""
-    assert journal.called is False
-    assert _CURRENT_SOURCE_BINDING.get() is None
+    assert called is False
+    assert binding is None
 
 
 def test_snapshot_source_guard_allows_exact_candle_at_runtime() -> None:
@@ -73,12 +73,11 @@ def test_snapshot_source_guard_allows_exact_candle_at_runtime() -> None:
             self.called = True
             return [{"snapshot_id": "snapshot-1"}]
 
-    source_time = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
-    journal = FakeJournal()
-    _CURRENT_SOURCE_BINDING.set(("BTCUSDT", "1", source_time))
-
-    snapshot_id = asyncio.run(
-        journal.record_feature_snapshot(
+    async def exercise() -> tuple[str, bool, object]:
+        source_time = datetime(2026, 6, 9, 12, 0, tzinfo=UTC)
+        journal = FakeJournal()
+        _CURRENT_SOURCE_BINDING.set(("BTCUSDT", "1", source_time))
+        snapshot_id = await journal.record_feature_snapshot(
             symbol="BTCUSDT",
             interval="1",
             candle_open_time=source_time,
@@ -86,8 +85,9 @@ def test_snapshot_source_guard_allows_exact_candle_at_runtime() -> None:
             feature_names=["rsi"],
             feature_values=[0.5],
         )
-    )
+        return snapshot_id, journal.called, _CURRENT_SOURCE_BINDING.get()
 
+    snapshot_id, called, binding = asyncio.run(exercise())
     assert snapshot_id == "snapshot-1"
-    assert journal.called is True
-    assert _CURRENT_SOURCE_BINDING.get() is None
+    assert called is True
+    assert binding is None
