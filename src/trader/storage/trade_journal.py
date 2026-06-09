@@ -849,6 +849,7 @@ class TradeJournal:
             FROM durable_order_state
             WHERE state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
               AND updated_at > now() - interval '24 hours'
+              AND order_link_id NOT LIKE 'unknown:%'
             ORDER BY created_at DESC
             """
         )

@@ -274,8 +274,9 @@ class ExecutionEngine:
 
         Empty and duplicate IDs are silently discarded. Count is synced
         from the set after restoration.
+        IDs starting with 'unknown:' are excluded to prevent phantom recovery.
         """
-        valid_ids = [oid for oid in order_link_ids if oid]
+        valid_ids = [oid for oid in order_link_ids if oid and not str(oid).startswith("unknown:")]
         unique_ids = sorted(set(valid_ids))
         for oid in unique_ids:
             self._pending_entry_order_link_ids.add(oid)
@@ -293,11 +294,12 @@ class ExecutionEngine:
 
         Empty and duplicate IDs are silently discarded. Count is synced
         from the set after restoration.
+        IDs starting with 'unknown:' are excluded to prevent phantom recovery.
         """
         seen: set[str] = set()
         for rec in records:
             oid = str(rec.get("order_link_id", "")).strip()
-            if not oid or oid in seen:
+            if not oid or oid in seen or oid.startswith("unknown:"):
                 continue
             seen.add(oid)
             symbol = str(rec.get("symbol", ""))
