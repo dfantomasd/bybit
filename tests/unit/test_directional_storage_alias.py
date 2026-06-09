@@ -22,5 +22,5 @@ def test_snapshot_source_guard_rejects_mismatch_before_write() -> None:
 
     source = inspect.getsource(DirectionalTradeJournal.record_feature_snapshot)
     assert "feature_snapshot_source_mismatch" in source
-    assert "return \"\"" in source
+    assert 'return ""' in source
     assert "_CURRENT_SOURCE_BINDING.set(None)" in source
