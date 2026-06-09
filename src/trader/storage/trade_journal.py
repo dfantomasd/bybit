@@ -628,12 +628,14 @@ class TradeJournal:
         """Return order_link_ids with non-terminal status (CREATED_LOCAL or SUBMITTING).
 
         Called at startup to restore in-flight entry slots.
+        Excludes technical 'unknown:*' IDs.
         """
         rows = await self._fetch(
             """
             SELECT order_link_id
             FROM order_events
             WHERE status IN ('CREATED_LOCAL', 'SUBMITTING')
+              AND order_link_id NOT LIKE 'unknown:%'
             ORDER BY created_at ASC
             """
         )
@@ -849,6 +851,7 @@ class TradeJournal:
             FROM durable_order_state
             WHERE state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
               AND updated_at > now() - interval '24 hours'
+              AND order_link_id NOT LIKE 'unknown:%'
             ORDER BY created_at DESC
             """
         )
@@ -861,7 +864,8 @@ class TradeJournal:
         """Reverse lookup: find order_link_id by exchange_order_id.
 
         Searches durable_order_state first (authoritative), then order_events as fallback.
-        Returns None if not found.
+        Excludes technical 'unknown:*' IDs to avoid false-positive correlation.
+        Returns None if not found or if only unknown IDs exist.
         """
         if not self.is_enabled or not exchange_order_id:
             return None
@@ -873,13 +877,16 @@ class TradeJournal:
                 SELECT order_link_id
                 FROM durable_order_state
                 WHERE exchange_order_id = $1
+                  AND order_link_id NOT LIKE 'unknown:%'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 exchange_order_id,
             )
             if rows:
-                return str(rows[0]["order_link_id"])
+                candidate = str(rows[0]["order_link_id"]).strip()
+                if candidate and not candidate.startswith("unknown:"):
+                    return candidate
 
             # Fallback to order_events
             rows = await self._fetch(
@@ -887,13 +894,16 @@ class TradeJournal:
                 SELECT order_link_id
                 FROM order_events
                 WHERE exchange_order_id = $1
+                  AND order_link_id NOT LIKE 'unknown:%'
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
                 exchange_order_id,
             )
             if rows:
-                return str(rows[0]["order_link_id"])
+                candidate = str(rows[0]["order_link_id"]).strip()
+                if candidate and not candidate.startswith("unknown:"):
+                    return candidate
 
             return None
         except Exception as exc:
@@ -1201,7 +1211,8 @@ class TradeJournal:
     ) -> dict[str, Any]:
         """Return shadow gate statistics for a specific model version.
 
-        Filters by exact model_version, horizon_minutes, and label_schema_version.
+        Filters by exact model_version, horizon_minutes, label_schema_version,
+        and feature_schema_hash (to exclude incompatible feature snapshots).
         Only includes resolved outcomes with GATE_PASS/GATE_BLOCK decisions.
         """
         if not self.is_enabled:
@@ -1222,6 +1233,15 @@ class TradeJournal:
             if model_rows:
                 feature_schema_hash = model_rows[0].get("feature_schema_hash", "") or ""
 
+            # Fail-safe: if the model has no feature schema hash, don't mix incompatible snapshots
+            if not feature_schema_hash:
+                log.warning(
+                    "trade_journal.shadow_gate_stats_no_schema_hash",
+                    model_version=model_version,
+                    message="Model has no feature_schema_hash; returning empty stats to avoid mixing incompatible snapshots",
+                )
+                return {"model_version": model_version, "feature_schema_hash": ""}
+
             gate_rows = await self._fetch(
                 """
                 SELECT
@@ -1238,11 +1258,13 @@ class TradeJournal:
                   AND po.label_schema_version = $3
                   AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
                   AND fs.feature_values IS NOT NULL
+                  AND fs.feature_schema_hash = $4
                 GROUP BY pe.decision
                 """,
                 model_version,
                 horizon_minutes,
                 label_schema_version,
+                feature_schema_hash,
             )
 
             gate: dict[str, Any] = {"model_version": model_version}
