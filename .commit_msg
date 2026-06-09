@@ -1,0 +1,12 @@
+fix(training): make eligible feature snapshots idempotent
+
+- Add partial unique index `idx_feature_snapshots_unique_eligible` on
+  (symbol, interval, candle_open_time, feature_schema_hash) WHERE training_eligible=true
+  in both initial schema creation and migration path
+- Update `record_feature_snapshot()` to use ON CONFLICT ... WHERE training_eligible = true
+  DO UPDATE to upsert feature_names/feature_values and return existing snapshot_id
+- Extend audit_repair_training_data.py to detect and invalidate duplicate snapshots
+  (same symbol, interval, candle_open_time, feature_schema_hash) by marking them
+  training_eligible=false with invalid_reason='duplicate_snapshot_same_candle'
+- Keeps the first (oldest) snapshot per group as eligible, invalidates extras
+- No dead scaffold files (snapshot_idempotency.py, snapshot_write_idempotency.py) exist
