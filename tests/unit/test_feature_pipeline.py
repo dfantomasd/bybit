@@ -123,7 +123,7 @@ class TestFeaturePipeline:
         vec = pipeline.compute("BTCUSDT", "1")
 
         assert vec is not None
-        latest = store.confirmed("BTCUSDT", "1", limit=1)[-1]
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
         assert source_candle_for_feature(vec.feature_id) == ("BTCUSDT", "1", latest.open_time)
 
     async def test_source_guard_rejects_cached_vector_after_new_candle(self):
@@ -133,7 +133,7 @@ class TestFeaturePipeline:
         assert vec is not None
         assert pipeline.latest("BTCUSDT", "1") is vec
 
-        latest = store.confirmed("BTCUSDT", "1", limit=1)[-1]
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
         store.add(
             "BTCUSDT",
             "1",
