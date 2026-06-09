@@ -193,3 +193,77 @@ class TestShadowGateStatsFeatureSchemaFilter:
         assert captured_params["args"][3] == "abc123"
         # Verify the SQL uses $4 for the schema hash
         assert "fs.feature_schema_hash = $4" in captured_params["query"]
+
+
+class TestReverseLookupExcludesUnknown:
+    """Test that find_order_link_id_by_exchange_order_id() rejects unknown:* IDs."""
+
+    def test_durable_rejects_unknown(self) -> None:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        async def mock_fetch(query, *args):
+            if "durable_order_state" in query:
+                return [{"order_link_id": "unknown:123"}]
+            if "order_events" in query:
+                return [{"order_link_id": "valid-fallback-id"}]
+            return []
+
+        journal._fetch = mock_fetch
+
+        result = asyncio.run(journal.find_order_link_id_by_exchange_order_id("exch-123"))
+        # Should skip unknown and fall back to order_events
+        assert result == "valid-fallback-id"
+
+    def test_fallback_rejects_unknown(self) -> None:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        async def mock_fetch(query, *args):
+            if "durable_order_state" in query:
+                return []
+            if "order_events" in query:
+                return [{"order_link_id": "unknown:456"}]
+            return []
+
+        journal._fetch = mock_fetch
+
+        result = asyncio.run(journal.find_order_link_id_by_exchange_order_id("exch-456"))
+        assert result is None
+
+    def test_returns_real_local_id(self) -> None:
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        async def mock_fetch(query, *args):
+            if "durable_order_state" in query:
+                return [{"order_link_id": "local-abc-123"}]
+            return []
+
+        journal._fetch = mock_fetch
+
+        result = asyncio.run(journal.find_order_link_id_by_exchange_order_id("exch-789"))
+        assert result == "local-abc-123"
+
+
+class TestLoadPendingFromDbExcludesUnknown:
+    """Test that load_pending_from_db() SQL contains the unknown:* filter."""
+
+    def test_sql_contains_unknown_filter(self) -> None:
+        import inspect
+
+        src = inspect.getsource(TradeJournal.load_pending_from_db)
+        assert "order_link_id NOT LIKE 'unknown:%'" in src
+        assert re.search(r"WHERE.*order_link_id NOT LIKE 'unknown:%'", src, re.DOTALL)

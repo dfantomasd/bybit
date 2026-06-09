@@ -628,12 +628,14 @@ class TradeJournal:
         """Return order_link_ids with non-terminal status (CREATED_LOCAL or SUBMITTING).
 
         Called at startup to restore in-flight entry slots.
+        Excludes technical 'unknown:*' IDs.
         """
         rows = await self._fetch(
             """
             SELECT order_link_id
             FROM order_events
             WHERE status IN ('CREATED_LOCAL', 'SUBMITTING')
+              AND order_link_id NOT LIKE 'unknown:%'
             ORDER BY created_at ASC
             """
         )
@@ -862,7 +864,8 @@ class TradeJournal:
         """Reverse lookup: find order_link_id by exchange_order_id.
 
         Searches durable_order_state first (authoritative), then order_events as fallback.
-        Returns None if not found.
+        Excludes technical 'unknown:*' IDs to avoid false-positive correlation.
+        Returns None if not found or if only unknown IDs exist.
         """
         if not self.is_enabled or not exchange_order_id:
             return None
@@ -874,13 +877,16 @@ class TradeJournal:
                 SELECT order_link_id
                 FROM durable_order_state
                 WHERE exchange_order_id = $1
+                  AND order_link_id NOT LIKE 'unknown:%'
                 ORDER BY updated_at DESC
                 LIMIT 1
                 """,
                 exchange_order_id,
             )
             if rows:
-                return str(rows[0]["order_link_id"])
+                candidate = str(rows[0]["order_link_id"]).strip()
+                if candidate and not candidate.startswith("unknown:"):
+                    return candidate
 
             # Fallback to order_events
             rows = await self._fetch(
@@ -888,13 +894,16 @@ class TradeJournal:
                 SELECT order_link_id
                 FROM order_events
                 WHERE exchange_order_id = $1
+                  AND order_link_id NOT LIKE 'unknown:%'
                 ORDER BY created_at DESC
                 LIMIT 1
                 """,
                 exchange_order_id,
             )
             if rows:
-                return str(rows[0]["order_link_id"])
+                candidate = str(rows[0]["order_link_id"]).strip()
+                if candidate and not candidate.startswith("unknown:"):
+                    return candidate
 
             return None
         except Exception as exc:
