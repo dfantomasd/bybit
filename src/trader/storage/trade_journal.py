@@ -264,10 +264,18 @@ class TradeJournal:
                 candle_open_time timestamptz NOT NULL,
                 feature_schema_hash text NOT NULL,
                 feature_names jsonb NOT NULL,
-                feature_values jsonb NOT NULL
+                feature_values jsonb NOT NULL,
+                training_eligible boolean NOT NULL DEFAULT true,
+                invalid_reason text,
+                invalidated_at timestamptz
             );
             CREATE INDEX IF NOT EXISTS idx_feature_snapshots_symbol_time
                 ON feature_snapshots (symbol, created_at DESC);
+            -- Partial unique index for idempotent eligible snapshots only.
+            -- Old duplicate rows are marked training_eligible=false before this index is created.
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                WHERE training_eligible = true;
 
             -- ML prediction events (shadow scoring even when live decisions disabled)
             CREATE TABLE IF NOT EXISTS prediction_events (
@@ -390,6 +398,11 @@ class TradeJournal:
                     ADD COLUMN IF NOT EXISTS invalid_reason text;
                 ALTER TABLE feature_snapshots
                     ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+                -- Partial unique index for idempotent eligible snapshots only.
+                -- Old duplicate rows are marked training_eligible=false before this index is created.
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                    WHERE training_eligible = true;
             """)
 
     async def record_signal(
@@ -1002,7 +1015,12 @@ class TradeJournal:
         feature_names: list[str],
         feature_values: list[float],
     ) -> str:
-        """Write feature vector snapshot; return snapshot_id."""
+        """Write feature vector snapshot; return snapshot_id.
+
+        Idempotent: returns existing snapshot_id for the same
+        (symbol, interval, candle_open_time, feature_schema_hash) tuple
+        if training_eligible=true (partial unique index).
+        """
         rows = await self._fetch(
             """
             INSERT INTO feature_snapshots (
@@ -1010,6 +1028,11 @@ class TradeJournal:
                 feature_schema_hash, feature_names, feature_values
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+            ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)
+            WHERE training_eligible = true
+            DO UPDATE SET
+                feature_names = EXCLUDED.feature_names,
+                feature_values = EXCLUDED.feature_values
             RETURNING snapshot_id
             """,
             symbol,
