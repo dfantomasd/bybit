@@ -14,6 +14,7 @@ from typing import Any
 
 import structlog
 
+from trader.domain.models import FeatureVector
 from trader.features import pipeline as _pipeline_module
 from trader.features.pipeline import FeaturePipeline as _BaseFeaturePipeline
 
@@ -60,7 +61,7 @@ def source_candle_for_feature(feature_id: Any) -> _SourceBinding | None:
 class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
     """Feature pipeline that rejects stale cached vectors fail-closed."""
 
-    def compute(self, symbol: str, interval: str):  # type: ignore[no-untyped-def]
+    def compute(self, symbol: str, interval: str) -> FeatureVector | None:
         vec = super().compute(symbol, interval)
         if vec is None:
             return None
@@ -82,7 +83,7 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
         )
         return vec
 
-    def latest(self, symbol: str, interval: str):  # type: ignore[no-untyped-def]
+    def latest(self, symbol: str, interval: str) -> FeatureVector | None:
         vec = super().latest(symbol, interval)
         if vec is None:
             return None
