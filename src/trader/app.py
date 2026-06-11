@@ -1091,6 +1091,7 @@ class TradingApplication:
                 self._execution_engine._max_concurrent_pending if self._execution_engine is not None else None
             ),
             "max_same_side": self._execution_engine._max_same_side if self._execution_engine is not None else None,
+            "max_positions": self._settings.MAX_POSITIONS if self._settings is not None else None,
             "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
             "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
             "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
@@ -1129,6 +1130,12 @@ class TradingApplication:
             if self._execution_engine is not None:
                 self._execution_engine._max_same_side = ivalue
             return f"Max same-side positions set to {ivalue}"
+        if key == "max_positions":
+            ivalue = int(value)
+            if not 1 <= ivalue <= 10:
+                raise ValueError("max_positions must be 1..10")
+            self._settings.MAX_POSITIONS = ivalue
+            return f"Max simultaneous positions set to {ivalue}"
         if key == "price_cap":
             fvalue = float(value)
             if fvalue < 0 or fvalue > 100_000:
@@ -1142,8 +1149,12 @@ class TradingApplication:
             if not 1 <= ivalue <= self._settings.SCREENER_WIDE_MAX_SYMBOLS:
                 raise ValueError(f"feature_symbols must be 1..{self._settings.SCREENER_WIDE_MAX_SYMBOLS}")
             self._settings.SCREENER_FEATURE_MAX_SYMBOLS = ivalue
+            if self._settings.SCREENER_EXECUTION_CANDIDATES > ivalue:
+                self._settings.SCREENER_EXECUTION_CANDIDATES = ivalue
             if self._screener is not None:
                 self._screener._feature_max = ivalue
+                if self._screener._exec_candidates > ivalue:
+                    self._screener._exec_candidates = ivalue
             return f"Feature symbols set to {ivalue}"
         if key == "exec_candidates":
             ivalue = int(value)

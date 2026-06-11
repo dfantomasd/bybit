@@ -191,8 +191,10 @@ class TelegramMonitorBot:
 
         # Pending confirmations: chat_id → (action_name, coroutine_factory)
         self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
-        # Chats currently in the "enter custom limit value" flow
-        self._awaiting_custom_limit: set[int] = set()
+        # Chats currently in the "enter custom limit value" flow.
+        # None means the generic "key value" form; otherwise store the key that
+        # should receive the next numeric message from this chat.
+        self._awaiting_custom_limit: dict[int, str | None] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -491,12 +493,16 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("Price ≤25", callback_data="limit:price_cap:25"),
             ],
             [
-                InlineKeyboardButton("Feature 10", callback_data="limit:feature_symbols:10"),
-                InlineKeyboardButton("Feature 20", callback_data="limit:feature_symbols:20"),
+                InlineKeyboardButton("Изучать 10 монет", callback_data="limit:feature_symbols:10"),
+                InlineKeyboardButton("Изучать 20 монет", callback_data="limit:feature_symbols:20"),
             ],
             [
-                InlineKeyboardButton("Exec 5", callback_data="limit:exec_candidates:5"),
-                InlineKeyboardButton("Exec 10", callback_data="limit:exec_candidates:10"),
+                InlineKeyboardButton("Кандидатов 5", callback_data="limit:exec_candidates:5"),
+                InlineKeyboardButton("Кандидатов 10", callback_data="limit:exec_candidates:10"),
+            ],
+            [
+                InlineKeyboardButton("✏️ Изучать монет числом", callback_data="limit:custom:feature_symbols"),
+                InlineKeyboardButton("✏️ Сделок одновременно числом", callback_data="limit:custom:max_positions"),
             ],
             [InlineKeyboardButton("✏️ Своё значение", callback_data="limit:custom")],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
@@ -1888,7 +1894,7 @@ class TelegramMonitorBot:
         if len(args) != 2 or self._controller.set_runtime_setting is None:
             await self._reply(
                 update,
-                "Формат: /limits entries|pending|same_side|price_cap|feature_symbols|exec_candidates N\n"
+                "Формат: /limits entries|pending|same_side|max_positions|price_cap|feature_symbols|exec_candidates N\n"
                 "Фильтр модели: /limits model_gate on|off, /limits model_gate_threshold 0.60",
             )
             return
@@ -2110,20 +2116,31 @@ class TelegramMonitorBot:
         cid = self._chat_id(update)
         if cid is None or cid not in self._awaiting_custom_limit:
             return
-        self._awaiting_custom_limit.discard(cid)
+        expected_key = self._awaiting_custom_limit.pop(cid)
         if self._controller is None or self._controller.set_runtime_setting is None:
             await self._reply(update, "Runtime-настройки сейчас недоступны.")
             return
         text = (update.effective_message.text or "").strip() if update.effective_message else ""
-        parts = text.split()
-        if len(parts) != 2:
-            await self._reply(
-                update,
-                "Не понял. Формат: <code>ключ значение</code>, например <code>entries 3</code>.",
-                reply_markup=self._limits_menu(),
-            )
-            return
-        key, raw_value = parts[0].lower(), parts[1]
+        if expected_key is None:
+            parts = text.split()
+            if len(parts) != 2:
+                await self._reply(
+                    update,
+                    "Не понял. Формат: <code>ключ значение</code>, например <code>entries 3</code>.",
+                    reply_markup=self._limits_menu(),
+                )
+                return
+            key, raw_value = parts[0].lower(), parts[1]
+        else:
+            parts = text.split()
+            if len(parts) != 1:
+                await self._reply(
+                    update,
+                    "Отправьте только число, например <code>12</code>.",
+                    reply_markup=self._limits_menu(),
+                )
+                return
+            key, raw_value = expected_key, parts[0]
         try:
             if key in {"price_cap", "model_gate_threshold"}:
                 value: Any = float(raw_value)
@@ -2376,20 +2393,33 @@ class TelegramMonitorBot:
         if self._controller is None or self._controller.set_runtime_setting is None:
             await self._button_reply(update, "Runtime-настройки сейчас недоступны.", reply_markup=self._main_menu())
             return
-        if payload == "custom":
+        if payload == "custom" or payload.startswith("custom:"):
             cid = self._chat_id(update)
+            requested_key = payload.split(":", maxsplit=1)[1] if ":" in payload else None
             if cid is not None:
-                self._awaiting_custom_limit.add(cid)
-            await self._button_reply(
-                update,
-                "✏️ <b>Своё значение лимита</b>\n\n"
-                "Отправьте сообщение в формате: <code>ключ значение</code>\n"
-                "Например: <code>entries 3</code>, <code>price_cap 15.5</code>, "
-                "<code>model_gate_threshold 0.6</code>\n\n"
-                "Доступные ключи: entries, pending, same_side, price_cap, "
-                "feature_symbols, exec_candidates, model_gate, model_gate_threshold",
-                reply_markup=self._limits_menu(),
-            )
+                self._awaiting_custom_limit[cid] = requested_key
+            if requested_key == "feature_symbols":
+                text = (
+                    "✏️ <b>Сколько монет изучать?</b>\n\n"
+                    "Отправьте одно число. Бот сам возьмёт топ монет по сканеру.\n"
+                    "Например: <code>12</code> или <code>30</code>."
+                )
+            elif requested_key == "max_positions":
+                text = (
+                    "✏️ <b>Сколько сделок держать одновременно?</b>\n\n"
+                    "Отправьте одно число. Это ограничит максимум открытых позиций.\n"
+                    "Например: <code>1</code>, <code>2</code> или <code>4</code>."
+                )
+            else:
+                text = (
+                    "✏️ <b>Своё значение лимита</b>\n\n"
+                    "Отправьте сообщение в формате: <code>ключ значение</code>\n"
+                    "Например: <code>entries 3</code>, <code>price_cap 15.5</code>, "
+                    "<code>model_gate_threshold 0.6</code>\n\n"
+                    "Доступные ключи: entries, pending, same_side, max_positions, price_cap, "
+                    "feature_symbols, exec_candidates, model_gate, model_gate_threshold"
+                )
+            await self._button_reply(update, text, reply_markup=self._limits_menu())
             return
         try:
             key, raw_value = payload.split(":", maxsplit=1)
@@ -2523,10 +2553,11 @@ class TelegramMonitorBot:
             f"SHADOW: <code>{'да' if s.get('shadow', True) else 'нет'}</code>\n"
             f"Риск-профиль: <code>{s.get('risk_profile', 'n/a')}</code>\n"
             f"Новых входов в минуту: <code>{s.get('max_entries_per_minute', 'n/a')}</code> — ограничивает скорость риска\n"
+            f"Сделок одновременно: <code>{s.get('max_positions', 'n/a')}</code> — максимум открытых позиций\n"
             f"Одновременно pending: <code>{s.get('max_concurrent_pending', 'n/a')}</code> — сколько заявок может висеть\n"
             f"Позиций в одну сторону: <code>{s.get('max_same_side', 'n/a')}</code> — защита от перекоса Long/Short\n"
             f"Потолок цены монеты: <code>{s.get('screener_max_price_usd', 'n/a')}</code> — отсеивает дорогие монеты\n"
-            f"Монет для признаков: <code>{s.get('feature_max_symbols', 'n/a')}</code> — нагрузка на расчет модели\n"
+            f"Изучаемых монет: <code>{s.get('feature_max_symbols', 'n/a')}</code> — топ монет, где считаются признаки\n"
             f"Кандидатов на вход: <code>{s.get('execution_candidates', 'n/a')}</code> — сколько монет смотрит стратегия\n"
             f"Фильтр модели в CANARY: <code>{'да' if s.get('model_gate_canary_enabled', False) else 'нет'}</code>\n"
             f"Порог фильтра модели: <code>{s.get('model_gate_threshold', 'n/a')}</code>\n\n"
