@@ -1,0 +1,49 @@
+# Deploys main to Render via a Deploy Hook after CI passes.
+#
+# Why this exists: the native GitHub->Render webhook integration silently
+# stopped delivering push events (last auto-deploy was 239ab0b; later main
+# commits never triggered a deploy). A Deploy Hook called from Actions is
+# independent of that integration and only fires on green CI.
+#
+# Setup (one-time):
+#   1. Render dashboard -> service -> Settings -> Deploy Hook -> copy the URL.
+#   2. GitHub repo -> Settings -> Secrets and variables -> Actions ->
+#      New repository secret: RENDER_DEPLOY_HOOK_URL = <that URL>.
+name: Deploy
+
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+    branches: [main]
+
+jobs:
+  render-deploy:
+    name: Trigger Render deploy
+    runs-on: ubuntu-latest
+    # Only deploy green CI runs of pushes to main
+    if: github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push'
+    steps:
+      - name: Call Render deploy hook
+        env:
+          HOOK_URL: ${{ secrets.RENDER_DEPLOY_HOOK_URL }}
+          SHA: ${{ github.event.workflow_run.head_sha }}
+        run: |
+          if [ -z "$HOOK_URL" ]; then
+            echo "::warning::RENDER_DEPLOY_HOOK_URL secret is not set — skipping deploy."
+            echo "Add it: Render service -> Settings -> Deploy Hook, then repo Settings -> Secrets -> Actions."
+            exit 0
+          fi
+          echo "Triggering Render deploy for $SHA"
+          for attempt in 1 2 3; do
+            code=$(curl -s -o /tmp/resp.txt -w "%{http_code}" "$HOOK_URL")
+            echo "Attempt $attempt: HTTP $code"
+            if [ "$code" -ge 200 ] && [ "$code" -lt 300 ]; then
+              cat /tmp/resp.txt
+              exit 0
+            fi
+            sleep $((attempt * 5))
+          done
+          echo "::error::Render deploy hook failed after 3 attempts"
+          cat /tmp/resp.txt
+          exit 1
