@@ -28,6 +28,13 @@ def _parse_metrics(raw: Any) -> dict[str, Any]:
     return {}
 
 
+def _required_gate_float(gate: dict[str, Any], key: str, reason: str) -> tuple[float | None, str | None]:
+    value = gate.get(key)
+    if value is None:
+        return None, reason
+    return float(value), None
+
+
 async def _shadow_gate_stats(
     pool: Any,
     *,
@@ -71,13 +78,16 @@ async def _shadow_gate_stats(
         "lift_vs_all_bps": None,
     }
     weighted_total = 0.0
+    weighted_count = 0
     for row in rows:
         decision = str(row["decision"])
         count = int(row["cnt"] or 0)
-        avg_return = float(row["avg_net_return_bps"] or 0.0)
-        precision = float(row["precision"] or 0.0)
+        avg_return = float(row["avg_net_return_bps"]) if row["avg_net_return_bps"] is not None else None
+        precision = float(row["precision"]) if row["precision"] is not None else None
         stats["total_count"] += count
-        weighted_total += avg_return * count
+        if avg_return is not None:
+            weighted_total += avg_return * count
+            weighted_count += count
         if decision == "GATE_PASS":
             stats["pass_count"] = count
             stats["pass_avg_net_return_bps"] = avg_return
@@ -86,10 +96,9 @@ async def _shadow_gate_stats(
             stats["block_count"] = count
             stats["block_avg_net_return_bps"] = avg_return
 
-    total_count = int(stats["total_count"])
     pass_avg = stats["pass_avg_net_return_bps"]
-    if total_count and pass_avg is not None:
-        all_avg = weighted_total / total_count
+    if weighted_count and pass_avg is not None:
+        all_avg = weighted_total / weighted_count
         stats["all_avg_net_return_bps"] = all_avg
         stats["lift_vs_all_bps"] = float(pass_avg) - all_avg
     return stats
@@ -136,12 +145,24 @@ async def _promote(version: str, confirm: bool) -> None:
         gate = await _shadow_gate_stats(pool, version=version, horizon_minutes=horizon_minutes)
         resolved_observations = int(gate.get("total_count") or 0)
         pass_count = int(gate.get("pass_count") or 0)
-        _exp_raw = gate.get("pass_avg_net_return_bps")
-        if _exp_raw is None:
-            click.echo("Promotion criteria not met: insufficient_shadow_gate_data", err=True)
+        expectancy, missing_reason = _required_gate_float(
+            gate,
+            "pass_avg_net_return_bps",
+            "missing_shadow_pass_expectancy",
+        )
+        if missing_reason is not None:
+            click.echo(f"Promotion criteria not met: {missing_reason}", err=True)
             return
-        expectancy = float(_exp_raw)
-        lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
+        assert expectancy is not None
+        lift_bps, missing_reason = _required_gate_float(
+            gate,
+            "lift_vs_all_bps",
+            "missing_shadow_lift",
+        )
+        if missing_reason is not None:
+            click.echo(f"Promotion criteria not met: {missing_reason}", err=True)
+            return
+        assert lift_bps is not None
         quality = str(metrics.get("quality") or "")
 
         model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=version)
@@ -152,7 +173,7 @@ async def _promote(version: str, confirm: bool) -> None:
             min_samples=settings.MODEL_MIN_TRAINING_SAMPLES,
             min_resolved_observations=settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION,
             resolved_observations=resolved_observations,
-            walk_forward_expectancy=expectancy,
+            walk_forward_expectancy=float(expectancy),
             quality=quality,
             required_quality=settings.MODEL_GATE_CANARY_MIN_QUALITY,
         )

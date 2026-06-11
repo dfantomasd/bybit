@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import structlog
@@ -264,7 +264,10 @@ class TradeJournal:
                 candle_open_time timestamptz NOT NULL,
                 feature_schema_hash text NOT NULL,
                 feature_names jsonb NOT NULL,
-                feature_values jsonb NOT NULL
+                feature_values jsonb NOT NULL,
+                training_eligible boolean NOT NULL DEFAULT true,
+                invalid_reason text,
+                invalidated_at timestamptz
             );
             CREATE INDEX IF NOT EXISTS idx_feature_snapshots_symbol_time
                 ON feature_snapshots (symbol, created_at DESC);
@@ -299,6 +302,10 @@ class TradeJournal:
                 label_schema_version text DEFAULT 'directional_net_v1',
                 PRIMARY KEY (prediction_id, horizon_minutes)
             );
+            ALTER TABLE prediction_outcomes
+                ADD COLUMN IF NOT EXISTS label_schema_version text DEFAULT 'directional_net_v1';
+            CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema
+                ON prediction_outcomes (label_schema_version);
 
             -- ML model registry
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -392,8 +399,26 @@ class TradeJournal:
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
-                CREATE UNIQUE INDEX IF NOT EXISTS uq_feature_snapshots_candle
-                    ON feature_snapshots (symbol, interval, candle_open_time);
+                UPDATE feature_snapshots fs
+                SET training_eligible = false,
+                    invalid_reason = 'duplicate_snapshot_same_candle',
+                    invalidated_at = now()
+                WHERE fs.snapshot_id IN (
+                    SELECT snapshot_id
+                    FROM (
+                        SELECT snapshot_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY symbol, interval, candle_open_time, feature_schema_hash
+                                   ORDER BY created_at ASC, snapshot_id ASC
+                               ) AS rn
+                        FROM feature_snapshots
+                        WHERE training_eligible = true
+                    ) ranked
+                    WHERE rn > 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                    WHERE training_eligible = true;
                 -- Persistent pending-entry resolution state: survives restarts so a
                 -- terminal order status seen before a crash never re-blocks the slot.
                 CREATE TABLE IF NOT EXISTS order_pending_state (
@@ -412,13 +437,6 @@ class TradeJournal:
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
             """)
-            # This index must be created AFTER ALTER TABLE adds label_schema_version
-            # to avoid CREATE INDEX failing on an existing DB where the column was missing.
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
-                "ON prediction_outcomes (label_schema_version)"
-            )
-
     async def record_signal(
         self,
         proposal: TradeProposal,
@@ -1134,18 +1152,30 @@ class TradeJournal:
         )
 
     async def get_candle_counts(self) -> dict[str, int]:
-        """Return {interval: count} for market_candles (diagnostics)."""
-        rows = await self._fetch("SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval")
+        """Return {interval: confirmed count} for market_candles diagnostics."""
+        rows = await self._fetch(
+            """
+            SELECT interval, count(*) AS cnt
+            FROM market_candles
+            WHERE confirmed = true
+            GROUP BY interval
+            """
+        )
         return {str(r["interval"]): int(r["cnt"]) for r in rows}
 
     async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
-        """Return the most recent open_time for the given interval."""
+        """Return the most recent confirmed open_time for the given interval."""
         rows = await self._fetch(
-            "SELECT MAX(open_time) AS ts FROM market_candles WHERE interval = $1",
+            """
+            SELECT MAX(open_time) AS ts
+            FROM market_candles
+            WHERE interval = $1
+              AND confirmed = true
+            """,
             interval,
         )
         if rows and rows[0]["ts"]:
-            return rows[0]["ts"]
+            return cast(datetime, rows[0]["ts"])
         return None
 
     async def apply_candle_retention(self) -> None:
@@ -1176,7 +1206,11 @@ class TradeJournal:
                 feature_schema_hash, feature_names, feature_values
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
-            ON CONFLICT (symbol, interval, candle_open_time) DO NOTHING
+            ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)
+            WHERE training_eligible = true
+            DO UPDATE SET
+                feature_names = EXCLUDED.feature_names,
+                feature_values = EXCLUDED.feature_values
             RETURNING snapshot_id
             """,
             symbol,
