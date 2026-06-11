@@ -54,10 +54,12 @@ class PreflightChecker:
         symbols_to_check: list[str] | None = None,
         check_leverage_symbol: str | None = None,
         expected_account_type: str = "UNIFIED",
+        trading_mode: str | None = None,
     ) -> None:
         self._rest = rest_client
         self._endpoint_selector = endpoint_selector
         self._use_testnet = use_testnet
+        self._trading_mode = (trading_mode or ("TESTNET" if use_testnet else "LIVE")).upper()
         self._symbols = symbols_to_check or []
         self._leverage_symbol = check_leverage_symbol
         self._expected_account_type = expected_account_type
@@ -369,15 +371,21 @@ class PreflightChecker:
 
     async def _check_testnet_vs_live(self) -> CheckResult:
         """Ensure testnet mode matches the declared trading mode."""
-        # This check is mostly a guard: if testnet is True and we get live prices, something is wrong.
-        mode_label = "TESTNET" if self._use_testnet else "LIVE"
+        live_trading_mode = self._trading_mode in {"LIVE", "CANARY_LIVE"}
+        if self._use_testnet:
+            mode_label = "TESTNET"
+        elif live_trading_mode:
+            mode_label = self._trading_mode
+        else:
+            mode_label = f"{self._trading_mode} on mainnet endpoint"
+
         return CheckResult(
             name="testnet_vs_live",
             passed=True,
             critical=True,
             message=f"Running in {mode_label} mode — configuration consistent",
-            details={"use_testnet": self._use_testnet},
-            warning=("Running in LIVE mode — real money at risk!" if not self._use_testnet else None),
+            details={"use_testnet": self._use_testnet, "trading_mode": self._trading_mode},
+            warning=(f"Running in {self._trading_mode} mode — real money at risk!" if live_trading_mode else None),
         )
 
     async def _check_leverage_settings(self) -> CheckResult:

@@ -309,6 +309,7 @@ class TradingApplication:
             use_testnet=self._settings.BYBIT_USE_TESTNET,
             default_category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
+            trading_mode=self._settings.TRADING_MODE.value,
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
