@@ -342,14 +342,28 @@ def test_audit_script_contains_no_delete_statements() -> None:
 
 
 def test_train_sql_filters_training_eligible() -> None:
-    """train.py must include training_eligible = true in both CTEs."""
+    """train.py must filter training rows through the eligible_samples CTE."""
     import inspect
 
     from trader.training import train
 
     src = inspect.getsource(train)
-    count = src.count("training_eligible = true")
-    assert count >= 2, f"Expected at least 2 occurrences of 'training_eligible = true' in train.py, got {count}"
+    assert "WITH eligible_samples AS" in src
+    assert "fs.training_eligible = true" in src
+
+
+def test_train_sql_deduplicates_by_source_candle_before_split() -> None:
+    """Training samples must be unique by source candle, not only snapshot_id."""
+    import inspect
+
+    from trader.training import train
+
+    src = inspect.getsource(train)
+    assert "count(DISTINCT fs.snapshot_id)" not in src
+    assert "DISTINCT ON (fs.snapshot_id)" not in src
+    assert "ROW_NUMBER() OVER" in src
+    assert "PARTITION BY fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash" in src
+    assert "WHERE es.candle_rank = 1" in src
 
 
 def test_resolve_outcomes_sql_filters_training_eligible() -> None:
