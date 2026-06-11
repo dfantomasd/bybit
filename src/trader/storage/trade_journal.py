@@ -1338,11 +1338,11 @@ class TradeJournal:
             symbol = row["symbol"]
             entry_time = row["entry_time"]
 
+            # Entry price: must be the exact confirmed candle that closed at the signal time.
             entry_rows = await self._fetch(
                 """
                 SELECT close FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
-                ORDER BY open_time DESC LIMIT 1
+                WHERE symbol=$1 AND interval='1' AND open_time = $2 AND confirmed = true
                 """,
                 symbol,
                 entry_time,
@@ -1356,10 +1356,14 @@ class TradeJournal:
             from datetime import timedelta
 
             horizon_time = entry_time + timedelta(minutes=horizon_minutes)
+            # Horizon price: the last confirmed candle with open_time <= horizon_time.
+            # Since we only write confirmed candles, and we wait until horizon_time
+            # is in the past (pe.created_at < now() - horizon), the candle
+            # at horizon_time is almost certainly confirmed. Still we filter confirmed.
             horizon_rows = await self._fetch(
                 """
                 SELECT close, high, low FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
+                WHERE symbol=$1 AND interval='1' AND open_time <= $2 AND confirmed = true
                 ORDER BY open_time DESC LIMIT 1
                 """,
                 symbol,
