@@ -184,11 +184,22 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         rows = await pool.fetch(
             """
-            WITH schema_counts AS (
+            WITH eligible_samples AS (
                 SELECT
+                    fs.symbol,
+                    fs.interval,
+                    fs.candle_open_time,
+                    fs.feature_names,
+                    fs.feature_values,
                     fs.feature_schema_hash,
-                    count(DISTINCT fs.snapshot_id) AS sample_count,
-                    max(fs.created_at) AS latest_at
+                    po.net_return_bps,
+                    po.label,
+                    pe.strategy_signal,
+                    fs.created_at,
+                    ROW_NUMBER() OVER (
+                        PARTITION BY fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash
+                        ORDER BY fs.created_at DESC, pe.created_at DESC
+                    ) AS candle_rank
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
@@ -199,7 +210,16 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
-                GROUP BY fs.feature_schema_hash
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+            ),
+            schema_counts AS (
+                SELECT
+                    feature_schema_hash,
+                    count(*) AS sample_count,
+                    max(created_at) AS latest_at
+                FROM eligible_samples
+                WHERE candle_rank = 1
+                GROUP BY feature_schema_hash
             ),
             selected_schema AS (
                 SELECT feature_schema_hash
@@ -209,27 +229,16 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 LIMIT 1
             ),
             labelled AS (
-                SELECT DISTINCT ON (fs.snapshot_id)
-                       fs.feature_names,
-                       fs.feature_values,
-                       fs.feature_schema_hash,
-                       po.net_return_bps,
-                       po.label,
-                       pe.strategy_signal,
-                       fs.created_at
-                FROM feature_snapshots fs
-                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                JOIN selected_schema ss ON ss.feature_schema_hash = fs.feature_schema_hash
-                WHERE po.horizon_minutes = $1
-                  AND po.label IS NOT NULL
-                  AND po.label_schema_version = $2
-                  AND po.label_threshold_bps = $3
-                  AND fs.feature_values IS NOT NULL
-                  AND fs.training_eligible = true
-                  AND pe.model_version = 'RULE_BASELINE_V1'
-                  AND pe.strategy_signal IN ('Buy', 'Sell')
-                ORDER BY fs.snapshot_id, fs.created_at DESC
+                SELECT es.feature_names,
+                       es.feature_values,
+                       es.feature_schema_hash,
+                       es.net_return_bps,
+                       es.label,
+                       es.strategy_signal,
+                       es.created_at
+                FROM eligible_samples es
+                JOIN selected_schema ss ON ss.feature_schema_hash = es.feature_schema_hash
+                WHERE es.candle_rank = 1
             ),
             latest_window AS (
                 SELECT *
