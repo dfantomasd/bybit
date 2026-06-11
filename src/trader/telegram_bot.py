@@ -524,7 +524,7 @@ class TelegramMonitorBot:
         rows.append(
             [
                 InlineKeyboardButton("🔄 Обновить", callback_data=f"sym:page:{page}"),
-                InlineKeyboardButton("⬅️ Меню", callback_data="view:status"),
+                InlineKeyboardButton("🏠 Главное меню", callback_data="view:menu"),
             ]
         )
         return InlineKeyboardMarkup(rows)
