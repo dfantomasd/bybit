@@ -1170,6 +1170,18 @@ class TradeJournal:
         )
         return {str(r["interval"]): int(r["cnt"]) for r in rows}
 
+    async def get_candle_counts_per_symbol(self) -> dict[tuple[str, str], int]:
+        """Return {(symbol, interval): confirmed count} for backfill gap detection."""
+        rows = await self._fetch(
+            """
+            SELECT symbol, interval, count(*) AS cnt
+            FROM market_candles
+            WHERE confirmed = true
+            GROUP BY symbol, interval
+            """
+        )
+        return {(str(r["symbol"]), str(r["interval"])): int(r["cnt"]) for r in rows}
+
     async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
         """Return the most recent confirmed open_time for the given interval."""
         rows = await self._fetch(
