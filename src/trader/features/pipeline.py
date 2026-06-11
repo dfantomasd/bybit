@@ -30,10 +30,12 @@ from trader.features.technical import (
     ema_value,
     log_return,
     macd,
+    obv,
     realized_volatility,
     returns,
     rsi,
     sma,
+    volume_sma_ratio,
     volume_zscore,
 )
 
@@ -299,6 +301,20 @@ class FeaturePipeline:
             features["volume_zscore"] = val_vz
         else:
             missing.append("volume_zscore")
+
+        # --- OBV (On-Balance Volume) ---
+        val_obv = obv(closes, volumes)
+        if val_obv is not None:
+            features["obv_normalized"] = val_obv
+        else:
+            missing.append("obv_normalized")
+
+        # --- Volume to SMA(20) ratio ---
+        val_vol_ratio = volume_sma_ratio(volumes, 20)
+        if val_vol_ratio is not None:
+            features["volume_ratio_sma20"] = val_vol_ratio
+        else:
+            missing.append("volume_ratio_sma20")
 
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)

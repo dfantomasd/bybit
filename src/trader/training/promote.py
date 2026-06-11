@@ -51,7 +51,7 @@ async def _shadow_gate_stats(
           AND po.horizon_minutes = $2
           AND po.label IS NOT NULL
           AND po.label_schema_version = $3
-          AND COALESCE(fs.training_eligible, true) = true
+          AND fs.training_eligible = true
         GROUP BY pe.decision
         """,
         version,
@@ -136,7 +136,11 @@ async def _promote(version: str, confirm: bool) -> None:
         gate = await _shadow_gate_stats(pool, version=version, horizon_minutes=horizon_minutes)
         resolved_observations = int(gate.get("total_count") or 0)
         pass_count = int(gate.get("pass_count") or 0)
-        expectancy = float(gate.get("pass_avg_net_return_bps") or 0.0)
+        _exp_raw = gate.get("pass_avg_net_return_bps")
+        if _exp_raw is None:
+            click.echo("Promotion criteria not met: insufficient_shadow_gate_data", err=True)
+            return
+        expectancy = float(_exp_raw)
         lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
         quality = str(metrics.get("quality") or "")
 
@@ -154,6 +158,11 @@ async def _promote(version: str, confirm: bool) -> None:
         )
         if not can:
             click.echo(f"Promotion criteria not met: {reason}", err=True)
+            return
+
+        # Require at minimum 30 observed outcomes for statistical significance
+        if int(gate.get("total_count", 0)) < 30:
+            click.echo("Promotion criteria not met: insufficient_gate_observations", err=True)
             return
 
         min_pass_count = max(10, settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION // 3)

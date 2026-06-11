@@ -2142,6 +2142,14 @@ class TradingApplication:
                 log.debug("profit_manager.positions_fetch_failed", error=str(exc))
                 return
 
+        # Prune stale trailing-stop keys for positions that are no longer open
+        active_keys = {
+            f"{p.symbol}:{p.side.value}:{p.size}:{p.entry_price}"
+            for p in positions
+            if p.size > Decimal("0") and p.entry_price > Decimal("0")
+        }
+        self._trailing_stop_keys &= active_keys
+
         for pos in positions:
             if pos.size <= Decimal("0") or pos.entry_price <= Decimal("0"):
                 continue
@@ -2665,6 +2673,7 @@ class TradingApplication:
                 del _shadow_positions[symbol]
                 if self._execution_engine is not None:
                     await self._execution_engine.record_position_closed(symbol)
+                self._trailing_stop_keys.discard(symbol)
                 if self._telegram_bot is not None:
                     try:
                         label = "✅ TP" if hit == "TP" else "🛑 SL"
@@ -2722,6 +2731,7 @@ class TradingApplication:
 
             self._record_diag("signals_emitted")
 
+            # TODO: move record_signal after block checks
             if self._trade_journal is not None:
                 await self._trade_journal.record_signal(
                     proposal=proposal,

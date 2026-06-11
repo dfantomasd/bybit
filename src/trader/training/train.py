@@ -209,7 +209,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 LIMIT 1
             ),
             labelled AS (
-                SELECT DISTINCT ON (fs.snapshot_id)
+                SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time)
                        fs.feature_names,
                        fs.feature_values,
                        fs.feature_schema_hash,
@@ -229,7 +229,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                ORDER BY fs.snapshot_id, fs.created_at DESC
+                ORDER BY fs.symbol, fs.interval, fs.candle_open_time, fs.created_at DESC
             ),
             latest_window AS (
                 SELECT *

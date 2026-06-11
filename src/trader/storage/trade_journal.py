@@ -299,8 +299,6 @@ class TradeJournal:
                 label_schema_version text DEFAULT 'directional_net_v1',
                 PRIMARY KEY (prediction_id, horizon_minutes)
             );
-            CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema
-                ON prediction_outcomes (label_schema_version);
 
             -- ML model registry
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -390,7 +388,19 @@ class TradeJournal:
                     ADD COLUMN IF NOT EXISTS invalid_reason text;
                 ALTER TABLE feature_snapshots
                     ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_schema_version TEXT;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
+                CREATE UNIQUE INDEX IF NOT EXISTS uq_feature_snapshots_candle
+                    ON feature_snapshots (symbol, interval, candle_open_time);
             """)
+            # This index must be created AFTER ALTER TABLE adds label_schema_version
+            # to avoid CREATE INDEX failing on an existing DB where the column was missing.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
+                "ON prediction_outcomes (label_schema_version)"
+            )
 
     async def record_signal(
         self,
@@ -1010,6 +1020,7 @@ class TradeJournal:
                 feature_schema_hash, feature_names, feature_values
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+            ON CONFLICT (symbol, interval, candle_open_time) DO NOTHING
             RETURNING snapshot_id
             """,
             symbol,
@@ -1368,7 +1379,7 @@ class TradeJournal:
             rows = await self._fetch(
                 """
                 WITH labelled AS (
-                    SELECT DISTINCT ON (fs.snapshot_id)
+                    SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time)
                            fs.snapshot_id
                     FROM feature_snapshots fs
                     JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
@@ -1378,7 +1389,7 @@ class TradeJournal:
                       AND fs.feature_values IS NOT NULL
                       AND fs.training_eligible = true
                       AND pe.model_version = 'RULE_BASELINE_V1'
-                    ORDER BY fs.snapshot_id, fs.created_at ASC
+                    ORDER BY fs.symbol, fs.interval, fs.candle_open_time, fs.created_at ASC
                 )
                 SELECT count(*) AS cnt FROM labelled
                 """

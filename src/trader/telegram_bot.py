@@ -1010,7 +1010,7 @@ class TelegramMonitorBot:
         )
         require(
             "Модель обучена",
-            bool(latest_model.get("version")) or latest_run.get("status") == "COMPLETED",
+            bool(latest_model.get("version")),
             f"запуск={self._ru(latest_run.get('status', 'none'))}, модель={latest_model.get('version') or 'нет'}",
             "Нажмите 'Обучить 1000' или выполните python -m trader.training.train --min-samples 1000.",
             "10-20 минут после накопления 1000 примеров",
@@ -1038,10 +1038,18 @@ class TelegramMonitorBot:
         )
         require(
             "WebSocket живой",
-            ws_age is None or float(ws_age) <= 180,
+            ws_age is None or float(ws_age) <= 30,
             self._age_label_ru(ws_age),
             "Перезапустите сервис или проверьте доступ к Bybit WebSocket.",
             "1-3 минуты после восстановления соединения",
+        )
+        confirmed_age = diag.get("last_confirmed_candle_age_s")
+        require(
+            "Свежие подтверждённые свечи",
+            confirmed_age is not None and confirmed_age <= 120,
+            self._age_label_ru(confirmed_age),
+            "Проверьте что WS доставляет confirmed=True события в CandleStore.",
+            "1-2 минуты после восстановления WS",
         )
 
         warn_if(

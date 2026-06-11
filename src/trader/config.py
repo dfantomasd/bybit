@@ -385,6 +385,13 @@ class Settings(BaseSettings):
             # actually submitted. Auto-clear it here so operators don't need a separate env var.
             self.SHADOW_MODE = False
 
+        if self.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+            if self.BYBIT_USE_TESTNET:
+                raise ValueError(
+                    f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
+                    "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
+                )
+
 
 # ---------------------------------------------------------------------------
 # Risk profile parameter dataclasses

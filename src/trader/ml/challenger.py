@@ -14,7 +14,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import logging
+import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -24,7 +24,7 @@ import numpy as np
 
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 LEGACY_LABEL_SCHEMA_VERSION = "legacy_unknown"
 
