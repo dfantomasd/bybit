@@ -64,6 +64,13 @@ def _fake_update(chat_id: int = 12345) -> MagicMock:
     return u
 
 
+def _fake_text_update(text: str, chat_id: int = 12345) -> MagicMock:
+    update = _fake_update(chat_id=chat_id)
+    update.effective_message.text = text
+    update.message.text = text
+    return update
+
+
 def _fake_context() -> MagicMock:
     return type("_Ctx", (), {"args": ["off"]})()  # type: ignore[return-value]
 
@@ -291,8 +298,10 @@ def test_limits_menu_has_common_presets() -> None:
         "limit:entries:1",
         "limit:pending:1",
         "limit:same_side:1",
+        "limit:custom:max_positions",
         "limit:price_cap:25",
         "limit:feature_symbols:20",
+        "limit:custom:feature_symbols",
         "limit:exec_candidates:10",
     ]:
         assert expected in all_callbacks
@@ -354,6 +363,34 @@ async def test_limit_button_updates_runtime_setting() -> None:
     bot._controller.set_runtime_setting.assert_awaited_once_with("price_cap", 25.0)
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Screener price cap set to 25" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_custom_feature_symbols_button_accepts_plain_number() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value={})
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Feature symbols set to 12")
+    update = _fake_update()
+
+    await bot._handle_limit_button(update, "custom:feature_symbols")
+    await bot._on_text(_fake_text_update("12"), MagicMock())
+
+    bot._controller.set_runtime_setting.assert_awaited_once_with("feature_symbols", 12)
+
+
+@pytest.mark.asyncio
+async def test_custom_max_positions_button_accepts_plain_number() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value={})
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Max simultaneous positions set to 3")
+    update = _fake_update()
+
+    await bot._handle_limit_button(update, "custom:max_positions")
+    await bot._on_text(_fake_text_update("3"), MagicMock())
+
+    bot._controller.set_runtime_setting.assert_awaited_once_with("max_positions", 3)
 
 
 @pytest.mark.asyncio
