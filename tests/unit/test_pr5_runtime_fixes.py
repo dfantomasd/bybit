@@ -60,6 +60,27 @@ def test_active_symbols_falls_back_when_screener_empty():
     assert result == list(_SYMBOLS)
 
 
+def test_zero_trading_warning_is_suppressed_during_startup_warmup():
+    app = _make_app()
+    app._settings = MagicMock()
+    app._settings.MIN_SIGNALS_PER_HOUR = 1
+    app._settings.AUTO_SOFTEN_FILTERS_ENABLED = False
+    app._record_diag("signals_emitted")
+
+    engine = MagicMock()
+    engine.is_in_warmup.return_value = True
+    engine.warmup_seconds_remaining.return_value = 41.0
+    engine.get_diag_counts.return_value = {"order_placed": 0}
+    app._execution_engine = engine
+
+    with patch("trader.app.log") as log:
+        app._check_zero_trading()
+
+    log.warning.assert_not_called()
+    log.info.assert_called_once()
+    assert log.info.call_args.args[0] == "zero_trading.suppressed_warmup"
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

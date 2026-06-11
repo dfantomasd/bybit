@@ -234,6 +234,17 @@ class TestIndividualChecks:
         result = await checker._check_region_compatibility()
         assert result.passed is True
 
+    async def test_account_type_uta2_is_unified(self) -> None:
+        rest = _make_rest_mock()
+        rest.get_account_info.return_value = {
+            "retCode": 0,
+            "result": {"unifiedMarginStatus": 5},
+        }
+        checker = _make_checker(rest=rest)
+        result = await checker._check_account_type()
+        assert result.passed is True
+        assert "UNIFIED" in result.message
+
     async def test_testnet_vs_live_testnet_mode(self) -> None:
         checker = _make_checker(use_testnet=True)
         result = await checker._check_testnet_vs_live()
