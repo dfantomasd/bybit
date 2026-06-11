@@ -1705,31 +1705,81 @@ class TradingApplication:
                 log.info("candle_reconcile.completed", upserted=backfilled, symbols=len(symbols))
 
     async def _run_startup_backfill(self) -> None:
-        """One-shot historical candle backfill at startup (improvement idea).
+        """One-shot historical candle backfill at startup.
 
         With a fresh/cleared DB the canary checklist needs ~1000 1m candles and
         model training needs labelled history — waiting for WS alone takes many
         hours. This pages back through REST klines for the active symbols and
         persists clock-confirmed candles only, respecting a hard request cap.
         Idempotent: upsert_market_candle deduplicates on (symbol, interval, open_time).
+
+        Behaviour:
+        - Waits for the screener to publish its first symbol universe (so the
+          backfill targets real trading symbols, not the static fallback list).
+        - Waits up to 60s for the DB connection (it may still be bootstrapping).
+        - Skips (symbol, interval) pairs whose stored history already covers
+          >= 90% of the requested window — restarts cost near-zero REST quota.
+        - Never raises: a backfill failure must not take down the supervisor.
         """
         assert self._settings is not None
         if not self._settings.STARTUP_BACKFILL_ENABLED:
+            log.info("startup_backfill.disabled")
             return
+        try:
+            await self._startup_backfill()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.warning("startup_backfill.failed", error=str(exc), error_type=type(exc).__name__)
+
+    async def _startup_backfill(self) -> None:
+        assert self._settings is not None
+
+        # Wait for the screener's first refresh so we backfill the real universe.
+        if self._screener is not None:
+            try:
+                await asyncio.wait_for(self._screener.wait_ready(), timeout=120)
+            except TimeoutError:
+                log.warning("startup_backfill.screener_not_ready", fallback_symbols=list(_SYMBOLS))
+
+        # The trade journal connects concurrently at startup — give it up to 60s.
+        for _ in range(12):
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                break
+            if self._shutdown_event.is_set():
+                return
+            await asyncio.sleep(5)
         if self._bybit_adapter is None or self._trade_journal is None or not self._trade_journal.is_enabled:
             log.info("startup_backfill.skipped", reason="no_adapter_or_db")
             return
 
         days = max(1, int(self._settings.STARTUP_BACKFILL_DAYS))
         max_requests = max(1, int(self._settings.STARTUP_BACKFILL_MAX_REQUESTS))
+        window_ms = days * 86_400_000
         symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
+        if not symbols:
+            symbols = list(_SYMBOLS)
+
+        # Gap detection: skip pairs whose history already covers the window.
+        try:
+            existing_counts = await self._trade_journal.get_candle_counts_per_symbol()
+        except Exception as exc:
+            log.debug("startup_backfill.count_check_failed", error=str(exc))
+            existing_counts = {}
+
         requests_used = 0
         total_upserted = 0
+        skipped_pairs = 0
 
         for symbol in symbols:
             for interval in self._market_data_intervals():
                 bar_ms = _INTERVAL_MS.get(interval, 60_000)
-                window_ms = days * 86_400_000
+                expected_bars = window_ms // bar_ms
+                have = existing_counts.get((symbol, interval), 0)
+                if have >= expected_bars * 0.9:
+                    skipped_pairs += 1
+                    continue
+
                 end_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
                 oldest_needed_ms = end_ms - window_ms
                 while end_ms > oldest_needed_ms and requests_used < max_requests:
@@ -1794,7 +1844,20 @@ class TradingApplication:
             symbols=len(symbols),
             requests_used=requests_used,
             candles_upserted=total_upserted,
+            pairs_skipped_already_full=skipped_pairs,
         )
+        if total_upserted > 0 and self._telegram_bot is not None:
+            try:
+                await self._telegram_bot.notify(
+                    f"📥 <b>Стартовый backfill завершен</b>\n"
+                    f"Свечей записано: <code>{total_upserted}</code> | "
+                    f"REST-запросов: <code>{requests_used}/{max_requests}</code>\n"
+                    f"Монет: <code>{len(symbols)}</code> | "
+                    f"Пар пропущено (история уже есть): <code>{skipped_pairs}</code>\n"
+                    f"Модель начнет обучение после накопления размеченных исходов."
+                )
+            except Exception as exc:
+                log.debug("startup_backfill.notify_failed", error=str(exc))
 
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
