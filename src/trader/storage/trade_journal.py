@@ -264,7 +264,10 @@ class TradeJournal:
                 candle_open_time timestamptz NOT NULL,
                 feature_schema_hash text NOT NULL,
                 feature_names jsonb NOT NULL,
-                feature_values jsonb NOT NULL
+                feature_values jsonb NOT NULL,
+                training_eligible boolean NOT NULL DEFAULT true,
+                invalid_reason text,
+                invalidated_at timestamptz
             );
             CREATE INDEX IF NOT EXISTS idx_feature_snapshots_symbol_time
                 ON feature_snapshots (symbol, created_at DESC);
@@ -392,6 +395,26 @@ class TradeJournal:
                     ADD COLUMN IF NOT EXISTS invalid_reason text;
                 ALTER TABLE feature_snapshots
                     ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+                UPDATE feature_snapshots fs
+                SET training_eligible = false,
+                    invalid_reason = 'duplicate_snapshot_same_candle',
+                    invalidated_at = now()
+                WHERE fs.snapshot_id IN (
+                    SELECT snapshot_id
+                    FROM (
+                        SELECT snapshot_id,
+                               ROW_NUMBER() OVER (
+                                   PARTITION BY symbol, interval, candle_open_time, feature_schema_hash
+                                   ORDER BY created_at ASC, snapshot_id ASC
+                               ) AS rn
+                        FROM feature_snapshots
+                        WHERE training_eligible = true
+                    ) ranked
+                    WHERE rn > 1
+                );
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                    WHERE training_eligible = true;
             """)
 
     async def record_signal(
@@ -1012,6 +1035,11 @@ class TradeJournal:
                 feature_schema_hash, feature_names, feature_values
             )
             VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+            ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)
+            WHERE training_eligible = true
+            DO UPDATE SET
+                feature_names = EXCLUDED.feature_names,
+                feature_values = EXCLUDED.feature_values
             RETURNING snapshot_id
             """,
             symbol,
