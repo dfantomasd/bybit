@@ -394,6 +394,18 @@ class TradeJournal:
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
                 CREATE UNIQUE INDEX IF NOT EXISTS uq_feature_snapshots_candle
                     ON feature_snapshots (symbol, interval, candle_open_time);
+                -- Persistent pending-entry resolution state: survives restarts so a
+                -- terminal order status seen before a crash never re-blocks the slot.
+                CREATE TABLE IF NOT EXISTS order_pending_state (
+                    order_link_id text PRIMARY KEY,
+                    symbol text,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    resolved_at timestamptz
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_pending_state_unresolved
+                    ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
+                -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
+                ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
             """)
             # This index must be created AFTER ALTER TABLE adds label_schema_version
             # to avoid CREATE INDEX failing on an existing DB where the column was missing.
@@ -407,6 +419,7 @@ class TradeJournal:
         proposal: TradeProposal,
         feature_vector: FeatureVector | None,
         regime_context: RegimeContext | None,
+        model_decision: dict[str, Any] | None = None,
     ) -> None:
         features = None
         if feature_vector is not None:
@@ -424,9 +437,9 @@ class TradeJournal:
             INSERT INTO trade_signals (
                 proposal_id, created_at, strategy_id, symbol, side, confidence,
                 entry_price, take_profit, stop_loss, requested_qty,
-                requested_notional_usd, regime, rationale, features
+                requested_notional_usd, regime, rationale, features, model_decision
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb)
             ON CONFLICT (proposal_id) DO NOTHING
             """,
             proposal.proposal_id,
@@ -443,6 +456,7 @@ class TradeJournal:
             regime,
             proposal.rationale,
             json.dumps(features) if features is not None else None,
+            json.dumps(model_decision) if model_decision is not None else None,
         )
 
     async def record_risk_decision(self, symbol: str, decision: RiskDecision) -> None:
@@ -867,6 +881,63 @@ class TradeJournal:
         )
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Persistent pending-entry resolution state (order_pending_state)
+    # ------------------------------------------------------------------
+
+    async def record_order_pending(self, order_link_id: str, symbol: str) -> None:
+        """Register a pending entry order so its resolution survives restarts."""
+        if not self.is_enabled or not order_link_id:
+            return
+        await self._execute(
+            """
+            INSERT INTO order_pending_state (order_link_id, symbol)
+            VALUES ($1, $2)
+            ON CONFLICT (order_link_id) DO NOTHING
+            """,
+            order_link_id,
+            symbol,
+        )
+
+    async def mark_order_resolved(self, order_link_id: str, symbol: str = "") -> None:
+        """Persist that a pending entry order reached a terminal state.
+
+        Upserts so resolution is recorded even if record_order_pending was missed.
+        """
+        if not self.is_enabled or not order_link_id:
+            return
+        await self._execute(
+            """
+            INSERT INTO order_pending_state (order_link_id, symbol, resolved_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (order_link_id) DO UPDATE
+                SET resolved_at = COALESCE(order_pending_state.resolved_at, now())
+            """,
+            order_link_id,
+            symbol or None,
+        )
+
+    async def is_order_resolved(self, order_link_id: str) -> bool:
+        """True if the order has a persisted terminal resolution."""
+        if not self.is_enabled or not order_link_id:
+            return False
+        rows = await self._fetch(
+            "SELECT 1 FROM order_pending_state WHERE order_link_id = $1 AND resolved_at IS NOT NULL",
+            order_link_id,
+        )
+        return bool(rows)
+
+    async def get_unresolved_order_link_ids(self) -> list[str]:
+        """Return order_link_ids registered as pending but never resolved (last 24h)."""
+        rows = await self._fetch(
+            """
+            SELECT order_link_id FROM order_pending_state
+            WHERE resolved_at IS NULL AND created_at > now() - interval '24 hours'
+            ORDER BY created_at DESC
+            """
+        )
+        return [str(r["order_link_id"]) for r in rows]
+
     async def find_order_link_id_by_exchange_order_id(
         self,
         exchange_order_id: str,
@@ -1213,6 +1284,40 @@ class TradeJournal:
             exchange_order_id=exchange_order_id,
             last_error=error,
         )
+
+    async def get_returns_for_model(
+        self,
+        model_version: str,
+        limit: int = 200,
+        horizon_minutes: int | None = None,
+    ) -> list[float]:
+        """Return recent resolved net returns (bps) for a model version, newest first.
+
+        Used by the auto-promoter's bootstrap significance test. Pass
+        model_version='RULE_BASELINE_V1' for the baseline distribution.
+        """
+        if not self.is_enabled:
+            return []
+        params: list[Any] = [model_version, int(limit)]
+        horizon_clause = ""
+        if horizon_minutes is not None:
+            horizon_clause = "AND po.horizon_minutes = $3"
+            params.append(int(horizon_minutes))
+        rows = await self._fetch(
+            f"""
+            SELECT po.net_return_bps
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE pe.model_version = $1
+              AND po.net_return_bps IS NOT NULL
+              AND po.label_schema_version = 'directional_net_v1'
+              {horizon_clause}
+            ORDER BY po.resolved_at DESC NULLS LAST
+            LIMIT $2
+            """,
+            *params,
+        )
+        return [float(r["net_return_bps"]) for r in rows]
 
     async def get_shadow_gate_stats(
         self,

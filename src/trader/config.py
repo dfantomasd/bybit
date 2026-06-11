@@ -264,10 +264,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # ML / model
     # ------------------------------------------------------------------
-    MODEL_ENABLED: bool = False
+    MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
-    MODEL_ALLOW_LIVE_DECISIONS: bool = False
-    """When False, model only scores in shadow; rule-based strategy remains authoritative."""
+    MODEL_ALLOW_LIVE_DECISIONS: bool = True
+    """When False, model only scores in shadow; rule-based strategy remains authoritative.
+    When True, a compatible CHAMPION model may replace rule-based decisions (hybrid mode).
+    Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
     MODEL_SHADOW_SCORING_ENABLED: bool = True
@@ -279,17 +281,23 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
-    MODEL_AUTO_PROMOTE_ENABLED: bool = False
-    """Auto-promote challenger to champion when it beats the current champion.
-    Disabled by default — requires explicit operator opt-in."""
+    MODEL_AUTO_PROMOTE_ENABLED: bool = True
+    """Auto-promote challenger to champion when it beats the current champion
+    AND the lift is statistically significant (bootstrap p-value)."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
     MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
     MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
     """Minimum live lift (bps) the challenger must show before auto-promotion."""
+    MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
+    """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
+    return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""
+    MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS: int = 1000
+    MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES: int = 50
+    """Minimum resolved challenger returns required to run the bootstrap test."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
-    MODEL_GATE_CANARY_ENABLED: bool = False
+    MODEL_GATE_CANARY_ENABLED: bool = True
     """When enabled, allow the model gate to block entries only with conservative safeguards."""
     MODEL_GATE_CANARY_MIN_QUALITY: str = "GOOD"
     MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT: float = 60.0
@@ -391,6 +399,18 @@ class Settings(BaseSettings):
                     f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
                     "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
                 )
+
+        # Hybrid ML mode sanity check: live model decisions without the canary
+        # gate means the model can replace signals but nothing blocks weak ones.
+        if self.MODEL_ALLOW_LIVE_DECISIONS and not self.MODEL_GATE_CANARY_ENABLED:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "MODEL_ALLOW_LIVE_DECISIONS=true with MODEL_GATE_CANARY_ENABLED=false: "
+                "the model can replace rule-based decisions but the canary gate will not "
+                "block low-score signals. Consider enabling MODEL_GATE_CANARY_ENABLED.",
+                stacklevel=2,
+            )
 
 
 # ---------------------------------------------------------------------------

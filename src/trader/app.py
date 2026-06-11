@@ -61,6 +61,16 @@ _INTERVAL_MS = {
     "30": 1_800_000,
     "60": 3_600_000,
 }
+
+try:
+    from prometheus_client import Counter as _PromCounter
+
+    _ML_REPLACEMENT_COUNTER = _PromCounter(
+        "trader_ml_replacement_total",
+        "Signals where the ML champion replaced the rule-based decision",
+    )
+except Exception:  # pragma: no cover - prometheus optional at import time
+    _ML_REPLACEMENT_COUNTER = None
 _CRITICAL_TASK_NAMES = frozenset(
     {
         "screener",
@@ -812,6 +822,51 @@ class TradingApplication:
                     )
                     continue
 
+                # Statistical significance: bootstrap difference-of-means between
+                # the challenger's resolved returns and the baseline's. Guards
+                # against promoting a lucky streak.
+                from trader.training.bootstrap import bootstrap_pvalue
+
+                min_boot = max(50, int(self._settings.MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES))
+                n_iter = max(100, int(self._settings.MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS))
+                pvalue_threshold = float(self._settings.MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD)
+                horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+                challenger_returns = await self._trade_journal.get_returns_for_model(
+                    challenger_version, limit=200, horizon_minutes=horizon
+                )
+                baseline_returns = await self._trade_journal.get_returns_for_model(
+                    "RULE_BASELINE_V1", limit=200, horizon_minutes=horizon
+                )
+                if len(challenger_returns) < min_boot or len(baseline_returns) < min_boot:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="insufficient_bootstrap_samples",
+                        version=challenger_version,
+                        challenger_returns=len(challenger_returns),
+                        baseline_returns=len(baseline_returns),
+                        min_required=min_boot,
+                    )
+                    continue
+                boot = bootstrap_pvalue(challenger_returns, baseline_returns, n_iter=n_iter)
+                log.info(
+                    "model_auto_promote.bootstrap",
+                    version=challenger_version,
+                    p_value=boot.p_value,
+                    mean_diff_bps=round(boot.mean_diff_bps, 4),
+                    n_iterations=boot.n_iterations,
+                    n_challenger=boot.n_challenger,
+                    n_baseline=boot.n_baseline,
+                )
+                if boot.p_value >= pvalue_threshold:
+                    log.info(
+                        "model_auto_promote.waiting",
+                        reason="lift_not_significant",
+                        version=challenger_version,
+                        p_value=boot.p_value,
+                        pvalue_threshold=pvalue_threshold,
+                    )
+                    continue
+
                 log.info(
                     "model_auto_promote.triggered",
                     version=challenger_version,
@@ -819,6 +874,7 @@ class TradingApplication:
                     lift_bps=lift_bps,
                     champion_wf_bps=champion_wf_bps,
                     quality=quality,
+                    p_value=boot.p_value,
                 )
                 result = await self._start_model_promote(challenger_version)
 
@@ -831,6 +887,7 @@ class TradingApplication:
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
+                        f"Bootstrap p-value: <code>{boot.p_value:.4f}</code> ({boot.n_iterations} итераций)\n"
                         f"Качество: <code>{quality}</code>\n"
                         f"{result}"
                     )
@@ -1336,16 +1393,31 @@ class TradingApplication:
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
-        # P0.2: Restore pending entries from durable storage before any new entries
+        # P0.2: Restore pending entries from durable storage before any new entries.
+        # Orders with a persisted terminal resolution (order_pending_state.resolved_at)
+        # are skipped: a terminal status seen before a restart must not re-block the slot.
         if self._trade_journal is not None:
             try:
                 pending_records = await self._trade_journal.get_pending_durable_orders()
-                if pending_records:
-                    self._execution_engine.restore_pending_entries_with_symbols(pending_records)
+                unresolved_records = []
+                skipped_resolved = []
+                for record in pending_records:
+                    oid = str(record.get("order_link_id") or "")
+                    if oid and await self._trade_journal.is_order_resolved(oid):
+                        skipped_resolved.append(oid)
+                        continue
+                    unresolved_records.append(record)
+                if skipped_resolved:
+                    log.info(
+                        "execution_engine.pending_restore_skipped_resolved",
+                        ids=skipped_resolved,
+                    )
+                if unresolved_records:
+                    self._execution_engine.restore_pending_entries_with_symbols(unresolved_records)
                     log.info(
                         "execution_engine.pending_restored",
-                        count=len(pending_records),
-                        ids=[r.get("order_link_id") for r in pending_records],
+                        count=len(unresolved_records),
+                        ids=[r.get("order_link_id") for r in unresolved_records],
                     )
             except Exception as exc:
                 log.warning("execution_engine.pending_restore_failed", error=str(exc))
@@ -1509,6 +1581,79 @@ class TradingApplication:
                         has_api_key=has_api_key,
                     )
 
+    async def _reconcile_unconfirmed_candles(self) -> None:
+        """Backfill candles that have become confirmed since the last write.
+
+        Unconfirmed candles are never persisted (look-ahead bias guard), so a WS
+        gap or a restart mid-bar can leave holes. Every 5 minutes this re-fetches
+        the most recent klines via REST and upserts only those whose close_time
+        has already passed (confirmed by clock, not by stream).
+        """
+        assert self._settings is not None
+        reconcile_interval = 300  # 5 minutes
+        bars_to_check = 10
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=reconcile_interval)
+                break
+            except TimeoutError:
+                pass
+
+            if (
+                self._bybit_adapter is None
+                or self._trade_journal is None
+                or not self._trade_journal.is_enabled
+            ):
+                continue
+
+            symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
+            backfilled = 0
+            for symbol in symbols:
+                for interval in self._market_data_intervals():
+                    try:
+                        resp = await self._bybit_adapter._rest.get_kline(
+                            category="linear",
+                            symbol=symbol,
+                            interval=interval,
+                            limit=bars_to_check,
+                        )
+                        items = resp.get("result", {}).get("list", [])
+                        now_ms = datetime.now(tz=UTC).timestamp() * 1000
+                        bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                        for row in items:
+                            try:
+                                ts_ms = int(row[0])
+                                close_epoch_ms = ts_ms + bar_ms
+                                if now_ms < close_epoch_ms:
+                                    continue  # still open — skip, no look-ahead
+                                await self._trade_journal.upsert_market_candle(
+                                    symbol=symbol,
+                                    interval=interval,
+                                    open_time=datetime.fromtimestamp(ts_ms / 1000, tz=UTC),
+                                    close_time=datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC),
+                                    open=Decimal(str(row[1])),
+                                    high=Decimal(str(row[2])),
+                                    low=Decimal(str(row[3])),
+                                    close=Decimal(str(row[4])),
+                                    volume=Decimal(str(row[5])),
+                                    turnover=Decimal(str(row[6])),
+                                    confirmed=True,
+                                    source="rest_reconcile",
+                                )
+                                backfilled += 1
+                            except (IndexError, ValueError):
+                                continue
+                    except Exception as exc:
+                        log.debug(
+                            "candle_reconcile.fetch_failed",
+                            symbol=symbol,
+                            interval=interval,
+                            error=str(exc),
+                        )
+            if backfilled:
+                log.info("candle_reconcile.completed", upserted=backfilled, symbols=len(symbols))
+
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
         from trader.data.candles import CandleStore
@@ -1653,9 +1798,34 @@ class TradingApplication:
             }
 
             seen_exec_ids: set[str] = set()
-            # Guard: track order_link_ids whose pending count has already been released
-            # to prevent double-release if multiple terminal events arrive for the same order.
-            _pending_released: set[str] = set()
+            # In-process cache of released order_link_ids: avoids a DB roundtrip per
+            # duplicate terminal event. The authoritative record is order_pending_state
+            # (resolved_at) which survives restarts.
+            _released_cache: set[str] = set()
+
+            async def _release_pending(order_link_id: str, symbol: str) -> None:
+                """Release a pending entry slot exactly once and persist the resolution."""
+                if order_link_id in _released_cache:
+                    return
+                if (
+                    self._trade_journal is not None
+                    and self._trade_journal.is_enabled
+                    and await self._trade_journal.is_order_resolved(order_link_id)
+                ):
+                    _released_cache.add(order_link_id)
+                    return
+                if self._execution_engine is not None:
+                    self._execution_engine.mark_entry_resolved(order_link_id)
+                _released_cache.add(order_link_id)
+                if self._trade_journal is not None and self._trade_journal.is_enabled:
+                    try:
+                        await self._trade_journal.mark_order_resolved(order_link_id, symbol)
+                    except Exception as _res_exc:
+                        log.debug(
+                            "private_ws.mark_order_resolved_failed",
+                            order_link_id=order_link_id,
+                            error=str(_res_exc),
+                        )
 
             while not self._shutdown_event.is_set():
                 try:
@@ -1726,14 +1896,14 @@ class TradingApplication:
                             is_terminal = order_status in _terminal_order_states
 
                         # Release pending entry slot on terminal — exactly once per order.
-                        # Pass the exact order_link_id so only the correct slot is released.
-                        # _pending_released is shared with ExecutionUpdateEvent to prevent
-                        # double-release when both events arrive for the same fill.
-                        # Skip "unknown:" prefix IDs — they are fallback logging IDs, not real pending slots.
-                        if is_terminal and order_link_id and order_link_id not in _pending_released:
-                            if self._execution_engine is not None and not order_link_id.startswith("unknown:"):
-                                self._execution_engine.mark_entry_resolved(order_link_id)
-                            _pending_released.add(order_link_id)
+                        # Resolution is persisted to order_pending_state so a restart
+                        # never re-blocks the slot. Skip "unknown:" prefix IDs — they
+                        # are fallback logging IDs, not real pending slots.
+                        if is_terminal and order_link_id:
+                            if not order_link_id.startswith("unknown:"):
+                                await _release_pending(order_link_id, event.symbol)
+                            else:
+                                _released_cache.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
                             try:
@@ -1802,15 +1972,9 @@ class TradingApplication:
 
                         # P0.3: Release pending entry slot for this order_link_id only.
                         # Use the resolved order_link_id (after reverse lookup), skip "unknown:" prefixes.
-                        # Guard against double-release via shared _pending_released set.
-                        if (
-                            self._execution_engine is not None
-                            and order_link_id
-                            and not order_link_id.startswith("unknown:")
-                        ):
-                            if order_link_id not in _pending_released:
-                                self._execution_engine.mark_entry_resolved(order_link_id)
-                                _pending_released.add(order_link_id)
+                        # Resolution is persisted to order_pending_state for restart safety.
+                        if order_link_id and not order_link_id.startswith("unknown:"):
+                            await _release_pending(order_link_id, event.symbol)
 
                         if self._execution_engine is not None:
                             try:
@@ -2412,6 +2576,7 @@ class TradingApplication:
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
             "hour_model_gate_canary_blocked": hour_counts.get("model_gate_canary_blocked", 0),
+            "hour_ml_replacement": hour_counts.get("ml_replacement", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
@@ -2731,12 +2896,57 @@ class TradingApplication:
 
             self._record_diag("signals_emitted")
 
+            # --- Hybrid ML mode: a compatible CHAMPION may take over the decision ---
+            # The model scores P(net-positive outcome) for the proposed direction.
+            # When the score clears the gate threshold the signal becomes a model
+            # decision: confidence = model score, rationale = "ML model decision".
+            # The side is kept — the directional_net_v1 label schema scores the
+            # proposal's own direction, so a high score IS the model's directional view.
+            model_decision_meta: dict[str, Any] | None = None
+            if (
+                self._settings.MODEL_ENABLED
+                and self._settings.MODEL_ALLOW_LIVE_DECISIONS
+                and self._model_registry is not None
+            ):
+                try:
+                    ml_pred = self._model_registry.score_live(vec.values)
+                    ml_threshold = self._model_gate_threshold(regime_ctx)
+                    if ml_pred is not None and ml_pred.score >= ml_threshold:
+                        model_decision_meta = {
+                            "model_version": ml_pred.model_version,
+                            "score": ml_pred.score,
+                            "threshold": ml_threshold,
+                            "original_confidence": proposal.confidence,
+                            "original_rationale": proposal.rationale,
+                            "side": proposal.side.value,
+                        }
+                        proposal = proposal.model_copy(
+                            update={
+                                "confidence": min(1.0, max(0.0, ml_pred.score)),
+                                "rationale": "ML model decision",
+                            }
+                        )
+                        self._record_diag("ml_replacement")
+                        if _ML_REPLACEMENT_COUNTER is not None:
+                            _ML_REPLACEMENT_COUNTER.inc()
+                        log.info(
+                            "ml_live.decision_replaced",
+                            symbol=proposal.symbol,
+                            side=proposal.side.value,
+                            model_version=ml_pred.model_version,
+                            score=ml_pred.score,
+                            threshold=ml_threshold,
+                        )
+                except Exception as _ml_live_exc:
+                    log.debug("ml_live.replace_failed", symbol=symbol, error=str(_ml_live_exc))
+
             # TODO: move record_signal after block checks
             if self._trade_journal is not None:
                 await self._trade_journal.record_signal(
                     proposal=proposal,
                     feature_vector=vec,
                     regime_context=regime_ctx,
+                    model_decision=model_decision_meta,
                 )
 
             # Record feature snapshot for ML training (no lookahead — uses candle open_time)
@@ -3198,6 +3408,12 @@ class TradingApplication:
             # Outcome resolver: labels prediction events with horizon returns (every 5 min)
             outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")
             self._background_tasks.append(outcome_resolver_task)
+
+            # Candle reconciler: backfills candles that became confirmed (every 5 min)
+            candle_reconcile_task = asyncio.create_task(
+                self._reconcile_unconfirmed_candles(), name="candle-reconciler"
+            )
+            self._background_tasks.append(candle_reconcile_task)
 
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
             auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")
