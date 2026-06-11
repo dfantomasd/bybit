@@ -61,6 +61,16 @@ _INTERVAL_MS = {
     "30": 1_800_000,
     "60": 3_600_000,
 }
+
+try:
+    from prometheus_client import Counter as _PromCounter
+
+    _ML_REPLACEMENT_COUNTER = _PromCounter(
+        "trader_ml_replacement_total",
+        "Signals where the ML champion replaced the rule-based decision",
+    )
+except Exception:  # pragma: no cover - prometheus optional at import time
+    _ML_REPLACEMENT_COUNTER = None
 _CRITICAL_TASK_NAMES = frozenset(
     {
         "screener",
@@ -117,6 +127,7 @@ class TradingApplication:
         self._trailing_stop_keys: set[str] = set()
         self._fee_provider: Any | None = None
         self._last_tx_log_sync_at: datetime | None = None
+        self._last_zero_trading_warn_at: datetime | None = None
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
@@ -812,6 +823,51 @@ class TradingApplication:
                     )
                     continue
 
+                # Statistical significance: bootstrap difference-of-means between
+                # the challenger's resolved returns and the baseline's. Guards
+                # against promoting a lucky streak.
+                from trader.training.bootstrap import bootstrap_pvalue
+
+                min_boot = max(50, int(self._settings.MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES))
+                n_iter = max(100, int(self._settings.MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS))
+                pvalue_threshold = float(self._settings.MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD)
+                horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+                challenger_returns = await self._trade_journal.get_returns_for_model(
+                    challenger_version, limit=200, horizon_minutes=horizon
+                )
+                baseline_returns = await self._trade_journal.get_returns_for_model(
+                    "RULE_BASELINE_V1", limit=200, horizon_minutes=horizon
+                )
+                if len(challenger_returns) < min_boot or len(baseline_returns) < min_boot:
+                    log.debug(
+                        "model_auto_promote.waiting",
+                        reason="insufficient_bootstrap_samples",
+                        version=challenger_version,
+                        challenger_returns=len(challenger_returns),
+                        baseline_returns=len(baseline_returns),
+                        min_required=min_boot,
+                    )
+                    continue
+                boot = bootstrap_pvalue(challenger_returns, baseline_returns, n_iter=n_iter)
+                log.info(
+                    "model_auto_promote.bootstrap",
+                    version=challenger_version,
+                    p_value=boot.p_value,
+                    mean_diff_bps=round(boot.mean_diff_bps, 4),
+                    n_iterations=boot.n_iterations,
+                    n_challenger=boot.n_challenger,
+                    n_baseline=boot.n_baseline,
+                )
+                if boot.p_value >= pvalue_threshold:
+                    log.info(
+                        "model_auto_promote.waiting",
+                        reason="lift_not_significant",
+                        version=challenger_version,
+                        p_value=boot.p_value,
+                        pvalue_threshold=pvalue_threshold,
+                    )
+                    continue
+
                 log.info(
                     "model_auto_promote.triggered",
                     version=challenger_version,
@@ -819,6 +875,7 @@ class TradingApplication:
                     lift_bps=lift_bps,
                     champion_wf_bps=champion_wf_bps,
                     quality=quality,
+                    p_value=boot.p_value,
                 )
                 result = await self._start_model_promote(challenger_version)
 
@@ -831,6 +888,7 @@ class TradingApplication:
                         f"Версия: <code>{challenger_version}</code>\n"
                         f"Сигналов: <code>{total_count}</code> | "
                         f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
+                        f"Bootstrap p-value: <code>{boot.p_value:.4f}</code> ({boot.n_iterations} итераций)\n"
                         f"Качество: <code>{quality}</code>\n"
                         f"{result}"
                     )
@@ -1178,6 +1236,51 @@ class TradingApplication:
             )
             return diag
 
+        async def _healthcheck_provider() -> dict:
+            diag = self.get_diagnostics()
+            blockers = {
+                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
+                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
+                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
+                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
+            }
+            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "нет блокировок"
+            today_avg_net_bps = None
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    today_avg_net_bps = await self._trade_journal.get_today_avg_net_bps()
+                except Exception as _hc_exc:
+                    log.debug("healthcheck.avg_net_failed", error=str(_hc_exc))
+            return {
+                "hour_signals_emitted": diag.get("hour_signals_emitted", 0),
+                "hour_order_placed": diag.get("hour_order_placed", 0),
+                "hour_ml_replacement": diag.get("hour_ml_replacement", 0),
+                "hour_rule_fallback_signals": diag.get("hour_rule_fallback_signals", 0),
+                "top_blocker": top_blocker,
+                "blockers": blockers,
+                "today_avg_net_bps": today_avg_net_bps,
+            }
+
+        async def _recent_trades_provider() -> list[dict]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_recent_closed_trades(limit=10)
+
+        async def _add_subscription(chat_id: int) -> None:
+            if self._trade_journal is not None:
+                await self._trade_journal.add_telegram_subscription(chat_id)
+
+        async def _remove_subscription(chat_id: int) -> None:
+            if self._trade_journal is not None:
+                await self._trade_journal.remove_telegram_subscription(chat_id)
+
+        async def _load_subscriptions() -> list[int]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_telegram_subscriptions()
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -1201,6 +1304,11 @@ class TradingApplication:
             diagnostics_provider=self.get_diagnostics,
             db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
+            healthcheck_provider=_healthcheck_provider,
+            recent_trades_provider=_recent_trades_provider,
+            add_subscription=_add_subscription,
+            remove_subscription=_remove_subscription,
+            load_subscriptions=_load_subscriptions,
         )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
@@ -1336,16 +1444,31 @@ class TradingApplication:
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
         )
 
-        # P0.2: Restore pending entries from durable storage before any new entries
+        # P0.2: Restore pending entries from durable storage before any new entries.
+        # Orders with a persisted terminal resolution (order_pending_state.resolved_at)
+        # are skipped: a terminal status seen before a restart must not re-block the slot.
         if self._trade_journal is not None:
             try:
                 pending_records = await self._trade_journal.get_pending_durable_orders()
-                if pending_records:
-                    self._execution_engine.restore_pending_entries_with_symbols(pending_records)
+                unresolved_records = []
+                skipped_resolved = []
+                for record in pending_records:
+                    oid = str(record.get("order_link_id") or "")
+                    if oid and await self._trade_journal.is_order_resolved(oid):
+                        skipped_resolved.append(oid)
+                        continue
+                    unresolved_records.append(record)
+                if skipped_resolved:
+                    log.info(
+                        "execution_engine.pending_restore_skipped_resolved",
+                        ids=skipped_resolved,
+                    )
+                if unresolved_records:
+                    self._execution_engine.restore_pending_entries_with_symbols(unresolved_records)
                     log.info(
                         "execution_engine.pending_restored",
-                        count=len(pending_records),
-                        ids=[r.get("order_link_id") for r in pending_records],
+                        count=len(unresolved_records),
+                        ids=[r.get("order_link_id") for r in unresolved_records],
                     )
             except Exception as exc:
                 log.warning("execution_engine.pending_restore_failed", error=str(exc))
@@ -1509,6 +1632,75 @@ class TradingApplication:
                         has_api_key=has_api_key,
                     )
 
+    async def _reconcile_unconfirmed_candles(self) -> None:
+        """Backfill candles that have become confirmed since the last write.
+
+        Unconfirmed candles are never persisted (look-ahead bias guard), so a WS
+        gap or a restart mid-bar can leave holes. Every 5 minutes this re-fetches
+        the most recent klines via REST and upserts only those whose close_time
+        has already passed (confirmed by clock, not by stream).
+        """
+        assert self._settings is not None
+        reconcile_interval = 300  # 5 minutes
+        bars_to_check = 10
+
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=reconcile_interval)
+                break
+            except TimeoutError:
+                pass
+
+            if self._bybit_adapter is None or self._trade_journal is None or not self._trade_journal.is_enabled:
+                continue
+
+            symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
+            backfilled = 0
+            for symbol in symbols:
+                for interval in self._market_data_intervals():
+                    try:
+                        resp = await self._bybit_adapter._rest.get_kline(
+                            category="linear",
+                            symbol=symbol,
+                            interval=interval,
+                            limit=bars_to_check,
+                        )
+                        items = resp.get("result", {}).get("list", [])
+                        now_ms = datetime.now(tz=UTC).timestamp() * 1000
+                        bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                        for row in items:
+                            try:
+                                ts_ms = int(row[0])
+                                close_epoch_ms = ts_ms + bar_ms
+                                if now_ms < close_epoch_ms:
+                                    continue  # still open — skip, no look-ahead
+                                await self._trade_journal.upsert_market_candle(
+                                    symbol=symbol,
+                                    interval=interval,
+                                    open_time=datetime.fromtimestamp(ts_ms / 1000, tz=UTC),
+                                    close_time=datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC),
+                                    open=Decimal(str(row[1])),
+                                    high=Decimal(str(row[2])),
+                                    low=Decimal(str(row[3])),
+                                    close=Decimal(str(row[4])),
+                                    volume=Decimal(str(row[5])),
+                                    turnover=Decimal(str(row[6])),
+                                    confirmed=True,
+                                    source="rest_reconcile",
+                                )
+                                backfilled += 1
+                            except (IndexError, ValueError):
+                                continue
+                    except Exception as exc:
+                        log.debug(
+                            "candle_reconcile.fetch_failed",
+                            symbol=symbol,
+                            interval=interval,
+                            error=str(exc),
+                        )
+            if backfilled:
+                log.info("candle_reconcile.completed", upserted=backfilled, symbols=len(symbols))
+
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
         from trader.data.candles import CandleStore
@@ -1653,9 +1845,34 @@ class TradingApplication:
             }
 
             seen_exec_ids: set[str] = set()
-            # Guard: track order_link_ids whose pending count has already been released
-            # to prevent double-release if multiple terminal events arrive for the same order.
-            _pending_released: set[str] = set()
+            # In-process cache of released order_link_ids: avoids a DB roundtrip per
+            # duplicate terminal event. The authoritative record is order_pending_state
+            # (resolved_at) which survives restarts.
+            _released_cache: set[str] = set()
+
+            async def _release_pending(order_link_id: str, symbol: str) -> None:
+                """Release a pending entry slot exactly once and persist the resolution."""
+                if order_link_id in _released_cache:
+                    return
+                if (
+                    self._trade_journal is not None
+                    and self._trade_journal.is_enabled
+                    and await self._trade_journal.is_order_resolved(order_link_id)
+                ):
+                    _released_cache.add(order_link_id)
+                    return
+                if self._execution_engine is not None:
+                    self._execution_engine.mark_entry_resolved(order_link_id)
+                _released_cache.add(order_link_id)
+                if self._trade_journal is not None and self._trade_journal.is_enabled:
+                    try:
+                        await self._trade_journal.mark_order_resolved(order_link_id, symbol)
+                    except Exception as _res_exc:
+                        log.debug(
+                            "private_ws.mark_order_resolved_failed",
+                            order_link_id=order_link_id,
+                            error=str(_res_exc),
+                        )
 
             while not self._shutdown_event.is_set():
                 try:
@@ -1726,14 +1943,14 @@ class TradingApplication:
                             is_terminal = order_status in _terminal_order_states
 
                         # Release pending entry slot on terminal — exactly once per order.
-                        # Pass the exact order_link_id so only the correct slot is released.
-                        # _pending_released is shared with ExecutionUpdateEvent to prevent
-                        # double-release when both events arrive for the same fill.
-                        # Skip "unknown:" prefix IDs — they are fallback logging IDs, not real pending slots.
-                        if is_terminal and order_link_id and order_link_id not in _pending_released:
-                            if self._execution_engine is not None and not order_link_id.startswith("unknown:"):
-                                self._execution_engine.mark_entry_resolved(order_link_id)
-                            _pending_released.add(order_link_id)
+                        # Resolution is persisted to order_pending_state so a restart
+                        # never re-blocks the slot. Skip "unknown:" prefix IDs — they
+                        # are fallback logging IDs, not real pending slots.
+                        if is_terminal and order_link_id:
+                            if not order_link_id.startswith("unknown:"):
+                                await _release_pending(order_link_id, event.symbol)
+                            else:
+                                _released_cache.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._execution_engine is not None:
                             try:
@@ -1802,15 +2019,9 @@ class TradingApplication:
 
                         # P0.3: Release pending entry slot for this order_link_id only.
                         # Use the resolved order_link_id (after reverse lookup), skip "unknown:" prefixes.
-                        # Guard against double-release via shared _pending_released set.
-                        if (
-                            self._execution_engine is not None
-                            and order_link_id
-                            and not order_link_id.startswith("unknown:")
-                        ):
-                            if order_link_id not in _pending_released:
-                                self._execution_engine.mark_entry_resolved(order_link_id)
-                                _pending_released.add(order_link_id)
+                        # Resolution is persisted to order_pending_state for restart safety.
+                        if order_link_id and not order_link_id.startswith("unknown:"):
+                            await _release_pending(order_link_id, event.symbol)
 
                         if self._execution_engine is not None:
                             try:
@@ -2142,6 +2353,14 @@ class TradingApplication:
                 log.debug("profit_manager.positions_fetch_failed", error=str(exc))
                 return
 
+        # Prune stale trailing-stop keys for positions that are no longer open
+        active_keys = {
+            f"{p.symbol}:{p.side.value}:{p.size}:{p.entry_price}"
+            for p in positions
+            if p.size > Decimal("0") and p.entry_price > Decimal("0")
+        }
+        self._trailing_stop_keys &= active_keys
+
         for pos in positions:
             if pos.size <= Decimal("0") or pos.entry_price <= Decimal("0"):
                 continue
@@ -2371,6 +2590,40 @@ class TradingApplication:
         """Record a diagnostics event with the current timestamp."""
         self._diag_events.append((datetime.now(tz=UTC), event))
 
+    def _check_zero_trading(self) -> None:
+        """Warn (never block) when signals flow but nothing executes for an hour.
+
+        Helps catch over-tight filters: model gate, net edge, spread, risk.
+        Throttled to one warning per 10 minutes.
+        """
+        assert self._settings is not None
+        now = datetime.now(tz=UTC)
+        if self._last_zero_trading_warn_at is not None:
+            if (now - self._last_zero_trading_warn_at).total_seconds() < 600:
+                return
+        diag = self.get_diagnostics()
+        signals = int(diag.get("hour_signals_emitted") or 0)
+        placed = int(diag.get("hour_order_placed") or 0)
+        if signals >= max(1, self._settings.MIN_SIGNALS_PER_HOUR) and placed == 0:
+            self._last_zero_trading_warn_at = now
+            blockers = {
+                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
+                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
+                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
+                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
+            }
+            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "unknown"
+            log.warning(
+                "zero_trading.detected",
+                hour_signals=signals,
+                hour_orders_placed=placed,
+                top_blocker=top_blocker,
+                blockers=blockers,
+                auto_soften_enabled=self._settings.AUTO_SOFTEN_FILTERS_ENABLED,
+            )
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return a diagnostics snapshot for the /diagnostics Telegram command."""
         now = datetime.now(tz=UTC)
@@ -2404,6 +2657,10 @@ class TradingApplication:
             "hour_skipped_entry_cooldown": hour_counts.get("skipped_entry_cooldown", 0),
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
             "hour_model_gate_canary_blocked": hour_counts.get("model_gate_canary_blocked", 0),
+            "hour_ml_replacement": hour_counts.get("ml_replacement", 0),
+            "hour_rule_fallback_signals": hour_counts.get("rule_fallback_signal", 0),
+            "hour_spread_rejected": hour_counts.get("spread_rejected", 0),
+            "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
@@ -2598,7 +2855,7 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies = [
+        strategies: list = [
             EMAcrossoverStrategy(
                 symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
@@ -2606,6 +2863,42 @@ class TradingApplication:
                 max_risk_pct=0.01,  # 1% of balance per trade
             )
         ]
+
+        if self._settings.SCALP_STRATEGY_ENABLED and self._candle_store is not None:
+            from trader.strategies.scalp_micro import ScalpMicroStrategy
+
+            def _spread_for(symbol: str) -> float | None:
+                """Latest screener spread for the symbol; None when unknown (fail closed)."""
+                if self._screener is None:
+                    return None
+                for scored in self._screener.wide_universe:
+                    if scored.symbol == symbol:
+                        return scored.spread_bps
+                return None
+
+            strategies.append(
+                ScalpMicroStrategy(
+                    candle_store=self._candle_store,
+                    interval=_WS_INTERVAL,
+                    spread_provider=_spread_for,
+                    taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                    expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                    min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+                    max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                    cooldown_seconds=self._settings.SCALP_COOLDOWN_SECONDS,
+                    max_trades_per_minute=self._settings.SCALP_MAX_TRADES_PER_MINUTE,
+                    risk_pct=0.01,
+                    max_position_notional_usd=self._settings.SCALP_MAX_POSITION_NOTIONAL_USD,
+                    min_qty_usd=5.0,
+                    diag_hook=self._record_diag,
+                )
+            )
+            log.info(
+                "scalp_micro.enabled",
+                max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+                max_trades_per_minute=self._settings.SCALP_MAX_TRADES_PER_MINUTE,
+            )
 
         self._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
@@ -2665,6 +2958,7 @@ class TradingApplication:
                 del _shadow_positions[symbol]
                 if self._execution_engine is not None:
                     await self._execution_engine.record_position_closed(symbol)
+                self._trailing_stop_keys.discard(symbol)
                 if self._telegram_bot is not None:
                     try:
                         label = "✅ TP" if hit == "TP" else "🛑 SL"
@@ -2722,11 +3016,65 @@ class TradingApplication:
 
             self._record_diag("signals_emitted")
 
+            # --- Hybrid ML mode: a compatible CHAMPION may take over the decision ---
+            # The model scores P(net-positive outcome) for the proposed direction.
+            # When the score clears the gate threshold the signal becomes a model
+            # decision: confidence = model score, rationale = "ML model decision".
+            # The side is kept — the directional_net_v1 label schema scores the
+            # proposal's own direction, so a high score IS the model's directional view.
+            model_decision_meta: dict[str, Any] | None = None
+            if (
+                self._settings.MODEL_ENABLED
+                and self._settings.MODEL_ALLOW_LIVE_DECISIONS
+                and self._model_registry is not None
+            ):
+                try:
+                    ml_pred = self._model_registry.score_live(vec.values)
+                    ml_threshold = self._model_gate_threshold(regime_ctx)
+                    if (
+                        ml_pred is not None
+                        and ml_pred.score < ml_threshold
+                        and self._settings.FALLBACK_TO_RULE_WHEN_MODEL_UNSURE
+                    ):
+                        # Model exists but is unsure — keep the rule-based proposal.
+                        # Counted so /healthcheck can show how often the fallback fires.
+                        self._record_diag("rule_fallback_signal")
+                    if ml_pred is not None and ml_pred.score >= ml_threshold:
+                        model_decision_meta = {
+                            "model_version": ml_pred.model_version,
+                            "score": ml_pred.score,
+                            "threshold": ml_threshold,
+                            "original_confidence": proposal.confidence,
+                            "original_rationale": proposal.rationale,
+                            "side": proposal.side.value,
+                        }
+                        proposal = proposal.model_copy(
+                            update={
+                                "confidence": min(1.0, max(0.0, ml_pred.score)),
+                                "rationale": "ML model decision",
+                            }
+                        )
+                        self._record_diag("ml_replacement")
+                        if _ML_REPLACEMENT_COUNTER is not None:
+                            _ML_REPLACEMENT_COUNTER.inc()
+                        log.info(
+                            "ml_live.decision_replaced",
+                            symbol=proposal.symbol,
+                            side=proposal.side.value,
+                            model_version=ml_pred.model_version,
+                            score=ml_pred.score,
+                            threshold=ml_threshold,
+                        )
+                except Exception as _ml_live_exc:
+                    log.debug("ml_live.replace_failed", symbol=symbol, error=str(_ml_live_exc))
+
+            # TODO: move record_signal after block checks
             if self._trade_journal is not None:
                 await self._trade_journal.record_signal(
                     proposal=proposal,
                     feature_vector=vec,
                     regime_context=regime_ctx,
+                    model_decision=model_decision_meta,
                 )
 
             # Record feature snapshot for ML training (no lookahead — uses candle open_time)
@@ -2974,6 +3322,7 @@ class TradingApplication:
                     await self._refresh_closed_pnl_memory()
                 await self._sync_execution_positions()
                 await self._manage_open_positions()
+                self._check_zero_trading()
 
                 # Sync transaction log periodically
                 now = datetime.now(tz=UTC)
@@ -3188,6 +3537,10 @@ class TradingApplication:
             # Outcome resolver: labels prediction events with horizon returns (every 5 min)
             outcome_resolver_task = asyncio.create_task(self._run_outcome_resolver(), name="outcome-resolver")
             self._background_tasks.append(outcome_resolver_task)
+
+            # Candle reconciler: backfills candles that became confirmed (every 5 min)
+            candle_reconcile_task = asyncio.create_task(self._reconcile_unconfirmed_candles(), name="candle-reconciler")
+            self._background_tasks.append(candle_reconcile_task)
 
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
             auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")

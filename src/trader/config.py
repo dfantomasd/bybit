@@ -96,6 +96,33 @@ class Settings(BaseSettings):
     FUNDING_BUFFER_PCT: float = 0.01
     """Estimated funding cost buffer per position."""
 
+    # ------------------------------------------------------------------
+    # Scalping (ScalpMicroStrategy)
+    # ------------------------------------------------------------------
+    SCALP_STRATEGY_ENABLED: bool = True
+    """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
+    MAX_SPREAD_BPS_SCALP: float = 3.0
+    """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
+    MIN_NET_SCALP_RETURN_PCT: float = 0.05
+    """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
+    SCALP_COOLDOWN_SECONDS: int = 60
+    """Minimum seconds between scalp signals per symbol."""
+    SCALP_MAX_TRADES_PER_MINUTE: int = 10
+    """Global cap on scalp signals per minute across the whole portfolio."""
+    SCALP_MAX_POSITION_NOTIONAL_USD: float = 100.0
+    """Hard notional cap per scalp position."""
+
+    # ------------------------------------------------------------------
+    # Anti zero-trading guards
+    # ------------------------------------------------------------------
+    MIN_SIGNALS_PER_HOUR: int = 1
+    """Expected minimum signals/hour; below this with zero fills a warning is logged."""
+    AUTO_SOFTEN_FILTERS_ENABLED: bool = False
+    """Reserved: when true, filters may be relaxed automatically on zero trading. Off by default."""
+    FALLBACK_TO_RULE_WHEN_MODEL_UNSURE: bool = True
+    """When the model exists but its score is below the gate threshold, keep the
+    rule-based proposal instead of dropping it (hybrid mode fallback)."""
+
     ENTRY_ORDER_MODE: str = "MARKET"
     """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
     ENTRY_LIMIT_TTL_SECONDS: int = 5
@@ -264,10 +291,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # ML / model
     # ------------------------------------------------------------------
-    MODEL_ENABLED: bool = False
+    MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
     MODEL_ALLOW_LIVE_DECISIONS: bool = False
-    """When False, model only scores in shadow; rule-based strategy remains authoritative."""
+    """When False, model only scores in shadow; rule-based strategy remains authoritative.
+    When True, a compatible CHAMPION model may replace rule-based decisions (hybrid mode).
+    Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
     MODEL_SHADOW_SCORING_ENABLED: bool = True
@@ -280,12 +309,18 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
-    """Auto-promote challenger to champion when it beats the current champion.
-    Disabled by default — requires explicit operator opt-in."""
+    """Auto-promote challenger to champion when it beats the current champion
+    AND the lift is statistically significant (bootstrap p-value)."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
     MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
     MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
     """Minimum live lift (bps) the challenger must show before auto-promotion."""
+    MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
+    """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
+    return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""
+    MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS: int = 1000
+    MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES: int = 50
+    """Minimum resolved challenger returns required to run the bootstrap test."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
@@ -384,6 +419,25 @@ class Settings(BaseSettings):
             # SHADOW_MODE defaults to True but must be False in CANARY_LIVE so orders are
             # actually submitted. Auto-clear it here so operators don't need a separate env var.
             self.SHADOW_MODE = False
+
+        if self.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+            if self.BYBIT_USE_TESTNET:
+                raise ValueError(
+                    f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
+                    "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
+                )
+
+        # Hybrid ML mode sanity check: live model decisions without the canary
+        # gate means the model can replace signals but nothing blocks weak ones.
+        if self.MODEL_ALLOW_LIVE_DECISIONS and not self.MODEL_GATE_CANARY_ENABLED:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "MODEL_ALLOW_LIVE_DECISIONS=true with MODEL_GATE_CANARY_ENABLED=false: "
+                "the model can replace rule-based decisions but the canary gate will not "
+                "block low-score signals. Consider enabling MODEL_GATE_CANARY_ENABLED.",
+                stacklevel=2,
+            )
 
 
 # ---------------------------------------------------------------------------

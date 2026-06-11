@@ -370,6 +370,43 @@ def lower_wick_ratio(open_: float, high: float, low: float, close: float) -> flo
 # ---------------------------------------------------------------------------
 
 
+def obv(closes: Sequence[float], volumes: Sequence[float]) -> float | None:
+    """On-Balance Volume normalised by the mean volume over the window.
+
+    Returns the OBV divided by mean(volumes) so the value is scale-independent
+    and comparable across different symbols and time periods.
+    """
+    n = min(len(closes), len(volumes))
+    if n < 2:
+        return None
+    closes_ = list(closes[-n:])
+    volumes_ = list(volumes[-n:])
+    running = 0.0
+    for i in range(1, n):
+        if closes_[i] > closes_[i - 1]:
+            running += volumes_[i]
+        elif closes_[i] < closes_[i - 1]:
+            running -= volumes_[i]
+    mean_vol = sum(volumes_) / n
+    if mean_vol == 0:
+        return 0.0
+    return running / mean_vol
+
+
+def volume_sma_ratio(volumes: Sequence[float], period: int = 20) -> float | None:
+    """Ratio of current volume to SMA of volume over ``period`` bars.
+
+    Values > 1 indicate above-average volume; < 1 indicates below-average.
+    """
+    if len(volumes) < period:
+        return None
+    window = list(volumes[-period:])
+    mean = sum(window) / period
+    if mean == 0:
+        return 1.0
+    return volumes[-1] / mean
+
+
 def ema_slope(series: Sequence[float], period: int, lookback: int = 3) -> float | None:
     """Slope of the EMA over the last ``lookback`` values (normalised by price)."""
     ema_vals = ema(series, period)

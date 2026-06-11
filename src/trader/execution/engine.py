@@ -265,6 +265,19 @@ class ExecutionEngine:
         # Always sync count from the authoritative set
         self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
+    async def resolve_pending_durable(self, order_link_id: str, symbol: str = "") -> None:
+        """Release a pending slot and persist the resolution to order_pending_state."""
+        self.mark_entry_resolved(order_link_id)
+        if self._trade_journal is not None and self._trade_journal.is_enabled:
+            try:
+                await self._trade_journal.mark_order_resolved(order_link_id, symbol)
+            except Exception as _res_exc:
+                log.debug(
+                    "execution.mark_order_resolved_failed",
+                    order_link_id=order_link_id,
+                    error=str(_res_exc),
+                )
+
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
         return symbol in self._pending_entry_symbols.values()
@@ -935,15 +948,25 @@ class ExecutionEngine:
 
             # P0.3: Register pending entry slot (with symbol for screener protection)
             self.mark_entry_submitted(intent.order_link_id, symbol=symbol)
+            # Persist pending registration so resolution state survives restarts
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_pending(intent.order_link_id, symbol)
+                except Exception as _pend_exc:
+                    log.debug(
+                        "execution.record_order_pending_failed",
+                        order_link_id=intent.order_link_id,
+                        error=str(_pend_exc),
+                    )
 
             # P0.6: Second canary gate immediately before REST
             if self._is_canary:
                 if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
                     log.warning("canary.blocked_max_positions_pre_rest", symbol=symbol)
                     return None
                 if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
                     log.warning("canary.blocked_max_exposure_pre_rest", symbol=symbol)
                     return None
 
@@ -966,7 +989,7 @@ class ExecutionEngine:
                         order_link_id=intent.order_link_id,
                         error=str(_durable_exc),
                     )
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
                     return None
 
             try:
@@ -994,7 +1017,7 @@ class ExecutionEngine:
                     )
             except Exception as exc:
                 self._diag_order_failed += 1
-                self.mark_entry_resolved(intent.order_link_id)
+                await self.resolve_pending_durable(intent.order_link_id, symbol)
                 # Record failure timestamp (NOT an entry cooldown — separate state)
                 self._last_failure_at[symbol] = datetime.now(tz=UTC)
                 log.error(

@@ -181,6 +181,11 @@ async def _promote(version: str, confirm: bool) -> None:
             click.echo(f"Promotion criteria not met: {reason}", err=True)
             return
 
+        # Require at minimum 30 observed outcomes for statistical significance
+        if int(gate.get("total_count", 0)) < 30:
+            click.echo("Promotion criteria not met: insufficient_gate_observations", err=True)
+            return
+
         min_pass_count = max(10, settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION // 3)
         if pass_count < min_pass_count:
             click.echo(

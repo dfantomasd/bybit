@@ -395,6 +395,27 @@ class TradeJournal:
                     ADD COLUMN IF NOT EXISTS invalid_reason text;
                 ALTER TABLE feature_snapshots
                     ADD COLUMN IF NOT EXISTS invalidated_at timestamptz;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_schema_version TEXT;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
+                -- Persistent pending-entry resolution state: survives restarts so a
+                -- terminal order status seen before a crash never re-blocks the slot.
+                CREATE TABLE IF NOT EXISTS order_pending_state (
+                    order_link_id text PRIMARY KEY,
+                    symbol text,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    resolved_at timestamptz
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_pending_state_unresolved
+                    ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
+                -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
+                ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
+                -- Telegram push-notification subscriptions (survive restarts)
+                CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+                    chat_id bigint PRIMARY KEY,
+                    subscribed_at timestamptz NOT NULL DEFAULT now()
+                );
                 UPDATE feature_snapshots fs
                 SET training_eligible = false,
                     invalid_reason = 'duplicate_snapshot_same_candle',
@@ -416,12 +437,19 @@ class TradeJournal:
                     ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
                     WHERE training_eligible = true;
             """)
+            # This index must be created AFTER ALTER TABLE adds label_schema_version
+            # to avoid CREATE INDEX failing on an existing DB where the column was missing.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
+                "ON prediction_outcomes (label_schema_version)"
+            )
 
     async def record_signal(
         self,
         proposal: TradeProposal,
         feature_vector: FeatureVector | None,
         regime_context: RegimeContext | None,
+        model_decision: dict[str, Any] | None = None,
     ) -> None:
         features = None
         if feature_vector is not None:
@@ -439,9 +467,9 @@ class TradeJournal:
             INSERT INTO trade_signals (
                 proposal_id, created_at, strategy_id, symbol, side, confidence,
                 entry_price, take_profit, stop_loss, requested_qty,
-                requested_notional_usd, regime, rationale, features
+                requested_notional_usd, regime, rationale, features, model_decision
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb)
             ON CONFLICT (proposal_id) DO NOTHING
             """,
             proposal.proposal_id,
@@ -458,6 +486,7 @@ class TradeJournal:
             regime,
             proposal.rationale,
             json.dumps(features) if features is not None else None,
+            json.dumps(model_decision) if model_decision is not None else None,
         )
 
     async def record_risk_decision(self, symbol: str, decision: RiskDecision) -> None:
@@ -882,6 +911,143 @@ class TradeJournal:
         )
         return [dict(r) for r in rows]
 
+    # ------------------------------------------------------------------
+    # Persistent pending-entry resolution state (order_pending_state)
+    # ------------------------------------------------------------------
+
+    async def record_order_pending(self, order_link_id: str, symbol: str) -> None:
+        """Register a pending entry order so its resolution survives restarts."""
+        if not self.is_enabled or not order_link_id:
+            return
+        await self._execute(
+            """
+            INSERT INTO order_pending_state (order_link_id, symbol)
+            VALUES ($1, $2)
+            ON CONFLICT (order_link_id) DO NOTHING
+            """,
+            order_link_id,
+            symbol,
+        )
+
+    async def mark_order_resolved(self, order_link_id: str, symbol: str = "") -> None:
+        """Persist that a pending entry order reached a terminal state.
+
+        Upserts so resolution is recorded even if record_order_pending was missed.
+        """
+        if not self.is_enabled or not order_link_id:
+            return
+        await self._execute(
+            """
+            INSERT INTO order_pending_state (order_link_id, symbol, resolved_at)
+            VALUES ($1, $2, now())
+            ON CONFLICT (order_link_id) DO UPDATE
+                SET resolved_at = COALESCE(order_pending_state.resolved_at, now())
+            """,
+            order_link_id,
+            symbol or None,
+        )
+
+    async def is_order_resolved(self, order_link_id: str) -> bool:
+        """True if the order has a persisted terminal resolution."""
+        if not self.is_enabled or not order_link_id:
+            return False
+        rows = await self._fetch(
+            "SELECT 1 FROM order_pending_state WHERE order_link_id = $1 AND resolved_at IS NOT NULL",
+            order_link_id,
+        )
+        return bool(rows)
+
+    async def get_unresolved_order_link_ids(self) -> list[str]:
+        """Return order_link_ids registered as pending but never resolved (last 24h)."""
+        rows = await self._fetch(
+            """
+            SELECT order_link_id FROM order_pending_state
+            WHERE resolved_at IS NULL AND created_at > now() - interval '24 hours'
+            ORDER BY created_at DESC
+            """
+        )
+        return [str(r["order_link_id"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Telegram subscriptions
+    # ------------------------------------------------------------------
+
+    async def add_telegram_subscription(self, chat_id: int) -> None:
+        """Persist a Telegram chat subscription (idempotent)."""
+        if not self.is_enabled:
+            return
+        await self._execute(
+            "INSERT INTO telegram_subscriptions (chat_id) VALUES ($1) ON CONFLICT (chat_id) DO NOTHING",
+            int(chat_id),
+        )
+
+    async def remove_telegram_subscription(self, chat_id: int) -> None:
+        if not self.is_enabled:
+            return
+        await self._execute(
+            "DELETE FROM telegram_subscriptions WHERE chat_id = $1",
+            int(chat_id),
+        )
+
+    async def get_telegram_subscriptions(self) -> list[int]:
+        rows = await self._fetch("SELECT chat_id FROM telegram_subscriptions ORDER BY subscribed_at")
+        return [int(r["chat_id"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Telegram /trades and /healthcheck data
+    # ------------------------------------------------------------------
+
+    async def get_recent_closed_trades(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return the most recent closed trades for the /trades command."""
+        rows = await self._fetch(
+            """
+            SELECT created_at, symbol, side, qty, avg_entry_price, avg_exit_price, closed_pnl
+            FROM closed_pnl
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            int(limit),
+        )
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            entry = float(r["avg_entry_price"] or 0)
+            exit_ = float(r["avg_exit_price"] or 0)
+            net_bps: float | None = None
+            if entry > 0 and exit_ > 0:
+                direction = 1.0 if str(r["side"] or "").upper() in ("BUY", "SELL_CLOSE") else -1.0
+                # closed_pnl side is the closing side; entry/exit prices carry direction info
+                net_bps = (exit_ - entry) / entry * 10_000 * direction
+            result.append(
+                {
+                    "created_at": r["created_at"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "qty": float(r["qty"] or 0),
+                    "entry": entry,
+                    "exit": exit_,
+                    "pnl_usdt": float(r["closed_pnl"] or 0),
+                    "net_bps": net_bps,
+                }
+            )
+        return result
+
+    async def get_today_avg_net_bps(self) -> float | None:
+        """Average resolved net return (bps) for today's baseline signals."""
+        rows = await self._fetch(
+            """
+            SELECT avg(po.net_return_bps) AS avg_bps
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE po.net_return_bps IS NOT NULL
+              AND po.label_schema_version = 'directional_net_v1'
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND po.resolved_at >= date_trunc('day', now())
+            """
+        )
+        if rows and rows[0]["avg_bps"] is not None:
+            return float(rows[0]["avg_bps"])
+        return None
+
     async def find_order_link_id_by_exchange_order_id(
         self,
         exchange_order_id: str,
@@ -1245,6 +1411,53 @@ class TradeJournal:
             last_error=error,
         )
 
+    async def get_returns_for_model(
+        self,
+        model_version: str,
+        limit: int = 200,
+        horizon_minutes: int | None = None,
+    ) -> list[float]:
+        """Return recent resolved net returns (bps) for a model version, newest first.
+
+        Used by the auto-promoter's bootstrap significance test. Pass
+        model_version='RULE_BASELINE_V1' for the baseline distribution.
+        """
+        if not self.is_enabled:
+            return []
+        if horizon_minutes is not None:
+            rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_outcomes po
+                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                WHERE pe.model_version = $1
+                  AND po.net_return_bps IS NOT NULL
+                  AND po.label_schema_version = 'directional_net_v1'
+                  AND po.horizon_minutes = $3
+                ORDER BY po.resolved_at DESC NULLS LAST
+                LIMIT $2
+                """,
+                model_version,
+                int(limit),
+                int(horizon_minutes),
+            )
+        else:
+            rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_outcomes po
+                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                WHERE pe.model_version = $1
+                  AND po.net_return_bps IS NOT NULL
+                  AND po.label_schema_version = 'directional_net_v1'
+                ORDER BY po.resolved_at DESC NULLS LAST
+                LIMIT $2
+                """,
+                model_version,
+                int(limit),
+            )
+        return [float(r["net_return_bps"]) for r in rows]
+
     async def get_shadow_gate_stats(
         self,
         model_version: str,
@@ -1410,7 +1623,7 @@ class TradeJournal:
             rows = await self._fetch(
                 """
                 WITH labelled AS (
-                    SELECT DISTINCT ON (fs.snapshot_id)
+                    SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time)
                            fs.snapshot_id
                     FROM feature_snapshots fs
                     JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
@@ -1420,7 +1633,7 @@ class TradeJournal:
                       AND fs.feature_values IS NOT NULL
                       AND fs.training_eligible = true
                       AND pe.model_version = 'RULE_BASELINE_V1'
-                    ORDER BY fs.snapshot_id, fs.created_at ASC
+                    ORDER BY fs.symbol, fs.interval, fs.candle_open_time, fs.created_at ASC
                 )
                 SELECT count(*) AS cnt FROM labelled
                 """
