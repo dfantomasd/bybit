@@ -342,14 +342,28 @@ def test_audit_script_contains_no_delete_statements() -> None:
 
 
 def test_train_sql_filters_training_eligible() -> None:
-    """train.py must include training_eligible = true in both CTEs."""
+    """train.py must filter training rows through the eligible_samples CTE."""
     import inspect
 
     from trader.training import train
 
     src = inspect.getsource(train)
-    count = src.count("training_eligible = true")
-    assert count >= 2, f"Expected at least 2 occurrences of 'training_eligible = true' in train.py, got {count}"
+    assert "WITH eligible_samples AS" in src
+    assert "fs.training_eligible = true" in src
+
+
+def test_train_sql_deduplicates_by_source_candle_before_split() -> None:
+    """Training samples must be unique by source candle, not only snapshot_id."""
+    import inspect
+
+    from trader.training import train
+
+    src = inspect.getsource(train)
+    assert "count(DISTINCT fs.snapshot_id)" not in src
+    assert "DISTINCT ON (fs.snapshot_id)" not in src
+    assert "ROW_NUMBER() OVER" in src
+    assert "PARTITION BY fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash" in src
+    assert "WHERE es.candle_rank = 1" in src
 
 
 def test_resolve_outcomes_sql_filters_training_eligible() -> None:
@@ -370,3 +384,53 @@ def test_promote_stats_sql_filters_training_eligible() -> None:
 
     src = inspect.getsource(promote)
     assert "training_eligible" in src, "promote.py must reference training_eligible to exclude bad snapshots"
+
+
+def test_promotion_required_gate_float_treats_missing_as_blocking() -> None:
+    from trader.training.promote import _required_gate_float
+
+    missing_value, missing_reason = _required_gate_float(
+        {"pass_avg_net_return_bps": None},
+        "pass_avg_net_return_bps",
+        "missing_shadow_pass_expectancy",
+    )
+    zero_value, zero_reason = _required_gate_float(
+        {"pass_avg_net_return_bps": 0.0},
+        "pass_avg_net_return_bps",
+        "missing_shadow_pass_expectancy",
+    )
+
+    assert missing_value is None
+    assert missing_reason == "missing_shadow_pass_expectancy"
+    assert zero_value == 0.0
+    assert zero_reason is None
+
+
+@pytest.mark.asyncio
+async def test_shadow_gate_stats_preserves_missing_pass_expectancy() -> None:
+    from trader.training.promote import _shadow_gate_stats
+
+    class Pool:
+        async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
+            assert "COALESCE(fs.training_eligible, true) = true" in query
+            assert args[0] == "model-v1"
+            return [
+                {
+                    "decision": "GATE_PASS",
+                    "cnt": 12,
+                    "avg_net_return_bps": None,
+                    "precision": 0.5,
+                },
+                {
+                    "decision": "GATE_BLOCK",
+                    "cnt": 8,
+                    "avg_net_return_bps": -1.5,
+                    "precision": 0.25,
+                },
+            ]
+
+    stats = await _shadow_gate_stats(Pool(), version="model-v1", horizon_minutes=15)
+
+    assert stats["pass_count"] == 12
+    assert stats["pass_avg_net_return_bps"] is None
+    assert stats["lift_vs_all_bps"] is None

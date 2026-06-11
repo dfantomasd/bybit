@@ -293,7 +293,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
-    MODEL_ALLOW_LIVE_DECISIONS: bool = True
+    MODEL_ALLOW_LIVE_DECISIONS: bool = False
     """When False, model only scores in shadow; rule-based strategy remains authoritative.
     When True, a compatible CHAMPION model may replace rule-based decisions (hybrid mode).
     Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
@@ -308,7 +308,7 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
-    MODEL_AUTO_PROMOTE_ENABLED: bool = True
+    MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
     AND the lift is statistically significant (bootstrap p-value)."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
@@ -324,7 +324,7 @@ class Settings(BaseSettings):
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
-    MODEL_GATE_CANARY_ENABLED: bool = True
+    MODEL_GATE_CANARY_ENABLED: bool = False
     """When enabled, allow the model gate to block entries only with conservative safeguards."""
     MODEL_GATE_CANARY_MIN_QUALITY: str = "GOOD"
     MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT: float = 60.0

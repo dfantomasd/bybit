@@ -38,9 +38,6 @@ dependencies = [
 
 [project.optional-dependencies]
 ml = [
-    "torch>=2.3.0",
-    "stable-baselines3>=2.3.0",
-    "gymnasium>=0.29.0",
     "optuna>=3.6.0",
     "mlflow>=2.13.0",
     "river>=0.21.0",

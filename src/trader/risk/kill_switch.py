@@ -144,8 +144,11 @@ class KillSwitch:
                 reason = content or "kill flag file present"
             except OSError:
                 reason = "kill flag file present"
-            # activate() handles escalation; always call it when flag file exists
-            await self.activate(KillSwitchMode.FULL_STOP, reason=reason, operator="file_flag")
+            await self.activate(
+                KillSwitchMode.FULL_STOP,
+                reason=reason,
+                operator="file_flag",
+            )
 
     # ------------------------------------------------------------------
     # Properties

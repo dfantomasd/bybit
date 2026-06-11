@@ -10,6 +10,7 @@ Checks:
 - Sufficient samples per symbol
 - No orphaned snapshots (no linked prediction outcomes)
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -53,9 +54,7 @@ async def _validate(dsn: str) -> int:
             click.echo("[OK] No duplicate snapshots found.")
 
         # 2. Snapshots with NULL feature_values
-        rows = await pool.fetch(
-            "SELECT count(*) AS cnt FROM feature_snapshots WHERE feature_values IS NULL"
-        )
+        rows = await pool.fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE feature_values IS NULL")
         null_count = int(rows[0]["cnt"])
         if null_count > 0:
             click.echo(f"[WARN] {null_count} snapshots have NULL feature_values.")

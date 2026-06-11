@@ -1651,11 +1651,7 @@ class TradingApplication:
             except TimeoutError:
                 pass
 
-            if (
-                self._bybit_adapter is None
-                or self._trade_journal is None
-                or not self._trade_journal.is_enabled
-            ):
+            if self._bybit_adapter is None or self._trade_journal is None or not self._trade_journal.is_enabled:
                 continue
 
             symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
@@ -3543,9 +3539,7 @@ class TradingApplication:
             self._background_tasks.append(outcome_resolver_task)
 
             # Candle reconciler: backfills candles that became confirmed (every 5 min)
-            candle_reconcile_task = asyncio.create_task(
-                self._reconcile_unconfirmed_candles(), name="candle-reconciler"
-            )
+            candle_reconcile_task = asyncio.create_task(self._reconcile_unconfirmed_candles(), name="candle-reconciler")
             self._background_tasks.append(candle_reconcile_task)
 
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate

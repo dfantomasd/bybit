@@ -209,6 +209,7 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
         return_value={
             "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
             "last_ws_message_age_s": 10,
+            "last_confirmed_candle_age_s": 30,
             "last_strategy_loop_at": "2026-06-07T10:00:00Z",
             "hour_api_rejected": 0,
             "hour_min_notional_rejected": 0,

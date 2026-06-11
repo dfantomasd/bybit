@@ -3,7 +3,12 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock
 
+import pytest
+
+from trader.ml import challenger as challenger_module
 from trader.ml.challenger import ChallengerModel, ModelPrediction, ModelRegistry, ModelStatus
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
@@ -142,3 +147,28 @@ def test_promotion_accepts_compatible_good_model() -> None:
 
     assert allowed is True
     assert reason == "criteria_met"
+
+
+@pytest.mark.asyncio
+async def test_load_champion_uses_standard_logging_arguments(monkeypatch: pytest.MonkeyPatch) -> None:
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(return_value=[])
+
+    warning_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    def warning_without_structlog_kwargs(message: str, *args: Any) -> None:
+        warning_calls.append((message, args))
+
+    def fail_on_debug_failure(message: str, *args: Any, **kwargs: Any) -> None:
+        del args, kwargs
+        if message == "model_registry.load_champion_failed":
+            raise AssertionError("load_champion should not fail because of logging kwargs")
+
+    monkeypatch.setattr(challenger_module.log, "warning", warning_without_structlog_kwargs)
+    monkeypatch.setattr(challenger_module.log, "debug", fail_on_debug_failure)
+
+    registry = ModelRegistry(trade_journal=journal)
+
+    assert await registry.load_champion() is None
+    assert warning_calls == [("model_registry.no_compatible_champion required_schema=%s", (LABEL_SCHEMA_VERSION,))]
