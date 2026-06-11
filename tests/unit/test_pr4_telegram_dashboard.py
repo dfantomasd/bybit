@@ -131,6 +131,21 @@ def test_main_menu_has_symbol_selection_button() -> None:
     assert any("Выбрать пары" in text for text in all_texts)
 
 
+def test_main_menu_is_grouped_and_has_mode_indicator_text() -> None:
+    bot = _make_bot()
+    markup = bot._main_menu()
+    all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
+    all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+
+    assert "📊 Статус" in all_texts
+    assert "🎚 Риски и лимиты" in all_texts
+    assert "🗄 База и модель" in all_texts
+    assert "⚙️ Управление" in all_texts
+    assert "❓ Помощь" in all_texts
+    assert "view:menu" in all_callbacks
+    assert "SHADOW" in bot._menu_text()
+
+
 def test_symbol_select_menu_marks_selected_symbols() -> None:
     bot = _make_bot()
     markup = bot._symbol_select_menu()
@@ -184,6 +199,13 @@ def test_control_menu_has_training_and_limits() -> None:
     assert "view:db_model" in all_callbacks
     assert "view:canary" in all_callbacks
     assert "view:model_help" in all_callbacks
+
+
+def test_submenus_have_home_button() -> None:
+    bot = _make_bot()
+    for markup in [bot._control_menu(), bot._canary_menu(), bot._limits_menu(), bot._symbol_select_menu()]:
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        assert "view:menu" in all_callbacks
 
 
 def test_model_help_is_russian_operator_text() -> None:
@@ -346,3 +368,29 @@ async def test_train_button_starts_shadow_training() -> None:
     bot._controller.start_training.assert_awaited_once_with(1000, 15, 5.0)
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "training started" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_stop_confirm_button_runs_emergency_stop() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    update = _fake_update()
+
+    await bot._handle_confirm_button(update, "stop:yes")
+
+    bot._controller.emergency_stop.assert_awaited_once()
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Аварийная остановка выполнена" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_menu_command_shows_main_menu() -> None:
+    bot = _make_bot()
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_menu(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Bybit AI Trader" in reply_text
+    assert "SHADOW" in reply_text
