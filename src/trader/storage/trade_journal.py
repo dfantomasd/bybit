@@ -299,6 +299,8 @@ class TradeJournal:
                 label_schema_version text DEFAULT 'directional_net_v1',
                 PRIMARY KEY (prediction_id, horizon_minutes)
             );
+            ALTER TABLE prediction_outcomes
+                ADD COLUMN IF NOT EXISTS label_schema_version text DEFAULT 'directional_net_v1';
             CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema
                 ON prediction_outcomes (label_schema_version);
 
