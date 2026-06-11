@@ -78,6 +78,7 @@ def _make_checker(
     rest: AsyncMock | None = None,
     use_testnet: bool = True,
     region: BybitRegion = BybitRegion.GLOBAL,
+    trading_mode: str | None = None,
 ) -> PreflightChecker:
     if rest is None:
         rest = _make_rest_mock()
@@ -86,6 +87,7 @@ def _make_checker(
         rest_client=rest,
         endpoint_selector=selector,
         use_testnet=use_testnet,
+        trading_mode=trading_mode,
     )
 
 
@@ -239,11 +241,19 @@ class TestIndividualChecks:
         assert result.warning is None
 
     async def test_testnet_vs_live_live_mode_warns(self) -> None:
-        checker = _make_checker(use_testnet=False)
+        checker = _make_checker(use_testnet=False, trading_mode="LIVE")
         result = await checker._check_testnet_vs_live()
         assert result.passed is True
         assert result.warning is not None
         assert "LIVE" in result.warning
+
+    async def test_testnet_vs_live_shadow_mainnet_endpoint_does_not_warn_live(self) -> None:
+        checker = _make_checker(use_testnet=False, trading_mode="SHADOW")
+        result = await checker._check_testnet_vs_live()
+        assert result.passed is True
+        assert result.warning is None
+        assert "SHADOW on mainnet endpoint" in result.message
+        assert result.details["trading_mode"] == "SHADOW"
 
     async def test_balance_ok_with_sufficient_funds(self) -> None:
         checker = _make_checker(_make_rest_mock(wallet_balance_total=500.0))
