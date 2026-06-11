@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import json
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 from typing import Any
 
 import pytest
 
+from trader.domain.enums import MarketRegime, MarketType, OrderSide
+from trader.domain.models import FeatureVector, TradeProposal
 from trader.storage.directional_trade_journal import DirectionalTradeJournal
 from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps
 
@@ -26,6 +30,16 @@ class _FakeDirectionalJournal(DirectionalTradeJournal):
 
     async def resolve_prediction_outcomes(self, **kwargs: Any) -> None:
         self.saved.append(kwargs)
+
+
+class _SignalCaptureJournal(DirectionalTradeJournal):
+    """Capture record_signal writes without opening a database connection."""
+
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _execute(self, query: str, *args: Any) -> None:
+        self.executed.append((query, args))
 
 
 def _prediction(entry_time: datetime, *, side: str = "Sell") -> dict[str, Any]:
@@ -50,6 +64,42 @@ def _complete_path(entry_time: datetime, *, final_close: float = 99.0) -> list[d
             }
         )
     return rows
+
+
+@pytest.mark.asyncio
+async def test_record_signal_accepts_and_persists_model_decision_metadata() -> None:
+    journal = _SignalCaptureJournal()
+    proposal = TradeProposal(
+        strategy_id="trend",
+        symbol="XRPUSDT",
+        market_type=MarketType.LINEAR,
+        side=OrderSide.BUY,
+        requested_qty=Decimal("10"),
+        entry_price=Decimal("0.5"),
+        confidence=0.7,
+        regime=MarketRegime.BULL_TREND,
+        rationale="test",
+    )
+    feature_vector = FeatureVector(
+        symbol="XRPUSDT",
+        values=[1.0],
+        feature_names=["momentum"],
+        quality_score=1.0,
+        lookback_bars=60,
+    )
+    model_decision = {"model_version": "champion-1", "score": 0.81, "threshold": 0.7}
+
+    await journal.record_signal(
+        proposal=proposal,
+        feature_vector=feature_vector,
+        regime_context=None,
+        model_decision=model_decision,
+    )
+
+    assert len(journal.executed) == 1
+    query, args = journal.executed[0]
+    assert "model_decision" in query
+    assert json.loads(args[-1]) == model_decision
 
 
 @pytest.mark.asyncio

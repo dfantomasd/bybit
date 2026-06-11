@@ -64,13 +64,14 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         proposal: TradeProposal,
         feature_vector: FeatureVector | None,
         regime_context: RegimeContext | None,
+        model_decision: dict[str, Any] | None = None,
     ) -> None:
         """Persist a signal and bind its vector to the current async task."""
 
         binding = source_candle_for_feature(feature_vector.feature_id) if feature_vector is not None else None
         _CURRENT_SOURCE_BINDING.set(binding)
         try:
-            await super().record_signal(proposal, feature_vector, regime_context)
+            await super().record_signal(proposal, feature_vector, regime_context, model_decision=model_decision)
         except Exception:
             _CURRENT_SOURCE_BINDING.set(None)
             raise
