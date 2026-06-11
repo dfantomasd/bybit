@@ -113,6 +113,17 @@ class Settings(BaseSettings):
     """Hard notional cap per scalp position."""
 
     # ------------------------------------------------------------------
+    # Startup candle backfill
+    # ------------------------------------------------------------------
+    STARTUP_BACKFILL_ENABLED: bool = True
+    """Backfill missing market_candles history via REST once at startup so the
+    canary history requirements and model training don't wait days for WS data."""
+    STARTUP_BACKFILL_DAYS: int = 2
+    """How many days of history to backfill per symbol/interval."""
+    STARTUP_BACKFILL_MAX_REQUESTS: int = 200
+    """Hard cap on REST kline requests per startup (rate-limit protection)."""
+
+    # ------------------------------------------------------------------
     # Anti zero-trading guards
     # ------------------------------------------------------------------
     MIN_SIGNALS_PER_HOUR: int = 1
@@ -310,7 +321,9 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
-    AND the lift is statistically significant (bootstrap p-value)."""
+    AND the lift is statistically significant (bootstrap p-value).
+    Disabled by default: let the model train and accumulate shadow evidence first,
+    then enable explicitly via env."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
     MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
     MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
@@ -325,7 +338,8 @@ class Settings(BaseSettings):
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
     MODEL_GATE_CANARY_ENABLED: bool = False
-    """When enabled, allow the model gate to block entries only with conservative safeguards."""
+    """When enabled, allow the model gate to block entries only with conservative safeguards.
+    Disabled by default until a promoted CHAMPION shows positive shadow-gate lift."""
     MODEL_GATE_CANARY_MIN_QUALITY: str = "GOOD"
     MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT: float = 60.0
     MODEL_GATE_CANARY_MIN_OBSERVATIONS: int = 50

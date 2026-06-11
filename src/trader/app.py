@@ -128,6 +128,8 @@ class TradingApplication:
         self._fee_provider: Any | None = None
         self._last_tx_log_sync_at: datetime | None = None
         self._last_zero_trading_warn_at: datetime | None = None
+        # Set on every confirmed WS kline; drives the canary "fresh confirmed candles" check
+        self._last_confirmed_candle_at: datetime | None = None
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
@@ -1702,6 +1704,98 @@ class TradingApplication:
             if backfilled:
                 log.info("candle_reconcile.completed", upserted=backfilled, symbols=len(symbols))
 
+    async def _run_startup_backfill(self) -> None:
+        """One-shot historical candle backfill at startup (improvement idea).
+
+        With a fresh/cleared DB the canary checklist needs ~1000 1m candles and
+        model training needs labelled history — waiting for WS alone takes many
+        hours. This pages back through REST klines for the active symbols and
+        persists clock-confirmed candles only, respecting a hard request cap.
+        Idempotent: upsert_market_candle deduplicates on (symbol, interval, open_time).
+        """
+        assert self._settings is not None
+        if not self._settings.STARTUP_BACKFILL_ENABLED:
+            return
+        if self._bybit_adapter is None or self._trade_journal is None or not self._trade_journal.is_enabled:
+            log.info("startup_backfill.skipped", reason="no_adapter_or_db")
+            return
+
+        days = max(1, int(self._settings.STARTUP_BACKFILL_DAYS))
+        max_requests = max(1, int(self._settings.STARTUP_BACKFILL_MAX_REQUESTS))
+        symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
+        requests_used = 0
+        total_upserted = 0
+
+        for symbol in symbols:
+            for interval in self._market_data_intervals():
+                bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                window_ms = days * 86_400_000
+                end_ms = int(datetime.now(tz=UTC).timestamp() * 1000)
+                oldest_needed_ms = end_ms - window_ms
+                while end_ms > oldest_needed_ms and requests_used < max_requests:
+                    if self._shutdown_event.is_set():
+                        return
+                    try:
+                        resp = await self._bybit_adapter._rest.get_kline(
+                            category="linear",
+                            symbol=symbol,
+                            interval=interval,
+                            end=end_ms,
+                            limit=1000,
+                        )
+                    except Exception as exc:
+                        log.warning(
+                            "startup_backfill.fetch_failed",
+                            symbol=symbol,
+                            interval=interval,
+                            error=str(exc),
+                        )
+                        break
+                    requests_used += 1
+                    items = resp.get("result", {}).get("list", [])
+                    if not items:
+                        break
+                    now_ms = datetime.now(tz=UTC).timestamp() * 1000
+                    oldest_in_page = end_ms
+                    for row in items:
+                        try:
+                            ts_ms = int(row[0])
+                            oldest_in_page = min(oldest_in_page, ts_ms)
+                            close_epoch_ms = ts_ms + bar_ms
+                            if now_ms < close_epoch_ms:
+                                continue  # unconfirmed — never persist (look-ahead guard)
+                            await self._trade_journal.upsert_market_candle(
+                                symbol=symbol,
+                                interval=interval,
+                                open_time=datetime.fromtimestamp(ts_ms / 1000, tz=UTC),
+                                close_time=datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC),
+                                open=Decimal(str(row[1])),
+                                high=Decimal(str(row[2])),
+                                low=Decimal(str(row[3])),
+                                close=Decimal(str(row[4])),
+                                volume=Decimal(str(row[5])),
+                                turnover=Decimal(str(row[6])),
+                                confirmed=True,
+                                source="rest_backfill",
+                            )
+                            total_upserted += 1
+                        except (IndexError, ValueError):
+                            continue
+                    if oldest_in_page >= end_ms:
+                        break  # no progress — avoid infinite loop
+                    end_ms = oldest_in_page - 1
+                    await asyncio.sleep(0.25)  # be gentle on REST rate limits
+            if requests_used >= max_requests:
+                log.info("startup_backfill.request_cap_reached", cap=max_requests)
+                break
+
+        log.info(
+            "startup_backfill.completed",
+            symbols=len(symbols),
+            requests_used=requests_used,
+            candles_upserted=total_upserted,
+        )
+
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
         from trader.data.candles import CandleStore
@@ -1749,6 +1843,7 @@ class TradingApplication:
                         self._candle_store.add(event.symbol, event.interval, candle)
 
                         if event.confirm:
+                            self._last_confirmed_candle_at = datetime.now(tz=UTC)
                             # Event-driven feature recompute for this (symbol, interval)
                             if self._feature_pipeline is not None:
                                 await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
@@ -1961,6 +2056,10 @@ class TradingApplication:
                     elif isinstance(event, ExecutionUpdateEvent):
                         if event.exec_id in seen_exec_ids:
                             continue
+                        # Bound the dedup set: duplicates after a reset are harmless
+                        # (downstream journal writes are idempotent on exec_id).
+                        if len(seen_exec_ids) >= 10_000:
+                            seen_exec_ids.clear()
                         seen_exec_ids.add(event.exec_id)
                         # P0: Reverse lookup order_link_id if not present
                         order_link_id = event.order_link_id
@@ -2648,10 +2747,14 @@ class TradingApplication:
         ws_age: float | None = None
         if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
             ws_age = (now - self._health_checker._last_ws_message_at).total_seconds()
+        confirmed_age: float | None = None
+        if self._last_confirmed_candle_at is not None:
+            confirmed_age = (now - self._last_confirmed_candle_at).total_seconds()
 
         return {
             "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
             "last_ws_message_age_s": ws_age,
+            "last_confirmed_candle_age_s": confirmed_age,
             "active_symbols": (self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)),
             "open_positions": (
                 list(self._execution_engine._open_positions.keys()) if self._execution_engine is not None else []
@@ -3556,6 +3659,10 @@ class TradingApplication:
             # Candle reconciler: backfills candles that became confirmed (every 5 min)
             candle_reconcile_task = asyncio.create_task(self._reconcile_unconfirmed_candles(), name="candle-reconciler")
             self._background_tasks.append(candle_reconcile_task)
+
+            # One-shot startup backfill: fills candle history so training doesn't wait days
+            startup_backfill_task = asyncio.create_task(self._run_startup_backfill(), name="startup-backfill")
+            self._background_tasks.append(startup_backfill_task)
 
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
             auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")
