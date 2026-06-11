@@ -48,7 +48,7 @@ from typing import Any
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes
+from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
 
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
@@ -135,6 +135,14 @@ class TradingController:
     set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None
     # Safety gate: when False, Telegram cannot escalate to a riskier profile
     allow_risk_increase: bool = False
+    # /healthcheck data: signals/fills/blockers/avg net edge
+    healthcheck_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    # /trades data: recent closed trades
+    recent_trades_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
+    # Persistent Telegram subscriptions (survive restarts)
+    add_subscription: Callable[[int], Awaitable[None]] | None = None
+    remove_subscription: Callable[[int], Awaitable[None]] | None = None
+    load_subscriptions: Callable[[], Awaitable[list[int]]] | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -183,6 +191,8 @@ class TelegramMonitorBot:
 
         # Pending confirmations: chat_id → (action_name, coroutine_factory)
         self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
+        # Chats currently in the "enter custom limit value" flow
+        self._awaiting_custom_limit: set[int] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -216,6 +226,10 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
         app.add_handler(CommandHandler("db", self._cmd_db_model))
         app.add_handler(CommandHandler("model", self._cmd_db_model))
+        app.add_handler(CommandHandler("trades", self._cmd_trades))
+        app.add_handler(CommandHandler("healthcheck", self._cmd_healthcheck))
+        app.add_handler(CommandHandler("subscribe", self._cmd_subscribe))
+        app.add_handler(CommandHandler("unsubscribe", self._cmd_unsubscribe))
 
         # Control
         app.add_handler(CommandHandler("pause", self._cmd_pause))
@@ -228,6 +242,18 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("stop", self._cmd_stop))
         app.add_handler(CommandHandler("confirm", self._cmd_confirm))
         app.add_handler(CallbackQueryHandler(self._on_button))
+        # Free-text handler for the "custom limit value" flow
+        app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+
+        # Load persisted subscriptions so push notifications survive restarts
+        if self._controller is not None and self._controller.load_subscriptions is not None:
+            try:
+                for chat_id in await self._controller.load_subscriptions():
+                    self._subscribed.add(chat_id)
+                    self._config.allowed_chat_ids.add(chat_id)
+                log.info("telegram_subscriptions_loaded", count=len(self._subscribed))
+            except Exception as exc:
+                log.warning("telegram_subscriptions_load_failed", error=str(exc))
 
         await app.initialize()
         await app.start()
@@ -393,6 +419,7 @@ class TelegramMonitorBot:
         return InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔄 Обновить готовность", callback_data="view:canary")],
+                [InlineKeyboardButton("📊 Метрики модели", callback_data="view:canary_model")],
                 [
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                     InlineKeyboardButton("⬅️ Назад", callback_data="view:control"),
@@ -426,6 +453,7 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("Exec 5", callback_data="limit:exec_candidates:5"),
                 InlineKeyboardButton("Exec 10", callback_data="limit:exec_candidates:10"),
             ],
+            [InlineKeyboardButton("✏️ Своё значение", callback_data="limit:custom")],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
         ]
         return InlineKeyboardMarkup(rows)
@@ -1577,6 +1605,16 @@ class TelegramMonitorBot:
     # Control commands
     # ------------------------------------------------------------------
 
+    def _confirm_menu(self, action: str) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("✅ Да", callback_data=f"confirm:{action}:yes"),
+                    InlineKeyboardButton("❌ Нет", callback_data=f"confirm:{action}:no"),
+                ]
+            ]
+        )
+
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
@@ -1584,8 +1622,11 @@ class TelegramMonitorBot:
         if self._controller is None:
             await self._reply(update, "Управление сейчас недоступно.")
             return
-        await self._controller.pause()
-        await self._reply(update, "⏸ Бот на <b>паузе</b>: новые входы не открываются.\nКоманда /resume снимет паузу.")
+        await self._reply(
+            update,
+            "⏸ Поставить бота на <b>паузу</b>? Новые входы открываться не будут.",
+            reply_markup=self._confirm_menu("pause"),
+        )
 
     async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1597,8 +1638,42 @@ class TelegramMonitorBot:
         if not self._controller.is_paused():
             await self._reply(update, "Бот не на паузе.")
             return
-        await self._controller.resume()
-        await self._reply(update, "▶️ Бот <b>возобновлен</b>: сбор данных и новые входы снова разрешены.")
+        await self._reply(
+            update,
+            "▶️ <b>Возобновить</b> работу бота? Сбор данных и новые входы будут снова разрешены.",
+            reply_markup=self._confirm_menu("resume"),
+        )
+
+    async def _handle_confirm_button(self, update: Update, payload: str) -> None:
+        """Handle confirm:<action>:<yes|no> inline buttons for pause/resume."""
+        if self._controller is None:
+            await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
+            return
+        try:
+            action, answer = payload.split(":", maxsplit=1)
+        except ValueError:
+            await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
+            return
+        if answer != "yes":
+            await self._button_reply(update, "Действие отменено.", reply_markup=self._main_menu())
+            return
+        if action == "pause":
+            await self._controller.pause()
+            await self._button_reply(
+                update,
+                "⏸ Бот на <b>паузе</b>: новые входы не открываются.\nКоманда /resume снимет паузу.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if action == "resume":
+            await self._controller.resume()
+            await self._button_reply(
+                update,
+                "▶️ Бот <b>возобновлен</b>: сбор данных и новые входы снова разрешены.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
 
     async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorised(update):
@@ -1800,6 +1875,207 @@ class TelegramMonitorBot:
             await self._reply(update, f"❌ Не получилось: <code>{exc}</code>")
             log.error("telegram_control_failed", action=action_name, error=str(exc))
 
+    async def _show_canary_model_metrics(self, update: Update) -> None:
+        """Second /canary screen: model quality metrics (lift, precision, gate stats)."""
+        db_diag: dict[str, Any] = {}
+        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+            try:
+                db_diag = await self._controller.db_diagnostics_provider()
+            except Exception as exc:
+                await self._button_reply(
+                    update,
+                    f"❌ Не удалось получить метрики: <code>{html.escape(str(exc))}</code>",
+                    reply_markup=self._canary_menu(),
+                )
+                return
+        latest_model = db_diag.get("latest_model_version", {}) or {}
+        gate = db_diag.get("shadow_gate_15m", {}) or {}
+        metrics = latest_model.get("metrics") or {}
+        if isinstance(metrics, str):
+            try:
+                import json as _json
+
+                metrics = _json.loads(metrics)
+            except Exception:
+                metrics = {}
+
+        def _fmt(value: Any, suffix: str = "") -> str:
+            if value is None:
+                return "нет данных"
+            try:
+                return f"{float(value):+.3f}{suffix}" if suffix == " bps" else f"{float(value):.3f}{suffix}"
+            except (TypeError, ValueError):
+                return html.escape(str(value))
+
+        gate_lift = gate.get("lift_vs_all_bps")
+        lines = [
+            "<b>📊 Метрики модели</b>",
+            "",
+            f"Версия: <code>{html.escape(str(latest_model.get('version') or 'нет'))}</code>",
+            f"Статус: <code>{self._ru(latest_model.get('status', 'none'))}</code>",
+            f"Качество: <code>{self._ru(str(metrics.get('quality') or 'нет данных'))}</code>",
+            "",
+            f"Walk-forward expectancy: <code>{_fmt(metrics.get('walk_forward_expectancy_bps') or metrics.get('best_threshold_avg_net_return_bps'), ' bps')}</code>",
+            f"Precision (val): <code>{_fmt(metrics.get('val_precision') or metrics.get('precision'))}</code>",
+            f"AUC (val): <code>{_fmt(metrics.get('val_auc') or metrics.get('auc'))}</code>",
+            f"Bootstrap p-value: <code>{_fmt(metrics.get('bootstrap_p_value'))}</code>",
+            "",
+            "<b>Shadow gate (15m):</b>",
+            f"Решений: <code>{int(gate.get('total_count') or 0)}</code> | "
+            f"Pass: <code>{int(gate.get('pass_count') or 0)}</code>",
+            f"Gate lift: <code>{_fmt(gate_lift, ' bps')}</code>",
+            f"Pass expectancy: <code>{_fmt(gate.get('pass_avg_net_return_bps'), ' bps')}</code>",
+        ]
+        await self._button_reply(update, "\n".join(lines), reply_markup=self._canary_menu())
+
+    # ------------------------------------------------------------------
+    # Subscriptions / trades / healthcheck
+    # ------------------------------------------------------------------
+
+    async def _cmd_subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        cid = self._chat_id(update)
+        if cid is None:
+            return
+        self._subscribed.add(cid)
+        if self._controller is not None and self._controller.add_subscription is not None:
+            try:
+                await self._controller.add_subscription(cid)
+                await self._reply(update, "🔔 Подписка оформлена и сохранена: уведомления переживут перезапуск.")
+                return
+            except Exception as exc:
+                log.warning("telegram_subscribe_persist_failed", error=str(exc))
+        await self._reply(update, "🔔 Подписка оформлена (без БД — до перезапуска).")
+
+    async def _cmd_unsubscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        cid = self._chat_id(update)
+        if cid is None:
+            return
+        self._subscribed.discard(cid)
+        if self._controller is not None and self._controller.remove_subscription is not None:
+            try:
+                await self._controller.remove_subscription(cid)
+            except Exception as exc:
+                log.warning("telegram_unsubscribe_persist_failed", error=str(exc))
+        await self._reply(update, "🔕 Подписка отключена: push-уведомления больше не приходят в этот чат.")
+
+    async def _cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.recent_trades_provider is None:
+            await self._reply(update, "История сделок сейчас недоступна.")
+            return
+        try:
+            trades = await self._controller.recent_trades_provider()
+        except Exception as exc:
+            await self._reply(update, f"❌ Не удалось получить сделки: <code>{html.escape(str(exc))}</code>")
+            return
+        if not trades:
+            await self._reply(update, "📭 Закрытых сделок пока нет.")
+            return
+        lines = ["<b>📜 Последние закрытые сделки</b>", ""]
+        for t in trades[:10]:
+            ts = self._fmt_timestamp(t.get("created_at"))
+            pnl = float(t.get("pnl_usdt") or 0)
+            pnl_mark = "🟢" if pnl > 0 else ("🔴" if pnl < 0 else "⚪")
+            net_bps = t.get("net_bps")
+            net_str = f" | {float(net_bps):+.1f} bps" if net_bps is not None else ""
+            lines.append(
+                f"{pnl_mark} <code>{ts}</code> {html.escape(str(t.get('symbol', '?')))} "
+                f"{html.escape(str(t.get('side', '?')))} "
+                f"PnL: <code>{pnl:+.4f} USDT</code>{net_str}"
+            )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_healthcheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.healthcheck_provider is None:
+            await self._reply(update, "Healthcheck сейчас недоступен.")
+            return
+        try:
+            hc = await self._controller.healthcheck_provider()
+        except Exception as exc:
+            await self._reply(update, f"❌ Healthcheck не удался: <code>{html.escape(str(exc))}</code>")
+            return
+        signals = int(hc.get("hour_signals_emitted") or 0)
+        placed = int(hc.get("hour_order_placed") or 0)
+        top_blocker = str(hc.get("top_blocker") or "нет данных")
+        blockers: dict[str, int] = hc.get("blockers") or {}
+        avg_net = hc.get("today_avg_net_bps")
+        ml_replaced = int(hc.get("hour_ml_replacement") or 0)
+        rule_fallback = int(hc.get("hour_rule_fallback_signals") or 0)
+        status_icon = "✅" if placed > 0 or signals == 0 else "⚠️"
+        lines = [
+            "<b>🩺 Healthcheck</b>",
+            "",
+            f"Сигналов за час: <code>{signals}</code>",
+            f"Исполнено сделок за час: <code>{placed}</code> {status_icon}",
+            f"ML-замен за час: <code>{ml_replaced}</code> | Rule-fallback: <code>{rule_fallback}</code>",
+            "",
+            f"Самый частый блокер: <code>{html.escape(top_blocker)}</code>",
+        ]
+        if blockers:
+            lines.append("Блокеры за час:")
+            for name, count in sorted(blockers.items(), key=lambda kv: -kv[1]):
+                if count > 0:
+                    lines.append(f"  • {html.escape(name)}: <code>{count}</code>")
+        lines.append("")
+        if avg_net is not None:
+            lines.append(f"Средний net edge сегодня: <code>{float(avg_net):+.2f} bps</code>")
+        else:
+            lines.append("Средний net edge сегодня: <code>нет разрешённых исходов</code>")
+        if signals > 0 and placed == 0:
+            lines.append("")
+            lines.append("⚠️ Сигналы есть, сделок нет — посмотрите блокеры выше и /limits.")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Handle free-text input: currently only the custom-limit flow."""
+        del context
+        if not await self._authorised(update):
+            return
+        cid = self._chat_id(update)
+        if cid is None or cid not in self._awaiting_custom_limit:
+            return
+        self._awaiting_custom_limit.discard(cid)
+        if self._controller is None or self._controller.set_runtime_setting is None:
+            await self._reply(update, "Runtime-настройки сейчас недоступны.")
+            return
+        text = (update.effective_message.text or "").strip() if update.effective_message else ""
+        parts = text.split()
+        if len(parts) != 2:
+            await self._reply(
+                update,
+                "Не понял. Формат: <code>ключ значение</code>, например <code>entries 3</code>.",
+                reply_markup=self._limits_menu(),
+            )
+            return
+        key, raw_value = parts[0].lower(), parts[1]
+        try:
+            if key in {"price_cap", "model_gate_threshold"}:
+                value: Any = float(raw_value)
+            elif key == "model_gate":
+                value = raw_value
+            else:
+                value = int(raw_value)
+            msg = await self._controller.set_runtime_setting(key, value)
+        except Exception as exc:
+            await self._reply(
+                update,
+                f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>",
+                reply_markup=self._limits_menu(),
+            )
+            return
+        await self._reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._limits_menu())
+
     async def _on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         query = update.callback_query
@@ -1810,6 +2086,9 @@ class TelegramMonitorBot:
             return
 
         data = query.data or ""
+        if data.startswith("confirm:"):
+            await self._handle_confirm_button(update, data.removeprefix("confirm:"))
+            return
         if data.startswith("view:"):
             await self._handle_view_button(update, data.removeprefix("view:"))
             return
@@ -1850,6 +2129,9 @@ class TelegramMonitorBot:
             return
         if action == "canary":
             await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            return
+        if action == "canary_model":
+            await self._show_canary_model_metrics(update)
             return
         if action == "model_help":
             await self._cmd_model_help(update, fake_context)  # type: ignore[arg-type]
@@ -1924,16 +2206,21 @@ class TelegramMonitorBot:
             await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
             return
         if action == "pause":
-            await self._controller.pause()
             await self._button_reply(
                 update,
-                "Бот на <b>паузе</b>: новые входы не открываются.",
-                reply_markup=self._main_menu(),
+                "⏸ Поставить бота на <b>паузу</b>? Новые входы открываться не будут.",
+                reply_markup=self._confirm_menu("pause"),
             )
             return
         if action == "resume":
-            await self._controller.resume()
-            await self._button_reply(update, "Бот <b>возобновлен</b>.", reply_markup=self._main_menu())
+            if not self._controller.is_paused():
+                await self._button_reply(update, "Бот не на паузе.", reply_markup=self._main_menu())
+                return
+            await self._button_reply(
+                update,
+                "▶️ <b>Возобновить</b> работу бота?",
+                reply_markup=self._confirm_menu("resume"),
+            )
             return
         if action == "promote":
             if self._controller.promote_model is None:
@@ -2014,6 +2301,21 @@ class TelegramMonitorBot:
     async def _handle_limit_button(self, update: Update, payload: str) -> None:
         if self._controller is None or self._controller.set_runtime_setting is None:
             await self._button_reply(update, "Runtime-настройки сейчас недоступны.", reply_markup=self._main_menu())
+            return
+        if payload == "custom":
+            cid = self._chat_id(update)
+            if cid is not None:
+                self._awaiting_custom_limit.add(cid)
+            await self._button_reply(
+                update,
+                "✏️ <b>Своё значение лимита</b>\n\n"
+                "Отправьте сообщение в формате: <code>ключ значение</code>\n"
+                "Например: <code>entries 3</code>, <code>price_cap 15.5</code>, "
+                "<code>model_gate_threshold 0.6</code>\n\n"
+                "Доступные ключи: entries, pending, same_side, price_cap, "
+                "feature_symbols, exec_candidates, model_gate, model_gate_threshold",
+                reply_markup=self._limits_menu(),
+            )
             return
         try:
             key, raw_value = payload.split(":", maxsplit=1)
@@ -2117,6 +2419,10 @@ class TelegramMonitorBot:
             "/start       — меню, включая выбор торговых пар\n"
             "/pnl         — история закрытого PnL\n"
             "/net         — чистый PnL с комиссиями и фандингом\n"
+            "/trades      — последние 10 закрытых сделок\n"
+            "/healthcheck — сигналы/сделки за час и главный блокер\n"
+            "/subscribe   — подписаться на уведомления (хранится в БД)\n"
+            "/unsubscribe — отписаться от уведомлений\n"
             "/diagnostics — счетчики и задержки циклов\n"
             "/help        — это сообщение\n" + ctrl_section
         )

@@ -406,6 +406,11 @@ class TradeJournal:
                     ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
                 -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
                 ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
+                -- Telegram push-notification subscriptions (survive restarts)
+                CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+                    chat_id bigint PRIMARY KEY,
+                    subscribed_at timestamptz NOT NULL DEFAULT now()
+                );
             """)
             # This index must be created AFTER ALTER TABLE adds label_schema_version
             # to avoid CREATE INDEX failing on an existing DB where the column was missing.
@@ -937,6 +942,86 @@ class TradeJournal:
             """
         )
         return [str(r["order_link_id"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Telegram subscriptions
+    # ------------------------------------------------------------------
+
+    async def add_telegram_subscription(self, chat_id: int) -> None:
+        """Persist a Telegram chat subscription (idempotent)."""
+        if not self.is_enabled:
+            return
+        await self._execute(
+            "INSERT INTO telegram_subscriptions (chat_id) VALUES ($1) ON CONFLICT (chat_id) DO NOTHING",
+            int(chat_id),
+        )
+
+    async def remove_telegram_subscription(self, chat_id: int) -> None:
+        if not self.is_enabled:
+            return
+        await self._execute(
+            "DELETE FROM telegram_subscriptions WHERE chat_id = $1",
+            int(chat_id),
+        )
+
+    async def get_telegram_subscriptions(self) -> list[int]:
+        rows = await self._fetch("SELECT chat_id FROM telegram_subscriptions ORDER BY subscribed_at")
+        return [int(r["chat_id"]) for r in rows]
+
+    # ------------------------------------------------------------------
+    # Telegram /trades and /healthcheck data
+    # ------------------------------------------------------------------
+
+    async def get_recent_closed_trades(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Return the most recent closed trades for the /trades command."""
+        rows = await self._fetch(
+            """
+            SELECT created_at, symbol, side, qty, avg_entry_price, avg_exit_price, closed_pnl
+            FROM closed_pnl
+            ORDER BY created_at DESC
+            LIMIT $1
+            """,
+            int(limit),
+        )
+        result: list[dict[str, Any]] = []
+        for r in rows:
+            entry = float(r["avg_entry_price"] or 0)
+            exit_ = float(r["avg_exit_price"] or 0)
+            net_bps: float | None = None
+            if entry > 0 and exit_ > 0:
+                direction = 1.0 if str(r["side"] or "").upper() in ("BUY", "SELL_CLOSE") else -1.0
+                # closed_pnl side is the closing side; entry/exit prices carry direction info
+                net_bps = (exit_ - entry) / entry * 10_000 * direction
+            result.append(
+                {
+                    "created_at": r["created_at"],
+                    "symbol": r["symbol"],
+                    "side": r["side"],
+                    "qty": float(r["qty"] or 0),
+                    "entry": entry,
+                    "exit": exit_,
+                    "pnl_usdt": float(r["closed_pnl"] or 0),
+                    "net_bps": net_bps,
+                }
+            )
+        return result
+
+    async def get_today_avg_net_bps(self) -> float | None:
+        """Average resolved net return (bps) for today's baseline signals."""
+        rows = await self._fetch(
+            """
+            SELECT avg(po.net_return_bps) AS avg_bps
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE po.net_return_bps IS NOT NULL
+              AND po.label_schema_version = 'directional_net_v1'
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND po.resolved_at >= date_trunc('day', now())
+            """
+        )
+        if rows and rows[0]["avg_bps"] is not None:
+            return float(rows[0]["avg_bps"])
+        return None
 
     async def find_order_link_id_by_exchange_order_id(
         self,

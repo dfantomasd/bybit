@@ -96,6 +96,33 @@ class Settings(BaseSettings):
     FUNDING_BUFFER_PCT: float = 0.01
     """Estimated funding cost buffer per position."""
 
+    # ------------------------------------------------------------------
+    # Scalping (ScalpMicroStrategy)
+    # ------------------------------------------------------------------
+    SCALP_STRATEGY_ENABLED: bool = True
+    """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
+    MAX_SPREAD_BPS_SCALP: float = 3.0
+    """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
+    MIN_NET_SCALP_RETURN_PCT: float = 0.05
+    """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
+    SCALP_COOLDOWN_SECONDS: int = 60
+    """Minimum seconds between scalp signals per symbol."""
+    SCALP_MAX_TRADES_PER_MINUTE: int = 10
+    """Global cap on scalp signals per minute across the whole portfolio."""
+    SCALP_MAX_POSITION_NOTIONAL_USD: float = 100.0
+    """Hard notional cap per scalp position."""
+
+    # ------------------------------------------------------------------
+    # Anti zero-trading guards
+    # ------------------------------------------------------------------
+    MIN_SIGNALS_PER_HOUR: int = 1
+    """Expected minimum signals/hour; below this with zero fills a warning is logged."""
+    AUTO_SOFTEN_FILTERS_ENABLED: bool = False
+    """Reserved: when true, filters may be relaxed automatically on zero trading. Off by default."""
+    FALLBACK_TO_RULE_WHEN_MODEL_UNSURE: bool = True
+    """When the model exists but its score is below the gate threshold, keep the
+    rule-based proposal instead of dropping it (hybrid mode fallback)."""
+
     ENTRY_ORDER_MODE: str = "MARKET"
     """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
     ENTRY_LIMIT_TTL_SECONDS: int = 5

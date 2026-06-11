@@ -127,6 +127,7 @@ class TradingApplication:
         self._trailing_stop_keys: set[str] = set()
         self._fee_provider: Any | None = None
         self._last_tx_log_sync_at: datetime | None = None
+        self._last_zero_trading_warn_at: datetime | None = None
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
@@ -1235,6 +1236,51 @@ class TradingApplication:
             )
             return diag
 
+        async def _healthcheck_provider() -> dict:
+            diag = self.get_diagnostics()
+            blockers = {
+                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
+                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
+                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
+                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
+            }
+            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "нет блокировок"
+            today_avg_net_bps = None
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    today_avg_net_bps = await self._trade_journal.get_today_avg_net_bps()
+                except Exception as _hc_exc:
+                    log.debug("healthcheck.avg_net_failed", error=str(_hc_exc))
+            return {
+                "hour_signals_emitted": diag.get("hour_signals_emitted", 0),
+                "hour_order_placed": diag.get("hour_order_placed", 0),
+                "hour_ml_replacement": diag.get("hour_ml_replacement", 0),
+                "hour_rule_fallback_signals": diag.get("hour_rule_fallback_signals", 0),
+                "top_blocker": top_blocker,
+                "blockers": blockers,
+                "today_avg_net_bps": today_avg_net_bps,
+            }
+
+        async def _recent_trades_provider() -> list[dict]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_recent_closed_trades(limit=10)
+
+        async def _add_subscription(chat_id: int) -> None:
+            if self._trade_journal is not None:
+                await self._trade_journal.add_telegram_subscription(chat_id)
+
+        async def _remove_subscription(chat_id: int) -> None:
+            if self._trade_journal is not None:
+                await self._trade_journal.remove_telegram_subscription(chat_id)
+
+        async def _load_subscriptions() -> list[int]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_telegram_subscriptions()
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -1258,6 +1304,11 @@ class TradingApplication:
             diagnostics_provider=self.get_diagnostics,
             db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
+            healthcheck_provider=_healthcheck_provider,
+            recent_trades_provider=_recent_trades_provider,
+            add_subscription=_add_subscription,
+            remove_subscription=_remove_subscription,
+            load_subscriptions=_load_subscriptions,
         )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
@@ -2543,6 +2594,40 @@ class TradingApplication:
         """Record a diagnostics event with the current timestamp."""
         self._diag_events.append((datetime.now(tz=UTC), event))
 
+    def _check_zero_trading(self) -> None:
+        """Warn (never block) when signals flow but nothing executes for an hour.
+
+        Helps catch over-tight filters: model gate, net edge, spread, risk.
+        Throttled to one warning per 10 minutes.
+        """
+        assert self._settings is not None
+        now = datetime.now(tz=UTC)
+        if self._last_zero_trading_warn_at is not None:
+            if (now - self._last_zero_trading_warn_at).total_seconds() < 600:
+                return
+        diag = self.get_diagnostics()
+        signals = int(diag.get("hour_signals_emitted") or 0)
+        placed = int(diag.get("hour_order_placed") or 0)
+        if signals >= max(1, self._settings.MIN_SIGNALS_PER_HOUR) and placed == 0:
+            self._last_zero_trading_warn_at = now
+            blockers = {
+                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
+                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
+                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
+                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
+            }
+            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "unknown"
+            log.warning(
+                "zero_trading.detected",
+                hour_signals=signals,
+                hour_orders_placed=placed,
+                top_blocker=top_blocker,
+                blockers=blockers,
+                auto_soften_enabled=self._settings.AUTO_SOFTEN_FILTERS_ENABLED,
+            )
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return a diagnostics snapshot for the /diagnostics Telegram command."""
         now = datetime.now(tz=UTC)
@@ -2577,6 +2662,9 @@ class TradingApplication:
             "hour_skipped_failure_cooldown": hour_counts.get("skipped_failure_cooldown", 0),
             "hour_model_gate_canary_blocked": hour_counts.get("model_gate_canary_blocked", 0),
             "hour_ml_replacement": hour_counts.get("ml_replacement", 0),
+            "hour_rule_fallback_signals": hour_counts.get("rule_fallback_signal", 0),
+            "hour_spread_rejected": hour_counts.get("spread_rejected", 0),
+            "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
@@ -2771,7 +2859,7 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies = [
+        strategies: list = [
             EMAcrossoverStrategy(
                 symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
@@ -2779,6 +2867,42 @@ class TradingApplication:
                 max_risk_pct=0.01,  # 1% of balance per trade
             )
         ]
+
+        if self._settings.SCALP_STRATEGY_ENABLED and self._candle_store is not None:
+            from trader.strategies.scalp_micro import ScalpMicroStrategy
+
+            def _spread_for(symbol: str) -> float | None:
+                """Latest screener spread for the symbol; None when unknown (fail closed)."""
+                if self._screener is None:
+                    return None
+                for scored in self._screener.wide_universe:
+                    if scored.symbol == symbol:
+                        return scored.spread_bps
+                return None
+
+            strategies.append(
+                ScalpMicroStrategy(
+                    candle_store=self._candle_store,
+                    interval=_WS_INTERVAL,
+                    spread_provider=_spread_for,
+                    taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                    expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                    min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+                    max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                    cooldown_seconds=self._settings.SCALP_COOLDOWN_SECONDS,
+                    max_trades_per_minute=self._settings.SCALP_MAX_TRADES_PER_MINUTE,
+                    risk_pct=0.01,
+                    max_position_notional_usd=self._settings.SCALP_MAX_POSITION_NOTIONAL_USD,
+                    min_qty_usd=5.0,
+                    diag_hook=self._record_diag,
+                )
+            )
+            log.info(
+                "scalp_micro.enabled",
+                max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+                max_trades_per_minute=self._settings.SCALP_MAX_TRADES_PER_MINUTE,
+            )
 
         self._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
@@ -2911,6 +3035,14 @@ class TradingApplication:
                 try:
                     ml_pred = self._model_registry.score_live(vec.values)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
+                    if (
+                        ml_pred is not None
+                        and ml_pred.score < ml_threshold
+                        and self._settings.FALLBACK_TO_RULE_WHEN_MODEL_UNSURE
+                    ):
+                        # Model exists but is unsure — keep the rule-based proposal.
+                        # Counted so /healthcheck can show how often the fallback fires.
+                        self._record_diag("rule_fallback_signal")
                     if ml_pred is not None and ml_pred.score >= ml_threshold:
                         model_decision_meta = {
                             "model_version": ml_pred.model_version,
@@ -3194,6 +3326,7 @@ class TradingApplication:
                     await self._refresh_closed_pnl_memory()
                 await self._sync_execution_positions()
                 await self._manage_open_positions()
+                self._check_zero_trading()
 
                 # Sync transaction log periodically
                 now = datetime.now(tz=UTC)
