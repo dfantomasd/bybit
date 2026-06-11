@@ -1583,6 +1583,7 @@ class TradeJournal:
             "write_health": self.write_health(),
             "candles_by_interval": {},
             "latest_candle_1m": None,
+            "last_confirmed_candle_age_s": None,
             "feature_snapshots": 0,
             "prediction_outcomes": 0,
             "prediction_outcomes_by_horizon": {},
@@ -1605,7 +1606,12 @@ class TradeJournal:
             self._last_read_error = None
             self._last_read_error_at = None
             result["candles_by_interval"] = await self.get_candle_counts()
-            result["latest_candle_1m"] = await self.get_latest_candle_time("1")
+            latest_candle_1m = await self.get_latest_candle_time("1")
+            result["latest_candle_1m"] = latest_candle_1m
+            if latest_candle_1m is not None:
+                result["last_confirmed_candle_age_s"] = max(
+                    0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
+                )
             rows = await self._fetch("SELECT count(*) AS cnt FROM feature_snapshots")
             result["feature_snapshots"] = int(rows[0]["cnt"]) if rows else 0
             rows = await self._fetch("SELECT count(*) AS cnt FROM prediction_outcomes")
