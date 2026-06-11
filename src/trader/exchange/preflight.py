@@ -273,8 +273,8 @@ class PreflightChecker:
             result = resp.get("result", {})
             account_type = result.get("unifiedMarginStatus", result.get("marginMode", ""))
 
-            # Bybit unifiedMarginStatus: 1=Regular, 2=Unified margin, 3=Unified trade
-            unified = account_type in (2, 3, "2", "3", "UNIFIED", "UTA")
+            # Bybit unifiedMarginStatus: 1=classic, 3/4=UTA1.0, 5/6=UTA2.0.
+            unified = account_type in (2, 3, 4, 5, 6, "2", "3", "4", "5", "6", "UNIFIED", "UTA")
             return CheckResult(
                 name="account_type",
                 passed=unified,

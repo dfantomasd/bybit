@@ -2606,6 +2606,14 @@ class TradingApplication:
         signals = int(diag.get("hour_signals_emitted") or 0)
         placed = int(diag.get("hour_order_placed") or 0)
         if signals >= max(1, self._settings.MIN_SIGNALS_PER_HOUR) and placed == 0:
+            if self._execution_engine is not None and self._execution_engine.is_in_warmup():
+                log.info(
+                    "zero_trading.suppressed_warmup",
+                    hour_signals=signals,
+                    warmup_seconds_remaining=round(self._execution_engine.warmup_seconds_remaining(), 1),
+                )
+                return
+
             self._last_zero_trading_warn_at = now
             blockers = {
                 "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
