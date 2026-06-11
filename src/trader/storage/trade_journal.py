@@ -289,6 +289,10 @@ class TradeJournal:
                 ADD COLUMN IF NOT EXISTS metadata jsonb;
             CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
                 ON prediction_events (symbol, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_prediction_events_model_time
+                ON prediction_events (model_version, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_prediction_events_model_decision_time
+                ON prediction_events (model_version, decision, created_at DESC);
 
             -- Outcome labels for training (resolved after horizon_minutes)
             CREATE TABLE IF NOT EXISTS prediction_outcomes (
@@ -306,6 +310,9 @@ class TradeJournal:
                 ADD COLUMN IF NOT EXISTS label_schema_version text DEFAULT 'directional_net_v1';
             CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema
                 ON prediction_outcomes (label_schema_version);
+            CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_horizon_schema
+                ON prediction_outcomes (horizon_minutes, label_schema_version)
+                WHERE label IS NOT NULL;
 
             -- ML model registry
             CREATE TABLE IF NOT EXISTS model_versions (
@@ -409,6 +416,8 @@ class TradeJournal:
                 );
                 CREATE INDEX IF NOT EXISTS idx_order_pending_state_unresolved
                     ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
+                CREATE INDEX IF NOT EXISTS idx_order_pending_state_symbol_unresolved
+                    ON order_pending_state (symbol, created_at DESC) WHERE resolved_at IS NULL;
                 -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
                 ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
                 -- Telegram push-notification subscriptions (survive restarts)

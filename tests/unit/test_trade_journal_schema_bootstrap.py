@@ -14,8 +14,10 @@ class _FakeConnection:
         self.label_schema_column_seen = False
         self.feature_snapshot_eligibility_seen = False
         self.feature_snapshot_duplicates_invalidated = False
+        self.executed_sql: list[str] = []
 
     async def execute(self, sql: str) -> None:
+        self.executed_sql.append(sql)
         label_alter_pos = sql.find("ALTER TABLE prediction_outcomes")
         label_index_pos = sql.find("idx_prediction_outcomes_label_schema")
         label_alter = label_alter_pos >= 0 and "label_schema_version" in sql[label_alter_pos:]
@@ -82,3 +84,18 @@ async def test_feature_snapshot_eligible_unique_index_is_bootstrapped_after_dedu
     journal._pool = cast(Any, _FakePool())
 
     await journal._ensure_schema()
+
+
+@pytest.mark.asyncio
+async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    sql = "\n".join(pool.conn.executed_sql)
+    assert "idx_prediction_events_model_time" in sql
+    assert "idx_prediction_events_model_decision_time" in sql
+    assert "idx_prediction_outcomes_horizon_schema" in sql
+    assert "idx_order_pending_state_symbol_unresolved" in sql
