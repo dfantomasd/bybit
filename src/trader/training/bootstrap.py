@@ -49,11 +49,10 @@ def bootstrap_pvalue(
     baseline = [float(x) for x in samples_baseline]
     if not challenger or not baseline:
         raise ValueError(
-            f"bootstrap_pvalue requires non-empty samples "
-            f"(challenger={len(challenger)}, baseline={len(baseline)})"
+            f"bootstrap_pvalue requires non-empty samples (challenger={len(challenger)}, baseline={len(baseline)})"
         )
 
-    rng = random.Random(seed)
+    rng = random.Random(seed)  # noqa: S311 - statistical resampling, not cryptography
     n_c = len(challenger)
     n_b = len(baseline)
     observed_diff = (sum(challenger) / n_c) - (sum(baseline) / n_b)

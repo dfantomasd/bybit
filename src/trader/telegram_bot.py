@@ -211,6 +211,7 @@ class TelegramMonitorBot:
 
         # Observability
         app.add_handler(CommandHandler("start", self._cmd_start))
+        app.add_handler(CommandHandler("menu", self._cmd_menu))
         app.add_handler(CommandHandler("help", self._cmd_help))
         app.add_handler(CommandHandler("status", self._cmd_status))
         app.add_handler(CommandHandler("balance", self._cmd_balance))
@@ -368,28 +369,71 @@ class TelegramMonitorBot:
     def _chat_id(self, update: Update) -> int | None:
         return update.effective_chat.id if update.effective_chat else None
 
+    def _mode_indicator(self) -> str:
+        """Compact current-mode line for menu headers."""
+        mode = (self._config.trading_mode or "SHADOW").upper()
+        is_shadow = self._controller.is_shadow() if self._controller is not None else True
+        is_paused = self._controller.is_paused() if self._controller is not None else False
+        if mode == "LIVE":
+            badge = "🔴 LIVE — реальные деньги"
+        elif mode == "CANARY_LIVE":
+            badge = "🟠 CANARY — реальные деньги, малый размер"
+        elif is_shadow:
+            badge = "🟢 SHADOW — ордера не отправляются"
+        else:
+            badge = f"⚪ {mode}"
+        pause_str = " | ⏸ пауза" if is_paused else ""
+        venue = "testnet" if self._config.bybit_use_testnet else "Bybit mainnet"
+        return f"{badge} | {venue}{pause_str}"
+
+    def _menu_text(self) -> str:
+        return f"<b>🏠 Bybit AI Trader</b>\n{self._mode_indicator()}\n\nВыберите раздел:"
+
     def _main_menu(self) -> InlineKeyboardMarkup:
         rows = [
+            # — Статус и баланс —
+            [
+                InlineKeyboardButton("📊 Статус", callback_data="view:status"),
+                InlineKeyboardButton("💰 Баланс", callback_data="view:balance"),
+            ],
+            # — Торговля и сигналы —
             [
                 InlineKeyboardButton("📂 Позиции", callback_data="view:positions"),
-                InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
+                InlineKeyboardButton("📜 Сделки", callback_data="view:trades"),
             ],
-            [InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select")],
             [
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
-            [InlineKeyboardButton("💸 Издержки", callback_data="view:costs")],
+            # — Риски и лимиты —
+            [
+                InlineKeyboardButton("🎚 Риски и лимиты", callback_data="control:limits"),
+                InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
+            ],
+            # — Модель и обучение —
             [
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
+                InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
+            ],
+            # — Настройки —
+            [
+                InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
+                InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
                 InlineKeyboardButton("🖥 Нагрузка", callback_data="view:diagnostics"),
             ],
             [
                 InlineKeyboardButton("⚙️ Управление", callback_data="view:control"),
-                InlineKeyboardButton("🔄 Обновить", callback_data="view:status"),
+                InlineKeyboardButton("🩺 Healthcheck", callback_data="view:healthcheck"),
+            ],
+            [
+                InlineKeyboardButton("❓ Помощь", callback_data="view:help"),
+                InlineKeyboardButton("🔄 Обновить", callback_data="view:menu"),
             ],
         ]
         return InlineKeyboardMarkup(rows)
+
+    def _home_row(self) -> list[InlineKeyboardButton]:
+        return [InlineKeyboardButton("🏠 Главное меню", callback_data="view:menu")]
 
     def _control_menu(self) -> InlineKeyboardMarkup:
         """Control submenu — safe operations only (no risk escalation, no LIVE activation)."""
@@ -411,7 +455,7 @@ class TelegramMonitorBot:
             [InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary")],
             [InlineKeyboardButton("❓ Как читать модель + путь к реальным деньгам", callback_data="view:model_help")],
             [InlineKeyboardButton("🚨 Аварийная остановка", callback_data="control:stop")],
-            [InlineKeyboardButton("⬅️ Назад", callback_data="view:status")],
+            self._home_row(),
         ]
         return InlineKeyboardMarkup(rows)
 
@@ -424,6 +468,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                     InlineKeyboardButton("⬅️ Назад", callback_data="view:control"),
                 ],
+                self._home_row(),
             ]
         )
 
@@ -455,6 +500,7 @@ class TelegramMonitorBot:
             ],
             [InlineKeyboardButton("✏️ Своё значение", callback_data="limit:custom")],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
+            self._home_row(),
         ]
         return InlineKeyboardMarkup(rows)
 
@@ -523,7 +569,13 @@ class TelegramMonitorBot:
         cid = self._chat_id(update)
         if cid:
             self._subscribed.add(cid)
-        await self._reply(update, self._help_text(), reply_markup=self._main_menu())
+        await self._reply(update, self._menu_text(), reply_markup=self._main_menu())
+
+    async def _cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        await self._reply(update, self._menu_text(), reply_markup=self._main_menu())
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -1673,6 +1725,23 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
+        if action == "stop":
+            try:
+                await self._controller.emergency_stop()
+            except Exception as exc:
+                await self._button_reply(
+                    update,
+                    f"❌ Остановка не удалась: <code>{html.escape(str(exc))}</code>",
+                    reply_markup=self._main_menu(),
+                )
+                return
+            log.info("telegram_control_confirmed", action="emergency_stop")
+            await self._button_reply(
+                update,
+                "🚨 <b>Аварийная остановка выполнена.</b> Новые входы остановлены; для возобновления перезапустите сервис.",
+                reply_markup=self._main_menu(),
+            )
+            return
         await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
 
     async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1845,17 +1914,13 @@ class TelegramMonitorBot:
         if self._controller is None:
             await self._reply(update, "Управление сейчас недоступно.")
             return
-        cid = self._chat_id(update)
-        if cid:
-            self._pending[cid] = (
-                "АВАРИЙНАЯ ОСТАНОВКА (нужен ручной перезапуск)",
-                self._controller.emergency_stop,
-            )
         await self._reply(
             update,
-            "🚨 Запрошена <b>аварийная остановка</b>.\n"
-            "Новые входы будут полностью остановлены, затем нужен ручной перезапуск.\n"
-            "Отправьте /confirm для выполнения или ничего не делайте для отмены.",
+            "🚨 <b>Аварийная остановка</b>\n\n"
+            "Все новые входы будут полностью остановлены. "
+            "Для возобновления потребуется ручной перезапуск сервиса.\n\n"
+            "Выполнить?",
+            reply_markup=self._confirm_menu("stop"),
         )
 
     async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2124,6 +2189,18 @@ class TelegramMonitorBot:
             "diagnostics": self._cmd_diagnostics,
             "costs": self._cmd_costs,
         }
+        if action == "menu":
+            await self._button_reply(update, self._menu_text(), reply_markup=self._main_menu())
+            return
+        if action == "help":
+            await self._button_reply(update, self._help_text(), reply_markup=self._main_menu())
+            return
+        if action == "trades":
+            await self._cmd_trades(update, fake_context)  # type: ignore[arg-type]
+            return
+        if action == "healthcheck":
+            await self._cmd_healthcheck(update, fake_context)  # type: ignore[arg-type]
+            return
         if action == "db_model":
             await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]
             return
@@ -2257,16 +2334,13 @@ class TelegramMonitorBot:
             await self._button_reply(update, self._limits_text(), reply_markup=self._limits_menu())
             return
         if action == "stop":
-            cid = self._chat_id(update)
-            if cid:
-                self._pending[cid] = (
-                    "АВАРИЙНАЯ ОСТАНОВКА (нужен ручной перезапуск)",
-                    self._controller.emergency_stop,
-                )
             await self._button_reply(
                 update,
-                "<b>Аварийная остановка</b> запрошена.\nОтправьте /confirm для выполнения или ничего не делайте для отмены.",
-                reply_markup=self._main_menu(),
+                "🚨 <b>Аварийная остановка</b>\n\n"
+                "Все новые входы будут полностью остановлены. "
+                "Для возобновления потребуется ручной перезапуск сервиса.\n\n"
+                "Выполнить?",
+                reply_markup=self._confirm_menu("stop"),
             )
             return
         await self._button_reply(update, "Неизвестное действие управления.", reply_markup=self._main_menu())
@@ -2410,6 +2484,7 @@ class TelegramMonitorBot:
         return (
             "<b>Bybit AI Trader</b>\n\n"
             "<b>Наблюдение</b>\n"
+            "/menu        — главное меню с кнопками\n"
             "/status      — здоровье системы\n"
             "/balance     — баланс кошелька\n"
             "/positions   — открытые позиции\n"

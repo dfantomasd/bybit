@@ -437,6 +437,7 @@ class TradeJournal:
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
             """)
+
     async def record_signal(
         self,
         proposal: TradeProposal,
@@ -1417,24 +1418,21 @@ class TradeJournal:
         """
         if not self.is_enabled:
             return []
-        params: list[Any] = [model_version, int(limit)]
-        horizon_clause = ""
-        if horizon_minutes is not None:
-            horizon_clause = "AND po.horizon_minutes = $3"
-            params.append(int(horizon_minutes))
         rows = await self._fetch(
-            f"""
+            """
             SELECT po.net_return_bps
             FROM prediction_outcomes po
             JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
             WHERE pe.model_version = $1
               AND po.net_return_bps IS NOT NULL
               AND po.label_schema_version = 'directional_net_v1'
-              {horizon_clause}
+              AND ($3::int IS NULL OR po.horizon_minutes = $3)
             ORDER BY po.resolved_at DESC NULLS LAST
             LIMIT $2
             """,
-            *params,
+            model_version,
+            int(limit),
+            int(horizon_minutes) if horizon_minutes is not None else None,
         )
         return [float(r["net_return_bps"]) for r in rows]
 

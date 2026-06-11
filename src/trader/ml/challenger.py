@@ -14,13 +14,13 @@ from __future__ import annotations
 import hashlib
 import io
 import json
-import structlog
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
 
 import joblib
 import numpy as np
+import structlog
 
 from trader.training.labels import LABEL_SCHEMA_VERSION
 

@@ -134,8 +134,8 @@ class ScalpMicroStrategy(BaseStrategy):
         if self._diag_hook is not None:
             try:
                 self._diag_hook(reason)
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("scalp_micro.diag_hook_failed", reason=reason, error=str(exc))
 
     def _rate_limited(self, symbol: str) -> bool:
         now = datetime.now(tz=UTC)

@@ -58,7 +58,7 @@ async def _shadow_gate_stats(
           AND po.horizon_minutes = $2
           AND po.label IS NOT NULL
           AND po.label_schema_version = $3
-          AND fs.training_eligible = true
+          AND COALESCE(fs.training_eligible, true) = true
         GROUP BY pe.decision
         """,
         version,
