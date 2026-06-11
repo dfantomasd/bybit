@@ -330,6 +330,8 @@ async def test_feature_snapshot_written() -> None:
     assert len(fetched) == 1
     query, args = fetched[0]
     assert "feature_snapshots" in query
+    assert "ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)" in query
+    assert "WHERE training_eligible = true" in query
     assert "DOGEUSDT" in args
 
 
