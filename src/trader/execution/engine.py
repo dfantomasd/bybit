@@ -126,6 +126,7 @@ class ExecutionEngine:
         # Per-session diagnostic counters (cumulative, not windowed)
         self._diag_skip_pending: int = 0
         self._diag_order_placed: int = 0
+        self._diag_shadow_order_would_be_placed: int = 0
         self._diag_order_failed: int = 0
         self._diag_net_edge_rejected: int = 0
         self._diag_no_tp_rejected: int = 0
@@ -845,6 +846,7 @@ class ExecutionEngine:
 
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
+            self._diag_shadow_order_would_be_placed += 1
             log.info(
                 "shadow.order_would_be_placed",
                 symbol=symbol,
@@ -1152,6 +1154,7 @@ class ExecutionEngine:
         return {
             "skipped_pending_entries": self._diag_skip_pending,
             "order_placed": self._diag_order_placed,
+            "shadow_order_would_be_placed": self._diag_shadow_order_would_be_placed,
             "order_failed": self._diag_order_failed,
             "pending_entry_count": len(self._pending_entry_order_link_ids),
             "net_edge_rejected": self._diag_net_edge_rejected,
