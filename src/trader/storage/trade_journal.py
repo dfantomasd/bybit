@@ -7,7 +7,7 @@ import json
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import asyncpg
 import structlog
@@ -993,18 +993,30 @@ class TradeJournal:
         )
 
     async def get_candle_counts(self) -> dict[str, int]:
-        """Return {interval: count} for market_candles (diagnostics)."""
-        rows = await self._fetch("SELECT interval, count(*) AS cnt FROM market_candles GROUP BY interval")
+        """Return {interval: confirmed count} for market_candles diagnostics."""
+        rows = await self._fetch(
+            """
+            SELECT interval, count(*) AS cnt
+            FROM market_candles
+            WHERE confirmed = true
+            GROUP BY interval
+            """
+        )
         return {str(r["interval"]): int(r["cnt"]) for r in rows}
 
     async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
-        """Return the most recent open_time for the given interval."""
+        """Return the most recent confirmed open_time for the given interval."""
         rows = await self._fetch(
-            "SELECT MAX(open_time) AS ts FROM market_candles WHERE interval = $1",
+            """
+            SELECT MAX(open_time) AS ts
+            FROM market_candles
+            WHERE interval = $1
+              AND confirmed = true
+            """,
             interval,
         )
         if rows and rows[0]["ts"]:
-            return rows[0]["ts"]
+            return cast(datetime, rows[0]["ts"])
         return None
 
     async def apply_candle_retention(self) -> None:
