@@ -323,8 +323,8 @@ class ModelRegistry:
             if not rows:
                 self._champion = None
                 log.warning(
-                    "model_registry.no_compatible_champion",
-                    required_schema=LABEL_SCHEMA_VERSION,
+                    "model_registry.no_compatible_champion required_schema=%s",
+                    LABEL_SCHEMA_VERSION,
                 )
                 return None
             row = rows[0]
@@ -338,9 +338,9 @@ class ModelRegistry:
             model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._champion = model
             log.info(
-                "model_registry.champion_loaded",
-                version=model.version,
-                samples=model.training_samples,
+                "model_registry.champion_loaded version=%s samples=%s",
+                model.version,
+                model.training_samples,
             )
             return model
         except Exception as exc:
@@ -379,9 +379,9 @@ class ModelRegistry:
             model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
             self._challenger = model
             log.info(
-                "model_registry.challenger_loaded",
-                version=model.version,
-                samples=model.training_samples,
+                "model_registry.challenger_loaded version=%s samples=%s",
+                model.version,
+                model.training_samples,
             )
             return model
         except Exception as exc:
