@@ -52,7 +52,7 @@ def bootstrap_pvalue(
             f"bootstrap_pvalue requires non-empty samples (challenger={len(challenger)}, baseline={len(baseline)})"
         )
 
-    rng = random.Random(seed)  # noqa: S311 - statistical resampling, not cryptography
+    rng = random.Random(seed)  # noqa: S311 - deterministic statistical resampling, not security-sensitive.
     n_c = len(challenger)
     n_b = len(baseline)
     observed_diff = (sum(challenger) / n_c) - (sum(baseline) / n_b)

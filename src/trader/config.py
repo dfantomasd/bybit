@@ -304,7 +304,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
-    MODEL_ALLOW_LIVE_DECISIONS: bool = True
+    MODEL_ALLOW_LIVE_DECISIONS: bool = False
     """When False, model only scores in shadow; rule-based strategy remains authoritative.
     When True, a compatible CHAMPION model may replace rule-based decisions (hybrid mode).
     Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""

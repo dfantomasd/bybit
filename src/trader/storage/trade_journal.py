@@ -399,6 +399,23 @@ class TradeJournal:
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
+                -- Persistent pending-entry resolution state: survives restarts so a
+                -- terminal order status seen before a crash never re-blocks the slot.
+                CREATE TABLE IF NOT EXISTS order_pending_state (
+                    order_link_id text PRIMARY KEY,
+                    symbol text,
+                    created_at timestamptz NOT NULL DEFAULT now(),
+                    resolved_at timestamptz
+                );
+                CREATE INDEX IF NOT EXISTS idx_order_pending_state_unresolved
+                    ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
+                -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
+                ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
+                -- Telegram push-notification subscriptions (survive restarts)
+                CREATE TABLE IF NOT EXISTS telegram_subscriptions (
+                    chat_id bigint PRIMARY KEY,
+                    subscribed_at timestamptz NOT NULL DEFAULT now()
+                );
                 UPDATE feature_snapshots fs
                 SET training_eligible = false,
                     invalid_reason = 'duplicate_snapshot_same_candle',
@@ -419,24 +436,13 @@ class TradeJournal:
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
                     ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
                     WHERE training_eligible = true;
-                -- Persistent pending-entry resolution state: survives restarts so a
-                -- terminal order status seen before a crash never re-blocks the slot.
-                CREATE TABLE IF NOT EXISTS order_pending_state (
-                    order_link_id text PRIMARY KEY,
-                    symbol text,
-                    created_at timestamptz NOT NULL DEFAULT now(),
-                    resolved_at timestamptz
-                );
-                CREATE INDEX IF NOT EXISTS idx_order_pending_state_unresolved
-                    ON order_pending_state (created_at DESC) WHERE resolved_at IS NULL;
-                -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
-                ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
-                -- Telegram push-notification subscriptions (survive restarts)
-                CREATE TABLE IF NOT EXISTS telegram_subscriptions (
-                    chat_id bigint PRIMARY KEY,
-                    subscribed_at timestamptz NOT NULL DEFAULT now()
-                );
             """)
+            # This index must be created AFTER ALTER TABLE adds label_schema_version
+            # to avoid CREATE INDEX failing on an existing DB where the column was missing.
+            await conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
+                "ON prediction_outcomes (label_schema_version)"
+            )
 
     async def record_signal(
         self,
@@ -1332,11 +1338,11 @@ class TradeJournal:
             symbol = row["symbol"]
             entry_time = row["entry_time"]
 
+            # Entry price: must be the exact confirmed candle that closed at the signal time.
             entry_rows = await self._fetch(
                 """
                 SELECT close FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
-                ORDER BY open_time DESC LIMIT 1
+                WHERE symbol=$1 AND interval='1' AND open_time = $2 AND confirmed = true
                 """,
                 symbol,
                 entry_time,
@@ -1350,10 +1356,14 @@ class TradeJournal:
             from datetime import timedelta
 
             horizon_time = entry_time + timedelta(minutes=horizon_minutes)
+            # Horizon price: the last confirmed candle with open_time <= horizon_time.
+            # Since we only write confirmed candles, and we wait until horizon_time
+            # is in the past (pe.created_at < now() - horizon), the candle
+            # at horizon_time is almost certainly confirmed. Still we filter confirmed.
             horizon_rows = await self._fetch(
                 """
                 SELECT close, high, low FROM market_candles
-                WHERE symbol=$1 AND interval='1' AND open_time <= $2
+                WHERE symbol=$1 AND interval='1' AND open_time <= $2 AND confirmed = true
                 ORDER BY open_time DESC LIMIT 1
                 """,
                 symbol,
@@ -1418,22 +1428,38 @@ class TradeJournal:
         """
         if not self.is_enabled:
             return []
-        rows = await self._fetch(
-            """
-            SELECT po.net_return_bps
-            FROM prediction_outcomes po
-            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
-            WHERE pe.model_version = $1
-              AND po.net_return_bps IS NOT NULL
-              AND po.label_schema_version = 'directional_net_v1'
-              AND ($3::int IS NULL OR po.horizon_minutes = $3)
-            ORDER BY po.resolved_at DESC NULLS LAST
-            LIMIT $2
-            """,
-            model_version,
-            int(limit),
-            int(horizon_minutes) if horizon_minutes is not None else None,
-        )
+        if horizon_minutes is not None:
+            rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_outcomes po
+                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                WHERE pe.model_version = $1
+                  AND po.net_return_bps IS NOT NULL
+                  AND po.label_schema_version = 'directional_net_v1'
+                  AND po.horizon_minutes = $3
+                ORDER BY po.resolved_at DESC NULLS LAST
+                LIMIT $2
+                """,
+                model_version,
+                int(limit),
+                int(horizon_minutes),
+            )
+        else:
+            rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_outcomes po
+                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                WHERE pe.model_version = $1
+                  AND po.net_return_bps IS NOT NULL
+                  AND po.label_schema_version = 'directional_net_v1'
+                ORDER BY po.resolved_at DESC NULLS LAST
+                LIMIT $2
+                """,
+                model_version,
+                int(limit),
+            )
         return [float(r["net_return_bps"]) for r in rows]
 
     async def get_shadow_gate_stats(
@@ -1561,6 +1587,7 @@ class TradeJournal:
             "write_health": self.write_health(),
             "candles_by_interval": {},
             "latest_candle_1m": None,
+            "last_confirmed_candle_age_s": None,
             "feature_snapshots": 0,
             "prediction_outcomes": 0,
             "prediction_outcomes_by_horizon": {},
@@ -1583,7 +1610,12 @@ class TradeJournal:
             self._last_read_error = None
             self._last_read_error_at = None
             result["candles_by_interval"] = await self.get_candle_counts()
-            result["latest_candle_1m"] = await self.get_latest_candle_time("1")
+            latest_candle_1m = await self.get_latest_candle_time("1")
+            result["latest_candle_1m"] = latest_candle_1m
+            if latest_candle_1m is not None:
+                result["last_confirmed_candle_age_s"] = max(
+                    0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
+                )
             rows = await self._fetch("SELECT count(*) AS cnt FROM feature_snapshots")
             result["feature_snapshots"] = int(rows[0]["cnt"]) if rows else 0
             rows = await self._fetch("SELECT count(*) AS cnt FROM prediction_outcomes")

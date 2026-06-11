@@ -53,6 +53,7 @@ class BybitAdapter:
         rsa_private_key: str | None = None,
         default_category: str = "linear",
         trade_journal: Any = None,
+        trading_mode: str = "TESTNET",
     ) -> None:
         from trader.domain.enums import BybitRegion
 
@@ -73,6 +74,7 @@ class BybitAdapter:
         self._default_category = default_category
         self._use_testnet = use_testnet
         self._journal = trade_journal
+        self._trading_mode = trading_mode
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -87,6 +89,7 @@ class BybitAdapter:
             rest_client=self._rest,
             endpoint_selector=self._endpoint_selector,
             use_testnet=self._use_testnet,
+            trading_mode=self._trading_mode,
         )
         report = await checker.run()
         logger.info(

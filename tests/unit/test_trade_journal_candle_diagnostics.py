@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -46,3 +47,26 @@ async def test_latest_candle_time_uses_only_confirmed_candles() -> None:
     assert "MAX(open_time)" in query
     assert "AND confirmed = true" in query
     assert args == ("1",)
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_reports_last_confirmed_candle_age() -> None:
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = object()  # type: ignore[assignment]
+    journal.get_candle_counts = AsyncMock(return_value={"1": 10})  # type: ignore[method-assign]
+    journal.get_latest_candle_time = AsyncMock(return_value=datetime.now(tz=UTC) - timedelta(seconds=45))  # type: ignore[method-assign]
+
+    async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del args
+        if "FROM feature_snapshots" in query:
+            return [{"cnt": 0}]
+        if "FROM prediction_outcomes" in query and "horizon_minutes" not in query:
+            return [{"cnt": 0}]
+        return []
+
+    journal._fetch = fake_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["latest_candle_1m"] is not None
+    assert 0 <= diag["last_confirmed_candle_age_s"] <= 60

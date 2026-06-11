@@ -311,6 +311,7 @@ class TradingApplication:
             use_testnet=self._settings.BYBIT_USE_TESTNET,
             default_category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
+            trading_mode=self._settings.TRADING_MODE.value,
         )
         log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
 
@@ -2703,7 +2704,16 @@ class TradingApplication:
         diag = self.get_diagnostics()
         signals = int(diag.get("hour_signals_emitted") or 0)
         placed = int(diag.get("hour_order_placed") or 0)
-        if signals >= max(1, self._settings.MIN_SIGNALS_PER_HOUR) and placed == 0:
+        shadow_would_place = int(diag.get("hour_shadow_order_would_be_placed") or 0)
+        if signals >= max(1, self._settings.MIN_SIGNALS_PER_HOUR) and placed == 0 and shadow_would_place == 0:
+            if self._execution_engine is not None and self._execution_engine.is_in_warmup():
+                log.info(
+                    "zero_trading.suppressed_warmup",
+                    hour_signals=signals,
+                    warmup_seconds_remaining=round(self._execution_engine.warmup_seconds_remaining(), 1),
+                )
+                return
+
             self._last_zero_trading_warn_at = now
             blockers = {
                 "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
@@ -2772,6 +2782,11 @@ class TradingApplication:
             ),
             "hour_order_placed": (
                 self._execution_engine.get_diag_counts().get("order_placed", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_shadow_order_would_be_placed": (
+                self._execution_engine.get_diag_counts().get("shadow_order_would_be_placed", 0)
                 if self._execution_engine is not None
                 else 0
             ),

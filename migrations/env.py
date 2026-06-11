@@ -1,4 +1,5 @@
 """Alembic environment configuration for async PostgreSQL migrations."""
+
 from __future__ import annotations
 
 import asyncio
@@ -23,6 +24,7 @@ if config.config_file_name is not None:
 #   target_metadata = Base.metadata
 target_metadata = None
 
+
 # Read the database URL from environment if not set in alembic.ini
 # This allows using docker secrets / env vars without hardcoding
 def get_url() -> str:
@@ -30,8 +32,7 @@ def get_url() -> str:
     url = os.environ.get("POSTGRES_DSN") or config.get_main_option("sqlalchemy.url")
     if not url:
         raise ValueError(
-            "Database URL not configured. "
-            "Set POSTGRES_DSN environment variable or sqlalchemy.url in alembic.ini"
+            "Database URL not configured. Set POSTGRES_DSN environment variable or sqlalchemy.url in alembic.ini"
         )
     # asyncpg driver is required for async migrations
     if "asyncpg" not in url and "postgresql" in url:
