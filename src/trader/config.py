@@ -111,6 +111,29 @@ class Settings(BaseSettings):
     """Global cap on scalp signals per minute across the whole portfolio."""
     SCALP_MAX_POSITION_NOTIONAL_USD: float = 100.0
     """Hard notional cap per scalp position."""
+    SCALP_MIN_OB_IMBALANCE: float = 0.15
+    """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
+    >= +value, SELL needs <= -value). Missing/stale book data fails OPEN."""
+
+    # ------------------------------------------------------------------
+    # Orderbook microstructure feed
+    # ------------------------------------------------------------------
+    ORDERBOOK_FEED_ENABLED: bool = True
+    """Subscribe to orderbook.50 for execution candidates and derive imbalance/
+    microprice features. Adds ~5-10 KB/s WS traffic per tracked symbol."""
+
+    # ------------------------------------------------------------------
+    # Regime-bucket performance gating
+    # ------------------------------------------------------------------
+    BUCKET_BLOCK_ENABLED: bool = True
+    """Skip strategy evaluation in (regime, volatility, UTC hour) buckets whose
+    own historical signals show persistent negative expectancy."""
+    BUCKET_MIN_SAMPLES: int = 30
+    """Minimum resolved outcomes in a bucket before it can be blocked."""
+    BUCKET_BLOCK_AVG_BPS: float = -2.0
+    """Block a bucket when its average net return is below this (bps)."""
+    BUCKET_STATS_REFRESH_SECONDS: int = 3600
+    """How often the in-memory bucket statistics are refreshed from Postgres."""
 
     # ------------------------------------------------------------------
     # Startup candle backfill

@@ -1057,6 +1057,46 @@ class TradeJournal:
             return float(rows[0]["avg_bps"])
         return None
 
+    async def get_bucket_stats(
+        self,
+        *,
+        horizon_minutes: int = 15,
+        lookback_days: int = 30,
+    ) -> dict[tuple[str, str, int], tuple[float, int]]:
+        """Per-(regime, volatility, UTC hour) expectancy of our own baseline signals.
+
+        Aggregates resolved outcomes of RULE_BASELINE_V1 prediction events whose
+        metadata carries the regime context recorded at signal time. Returns
+        {(regime, volatility, hour): (avg_return_bps, count)}. Events without
+        regime metadata are grouped under "UNKNOWN".
+        """
+        rows = await self._fetch(
+            """
+            SELECT
+                COALESCE(pe.metadata->>'regime', 'UNKNOWN') AS regime,
+                COALESCE(pe.metadata->>'volatility', 'UNKNOWN') AS volatility,
+                extract(hour FROM pe.created_at)::int AS hour,
+                avg(po.net_return_bps) AS avg_bps,
+                count(*) AS cnt
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE po.net_return_bps IS NOT NULL
+              AND po.horizon_minutes = $1
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND pe.created_at > now() - ($2::text || ' days')::interval
+            GROUP BY 1, 2, 3
+            """,
+            horizon_minutes,
+            str(lookback_days),
+        )
+        return {
+            (str(r["regime"]), str(r["volatility"]), int(r["hour"])): (
+                float(r["avg_bps"]),
+                int(r["cnt"]),
+            )
+            for r in rows
+        }
+
     async def find_order_link_id_by_exchange_order_id(
         self,
         exchange_order_id: str,

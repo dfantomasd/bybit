@@ -160,3 +160,46 @@ class TestScalpMicroStrategy:
         proposal = strat.evaluate(_vector(), closes[-1], 100_000.0)
         assert proposal is not None
         assert float(proposal.requested_notional_usd) <= 100.0
+
+    def test_imbalance_confirms_buy(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        strat = _strategy(store, imbalance_provider=lambda _s: 0.30, min_imbalance=0.15)
+        proposal = strat.evaluate(_vector(), closes[-1], 1000.0)
+        assert proposal is not None
+        assert proposal.side == OrderSide.BUY
+
+    def test_imbalance_against_buy_rejected(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+        # Book pressure is on the ask side → BUY signal must be dropped
+        strat = _strategy(
+            store,
+            rejections=rejections,
+            imbalance_provider=lambda _s: -0.40,
+            min_imbalance=0.15,
+        )
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert "imbalance_rejected" in rejections
+
+    def test_weak_imbalance_rejected(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+        # Positive but below the 0.15 threshold → not a confirmation
+        strat = _strategy(
+            store,
+            rejections=rejections,
+            imbalance_provider=lambda _s: 0.05,
+            min_imbalance=0.15,
+        )
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert "imbalance_rejected" in rejections
+
+    def test_missing_imbalance_fails_open(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        strat = _strategy(store, imbalance_provider=lambda _s: None, min_imbalance=0.15)
+        proposal = strat.evaluate(_vector(), closes[-1], 1000.0)
+        assert proposal is not None  # no book data must not block the signal
