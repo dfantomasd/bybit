@@ -138,6 +138,46 @@ class ChallengerModel:
             log.debug("challenger.predict_failed", exc_info=exc)
             return None
 
+    def fit_batch(self, features: Any, labels: Any, *, epochs: int = 5) -> None:
+        """Train from scratch on a full labelled batch.
+
+        Unlike per-sample ``partial_fit``, the scaler is fitted on the whole
+        batch BEFORE any gradient step (an online scaler feeds the first
+        hundreds of samples through near-random scaling, which a single-pass
+        SGD never recovers from), several shuffled epochs are run, and class
+        imbalance is countered with balanced sample weights.
+        """
+
+        if not _SKLEARN_AVAILABLE:
+            return
+        x = np.asarray(features, dtype=np.float32)
+        y = np.asarray(labels, dtype=np.int32)
+        if x.ndim != 2 or len(x) == 0 or len(x) != len(y):
+            return
+        # Batch training replaces any previous estimator state.
+        self._clf = SGDClassifier(
+            loss="log_loss",
+            max_iter=1,
+            warm_start=True,
+            random_state=42,
+        )
+        self._scaler = StandardScaler()
+        x_scaled = self._scaler.fit_transform(x)
+        classes = np.array([0, 1], dtype=np.int32)
+        counts = np.bincount(y, minlength=2).astype(np.float64)
+        weight_by_class = np.where(counts > 0, counts.sum() / (2.0 * np.maximum(counts, 1.0)), 1.0)
+        sample_weight = weight_by_class[y]
+        rng = np.random.default_rng(42)
+        for _ in range(max(1, int(epochs))):
+            order = rng.permutation(len(x_scaled))
+            self._clf.partial_fit(
+                x_scaled[order],
+                y[order],
+                classes=classes,
+                sample_weight=sample_weight[order],
+            )
+        self.training_samples = int(len(x_scaled))
+
     def partial_fit(self, features: list[float], label: int) -> None:
         """Online update with a single labelled sample."""
 

@@ -30,15 +30,6 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
-def _fit_model(model: Any, x_arr: np.ndarray, y: np.ndarray) -> None:
-    chunk = 32
-    for i in range(0, len(x_arr), chunk):
-        xb = x_arr[i : i + chunk]
-        yb = y[i : i + chunk]
-        for xi, yi in zip(xb, yb, strict=False):
-            model.partial_fit(xi.tolist(), int(yi))
-
-
 def _validation_metrics_by_side(
     *,
     sides: np.ndarray,
@@ -371,9 +362,12 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m_dnv1"
         model = ChallengerModel(version=version, feature_names=feature_names)
 
-        _fit_model(model, x_train, y_train)
+        # Fit on the chronological train split, evaluate on the held-out tail,
+        # then refit from scratch on all data — the saved artifact uses every
+        # sample while the stored metrics stay strictly out-of-sample.
+        model.fit_batch(x_train, y_train)
         metrics = _evaluate_model(model, x_val, y_val, returns_val, sides_val)
-        _fit_model(model, x_val, y_val)
+        model.fit_batch(x_arr, y)
 
         click.echo(f"Training complete: {model.training_samples} samples, version={version}")
         click.echo(

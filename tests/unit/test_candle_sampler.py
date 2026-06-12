@@ -110,3 +110,53 @@ class TestCandleSampler:
         app = _make_app()
         app._trade_journal.record_feature_snapshot = AsyncMock(side_effect=RuntimeError("db down"))
         await app._sample_confirmed_candle(_SYMBOL, "1", _vec())  # must not raise
+
+    @pytest.mark.asyncio
+    async def test_challenger_shadow_gate_event_recorded(self) -> None:
+        from trader.ml.challenger import ModelPrediction
+
+        app = _make_app()
+        registry = MagicMock()
+        registry.score_shadow = MagicMock(
+            return_value=ModelPrediction(
+                score=0.9,
+                label=1,
+                confidence=0.9,
+                model_version="v_test_challenger",
+            )
+        )
+        app._model_registry = registry
+        await app._sample_confirmed_candle(_SYMBOL, "1", _vec())
+        assert app._trade_journal.record_prediction_event.await_count == 2
+        shadow_kwargs = app._trade_journal.record_prediction_event.await_args_list[1].kwargs
+        assert shadow_kwargs["model_version"] == "v_test_challenger"
+        assert shadow_kwargs["decision"] == "GATE_PASS"
+        assert shadow_kwargs["metadata"]["source"] == "candle_sampler_shadow"
+
+    @pytest.mark.asyncio
+    async def test_challenger_shadow_gate_block_below_threshold(self) -> None:
+        from trader.ml.challenger import ModelPrediction
+
+        app = _make_app()
+        registry = MagicMock()
+        registry.score_shadow = MagicMock(
+            return_value=ModelPrediction(
+                score=0.10,
+                label=0,
+                confidence=0.90,
+                model_version="v_test_challenger",
+            )
+        )
+        app._model_registry = registry
+        await app._sample_confirmed_candle(_SYMBOL, "1", _vec())
+        shadow_kwargs = app._trade_journal.record_prediction_event.await_args_list[1].kwargs
+        assert shadow_kwargs["decision"] == "GATE_BLOCK"
+
+    @pytest.mark.asyncio
+    async def test_no_challenger_records_only_baseline(self) -> None:
+        app = _make_app()
+        registry = MagicMock()
+        registry.score_shadow = MagicMock(return_value=None)
+        app._model_registry = registry
+        await app._sample_confirmed_candle(_SYMBOL, "1", _vec())
+        assert app._trade_journal.record_prediction_event.await_count == 1
