@@ -105,7 +105,7 @@ class ScalpMicroStrategy(BaseStrategy):
         interval: str = "1",
         spread_provider: Callable[[str], float | None] | None = None,
         taker_fee_pct: float = 0.055,
-        expected_slippage_pct: float = 0.03,
+        expected_slippage_pct: float = 0.03,  # per side (one-way); doubled for round trip
         min_net_return_pct: float = 0.05,
         max_spread_bps: float = 3.0,
         cooldown_seconds: int = 60,
@@ -163,7 +163,7 @@ class ScalpMicroStrategy(BaseStrategy):
     def _net_edge_pct(self, gross_edge_pct: float, spread_bps: float) -> float:
         """Expected NET return in percent after round-trip costs."""
         spread_pct = spread_bps / 100.0  # bps -> percent
-        return gross_edge_pct - self._taker_fee_pct * 2 - spread_pct - self._expected_slippage_pct
+        return gross_edge_pct - self._taker_fee_pct * 2 - spread_pct - self._expected_slippage_pct * 2
 
     # ------------------------------------------------------------------
 
