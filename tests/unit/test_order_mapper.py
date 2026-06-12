@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from trader.domain.enums import MarketType, OrderSide, OrderType
-from trader.domain.models import OrderIntent
+from trader.domain.models import Balance, OrderIntent
 from trader.exchange.order_mapper import OrderMapper, _round_to_step
 
 # ---------------------------------------------------------------------------
@@ -42,6 +43,38 @@ def _make_intent(
     if sl is not None:
         kwargs["stop_loss"] = Decimal(sl)
     return OrderIntent(**kwargs)
+
+
+def test_rest_balance_preserves_updated_at_and_timestamp_alias() -> None:
+    mapper = OrderMapper()
+    balance = mapper.rest_balance_to_model(
+        {
+            "accountType": "UNIFIED",
+            "coin": "USDT",
+            "walletBalance": "100",
+            "availableBalance": "80",
+            "updatedTime": "1700000005000",
+        }
+    )
+
+    expected = datetime.fromtimestamp(1700000005, tz=UTC)
+    assert balance.updated_at == expected
+    assert balance.timestamp == expected
+
+
+def test_balance_accepts_legacy_timestamp_input() -> None:
+    ts = datetime.fromtimestamp(1700000010, tz=UTC)
+
+    balance = Balance(
+        account_type="UNIFIED",
+        currency="USDT",
+        wallet_balance=Decimal("10"),
+        available_balance=Decimal("9"),
+        timestamp=ts,
+    )
+
+    assert balance.updated_at == ts
+    assert balance.timestamp == ts
 
 
 # ---------------------------------------------------------------------------

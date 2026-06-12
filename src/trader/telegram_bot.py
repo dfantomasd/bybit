@@ -58,6 +58,7 @@ log = structlog.get_logger(__name__)
 
 # Inline confirm buttons and pending /confirm actions expire after this long.
 _CONFIRM_TTL_SECONDS = 300.0
+_CONFIRM_MAX_PENDING = 1000
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -415,56 +416,134 @@ class TelegramMonitorBot:
 
     def _main_menu(self) -> InlineKeyboardMarkup:
         rows = [
-            # — Статус и баланс —
             [
-                InlineKeyboardButton("📊 Статус", callback_data="view:status"),
-                InlineKeyboardButton("💰 Баланс", callback_data="view:balance"),
-            ],
-            # — Торговля и сигналы —
-            [
-                InlineKeyboardButton("📂 Позиции", callback_data="view:positions"),
-                InlineKeyboardButton("📜 Сделки", callback_data="view:trades"),
+                InlineKeyboardButton("🏠 Статус и режим", callback_data="view:status_mode"),
+                InlineKeyboardButton("💰 Баланс и позиции", callback_data="view:balance_positions"),
             ],
             [
-                InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
-                InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
+                InlineKeyboardButton("📈 Торговля и сигналы", callback_data="view:trading"),
+                InlineKeyboardButton("⚙️ Настройки", callback_data="view:settings"),
             ],
             [
-                InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
-                InlineKeyboardButton("⚖️ Compare", callback_data="view:compare"),
+                InlineKeyboardButton("🧠 Модель и обучение", callback_data="view:model"),
+                InlineKeyboardButton("🩺 Диагностика", callback_data="view:diagnostics"),
             ],
-            [InlineKeyboardButton("📑 Отчет стратегии", callback_data="view:strategy_report")],
-            # — Риски и лимиты —
-            [
-                InlineKeyboardButton("🎚 Риски и лимиты", callback_data="control:limits"),
-                InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
-            ],
-            [InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed")],
-            # — Модель и обучение —
-            [
-                InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
-                InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
-            ],
-            [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
-            # — Настройки —
-            [
-                InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
-                InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
-                InlineKeyboardButton("🖥 Нагрузка", callback_data="view:diagnostics"),
-            ],
-            [
-                InlineKeyboardButton("⚙️ Управление", callback_data="view:control"),
-                InlineKeyboardButton("🩺 Healthcheck", callback_data="view:healthcheck"),
-            ],
-            [
-                InlineKeyboardButton("❓ Помощь", callback_data="view:help"),
-                InlineKeyboardButton("🔄 Обновить", callback_data="view:menu"),
-            ],
+            [InlineKeyboardButton("❓ Помощь", callback_data="view:help")],
+            [InlineKeyboardButton("🔄 Обновить", callback_data="view:menu")],
         ]
         return InlineKeyboardMarkup(rows)
 
     def _home_row(self) -> list[InlineKeyboardButton]:
         return [InlineKeyboardButton("🏠 Главное меню", callback_data="view:menu")]
+
+    def _status_mode_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("📊 Статус", callback_data="view:status")],
+                [
+                    InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
+                    InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
+                ],
+                [InlineKeyboardButton("🎚 Изменить риск-профиль", callback_data="view:risk_profiles")],
+                self._home_row(),
+            ]
+        )
+
+    def _balance_positions_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("💰 Баланс", callback_data="view:balance"),
+                    InlineKeyboardButton("📂 Позиции", callback_data="view:positions"),
+                ],
+                [InlineKeyboardButton("📈 Результаты", callback_data="view:pnl")],
+                self._home_row(),
+            ]
+        )
+
+    def _trading_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🧠 Последние сигналы", callback_data="view:signals"),
+                    InlineKeyboardButton("📜 Закрытые сделки", callback_data="view:trades"),
+                ],
+                [
+                    InlineKeyboardButton("📈 Чистый PnL", callback_data="view:pnl"),
+                    InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
+                ],
+                [InlineKeyboardButton("📑 Отчет стратегии", callback_data="view:strategy_report")],
+                self._home_row(),
+            ]
+        )
+
+    def _settings_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
+                    InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
+                ],
+                [
+                    InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
+                    InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
+                ],
+                [InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols")],
+                self._home_row(),
+            ]
+        )
+
+    def _model_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
+                    InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance"),
+                ],
+                [
+                    InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
+                    InlineKeyboardButton("🏆 Промоутить", callback_data="control:promote"),
+                ],
+                [
+                    InlineKeyboardButton("⚖️ Compare", callback_data="view:compare"),
+                    InlineKeyboardButton("❓ Как читать модель", callback_data="view:model_help"),
+                ],
+                self._home_row(),
+            ]
+        )
+
+    def _diagnostics_menu(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(
+            [
+                [
+                    InlineKeyboardButton("🩺 Healthcheck", callback_data="view:healthcheck"),
+                    InlineKeyboardButton("🖥 Нагрузка", callback_data="view:load_diagnostics"),
+                ],
+                [
+                    InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed"),
+                    InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
+                ],
+                [
+                    InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
+                    InlineKeyboardButton("⚠️ Худшие сделки", callback_data="view:worst"),
+                ],
+                self._home_row(),
+            ]
+        )
+
+    def _risk_menu(self) -> InlineKeyboardMarkup:
+        rows = [
+            [
+                InlineKeyboardButton("CONSERVATIVE", callback_data=f"risk:{RiskProfile.CONSERVATIVE.value}"),
+                InlineKeyboardButton("MODERATE", callback_data=f"risk:{RiskProfile.MODERATE.value}"),
+            ],
+            [
+                InlineKeyboardButton("AGGRESSIVE", callback_data=f"risk:{RiskProfile.AGGRESSIVE.value}"),
+                InlineKeyboardButton("SCALP", callback_data=f"risk:{RiskProfile.SCALP.value}"),
+            ],
+            self._home_row(),
+        ]
+        return InlineKeyboardMarkup(rows)
 
     def _control_menu(self) -> InlineKeyboardMarkup:
         """Control submenu — safe operations only (no risk escalation, no LIVE activation)."""
@@ -2155,7 +2234,7 @@ class TelegramMonitorBot:
         for nonce in expired:
             self._confirm_nonces.pop(nonce, None)
         # Hard cap as a second line of defence against unbounded growth
-        while len(self._confirm_nonces) > 100:
+        while len(self._confirm_nonces) > _CONFIRM_MAX_PENDING:
             self._confirm_nonces.pop(next(iter(self._confirm_nonces)), None)
 
     def _consume_confirm_nonce(self, nonce: str, action: str) -> bool:
@@ -2787,7 +2866,7 @@ class TelegramMonitorBot:
             "signals": self._cmd_signals,
             "symbols": self._cmd_symbols,
             "pnl": self._cmd_pnl,
-            "diagnostics": self._cmd_diagnostics,
+            "load_diagnostics": self._cmd_diagnostics,
             "costs": self._cmd_costs,
             "costs_detailed": self._cmd_costs_detailed,
             "pnl_analysis": self._cmd_pnl_analysis,
@@ -2798,6 +2877,52 @@ class TelegramMonitorBot:
         if action == "menu":
             await self._button_reply(update, self._menu_text(), reply_markup=self._main_menu())
             return
+        if action == "status_mode":
+            text = f"<b>🏠 Статус и режим</b>\n{self._mode_indicator()}\n\nРежим, пауза и риск-профиль собраны здесь."
+            await self._button_reply(update, text, reply_markup=self._status_mode_menu())
+            return
+        if action == "balance_positions":
+            await self._button_reply(
+                update,
+                "<b>💰 Баланс и позиции</b>\n\nФинансовое состояние аккаунта и открытые позиции.",
+                reply_markup=self._balance_positions_menu(),
+            )
+            return
+        if action == "trading":
+            await self._button_reply(
+                update,
+                "<b>📈 Торговля и сигналы</b>\n\nСигналы, сделки, PnL и готовность к CANARY.",
+                reply_markup=self._trading_menu(),
+            )
+            return
+        if action == "settings":
+            await self._button_reply(
+                update,
+                "<b>⚙️ Настройки</b>\n\nЛимиты, пары и безопасные операционные переключатели.",
+                reply_markup=self._settings_menu(),
+            )
+            return
+        if action == "model":
+            await self._button_reply(
+                update,
+                "<b>🧠 Модель и обучение</b>\n\nБаза, качество модели, обучение и промоут.",
+                reply_markup=self._model_menu(),
+            )
+            return
+        if action == "diagnostics":
+            await self._button_reply(
+                update,
+                "<b>🩺 Диагностика</b>\n\nHealthcheck, издержки и разбор убыточности.",
+                reply_markup=self._diagnostics_menu(),
+            )
+            return
+        if action == "risk_profiles":
+            await self._button_reply(
+                update,
+                "<b>🎚 Риск-профиль</b>\n\nВыберите профиль. Повышение риска защищено настройкой Render.",
+                reply_markup=self._risk_menu(),
+            )
+            return
         if action == "help":
             await self._button_reply(update, self._help_text(), reply_markup=self._main_menu())
             return
@@ -2806,6 +2931,10 @@ class TelegramMonitorBot:
             return
         if action == "healthcheck":
             await self._cmd_healthcheck(update, fake_context)  # type: ignore[arg-type]
+            return
+        if action == "worst":
+            fake_context.args = ["10"]
+            await self._cmd_worst(update, fake_context)  # type: ignore[arg-type]
             return
         if action == "db_model":
             await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]

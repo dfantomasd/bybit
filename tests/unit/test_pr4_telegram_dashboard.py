@@ -122,20 +122,18 @@ async def test_live_activation_blocked_via_cmd_mode() -> None:
 
 
 def test_main_menu_has_db_model_button() -> None:
-    """Main menu should include 🗄 База и модель button."""
+    """Main menu should include the model section."""
     bot = _make_bot()
     markup = bot._main_menu()
     all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
-    assert any("База" in t or "модель" in t or "🗄" in t for t in all_texts), (
-        f"No DB/model button found in menu: {all_texts}"
-    )
+    assert any("Модель" in t or "🧠" in t for t in all_texts), f"No DB/model button found in menu: {all_texts}"
 
 
 def test_main_menu_has_symbol_selection_button() -> None:
     bot = _make_bot()
     markup = bot._main_menu()
     all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
-    assert any("Выбрать пары" in text for text in all_texts)
+    assert any("Настройки" in text for text in all_texts)
 
 
 def test_main_menu_is_grouped_and_has_mode_indicator_text() -> None:
@@ -144,10 +142,12 @@ def test_main_menu_is_grouped_and_has_mode_indicator_text() -> None:
     all_texts = [btn.text for row in markup.inline_keyboard for btn in row]
     all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
 
-    assert "📊 Статус" in all_texts
-    assert "🎚 Риски и лимиты" in all_texts
-    assert "🗄 База и модель" in all_texts
-    assert "⚙️ Управление" in all_texts
+    assert "🏠 Статус и режим" in all_texts
+    assert "💰 Баланс и позиции" in all_texts
+    assert "📈 Торговля и сигналы" in all_texts
+    assert "⚙️ Настройки" in all_texts
+    assert "🧠 Модель и обучение" in all_texts
+    assert "🩺 Диагностика" in all_texts
     assert "❓ Помощь" in all_texts
     assert "view:menu" in all_callbacks
     assert "SHADOW" in bot._menu_text()

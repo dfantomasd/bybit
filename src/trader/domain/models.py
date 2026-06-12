@@ -101,7 +101,6 @@ class FeatureVector(BaseModel):
     feature_id: uuid.UUID = Field(default_factory=uuid.uuid4)
     symbol: str
     timestamp: datetime = Field(default_factory=_now_utc)
-
     # Numerical features (ordered; length must match model's input dim)
     values: list[float] = Field(..., min_length=1)
 
@@ -349,7 +348,20 @@ class Balance(BaseModel):
     unrealised_pnl: Decimal = Decimal(0)
     margin_balance: Decimal | None = None
 
-    timestamp: datetime = Field(default_factory=_now_utc)
+    updated_at: datetime = Field(default_factory=_now_utc)
+
+    @model_validator(mode="before")
+    @classmethod
+    def accept_legacy_timestamp(cls, data: Any) -> Any:
+        if isinstance(data, dict) and "timestamp" in data and "updated_at" not in data:
+            data = dict(data)
+            data["updated_at"] = data.pop("timestamp")
+        return data
+
+    @property
+    def timestamp(self) -> datetime:
+        """Backward-compatible alias for older code that read balance.timestamp."""
+        return self.updated_at
 
 
 class InstrumentInfo(BaseModel):

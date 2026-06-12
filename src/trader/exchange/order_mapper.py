@@ -211,6 +211,7 @@ class OrderMapper:
 
         ``data`` should be one element from ``result.list[].coin[]``.
         """
+        updated_raw = data.get("updatedTime") or data.get("time") or data.get("createdTime")
         return Balance(
             account_type=data.get("accountType", "UNIFIED"),
             currency=data.get("coin", data.get("currency", "USDT")),
@@ -222,6 +223,7 @@ class OrderMapper:
             ),
             unrealised_pnl=_d(data.get("unrealisedPnl", "0")),
             margin_balance=_d(data.get("equity")) if data.get("equity") else None,
+            updated_at=_parse_dt(updated_raw) if updated_raw else datetime.now(tz=UTC),
         )
 
     def instruments_info_to_model(self, data: dict[str, Any]) -> InstrumentInfo:

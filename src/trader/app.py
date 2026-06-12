@@ -1539,13 +1539,22 @@ class TradingApplication:
             if available <= Decimal("0") and balance.wallet_balance > Decimal("0"):
                 available = balance.wallet_balance
             if available > Decimal("0"):
+                if self._balance_refreshed_at is not None and balance.updated_at < self._balance_refreshed_at:
+                    log.debug(
+                        "balance.refresh_ignored_stale",
+                        available_usd=str(available),
+                        updated_at=balance.updated_at.isoformat(),
+                        current_updated_at=self._balance_refreshed_at.isoformat(),
+                    )
+                    return self._cached_balance
                 old_capital = self._cached_balance
                 self._cached_balance = available
-                self._balance_refreshed_at = datetime.now(tz=UTC)
+                self._balance_refreshed_at = balance.updated_at
                 log.info(
                     "balance.refreshed",
                     available_usd=str(available),
                     wallet_usd=str(balance.wallet_balance),
+                    updated_at=self._balance_refreshed_at.isoformat(),
                 )
                 # P1: Update ExposureTracker capital so exposure_pct is always current
                 if self._exposure_tracker is not None and available != old_capital:
@@ -1633,6 +1642,8 @@ class TradingApplication:
 
     async def _on_screener_symbols_removed(self, symbols: list[str]) -> None:
         log.info("screener.symbols_removed", symbols=symbols)
+        for symbol in symbols:
+            self._last_candle_sample_at.pop(symbol, None)
 
     async def _start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
@@ -2200,9 +2211,17 @@ class TradingApplication:
                 try:
                     event = await asyncio.wait_for(private_event_queue.get(), timeout=1.0)
                     if isinstance(event, BalanceUpdateEvent) and event.available_balance > Decimal("0"):
+                        if self._balance_refreshed_at is not None and event.timestamp < self._balance_refreshed_at:
+                            log.debug(
+                                "private_ws.balance_update_ignored_stale",
+                                available=str(event.available_balance),
+                                updated_at=event.timestamp.isoformat(),
+                                current_updated_at=self._balance_refreshed_at.isoformat(),
+                            )
+                            continue
                         old_capital = self._cached_balance
                         self._cached_balance = event.available_balance
-                        self._balance_refreshed_at = datetime.now(tz=UTC)
+                        self._balance_refreshed_at = event.timestamp
                         # P1: Update ExposureTracker capital from WS balance push
                         if self._exposure_tracker is not None and event.available_balance != old_capital:
                             self._exposure_tracker.update_capital(
@@ -2218,6 +2237,7 @@ class TradingApplication:
                         log.debug(
                             "private_ws.balance_update",
                             available=str(event.available_balance),
+                            updated_at=self._balance_refreshed_at.isoformat(),
                         )
                     elif isinstance(event, OrderUpdateEvent):
                         # Wire OrderUpdateEvent → both idempotency AND durable state via adapter
