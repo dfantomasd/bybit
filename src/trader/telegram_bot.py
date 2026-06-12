@@ -3314,3 +3314,4 @@ class TelegramMonitorBot:
         if latency_ms is not None:
             s += f" <code>{latency_ms:.0f}ms</code>"
         return s
+
