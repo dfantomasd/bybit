@@ -48,7 +48,14 @@ from typing import Any
 import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
-from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ContextTypes,
+    MessageHandler,
+    filters,
+)
 
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
@@ -144,9 +151,13 @@ class TradingController:
     # Strategy loss diagnostics
     pnl_analysis_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     compare_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
-    worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
+    worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = (
+        None
+    )
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
-    model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
+    model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = (
+        None
+    )
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -236,7 +247,11 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("pnl_analysis", self._cmd_pnl_analysis))
         app.add_handler(CommandHandler("compare", self._cmd_compare))
         app.add_handler(CommandHandler("worst", self._cmd_worst))
-        app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
+        app.add_handler(CommandHandler("strategy_report", self._cmd_strategy_report))
+        app.add_handler(CommandHandler("report", self._cmd_strategy_report))
+        app.add_handler(
+            CommandHandler("model_performance", self._cmd_model_performance)
+        )
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -263,7 +278,10 @@ class TelegramMonitorBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
 
         # Load persisted subscriptions so push notifications survive restarts
-        if self._controller is not None and self._controller.load_subscriptions is not None:
+        if (
+            self._controller is not None
+            and self._controller.load_subscriptions is not None
+        ):
             try:
                 for chat_id in await self._controller.load_subscriptions():
                     self._subscribed.add(chat_id)
@@ -284,7 +302,9 @@ class TelegramMonitorBot:
             error_callback=self._polling_error_callback,
         )
         self._app = app
-        log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
+        log.info(
+            "telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids)
+        )
 
     async def stop(self) -> None:
         if self._app is None:
@@ -340,19 +360,29 @@ class TelegramMonitorBot:
         )
         await self.notify(text)
 
-    async def notify_position_opened(self, symbol: str, side: str, qty: Decimal, price: Decimal) -> None:
+    async def notify_position_opened(
+        self, symbol: str, side: str, qty: Decimal, price: Decimal
+    ) -> None:
         icon = "🟢" if side == "BUY" else "🔴"
-        await self.notify(f"{icon} <b>Позиция открыта</b>\n{symbol} {side} {qty} @ {price}")
+        await self.notify(
+            f"{icon} <b>Позиция открыта</b>\n{symbol} {side} {qty} @ {price}"
+        )
 
     async def notify_position_closed(self, symbol: str, realized_pnl: Decimal) -> None:
         icon = "✅" if realized_pnl >= 0 else "❌"
-        await self.notify(f"{icon} <b>Позиция закрыта</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>")
+        await self.notify(
+            f"{icon} <b>Позиция закрыта</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>"
+        )
 
     async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
-        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{breaker_type}</code>\nПричина: {reason}")
+        await self.notify(
+            f"⚠️ <b>Защитный стоп</b>\nТип: <code>{breaker_type}</code>\nПричина: {reason}"
+        )
 
     async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
-        await self.notify(f"⚙️ <b>Риск-профиль изменен</b>\n{old_profile} → <code>{new_profile}</code>")
+        await self.notify(
+            f"⚙️ <b>Риск-профиль изменен</b>\n{old_profile} → <code>{new_profile}</code>"
+        )
 
     # ------------------------------------------------------------------
     # Auth helpers
@@ -388,8 +418,12 @@ class TelegramMonitorBot:
     def _mode_indicator(self) -> str:
         """Compact current-mode line for menu headers."""
         mode = (self._config.trading_mode or "SHADOW").upper()
-        is_shadow = self._controller.is_shadow() if self._controller is not None else True
-        is_paused = self._controller.is_paused() if self._controller is not None else False
+        is_shadow = (
+            self._controller.is_shadow() if self._controller is not None else True
+        )
+        is_paused = (
+            self._controller.is_paused() if self._controller is not None else False
+        )
         if mode == "LIVE":
             badge = "🔴 LIVE — реальные деньги"
         elif mode == "CANARY_LIVE":
@@ -403,7 +437,9 @@ class TelegramMonitorBot:
         return f"{badge} | {venue}{pause_str}"
 
     def _menu_text(self) -> str:
-        return f"<b>🏠 Bybit AI Trader</b>\n{self._mode_indicator()}\n\nВыберите раздел:"
+        return (
+            f"<b>🏠 Bybit AI Trader</b>\n{self._mode_indicator()}\n\nВыберите раздел:"
+        )
 
     def _main_menu(self) -> InlineKeyboardMarkup:
         rows = [
@@ -419,33 +455,58 @@ class TelegramMonitorBot:
             ],
             [
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
-                InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
+                InlineKeyboardButton(
+                    "🧠 Почему нет сделок", callback_data="view:signals"
+                ),
             ],
             [
-                InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
+                InlineKeyboardButton(
+                    "🔬 PnL-анализ", callback_data="view:pnl_analysis"
+                ),
                 InlineKeyboardButton("⚖️ Compare", callback_data="view:compare"),
+            ],
+            [
+                InlineKeyboardButton(
+                    "📑 Отчет стратегии", callback_data="view:strategy_report"
+                )
             ],
             # — Риски и лимиты —
             [
-                InlineKeyboardButton("🎚 Риски и лимиты", callback_data="control:limits"),
+                InlineKeyboardButton(
+                    "🎚 Риски и лимиты", callback_data="control:limits"
+                ),
                 InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
             ],
-            [InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed")],
+            [
+                InlineKeyboardButton(
+                    "🧾 Издержки детально", callback_data="view:costs_detailed"
+                )
+            ],
             # — Модель и обучение —
             [
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
-                InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
+                InlineKeyboardButton(
+                    "🚦 Готовность CANARY", callback_data="view:canary"
+                ),
             ],
-            [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
+            [
+                InlineKeyboardButton(
+                    "📉 История моделей", callback_data="view:model_performance"
+                )
+            ],
             # — Настройки —
             [
-                InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
+                InlineKeyboardButton(
+                    "✅ Выбрать пары", callback_data="view:symbol_select"
+                ),
                 InlineKeyboardButton("🔎 Сканер", callback_data="view:symbols"),
                 InlineKeyboardButton("🖥 Нагрузка", callback_data="view:diagnostics"),
             ],
             [
                 InlineKeyboardButton("⚙️ Управление", callback_data="view:control"),
-                InlineKeyboardButton("🩺 Healthcheck", callback_data="view:healthcheck"),
+                InlineKeyboardButton(
+                    "🩺 Healthcheck", callback_data="view:healthcheck"
+                ),
             ],
             [
                 InlineKeyboardButton("❓ Помощь", callback_data="view:help"),
@@ -464,19 +525,40 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("⏸ Пауза", callback_data="control:pause"),
                 InlineKeyboardButton("▶️ Возобновить", callback_data="control:resume"),
             ],
-            [InlineKeyboardButton("🚫 LIVE заблокирован (только env vars)", callback_data="mode:active")],
+            [
+                InlineKeyboardButton(
+                    "🚫 LIVE заблокирован (только env vars)",
+                    callback_data="mode:active",
+                )
+            ],
             [
                 InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
-                InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
+                InlineKeyboardButton(
+                    "🧠 Обучить 1000", callback_data="train:1000:15:5"
+                ),
             ],
-            [InlineKeyboardButton("🏆 Промоутировать кандидата → CHAMPION", callback_data="control:promote")],
+            [
+                InlineKeyboardButton(
+                    "🏆 Промоутировать кандидата → CHAMPION",
+                    callback_data="control:promote",
+                )
+            ],
             [
                 InlineKeyboardButton("🎚 Лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
             ],
             [InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary")],
-            [InlineKeyboardButton("❓ Как читать модель + путь к реальным деньгам", callback_data="view:model_help")],
-            [InlineKeyboardButton("🚨 Аварийная остановка", callback_data="control:stop")],
+            [
+                InlineKeyboardButton(
+                    "❓ Как читать модель + путь к реальным деньгам",
+                    callback_data="view:model_help",
+                )
+            ],
+            [
+                InlineKeyboardButton(
+                    "🚨 Аварийная остановка", callback_data="control:stop"
+                )
+            ],
             self._home_row(),
         ]
         return InlineKeyboardMarkup(rows)
@@ -484,10 +566,20 @@ class TelegramMonitorBot:
     def _canary_menu(self) -> InlineKeyboardMarkup:
         return InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton("🔄 Обновить готовность", callback_data="view:canary")],
-                [InlineKeyboardButton("📊 Метрики модели", callback_data="view:canary_model")],
                 [
-                    InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
+                    InlineKeyboardButton(
+                        "🔄 Обновить готовность", callback_data="view:canary"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "📊 Метрики модели", callback_data="view:canary_model"
+                    )
+                ],
+                [
+                    InlineKeyboardButton(
+                        "🗄 База и модель", callback_data="view:db_model"
+                    ),
                     InlineKeyboardButton("⬅️ Назад", callback_data="view:control"),
                 ],
                 self._home_row(),
@@ -513,16 +605,30 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("Price ≤25", callback_data="limit:price_cap:25"),
             ],
             [
-                InlineKeyboardButton("Изучать 10 монет", callback_data="limit:feature_symbols:10"),
-                InlineKeyboardButton("Изучать 20 монет", callback_data="limit:feature_symbols:20"),
+                InlineKeyboardButton(
+                    "Изучать 10 монет", callback_data="limit:feature_symbols:10"
+                ),
+                InlineKeyboardButton(
+                    "Изучать 20 монет", callback_data="limit:feature_symbols:20"
+                ),
             ],
             [
-                InlineKeyboardButton("Кандидатов 5", callback_data="limit:exec_candidates:5"),
-                InlineKeyboardButton("Кандидатов 10", callback_data="limit:exec_candidates:10"),
+                InlineKeyboardButton(
+                    "Кандидатов 5", callback_data="limit:exec_candidates:5"
+                ),
+                InlineKeyboardButton(
+                    "Кандидатов 10", callback_data="limit:exec_candidates:10"
+                ),
             ],
             [
-                InlineKeyboardButton("✏️ Изучать монет числом", callback_data="limit:custom:feature_symbols"),
-                InlineKeyboardButton("✏️ Сделок одновременно числом", callback_data="limit:custom:max_positions"),
+                InlineKeyboardButton(
+                    "✏️ Изучать монет числом",
+                    callback_data="limit:custom:feature_symbols",
+                ),
+                InlineKeyboardButton(
+                    "✏️ Сделок одновременно числом",
+                    callback_data="limit:custom:max_positions",
+                ),
             ],
             [InlineKeyboardButton("✏️ Своё значение", callback_data="limit:custom")],
             [InlineKeyboardButton("⬅️ Управление", callback_data="view:control")],
@@ -530,7 +636,9 @@ class TelegramMonitorBot:
         ]
         return InlineKeyboardMarkup(rows)
 
-    def _symbol_select_menu(self, *, page: int = 0, page_size: int = 10) -> InlineKeyboardMarkup:
+    def _symbol_select_menu(
+        self, *, page: int = 0, page_size: int = 10
+    ) -> InlineKeyboardMarkup:
         candidates = self._symbol_candidates()
         selected = set(self._selected_symbols())
         total_pages = max(1, (len(candidates) + page_size - 1) // page_size)
@@ -539,12 +647,22 @@ class TelegramMonitorBot:
         rows: list[list[InlineKeyboardButton]] = []
         for symbol in candidates[start : start + page_size]:
             mark = "✅" if symbol in selected else "☐"
-            rows.append([InlineKeyboardButton(f"{mark} {symbol}", callback_data=f"sym:toggle:{symbol}:{page}")])
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        f"{mark} {symbol}", callback_data=f"sym:toggle:{symbol}:{page}"
+                    )
+                ]
+            )
         rows.append(
             [
                 InlineKeyboardButton("◀️", callback_data=f"sym:page:{max(0, page - 1)}"),
-                InlineKeyboardButton(f"{page + 1}/{total_pages}", callback_data=f"sym:page:{page}"),
-                InlineKeyboardButton("▶️", callback_data=f"sym:page:{min(total_pages - 1, page + 1)}"),
+                InlineKeyboardButton(
+                    f"{page + 1}/{total_pages}", callback_data=f"sym:page:{page}"
+                ),
+                InlineKeyboardButton(
+                    "▶️", callback_data=f"sym:page:{min(total_pages - 1, page + 1)}"
+                ),
             ]
         )
         rows.append(
@@ -574,7 +692,9 @@ class TelegramMonitorBot:
                 )
                 return
             except BadRequest as exc:
-                log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
+                log.debug(
+                    "telegram.edit_message_failed_fallback_to_reply", error=str(exc)
+                )
             await query.message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
@@ -588,7 +708,9 @@ class TelegramMonitorBot:
     # Observability commands
     # ------------------------------------------------------------------
 
-    async def _cmd_start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_start(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -597,26 +719,34 @@ class TelegramMonitorBot:
             self._subscribed.add(cid)
         await self._reply(update, self._menu_text(), reply_markup=self._main_menu())
 
-    async def _cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_menu(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
         await self._reply(update, self._menu_text(), reply_markup=self._main_menu())
 
-    async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_help(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
         await self._reply(update, self._help_text(), reply_markup=self._main_menu())
 
-    async def _cmd_status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_status(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
         try:
             health = await self._health_provider()
         except Exception as exc:
-            await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{exc}</code>")
+            await self._reply(
+                update, f"<b>Статус</b>\nПроверка не прошла: <code>{exc}</code>"
+            )
             return
 
         ctrl = self._controller
@@ -630,24 +760,39 @@ class TelegramMonitorBot:
         if ctrl:
             paused = " ⏸ пауза" if ctrl.is_paused() else ""
             shadow = " (тень, без ордеров)" if ctrl.is_shadow() else ""
-            lines.append(f"Риск-профиль: <code>{ctrl.current_profile()}</code>{shadow}{paused}")
+            lines.append(
+                f"Риск-профиль: <code>{ctrl.current_profile()}</code>{shadow}{paused}"
+            )
         else:
             lines.append(f"Риск-профиль: <code>{self._config.risk_profile}</code>")
 
         lines += [
             "",
-            self._component_line("Postgres", health.postgres, health.postgres_latency_ms, required=True),
-            self._component_line("Redis", health.redis, health.redis_latency_ms, required=False),
-            self._component_line("Bybit REST", health.bybit_rest, health.bybit_rest_latency_ms, required=False),
+            self._component_line(
+                "Postgres", health.postgres, health.postgres_latency_ms, required=True
+            ),
+            self._component_line(
+                "Redis", health.redis, health.redis_latency_ms, required=False
+            ),
+            self._component_line(
+                "Bybit REST",
+                health.bybit_rest,
+                health.bybit_rest_latency_ms,
+                required=False,
+            ),
             self._component_line("Bybit WS", health.bybit_ws, None, required=True),
-            self._component_line("Признаки модели", health.features_fresh, None, required=True),
+            self._component_line(
+                "Признаки модели", health.features_fresh, None, required=True
+            ),
         ]
         if health.messages:
             lines += ["", "<b>Предупреждения</b>"]
             lines.extend(f"• {m}" for m in health.messages[:6])
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_balance(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -658,7 +803,9 @@ class TelegramMonitorBot:
         try:
             bal: Balance = await adapter.get_balance()
         except Exception as exc:
-            await self._reply(update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(
+                update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>"
+            )
             return
         lines = [
             "<b>Баланс Bybit UNIFIED</b>",
@@ -670,10 +817,14 @@ class TelegramMonitorBot:
             lines.append(f"Маржа: <code>{bal.margin_balance}</code>")
         if bal.unrealised_pnl:
             pnl_icon = "📈" if bal.unrealised_pnl >= 0 else "📉"
-            lines.append(f"Плавающий PnL: {pnl_icon} <code>{bal.unrealised_pnl:+}</code>")
+            lines.append(
+                f"Плавающий PnL: {pnl_icon} <code>{bal.unrealised_pnl:+}</code>"
+            )
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_positions(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_positions(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -682,9 +833,13 @@ class TelegramMonitorBot:
             await self._reply(update, "Подключение к Bybit еще не готово.")
             return
         try:
-            positions: list[Position] = await adapter.get_positions(self._config.default_category)
+            positions: list[Position] = await adapter.get_positions(
+                self._config.default_category
+            )
         except Exception as exc:
-            await self._reply(update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(
+                update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>"
+            )
             return
         open_pos = [p for p in positions if p.size > 0]
         if not open_pos:
@@ -709,7 +864,9 @@ class TelegramMonitorBot:
             lines.append(f"\n… еще {len(open_pos) - 10}")
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_signals(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_signals(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -729,7 +886,9 @@ class TelegramMonitorBot:
             ]
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_regime(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_regime(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -756,7 +915,9 @@ class TelegramMonitorBot:
             lines.append(f"{icon} <code>{sym}</code>: {regime}")
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_symbols(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_symbols(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -771,7 +932,9 @@ class TelegramMonitorBot:
         lines.extend(f"• <code>{s}</code>" for s in symbols)
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_pnl(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_pnl(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -780,10 +943,14 @@ class TelegramMonitorBot:
             await self._reply(update, "Подключение к Bybit еще не готово.")
             return
         try:
-            resp = await adapter._rest.get_closed_pnl(category=self._config.default_category, limit=20)
+            resp = await adapter._rest.get_closed_pnl(
+                category=self._config.default_category, limit=20
+            )
             records = resp.get("result", {}).get("list", [])
         except Exception as exc:
-            await self._reply(update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(
+                update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>"
+            )
             return
         if not records:
             await self._reply(update, "<b>Закрытый PnL</b>\nЗакрытых сделок пока нет.")
@@ -791,7 +958,12 @@ class TelegramMonitorBot:
         total = Decimal("0")
         today_total = Decimal("0")
         wins = 0
-        day_start_ms = int(datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
+        day_start_ms = int(
+            datetime.now(tz=UTC)
+            .replace(hour=0, minute=0, second=0, microsecond=0)
+            .timestamp()
+            * 1000
+        )
         shown = records[:20]
         lines = [f"<b>Закрытый PnL — последние {len(shown)} сделок</b>", ""]
         for r in shown:
@@ -801,24 +973,35 @@ class TelegramMonitorBot:
             if pnl >= 0:
                 wins += 1
             try:
-                if int(r.get("updatedTime") or r.get("createdTime") or 0) >= day_start_ms:
+                if (
+                    int(r.get("updatedTime") or r.get("createdTime") or 0)
+                    >= day_start_ms
+                ):
                     today_total += pnl
             except (TypeError, ValueError):
                 pass
             # Bybit closed-pnl `side` is the side of the CLOSING order:
             # a long position is closed by Sell, a short by Buy.
             side_raw = str(r.get("side", "")).upper()
-            side = "LONG" if side_raw == "SELL" else ("SHORT" if side_raw == "BUY" else side_raw or "?")
+            side = (
+                "LONG"
+                if side_raw == "SELL"
+                else ("SHORT" if side_raw == "BUY" else side_raw or "?")
+            )
             qty = r.get("qty", "")
             entry = r.get("avgEntryPrice", "")
             exit_p = r.get("avgExitPrice", "")
             icon = "✅" if pnl >= 0 else "❌"
             price_part = f" @ {entry}→{exit_p}" if entry and exit_p else ""
             qty_part = f" ×{qty}" if qty else ""
-            lines.append(f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>")
+            lines.append(
+                f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>"
+            )
         total_icon = "📈" if total >= 0 else "📉"
         winrate = wins / len(shown) * 100 if shown else 0.0
-        lines.append(f"\n{total_icon} <b>Итого за {len(shown)} сделок:</b> <code>{total:+.4f} USDT</code>")
+        lines.append(
+            f"\n{total_icon} <b>Итого за {len(shown)} сделок:</b> <code>{total:+.4f} USDT</code>"
+        )
         lines.append(f"Win-rate: <code>{wins}/{len(shown)} ({winrate:.0f}%)</code>")
         lines.append(f"Сегодня (UTC): <code>{today_total:+.4f} USDT</code>")
         lines.append(
@@ -839,14 +1022,22 @@ class TelegramMonitorBot:
                 net_stats = await self._net_results_provider()
             else:
                 # Fallback: try health_provider for backwards compat
-                stats = await self._health_provider() if callable(self._health_provider) else None
+                stats = (
+                    await self._health_provider()
+                    if callable(self._health_provider)
+                    else None
+                )
                 if stats is not None and isinstance(stats, dict):
                     net_stats = stats.get("net_results", {}) or {}
         except Exception as exc:
             log.warning("telegram.net_results_failed", error=str(exc))
             net_stats = {}
 
-        gross = float(net_stats.get("gross_closed_pnl_usd") or net_stats.get("gross_pnl_usd") or 0.0)
+        gross = float(
+            net_stats.get("gross_closed_pnl_usd")
+            or net_stats.get("gross_pnl_usd")
+            or 0.0
+        )
         fees = float(net_stats.get("total_fees_usd") or 0.0)
         funding = float(net_stats.get("total_funding_usd") or 0.0)
         slippage_est = float(net_stats.get("estimated_slippage_usd") or 0.0)
@@ -885,7 +1076,9 @@ class TelegramMonitorBot:
 
         await self._reply(update, text)
 
-    async def _cmd_costs(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_costs(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show execution cost breakdown for today."""
         del context
         if not await self._authorised(update):
@@ -906,7 +1099,10 @@ class TelegramMonitorBot:
         taker_pct = float(net_stats.get("taker_fill_pct") or 100.0)
 
         diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.diagnostics_provider is not None:
+        if (
+            self._controller is not None
+            and self._controller.diagnostics_provider is not None
+        ):
             try:
                 diag = self._controller.diagnostics_provider()
             except Exception as _diag_exc:
@@ -934,7 +1130,497 @@ class TelegramMonitorBot:
 
         await self._reply(update, text, reply_markup=self._main_menu())
 
-    async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_costs_detailed(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show paper-strategy gross/net edge and maker share diagnostics."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.costs_detailed_provider is None:
+            await self._reply(
+                update,
+                "<b>Издержки детально</b>\nПока недоступно.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        try:
+            data = await self._controller.costs_detailed_provider()
+        except Exception as exc:
+            log.warning("telegram.costs_detailed_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>Издержки детально</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        def _period_line(title: str, row: dict[str, Any]) -> str:
+            return (
+                f"<b>{title}</b>\n"
+                f"Сделок: <code>{int(row.get('count') or 0)}</code>\n"
+                f"Gross avg: <code>{float(row.get('avg_gross_bps') or 0.0):+.2f} bps</code>\n"
+                f"Net avg:   <code>{float(row.get('avg_net_bps') or 0.0):+.2f} bps</code>\n"
+                f"Cost avg:  <code>{float(row.get('avg_cost_bps') or 0.0):+.2f} bps</code>"
+            )
+
+        today = data.get("today") or {}
+        total = data.get("all_time") or {}
+        lines = [
+            "🧾 <b>Издержки детально</b>",
+            "База: <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "",
+            _period_line("Сегодня UTC", today),
+            "",
+            _period_line("Всего", total),
+        ]
+        maker_share = data.get("maker_share_pct")
+        maker_count = int(data.get("maker_count") or 0)
+        exec_count = int(data.get("execution_count") or 0)
+        if maker_share is not None and exec_count > 0:
+            lines.append(
+                f"\nMaker fills: <code>{float(maker_share):.1f}%</code> ({maker_count}/{exec_count})"
+            )
+        lines.append(
+            "\nПроскальзывание пока не считается: нет надежной связки signal → fill/close для всех режимов."
+        )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_pnl_analysis(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show baseline PnL breakdowns by symbol, hour, regime and weekday."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.pnl_analysis_provider is None:
+            await self._reply(
+                update,
+                "<b>PnL-анализ</b>\nПока недоступен.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        try:
+            data = await self._controller.pnl_analysis_provider()
+        except Exception as exc:
+            log.warning("telegram.pnl_analysis_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>PnL-анализ</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        def _row(label: str, count: Any, avg: Any, total: Any | None = None) -> str:
+            total_part = (
+                f", Σ <code>{float(total or 0.0):+.1f}</code>"
+                if total is not None
+                else ""
+            )
+            return f"{label}: <code>{int(count or 0)}</code>, avg <code>{float(avg or 0.0):+.2f}</code>{total_part}"
+
+        symbol_best = data.get("symbols_best") or []
+        symbol_worst = data.get("symbols_worst") or []
+        regimes = data.get("regimes") or []
+        weekdays = data.get("weekdays") or []
+        hours = {int(r.get("hour") or 0): r for r in data.get("hours") or []}
+        lines = [
+            "🔬 <b>PnL-анализ baseline</b>",
+            "Фильтр: <code>directional_net_v1</code>, <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "",
+            "<b>Топ-5 прибыльных символов</b>",
+        ]
+        lines.extend(
+            _row(
+                f"<code>{r.get('symbol', '?')}</code>",
+                r.get("count"),
+                r.get("avg_net_bps"),
+                r.get("total_net_bps"),
+            )
+            for r in symbol_best[:5]
+        )
+        lines.append("\n<b>Топ-5 убыточных символов</b>")
+        lines.extend(
+            _row(
+                f"<code>{r.get('symbol', '?')}</code>",
+                r.get("count"),
+                r.get("avg_net_bps"),
+                r.get("total_net_bps"),
+            )
+            for r in symbol_worst[:5]
+        )
+        lines.append("\n<b>По часам UTC</b>")
+        hour_chunks = []
+        for hour in range(24):
+            row = hours.get(hour, {})
+            label = f"{hour:02d}-{(hour + 1) % 24:02d}"
+            hour_chunks.append(
+                f"{label}:{float(row.get('avg_net_bps') or 0.0):+.1f}/{int(row.get('count') or 0)}"
+            )
+        lines.extend(
+            "<code>" + "  ".join(hour_chunks[i : i + 4]) + "</code>"
+            for i in range(0, 24, 4)
+        )
+        lines.append("\n<b>По режимам</b>")
+        lines.extend(
+            _row(
+                str(r.get("regime") or "unknown"),
+                r.get("count"),
+                r.get("avg_net_bps"),
+                r.get("total_net_bps"),
+            )
+            for r in regimes[:10]
+        )
+        lines.append("\n<b>По дням недели</b>")
+        lines.extend(
+            _row(
+                str(r.get("weekday") or "?"),
+                r.get("count"),
+                r.get("avg_net_bps"),
+                r.get("total_net_bps"),
+            )
+            for r in weekdays
+        )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_compare(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Compare baseline, model gate-pass and equal-size random baseline sample."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.compare_provider is None:
+            await self._reply(
+                update,
+                "<b>Compare</b>\nПока недоступно.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        try:
+            data = await self._controller.compare_provider()
+        except Exception as exc:
+            log.warning("telegram.compare_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>Compare</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        def _sample_line(title: str, row: dict[str, Any]) -> str:
+            return (
+                f"{title:<10} "
+                f"n=<code>{int(row.get('count') or 0):4d}</code>  "
+                f"sum=<code>{float(row.get('sum_net_bps') or 0.0):+9.1f}</code>  "
+                f"avg=<code>{float(row.get('avg_net_bps') or 0.0):+7.2f}</code>"
+            )
+
+        baseline = data.get("baseline") or {}
+        gate = data.get("gate_pass") or {}
+        random_sample = data.get("random_sample") or {}
+        model_version = data.get("model_version") or "none"
+        p_value = data.get("p_value")
+        lines = [
+            "⚖️ <b>Compare</b>",
+            f"Модель: <code>{model_version}</code>",
+            "<code>sample     n     sum_bps     avg_bps</code>",
+            _sample_line("baseline", baseline),
+            _sample_line("gate", gate),
+            _sample_line("random", random_sample),
+        ]
+        if p_value is None:
+            lines.append("\np-value: <code>n/a</code> — мало данных для проверки.")
+        else:
+            lines.append(
+                f"\np-value gate vs baseline: <code>{float(p_value):.4f}</code>"
+            )
+        gate_count = int(gate.get("count") or 0)
+        if gate_count < 20:
+            lines.append("⚠️ Gate-pass сделок меньше 20: статистика ещё очень шумная.")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_worst(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show worst labelled baseline outcomes with key features and model decision."""
+        if not await self._authorised(update):
+            return
+        limit = 10
+        if context.args:
+            try:
+                limit = max(1, min(20, int(context.args[0])))
+            except (TypeError, ValueError):
+                limit = 10
+        if self._controller is None or self._controller.worst_trades_provider is None:
+            await self._reply(
+                update, "<b>Worst</b>\nПока недоступно.", reply_markup=self._main_menu()
+            )
+            return
+        try:
+            rows = await self._controller.worst_trades_provider(limit)
+        except Exception as exc:
+            log.warning("telegram.worst_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>Worst</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if not rows:
+            await self._reply(
+                update,
+                "<b>Worst</b>\nУбыточных размеченных исходов пока нет.",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        lines = [f"📉 <b>{len(rows)} худших исходов baseline</b>"]
+        for row in rows:
+            features = row.get("features") or {}
+            feat_text = (
+                f"rsi={features.get('rsi_14', 'n/a')}, "
+                f"atr%={features.get('atr_14_pct', 'n/a')}, "
+                f"ob={features.get('ob_imbalance_l5', 'n/a')}, "
+                f"micro={features.get('microprice_deviation_bps', 'n/a')}"
+            )
+            score = row.get("model_score")
+            score_text = f"{float(score):.3f}" if score is not None else "n/a"
+            ts = (
+                self._fmt_timestamp(row.get("created_at"))
+                if row.get("created_at")
+                else "n/a"
+            )
+            lines.append(
+                "\n"
+                f"<code>{row.get('symbol', '?')}</code> {row.get('side', '?')} {ts}\n"
+                f"net: <code>{float(row.get('net_return_bps') or 0.0):+.2f} bps</code>, "
+                f"model: <code>{row.get('model_decision') or 'n/a'}</code> score=<code>{score_text}</code>\n"
+                f"<code>{feat_text}</code>"
+            )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_model_performance(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Show model metric history from model_versions.metrics."""
+        del context
+        if not await self._authorised(update):
+            return
+        if (
+            self._controller is None
+            or self._controller.model_performance_provider is None
+        ):
+            await self._reply(
+                update,
+                "<b>История моделей</b>\nПока недоступна.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        try:
+            rows = await self._controller.model_performance_provider()
+        except Exception as exc:
+            log.warning("telegram.model_performance_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if not rows:
+            await self._reply(
+                update,
+                "<b>История моделей</b>\nВерсий модели пока нет.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        lines = [
+            "📉 <b>История моделей</b>",
+            "<code>date UTC          q        prec   lift   wf</code>",
+        ]
+        for row in rows:
+            ts = (
+                self._fmt_timestamp(row.get("training_finished_at"))
+                if row.get("training_finished_at")
+                else "n/a"
+            )
+            quality = str(row.get("quality") or "n/a")[:8]
+            precision = row.get("precision")
+            lift = row.get("lift_bps")
+            walk_forward = row.get("walk_forward_bps")
+            precision_text = (
+                " n/a" if precision is None else f"{float(precision) * 100:4.1f}%"
+            )
+            lift_text = " n/a" if lift is None else f"{float(lift):+5.1f}"
+            wf_text = " n/a" if walk_forward is None else f"{float(walk_forward):+5.1f}"
+            lines.append(
+                f"<code>{ts[:16]:16} {quality:8} {precision_text} {lift_text} {wf_text}</code>"
+            )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_strategy_report(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
+        """Build one compact strategy diagnostics report for canary decisions."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(
+                update,
+                "<b>Отчет стратегии</b>\nПока недоступен.",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        async def _safe(
+            name: str, call: Callable[[], Awaitable[Any]] | None, default: Any
+        ) -> Any:
+            if call is None:
+                return default
+            try:
+                return await call()
+            except Exception as exc:
+                log.warning(
+                    "telegram.strategy_report_section_failed",
+                    section=name,
+                    error=str(exc),
+                )
+                return default
+
+        pnl = await _safe("pnl", self._controller.pnl_analysis_provider, {})
+        compare = await _safe("compare", self._controller.compare_provider, {})
+        costs = await _safe("costs", self._controller.costs_detailed_provider, {})
+        models = await _safe("models", self._controller.model_performance_provider, [])
+        worst_call = self._controller.worst_trades_provider
+        worst = []
+        if worst_call is not None:
+            try:
+                worst = await worst_call(3)
+            except Exception as exc:
+                log.warning("telegram.strategy_report_worst_failed", error=str(exc))
+
+        baseline = compare.get("baseline") or {}
+        gate = compare.get("gate_pass") or {}
+        random_sample = compare.get("random_sample") or {}
+        p_value = compare.get("p_value")
+        best_symbols = pnl.get("symbols_best") or []
+        worst_symbols = pnl.get("symbols_worst") or []
+        regimes = pnl.get("regimes") or []
+        total_costs = costs.get("all_time") or {}
+        today_costs = costs.get("today") or {}
+        latest_model = models[0] if models else {}
+
+        baseline_avg = float(baseline.get("avg_net_bps") or 0.0)
+        gate_avg = float(gate.get("avg_net_bps") or 0.0)
+        gate_count = int(gate.get("count") or 0)
+        gate_sum = float(gate.get("sum_net_bps") or 0.0)
+        baseline_sum = float(baseline.get("sum_net_bps") or 0.0)
+        random_avg = float(random_sample.get("avg_net_bps") or 0.0)
+        issues: list[str] = []
+        if baseline_avg <= 0:
+            issues.append(f"baseline avg отрицательный: {baseline_avg:+.2f} bps")
+        if gate_count < 20:
+            issues.append(f"gate-pass мало сделок: {gate_count}/20")
+        if gate_count >= 20 and gate_avg <= 0:
+            issues.append(f"gate-pass avg отрицательный: {gate_avg:+.2f} bps")
+        if p_value is None or float(p_value) >= 0.05:
+            issues.append("преимущество gate статистически не доказано")
+        quality = str(latest_model.get("quality") or "n/a")
+        walk_forward = latest_model.get("walk_forward_bps")
+        if quality not in ("GOOD", "ХОРОШО"):
+            issues.append(f"качество модели: {quality}")
+        if walk_forward is not None and float(walk_forward) <= 0:
+            issues.append(f"walk-forward: {float(walk_forward):+.2f} bps")
+
+        def _symbol_line(row: dict[str, Any]) -> str:
+            return (
+                f"<code>{row.get('symbol', '?')}</code> "
+                f"avg=<code>{float(row.get('avg_net_bps') or 0.0):+.1f}</code> "
+                f"n=<code>{int(row.get('count') or 0)}</code>"
+            )
+
+        def _regime_line(row: dict[str, Any]) -> str:
+            return (
+                f"{row.get('regime') or 'unknown'}: "
+                f"<code>{float(row.get('avg_net_bps') or 0.0):+.1f}</code> "
+                f"n=<code>{int(row.get('count') or 0)}</code>"
+            )
+
+        verdict = (
+            "НЕ ГОТОВ к CANARY" if issues else "можно рассматривать маленький CANARY"
+        )
+        lines = [
+            "📑 <b>Отчет стратегии</b>",
+            f"Вердикт: <b>{verdict}</b>",
+            "",
+            "<b>PnL выборки</b>",
+            f"Baseline: n=<code>{int(baseline.get('count') or 0)}</code>, "
+            f"Σ=<code>{baseline_sum:+.1f}</code>, avg=<code>{baseline_avg:+.2f}</code>",
+            f"Gate:     n=<code>{gate_count}</code>, "
+            f"Σ=<code>{gate_sum:+.1f}</code>, avg=<code>{gate_avg:+.2f}</code>",
+            f"Random:   n=<code>{int(random_sample.get('count') or 0)}</code>, "
+            f"avg=<code>{random_avg:+.2f}</code>",
+            f"p-value: <code>{'n/a' if p_value is None else f'{float(p_value):.4f}'}</code>",
+            "",
+            "<b>Что мешает</b>",
+        ]
+        lines.extend(f"• {issue}" for issue in issues[:6])
+        if not issues:
+            lines.append(
+                "• явных блокеров в диагностике не найдено; размер CANARY всё равно держать минимальным"
+            )
+
+        lines.append("\n<b>Лучшие символы</b>")
+        lines.extend(_symbol_line(row) for row in best_symbols[:3])
+        lines.append("\n<b>Худшие символы</b>")
+        lines.extend(_symbol_line(row) for row in worst_symbols[:3])
+        lines.append("\n<b>Режимы рынка</b>")
+        lines.extend(_regime_line(row) for row in regimes[:4])
+
+        lines.append("\n<b>Издержки baseline</b>")
+        lines.append(
+            f"Сегодня net avg=<code>{float(today_costs.get('avg_net_bps') or 0.0):+.2f}</code>, "
+            f"cost avg=<code>{float(today_costs.get('avg_cost_bps') or 0.0):+.2f}</code>"
+        )
+        lines.append(
+            f"Всего net avg=<code>{float(total_costs.get('avg_net_bps') or 0.0):+.2f}</code>, "
+            f"cost avg=<code>{float(total_costs.get('avg_cost_bps') or 0.0):+.2f}</code>"
+        )
+
+        if latest_model:
+            precision = latest_model.get("precision")
+            lift = latest_model.get("lift_bps")
+            precision_text = (
+                "n/a" if precision is None else f"{float(precision) * 100:.1f}%"
+            )
+            lift_text = "n/a" if lift is None else f"{float(lift):+.1f} bps"
+            wf_text = (
+                "n/a" if walk_forward is None else f"{float(walk_forward):+.1f} bps"
+            )
+            lines.append(
+                f"\n<b>Последняя модель</b>\n"
+                f"quality=<code>{quality}</code>, precision=<code>{precision_text}</code>, "
+                f"lift=<code>{lift_text}</code>, wf=<code>{wf_text}</code>"
+            )
+
+        if worst:
+            lines.append("\n<b>3 худших исхода</b>")
+            for row in worst:
+                lines.append(
+                    f"<code>{row.get('symbol', '?')}</code> {row.get('side', '?')} "
+                    f"<code>{float(row.get('net_return_bps') or 0.0):+.1f} bps</code> "
+                    f"{self._fmt_timestamp(row.get('created_at'))[:16]}"
+                )
+
+        lines.append(
+            "\nDrill-down: /pnl_analysis /compare /worst 10 /costs_detailed /model_performance"
+        )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_diagnostics(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -982,7 +1668,9 @@ class TelegramMonitorBot:
         pending_count = diag.get("pending_entry_count") or 0
         if pending_count > 0:
             ids_str = ", ".join(f"<code>{pid[:16]}…</code>" for pid in pending_ids[:3])
-            sym_str = ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
+            sym_str = (
+                ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
+            )
             lines.append(
                 f"\n⚠️ Новые входы <b>заблокированы</b> pending-заявкой:\n"
                 f"ID: {ids_str or 'нет'}, символ: {sym_str}\n"
@@ -991,21 +1679,29 @@ class TelegramMonitorBot:
 
         await self._reply(update, "\n".join(lines))
 
-    async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_canary_ready(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Show whether the system is ready for a tiny CANARY_LIVE test."""
         del context
         if not await self._authorised(update):
             return
 
         db_diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+        if (
+            self._controller is not None
+            and self._controller.db_diagnostics_provider is not None
+        ):
             try:
                 db_diag = await self._controller.db_diagnostics_provider()
             except Exception as exc:
                 db_diag = {"connected": False, "error": str(exc)}
 
         diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.diagnostics_provider is not None:
+        if (
+            self._controller is not None
+            and self._controller.diagnostics_provider is not None
+        ):
             try:
                 diag = self._controller.diagnostics_provider()
             except Exception as exc:
@@ -1017,7 +1713,9 @@ class TelegramMonitorBot:
             reply_markup=self._canary_menu(),
         )
 
-    def _canary_readiness_text(self, *, db_diag: dict[str, Any], diag: dict[str, Any]) -> str:
+    def _canary_readiness_text(
+        self, *, db_diag: dict[str, Any], diag: dict[str, Any]
+    ) -> str:
         checks: list[tuple[str, bool, str, str, str]] = []
         warnings: list[tuple[str, str]] = []
         estimates: list[str] = []
@@ -1033,7 +1731,11 @@ class TelegramMonitorBot:
         latest_1m = db_diag.get("latest_candle_1m")
         latest_age_s = self._utc_age_seconds(latest_1m)
         active_symbols = diag.get("active_symbols") or []
-        runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
+        runtime = (
+            self._controller.runtime_settings()
+            if self._controller and self._controller.runtime_settings
+            else {}
+        )
         latest_run = db_diag.get("latest_training_run", {}) or {}
         latest_model = db_diag.get("latest_model_version", {}) or {}
         model_info = diag.get("model", {}) or {}
@@ -1056,7 +1758,10 @@ class TelegramMonitorBot:
             except (TypeError, ValueError):
                 return None
 
-        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
+        trainable_15m = int(
+            db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m"))
+            or 0
+        )
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)
@@ -1079,8 +1784,12 @@ class TelegramMonitorBot:
         loop_at = diag.get("last_strategy_loop_at")
         hour_api_rejected = int(diag.get("hour_api_rejected") or 0)
         hour_min_notional = int(diag.get("hour_min_notional_rejected") or 0)
-        is_shadow = self._controller.is_shadow() if self._controller is not None else True
-        is_paused = self._controller.is_paused() if self._controller is not None else False
+        is_shadow = (
+            self._controller.is_shadow() if self._controller is not None else True
+        )
+        is_paused = (
+            self._controller.is_paused() if self._controller is not None else False
+        )
 
         active_count = max(1, len(active_symbols))
         one_m = int(candles.get("1") or 0)
@@ -1091,7 +1800,9 @@ class TelegramMonitorBot:
         require(
             "База данных подключена",
             bool(db_diag.get("connected")),
-            "хранилище доступно" if db_diag.get("connected") else "бот не видит Postgres",
+            "хранилище доступно"
+            if db_diag.get("connected")
+            else "бот не видит Postgres",
             "На Render проверьте POSTGRES_DSN и включите внешний PostgreSQL/Supabase.",
         )
         require(
@@ -1259,7 +1970,11 @@ class TelegramMonitorBot:
             "Для первой проверки реальных денег лучше держать модель в режиме наблюдения.",
         )
         diag_error = diag.get("error")
-        db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
+        db_error = (
+            db_diag.get("error")
+            or db_diag.get("last_connect_error")
+            or db_diag.get("last_read_error")
+        )
         warn_if(
             bool(diag_error),
             f"Ошибка runtime диагностики: {html.escape(str(diag_error))}",
@@ -1272,7 +1987,10 @@ class TelegramMonitorBot:
         )
         if loop_at in (None, "never"):
             warnings.append(
-                ("Нет времени последнего цикла стратегии.", "Проверьте, что strategy-loop запущен и не падает.")
+                (
+                    "Нет времени последнего цикла стратегии.",
+                    "Проверьте, что strategy-loop запущен и не падает.",
+                )
             )
 
         failed = [item for item in checks if not item[1]]
@@ -1281,7 +1999,9 @@ class TelegramMonitorBot:
             if in_canary_live:
                 status = f"⚠️ CANARY_LIVE активен, но {len(failed)} условий нарушено"
             else:
-                status = f"❌ НЕ ГОТОВО — {passed_count} из {len(checks)} условий выполнено"
+                status = (
+                    f"❌ НЕ ГОТОВО — {passed_count} из {len(checks)} условий выполнено"
+                )
         elif warnings:
             if in_canary_live:
                 status = f"✅ CANARY_LIVE работает — {len(warnings)} предупреждений (некритично)"
@@ -1301,7 +2021,9 @@ class TelegramMonitorBot:
                 "• Данные уже могут быть собраны, но CANARY нельзя включать до положительного качества модели и paper-gate PnL."
             )
         if not estimates and warnings:
-            estimates.append("• Обязательные условия закрыты; остались только некритичные предупреждения.")
+            estimates.append(
+                "• Обязательные условия закрыты; остались только некритичные предупреждения."
+            )
         if not estimates:
             estimates.append("• Технически и модельно готово сейчас.")
 
@@ -1347,7 +2069,9 @@ class TelegramMonitorBot:
         )
         if missing_env:
             lines.extend(
-                f"• <code>{name}</code> — {desc}" for name, desc in required_env.items() if name in missing_env
+                f"• <code>{name}</code> — {desc}"
+                for name, desc in required_env.items()
+                if name in missing_env
             )
         else:
             lines.append("✅ Все ключевые env vars уже заданы в текущем окружении.")
@@ -1436,12 +2160,16 @@ class TelegramMonitorBot:
         except Exception:
             return str(ts)[:19]
 
-    async def _cmd_model_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_model_help(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Explain model/training screens in operator-friendly Russian."""
         del context
         if not await self._authorised(update):
             return
-        await self._reply(update, self._model_help_text(), reply_markup=self._control_menu())
+        await self._reply(
+            update, self._model_help_text(), reply_markup=self._control_menu()
+        )
 
     def _model_help_text(self) -> str:
         return (
@@ -1479,42 +2207,64 @@ class TelegramMonitorBot:
             "Реальное включение только через Render env vars."
         )
 
-    async def _cmd_db_model(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_db_model(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """🗄 БАЗА И МОДЕЛЬ screen."""
         del context
         if not await self._authorised(update):
             return
         try:
             db_diag: dict[str, Any] = {}
-            if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+            if (
+                self._controller is not None
+                and self._controller.db_diagnostics_provider is not None
+            ):
                 try:
                     db_diag = await self._controller.db_diagnostics_provider()
                 except Exception as exc:
                     db_diag = {"error": str(exc)}
 
             diag: dict[str, Any] = {}
-            if self._controller is not None and self._controller.diagnostics_provider is not None:
+            if (
+                self._controller is not None
+                and self._controller.diagnostics_provider is not None
+            ):
                 try:
                     diag = self._controller.diagnostics_provider()
                 except Exception as _diag_exc:
-                    log.debug("telegram.diagnostics_provider_failed", error=str(_diag_exc))
+                    log.debug(
+                        "telegram.diagnostics_provider_failed", error=str(_diag_exc)
+                    )
 
             connected = db_diag.get("connected", False)
             db_icon = "🟢" if connected else "🔴"
             configured = db_diag.get("configured", True)
-            db_status = "подключена" if connected else ("настроена, переподключается" if configured else "не настроена")
-            db_error = db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error")
+            db_status = (
+                "подключена"
+                if connected
+                else ("настроена, переподключается" if configured else "не настроена")
+            )
+            db_error = (
+                db_diag.get("error")
+                or db_diag.get("last_connect_error")
+                or db_diag.get("last_read_error")
+            )
             db_error_str = html.escape(str(db_error)) if db_error else ""
             if len(db_error_str) > 180:
                 db_error_str = f"{db_error_str[:177]}..."
             candles = db_diag.get("candles_by_interval", {})
             latest_1m = db_diag.get("latest_candle_1m")
             latest_str = self._fmt_timestamp(latest_1m)
-            outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
+            outcomes_by_horizon = (
+                db_diag.get("prediction_outcomes_by_horizon", {}) or {}
+            )
             labelled_15m = db_diag.get("labelled_samples_15m", 0)
             outcome_parts = [
                 f"{horizon}m={count}"
-                for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
+                for horizon, count in sorted(
+                    outcomes_by_horizon.items(), key=lambda item: int(item[0])
+                )
             ]
             outcome_breakdown = ", ".join(outcome_parts) if outcome_parts else "нет"
 
@@ -1537,7 +2287,11 @@ class TelegramMonitorBot:
             db_model_status = db_model.get("status")
             if champion_ver == "none" and db_model_status == "CHAMPION":
                 champion_ver = db_model_version or "none"
-            if challenger_ver == "none" and db_model_status and db_model_status != "CHAMPION":
+            if (
+                challenger_ver == "none"
+                and db_model_status
+                and db_model_status != "CHAMPION"
+            ):
                 challenger_ver = db_model_version or "none"
             if last_training == "never" and latest_run.get("finished_at"):
                 last_training = latest_run["finished_at"].strftime("%Y-%m-%d %H:%M UTC")
@@ -1557,12 +2311,22 @@ class TelegramMonitorBot:
             expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
             best_threshold = model_metrics.get("best_threshold")
             best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
-            precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
+            precision_str = (
+                f"{float(precision):.1%}" if precision is not None else "n/a"
+            )
             lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "n/a"
-            expectancy_str = f"{float(expectancy_bps):+.2f} bps" if expectancy_bps is not None else "n/a"
-            best_threshold_str = f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
+            expectancy_str = (
+                f"{float(expectancy_bps):+.2f} bps"
+                if expectancy_bps is not None
+                else "n/a"
+            )
+            best_threshold_str = (
+                f"{float(best_threshold):.2f}" if best_threshold is not None else "n/a"
+            )
             best_threshold_avg_str = (
-                f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
+                f"{float(best_threshold_avg):+.2f} bps"
+                if best_threshold_avg is not None
+                else "n/a"
             )
             gate = db_diag.get("shadow_gate_15m", {}) or {}
             gate_total = gate.get("total_count", 0) or 0
@@ -1572,11 +2336,25 @@ class TelegramMonitorBot:
             gate_block_avg = gate.get("block_avg_net_return_bps")
             gate_lift = gate.get("lift_vs_all_bps")
             gate_reasons = gate.get("top_block_reasons", {}) or {}
-            gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
-            gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
-            gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+            gate_pass_avg_str = (
+                f"{float(gate_pass_avg):+.2f} bps"
+                if gate_pass_avg is not None
+                else "n/a"
+            )
+            gate_block_avg_str = (
+                f"{float(gate_block_avg):+.2f} bps"
+                if gate_block_avg is not None
+                else "n/a"
+            )
+            gate_lift_str = (
+                f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+            )
             gate_reasons_str = (
-                ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
+                ", ".join(
+                    f"{html.escape(str(reason))}:{count}"
+                    for reason, count in gate_reasons.items()
+                )
+                or "n/a"
             )
             paper = db_diag.get("paper_pnl_15m", {}) or {}
             paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
@@ -1594,9 +2372,15 @@ class TelegramMonitorBot:
                 )
 
             data_note = (
-                "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
+                "данные собираются"
+                if connected and labelled_15m >= 1000
+                else "мало данных для уверенного обучения"
             )
-            training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
+            training_note = (
+                "модель-кандидат обучена"
+                if db_model_version
+                else "модель еще не обучена"
+            )
             if gate_lift is None:
                 gate_note = "фильтр модели еще не оценен"
             elif float(gate_lift) > 0:
@@ -1643,7 +2427,11 @@ class TelegramMonitorBot:
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
                 f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
                 "Lift фильтра: <code>"
-                + ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
+                + (
+                    "⏳ ждём ~50 живых сигналов"
+                    if gate_total == 0 and db_model_version
+                    else gate_lift_str
+                )
                 + "</code>",
                 f"Причины блоков: <code>{gate_reasons_str}</code>",
                 f"Paper baseline: <code>{_paper_line(paper_baseline)}</code>",
@@ -1692,7 +2480,9 @@ class TelegramMonitorBot:
             else:
                 gate_road_icon = "❌" if gate_total > 0 else "⏳"
                 gate_road_val = gate_lift_str if gate_lift is not None else "n/a"
-            lines.append(f"{gate_road_icon} Lift фильтра > 0 bps (≥50 сигналов) → <code>{gate_road_val}</code>")
+            lines.append(
+                f"{gate_road_icon} Lift фильтра > 0 bps (≥50 сигналов) → <code>{gate_road_val}</code>"
+            )
             # 6. Paper gate
             paper_gate_count = int(paper_gate.get("count") or 0)
             paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
@@ -1701,11 +2491,15 @@ class TelegramMonitorBot:
                 paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
             elif paper_gate_bps_val > 0:
                 paper_road_icon = "✅"
-                paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
+                paper_road_val = (
+                    f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
+                )
             else:
                 paper_road_icon = "❌"
                 paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
-            lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+            lines.append(
+                f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>"
+            )
 
             all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
             if (
@@ -1716,18 +2510,26 @@ class TelegramMonitorBot:
                 and paper_gate_count >= 20
                 and paper_gate_bps_val > 0
             ):
-                lines.append("\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render.")
+                lines.append(
+                    "\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render."
+                )
             else:
-                lines.append("\n💡 <i>Нажмите «❓ Как читать модель» для пошагового руководства.</i>")
+                lines.append(
+                    "\n💡 <i>Нажмите «❓ Как читать модель» для пошагового руководства.</i>"
+                )
 
             if latest_run_error:
-                lines.append(f"Ошибка последнего обучения: <code>{latest_run_error}</code>")
+                lines.append(
+                    f"Ошибка последнего обучения: <code>{latest_run_error}</code>"
+                )
             if db_diag.get("error"):
                 lines.append(f"\n<i>Ошибка: {html.escape(str(db_diag['error']))}</i>")
 
             await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
         except Exception as exc:
-            log.warning("telegram.db_model_render_failed", error=str(exc), exc_info=True)
+            log.warning(
+                "telegram.db_model_render_failed", error=str(exc), exc_info=True
+            )
             err_text = html.escape(str(exc))[:200]
             try:
                 await self._reply(
@@ -1736,7 +2538,9 @@ class TelegramMonitorBot:
                     reply_markup=self._main_menu(),
                 )
             except Exception as _reply_exc:
-                log.debug("telegram.db_model_fallback_reply_failed", error=str(_reply_exc))
+                log.debug(
+                    "telegram.db_model_fallback_reply_failed", error=str(_reply_exc)
+                )
 
     # ------------------------------------------------------------------
     # Control commands
@@ -1746,13 +2550,19 @@ class TelegramMonitorBot:
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("✅ Да", callback_data=f"confirm:{action}:yes"),
-                    InlineKeyboardButton("❌ Нет", callback_data=f"confirm:{action}:no"),
+                    InlineKeyboardButton(
+                        "✅ Да", callback_data=f"confirm:{action}:yes"
+                    ),
+                    InlineKeyboardButton(
+                        "❌ Нет", callback_data=f"confirm:{action}:no"
+                    ),
                 ]
             ]
         )
 
-    async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_pause(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -1765,7 +2575,9 @@ class TelegramMonitorBot:
             reply_markup=self._confirm_menu("pause"),
         )
 
-    async def _cmd_resume(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_resume(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -1784,15 +2596,21 @@ class TelegramMonitorBot:
     async def _handle_confirm_button(self, update: Update, payload: str) -> None:
         """Handle confirm:<action>:<yes|no> inline buttons for pause/resume."""
         if self._controller is None:
-            await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Управление сейчас недоступно.", reply_markup=self._main_menu()
+            )
             return
         try:
             action, answer = payload.split(":", maxsplit=1)
         except ValueError:
-            await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Неизвестное подтверждение.", reply_markup=self._main_menu()
+            )
             return
         if answer != "yes":
-            await self._button_reply(update, "Действие отменено.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Действие отменено.", reply_markup=self._main_menu()
+            )
             return
         if action == "pause":
             await self._controller.pause()
@@ -1827,9 +2645,13 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
-        await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
+        await self._button_reply(
+            update, "Неизвестное подтверждение.", reply_markup=self._main_menu()
+        )
 
-    async def _cmd_shadow(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_shadow(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not await self._authorised(update):
             return
         if self._controller is None:
@@ -1839,7 +2661,8 @@ class TelegramMonitorBot:
         if not args or args[0].lower() not in ("on", "off"):
             current = "on" if self._controller.is_shadow() else "off"
             await self._reply(
-                update, f"Shadow mode is currently <code>{current}</code>.\nUse: /shadow on  or  /shadow off"
+                update,
+                f"Shadow mode is currently <code>{current}</code>.\nUse: /shadow on  or  /shadow off",
             )
             return
         enable = args[0].lower() == "on"
@@ -1855,9 +2678,14 @@ class TelegramMonitorBot:
             )
             return
         await self._controller.set_shadow(True)
-        await self._reply(update, "🔦 Теневой режим: <code>включен, ордера считаются, но не отправляются</code>")
+        await self._reply(
+            update,
+            "🔦 Теневой режим: <code>включен, ордера считаются, но не отправляются</code>",
+        )
 
-    async def _cmd_mode(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_mode(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not await self._authorised(update):
             return
         if self._controller is None:
@@ -1886,7 +2714,9 @@ class TelegramMonitorBot:
             "Telegram не включает реальные деньги.",
         )
 
-    async def _cmd_risk(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_risk(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not await self._authorised(update):
             return
         if self._controller is None:
@@ -1897,7 +2727,8 @@ class TelegramMonitorBot:
         if not args or args[0].lower() not in valid:
             current = self._controller.current_profile()
             await self._reply(
-                update, f"Текущий риск-профиль: <code>{current}</code>\nФормат: /risk {' | '.join(valid)}"
+                update,
+                f"Текущий риск-профиль: <code>{current}</code>\nФормат: /risk {' | '.join(valid)}",
             )
             return
         new_profile_str = args[0].upper()
@@ -1936,7 +2767,9 @@ class TelegramMonitorBot:
             "Отправьте /confirm для применения или ничего не делайте для отмены.",
         )
 
-    async def _cmd_train(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_train(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not await self._authorised(update):
             return
         if self._controller is None or self._controller.start_training is None:
@@ -1948,10 +2781,15 @@ class TelegramMonitorBot:
             horizon = int(args[1]) if len(args) >= 2 else 15
             label_bps = float(args[2]) if len(args) >= 3 else 5.0
         except ValueError:
-            await self._reply(update, "Формат: /train [примеров] [горизонт_минут] [порог_bps]")
+            await self._reply(
+                update, "Формат: /train [примеров] [горизонт_минут] [порог_bps]"
+            )
             return
         if min_samples < 50 or horizon <= 0 or label_bps < 0:
-            await self._reply(update, "Параметры обучения отклонены: примеров>=50, горизонт>0, bps>=0.")
+            await self._reply(
+                update,
+                "Параметры обучения отклонены: примеров>=50, горизонт>0, bps>=0.",
+            )
             return
         try:
             msg = await self._controller.start_training(min_samples, horizon, label_bps)
@@ -1960,7 +2798,9 @@ class TelegramMonitorBot:
             return
         await self._reply(update, msg, reply_markup=self._main_menu())
 
-    async def _cmd_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_limits(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         if not await self._authorised(update):
             return
         if self._controller is None or self._controller.runtime_settings is None:
@@ -1968,7 +2808,9 @@ class TelegramMonitorBot:
             return
         args = context.args or []
         if not args:
-            await self._reply(update, self._limits_text(), reply_markup=self._control_menu())
+            await self._reply(
+                update, self._limits_text(), reply_markup=self._control_menu()
+            )
             return
         if len(args) != 2 or self._controller.set_runtime_setting is None:
             await self._reply(
@@ -1988,11 +2830,19 @@ class TelegramMonitorBot:
                 value = int(raw_value)
             msg = await self._controller.set_runtime_setting(key, value)
         except Exception as exc:
-            await self._reply(update, f"❌ Изменение лимита отклонено: <code>{exc}</code>")
+            await self._reply(
+                update, f"❌ Изменение лимита отклонено: <code>{exc}</code>"
+            )
             return
-        await self._reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._control_menu())
+        await self._reply(
+            update,
+            f"✅ {msg}\n\n{self._limits_text()}",
+            reply_markup=self._control_menu(),
+        )
 
-    async def _cmd_stop(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_stop(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2008,7 +2858,9 @@ class TelegramMonitorBot:
             reply_markup=self._confirm_menu("stop"),
         )
 
-    async def _cmd_confirm(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_confirm(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2028,7 +2880,10 @@ class TelegramMonitorBot:
     async def _show_canary_model_metrics(self, update: Update) -> None:
         """Second /canary screen: model quality metrics (lift, precision, gate stats)."""
         db_diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
+        if (
+            self._controller is not None
+            and self._controller.db_diagnostics_provider is not None
+        ):
             try:
                 db_diag = await self._controller.db_diagnostics_provider()
             except Exception as exc:
@@ -2053,7 +2908,11 @@ class TelegramMonitorBot:
             if value is None:
                 return "нет данных"
             try:
-                return f"{float(value):+.3f}{suffix}" if suffix == " bps" else f"{float(value):.3f}{suffix}"
+                return (
+                    f"{float(value):+.3f}{suffix}"
+                    if suffix == " bps"
+                    else f"{float(value):.3f}{suffix}"
+                )
             except (TypeError, ValueError):
                 return html.escape(str(value))
 
@@ -2076,13 +2935,17 @@ class TelegramMonitorBot:
             f"Gate lift: <code>{_fmt(gate_lift, ' bps')}</code>",
             f"Pass expectancy: <code>{_fmt(gate.get('pass_avg_net_return_bps'), ' bps')}</code>",
         ]
-        await self._button_reply(update, "\n".join(lines), reply_markup=self._canary_menu())
+        await self._button_reply(
+            update, "\n".join(lines), reply_markup=self._canary_menu()
+        )
 
     # ------------------------------------------------------------------
     # Subscriptions / trades / healthcheck
     # ------------------------------------------------------------------
 
-    async def _cmd_subscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_subscribe(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2090,16 +2953,24 @@ class TelegramMonitorBot:
         if cid is None:
             return
         self._subscribed.add(cid)
-        if self._controller is not None and self._controller.add_subscription is not None:
+        if (
+            self._controller is not None
+            and self._controller.add_subscription is not None
+        ):
             try:
                 await self._controller.add_subscription(cid)
-                await self._reply(update, "🔔 Подписка оформлена и сохранена: уведомления переживут перезапуск.")
+                await self._reply(
+                    update,
+                    "🔔 Подписка оформлена и сохранена: уведомления переживут перезапуск.",
+                )
                 return
             except Exception as exc:
                 log.warning("telegram_subscribe_persist_failed", error=str(exc))
         await self._reply(update, "🔔 Подписка оформлена (без БД — до перезапуска).")
 
-    async def _cmd_unsubscribe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_unsubscribe(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2107,14 +2978,22 @@ class TelegramMonitorBot:
         if cid is None:
             return
         self._subscribed.discard(cid)
-        if self._controller is not None and self._controller.remove_subscription is not None:
+        if (
+            self._controller is not None
+            and self._controller.remove_subscription is not None
+        ):
             try:
                 await self._controller.remove_subscription(cid)
             except Exception as exc:
                 log.warning("telegram_unsubscribe_persist_failed", error=str(exc))
-        await self._reply(update, "🔕 Подписка отключена: push-уведомления больше не приходят в этот чат.")
+        await self._reply(
+            update,
+            "🔕 Подписка отключена: push-уведомления больше не приходят в этот чат.",
+        )
 
-    async def _cmd_trades(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_trades(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2124,7 +3003,10 @@ class TelegramMonitorBot:
         try:
             trades = await self._controller.recent_trades_provider()
         except Exception as exc:
-            await self._reply(update, f"❌ Не удалось получить сделки: <code>{html.escape(str(exc))}</code>")
+            await self._reply(
+                update,
+                f"❌ Не удалось получить сделки: <code>{html.escape(str(exc))}</code>",
+            )
             return
         if not trades:
             await self._reply(update, "📭 Закрытых сделок пока нет.")
@@ -2143,7 +3025,9 @@ class TelegramMonitorBot:
             )
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
-    async def _cmd_healthcheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_healthcheck(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2153,7 +3037,10 @@ class TelegramMonitorBot:
         try:
             hc = await self._controller.healthcheck_provider()
         except Exception as exc:
-            await self._reply(update, f"❌ Healthcheck не удался: <code>{html.escape(str(exc))}</code>")
+            await self._reply(
+                update,
+                f"❌ Healthcheck не удался: <code>{html.escape(str(exc))}</code>",
+            )
             return
         signals = int(hc.get("hour_signals_emitted") or 0)
         placed = int(hc.get("hour_order_placed") or 0)
@@ -2179,15 +3066,23 @@ class TelegramMonitorBot:
                     lines.append(f"  • {html.escape(name)}: <code>{count}</code>")
         lines.append("")
         if avg_net is not None:
-            lines.append(f"Средний net edge сегодня: <code>{float(avg_net):+.2f} bps</code>")
+            lines.append(
+                f"Средний net edge сегодня: <code>{float(avg_net):+.2f} bps</code>"
+            )
         else:
-            lines.append("Средний net edge сегодня: <code>нет разрешённых исходов</code>")
+            lines.append(
+                "Средний net edge сегодня: <code>нет разрешённых исходов</code>"
+            )
         if signals > 0 and placed == 0:
             lines.append("")
-            lines.append("⚠️ Сигналы есть, сделок нет — посмотрите блокеры выше и /limits.")
+            lines.append(
+                "⚠️ Сигналы есть, сделок нет — посмотрите блокеры выше и /limits."
+            )
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
-    async def _cmd_buckets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _cmd_buckets(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         if not await self._authorised(update):
             return
@@ -2197,7 +3092,10 @@ class TelegramMonitorBot:
         try:
             data = await self._controller.bucket_stats_provider()
         except Exception as exc:
-            await self._reply(update, f"❌ Не удалось получить bucket-статистику: <code>{html.escape(str(exc))}</code>")
+            await self._reply(
+                update,
+                f"❌ Не удалось получить bucket-статистику: <code>{html.escape(str(exc))}</code>",
+            )
             return
         buckets: list[dict[str, Any]] = data.get("buckets") or []
         refreshed_at = data.get("refreshed_at")
@@ -2210,7 +3108,9 @@ class TelegramMonitorBot:
             # Worst expectancy first; cap output so the message stays readable
             shown = sorted(buckets, key=lambda b: float(b["avg_bps"]))[:20]
             for b in shown:
-                blocked = int(b["count"]) >= min_samples and float(b["avg_bps"]) < block_below
+                blocked = (
+                    int(b["count"]) >= min_samples and float(b["avg_bps"]) < block_below
+                )
                 icon = "🚫" if blocked else "✅"
                 lines.append(
                     f"{icon} {html.escape(str(b['regime']))}/{html.escape(str(b['volatility']))} "
@@ -2225,7 +3125,9 @@ class TelegramMonitorBot:
             lines.append(f"Обновлено: <code>{html.escape(str(refreshed_at))}</code>")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
-    async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _on_text(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         """Handle free-text input: currently only the custom-limit flow."""
         del context
         if not await self._authorised(update):
@@ -2237,7 +3139,11 @@ class TelegramMonitorBot:
         if self._controller is None or self._controller.set_runtime_setting is None:
             await self._reply(update, "Runtime-настройки сейчас недоступны.")
             return
-        text = (update.effective_message.text or "").strip() if update.effective_message else ""
+        text = (
+            (update.effective_message.text or "").strip()
+            if update.effective_message
+            else ""
+        )
         if expected_key is None:
             parts = text.split()
             if len(parts) != 2:
@@ -2273,9 +3179,15 @@ class TelegramMonitorBot:
                 reply_markup=self._limits_menu(),
             )
             return
-        await self._reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._limits_menu())
+        await self._reply(
+            update,
+            f"✅ {msg}\n\n{self._limits_text()}",
+            reply_markup=self._limits_menu(),
+        )
 
-    async def _on_button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    async def _on_button(
+        self, update: Update, context: ContextTypes.DEFAULT_TYPE
+    ) -> None:
         del context
         query = update.callback_query
         if query is None:
@@ -2309,7 +3221,9 @@ class TelegramMonitorBot:
         if data.startswith("sym:"):
             await self._handle_symbol_button(update, data.removeprefix("sym:"))
             return
-        await self._button_reply(update, "Неизвестная кнопка.", reply_markup=self._main_menu())
+        await self._button_reply(
+            update, "Неизвестная кнопка.", reply_markup=self._main_menu()
+        )
 
     async def _handle_view_button(self, update: Update, action: str) -> None:
         fake_context = type("_Context", (), {"args": []})()
@@ -2325,13 +3239,18 @@ class TelegramMonitorBot:
             "costs_detailed": self._cmd_costs_detailed,
             "pnl_analysis": self._cmd_pnl_analysis,
             "compare": self._cmd_compare,
+            "strategy_report": self._cmd_strategy_report,
             "model_performance": self._cmd_model_performance,
         }
         if action == "menu":
-            await self._button_reply(update, self._menu_text(), reply_markup=self._main_menu())
+            await self._button_reply(
+                update, self._menu_text(), reply_markup=self._main_menu()
+            )
             return
         if action == "help":
-            await self._button_reply(update, self._help_text(), reply_markup=self._main_menu())
+            await self._button_reply(
+                update, self._help_text(), reply_markup=self._main_menu()
+            )
             return
         if action == "trades":
             await self._cmd_trades(update, fake_context)  # type: ignore[arg-type]
@@ -2363,7 +3282,9 @@ class TelegramMonitorBot:
             return
         handler = handlers.get(action)
         if handler is None:
-            await self._button_reply(update, "Неизвестный экран.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Неизвестный экран.", reply_markup=self._main_menu()
+            )
             return
         await handler(update, fake_context)  # type: ignore[arg-type]
 
@@ -2391,7 +3312,11 @@ class TelegramMonitorBot:
     async def _handle_symbol_button(self, update: Update, payload: str) -> None:
         parts = payload.split(":")
         if not parts:
-            await self._button_reply(update, "Неизвестное действие выбора пар.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "Неизвестное действие выбора пар.",
+                reply_markup=self._main_menu(),
+            )
             return
         if parts[0] == "page":
             page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
@@ -2401,7 +3326,11 @@ class TelegramMonitorBot:
             symbol = parts[1].upper()
             page = int(parts[2]) if len(parts) > 2 and parts[2].isdigit() else 0
             if self._controller is None or self._controller.toggle_symbol is None:
-                await self._button_reply(update, "Выбор пар сейчас недоступен.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update,
+                    "Выбор пар сейчас недоступен.",
+                    reply_markup=self._main_menu(),
+                )
                 return
             try:
                 msg = await self._controller.toggle_symbol(symbol)
@@ -2414,11 +3343,15 @@ class TelegramMonitorBot:
                 reply_markup=self._symbol_select_menu(page=page),
             )
             return
-        await self._button_reply(update, "Неизвестное действие выбора пар.", reply_markup=self._main_menu())
+        await self._button_reply(
+            update, "Неизвестное действие выбора пар.", reply_markup=self._main_menu()
+        )
 
     async def _handle_control_button(self, update: Update, action: str) -> None:
         if self._controller is None:
-            await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Управление сейчас недоступно.", reply_markup=self._main_menu()
+            )
             return
         if action == "pause":
             await self._button_reply(
@@ -2429,7 +3362,9 @@ class TelegramMonitorBot:
             return
         if action == "resume":
             if not self._controller.is_paused():
-                await self._button_reply(update, "Бот не на паузе.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update, "Бот не на паузе.", reply_markup=self._main_menu()
+                )
                 return
             await self._button_reply(
                 update,
@@ -2439,7 +3374,9 @@ class TelegramMonitorBot:
             return
         if action == "promote":
             if self._controller.promote_model is None:
-                await self._button_reply(update, "Промоут сейчас недоступен.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update, "Промоут сейчас недоступен.", reply_markup=self._main_menu()
+                )
                 return
             db_diag: dict[str, Any] = {}
             if self._controller.db_diagnostics_provider is not None:
@@ -2450,7 +3387,11 @@ class TelegramMonitorBot:
             latest_model = db_diag.get("latest_model_version", {}) or {}
             version = latest_model.get("version") or ""
             if not version:
-                await self._button_reply(update, "Нет модели-кандидата для промоута.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update,
+                    "Нет модели-кандидата для промоута.",
+                    reply_markup=self._main_menu(),
+                )
                 return
             try:
                 msg = await self._controller.promote_model(version)
@@ -2460,7 +3401,11 @@ class TelegramMonitorBot:
             return
         if action == "train":
             if self._controller.start_training is None:
-                await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update,
+                    "Запуск обучения сейчас недоступен.",
+                    reply_markup=self._main_menu(),
+                )
                 return
             try:
                 msg = await self._controller.start_training(500, 15, 5.0)
@@ -2469,7 +3414,9 @@ class TelegramMonitorBot:
             await self._button_reply(update, msg, reply_markup=self._main_menu())
             return
         if action == "limits":
-            await self._button_reply(update, self._limits_text(), reply_markup=self._limits_menu())
+            await self._button_reply(
+                update, self._limits_text(), reply_markup=self._limits_menu()
+            )
             return
         if action == "stop":
             await self._button_reply(
@@ -2481,15 +3428,25 @@ class TelegramMonitorBot:
                 reply_markup=self._confirm_menu("stop"),
             )
             return
-        await self._button_reply(update, "Неизвестное действие управления.", reply_markup=self._main_menu())
+        await self._button_reply(
+            update, "Неизвестное действие управления.", reply_markup=self._main_menu()
+        )
 
     async def _handle_train_button(self, update: Update, payload: str) -> None:
         if self._controller is None:
-            await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "Запуск обучения сейчас недоступен.",
+                reply_markup=self._main_menu(),
+            )
             return
         if payload == "all":
             if self._controller.start_training_all is None:
-                await self._button_reply(update, "Обучение ВСЕ сейчас недоступно.", reply_markup=self._main_menu())
+                await self._button_reply(
+                    update,
+                    "Обучение ВСЕ сейчас недоступно.",
+                    reply_markup=self._main_menu(),
+                )
                 return
             try:
                 msg = await self._controller.start_training_all()
@@ -2498,7 +3455,11 @@ class TelegramMonitorBot:
             await self._button_reply(update, msg, reply_markup=self._main_menu())
             return
         if self._controller.start_training is None:
-            await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "Запуск обучения сейчас недоступен.",
+                reply_markup=self._main_menu(),
+            )
             return
         try:
             min_s_raw, horizon_raw, label_raw = payload.split(":", maxsplit=2)
@@ -2512,11 +3473,17 @@ class TelegramMonitorBot:
 
     async def _handle_limit_button(self, update: Update, payload: str) -> None:
         if self._controller is None or self._controller.set_runtime_setting is None:
-            await self._button_reply(update, "Runtime-настройки сейчас недоступны.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "Runtime-настройки сейчас недоступны.",
+                reply_markup=self._main_menu(),
+            )
             return
         if payload == "custom" or payload.startswith("custom:"):
             cid = self._chat_id(update)
-            requested_key = payload.split(":", maxsplit=1)[1] if ":" in payload else None
+            requested_key = (
+                payload.split(":", maxsplit=1)[1] if ":" in payload else None
+            )
             if cid is not None:
                 self._awaiting_custom_limit[cid] = requested_key
             if requested_key == "feature_symbols":
@@ -2553,11 +3520,17 @@ class TelegramMonitorBot:
                 reply_markup=self._limits_menu(),
             )
             return
-        await self._button_reply(update, f"✅ {msg}\n\n{self._limits_text()}", reply_markup=self._limits_menu())
+        await self._button_reply(
+            update,
+            f"✅ {msg}\n\n{self._limits_text()}",
+            reply_markup=self._limits_menu(),
+        )
 
     async def _handle_mode_button(self, update: Update, action: str) -> None:
         if self._controller is None:
-            await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Управление сейчас недоступно.", reply_markup=self._main_menu()
+            )
             return
         if action == "shadow":
             await self._controller.set_shadow(True)
@@ -2578,16 +3551,22 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
-        await self._button_reply(update, "Неизвестный режим.", reply_markup=self._main_menu())
+        await self._button_reply(
+            update, "Неизвестный режим.", reply_markup=self._main_menu()
+        )
 
     async def _queue_risk_change(self, update: Update, new_profile_str: str) -> None:
         if self._controller is None:
-            await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Управление сейчас недоступно.", reply_markup=self._main_menu()
+            )
             return
         try:
             new_profile = RiskProfile(new_profile_str)
         except ValueError:
-            await self._button_reply(update, "Неизвестный риск-профиль.", reply_markup=self._main_menu())
+            await self._button_reply(
+                update, "Неизвестный риск-профиль.", reply_markup=self._main_menu()
+            )
             return
         old_profile = self._controller.current_profile()
         if new_profile_str == old_profile:
@@ -2645,6 +3624,9 @@ class TelegramMonitorBot:
             "/start       — меню, включая выбор торговых пар\n"
             "/pnl         — история закрытого PnL\n"
             "/net         — чистый PnL с комиссиями и фандингом\n"
+            "/strategy_report — единый отчет по качеству стратегии\n"
+            "/report      — короткий alias для /strategy_report\n"
+            "/pnl_analysis /compare /worst [N] /costs_detailed /model_performance — drill-down диагностика\n"
             "/trades      — последние 10 закрытых сделок\n"
             "/healthcheck — сигналы/сделки за час и главный блокер\n"
             "/buckets     — экспектанси по режимам/часам и блокировки\n"
@@ -2692,7 +3674,9 @@ class TelegramMonitorBot:
             "Фильтр модели: <code>/limits model_gate on</code>, <code>/limits model_gate_threshold 0.60</code>"
         )
 
-    def _component_line(self, name: str, ok: bool, latency_ms: float | None, required: bool = True) -> str:
+    def _component_line(
+        self, name: str, ok: bool, latency_ms: float | None, required: bool = True
+    ) -> str:
         if ok:
             icon = "✅"
         elif required:
