@@ -89,6 +89,23 @@ async def test_pending_reservation_counts_towards_position_limit():
 
 
 @pytest.mark.asyncio
+async def test_capital_update_and_reservation_release_are_consistent():
+    """Sync exposure mutations should be protected by the same lock as async updates."""
+    t = _tracker(capital=Decimal("10000"))
+
+    can_add, reason = t.can_add_position("BTCUSDT", Decimal("1000"), order_id="order-1")
+    assert can_add, reason
+    assert t.total_exposure_pct == Decimal("10")
+
+    t.update_capital(Decimal("20000"))
+    assert t.total_exposure_pct == Decimal("5")
+
+    t.release_reservation("order-1")
+    assert t.total_exposure_pct == Decimal("0")
+    assert t.position_count == 0
+
+
+@pytest.mark.asyncio
 async def test_notional_is_not_multiplied_by_leverage():
     """P0.4: stored notional must equal qty × price (gross, not margin)."""
     capital = Decimal("10000")
