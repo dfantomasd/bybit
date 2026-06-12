@@ -660,4 +660,3 @@ RISK_PROFILE_MAP: dict[RiskProfile, RiskProfileConfig] = {
 def get_risk_profile_config(profile: RiskProfile) -> RiskProfileConfig:
     """Return the ``RiskProfileConfig`` for the given profile."""
     return RISK_PROFILE_MAP[profile]
-
