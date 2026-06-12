@@ -351,7 +351,7 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
         if "MAX(open_time)" in query:
             return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
         if "FROM feature_snapshots fs" in query:
-            return [{"cnt": 777}]
+            return [{"feature_schema_hash": "abc1234567890def", "cnt": 777}]
         if "FROM feature_snapshots" in query:
             return [{"cnt": 1200}]
         if "GROUP BY horizon_minutes" in query:
