@@ -16,7 +16,7 @@ import io
 import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import joblib
 import numpy as np
@@ -65,7 +65,8 @@ def encrypt_artifact(data: bytes) -> bytes:
     if cipher is None:
         log.warning("model_artifact.saved_unencrypted hint=set_MODEL_ENCRYPT_KEY")
         return data
-    return _ARTIFACT_MAGIC + cipher.encrypt(data)
+    encrypted = cast(bytes, cipher.encrypt(data))
+    return _ARTIFACT_MAGIC + encrypted
 
 
 def decrypt_artifact(data: bytes) -> bytes:
@@ -79,7 +80,7 @@ def decrypt_artifact(data: bytes) -> bytes:
     from cryptography.fernet import InvalidToken
 
     try:
-        return cipher.decrypt(bytes(data[len(_ARTIFACT_MAGIC) :]))
+        return cast(bytes, cipher.decrypt(bytes(data[len(_ARTIFACT_MAGIC) :])))
     except InvalidToken as exc:
         raise RuntimeError("artifact decryption failed: wrong MODEL_ENCRYPT_KEY") from exc
 
@@ -153,9 +154,10 @@ class ChallengerModel:
     allow_live_decisions: bool = False
     label_schema_version: str = LABEL_SCHEMA_VERSION
     model_type: str = "SGD"
-    """"SGD" (linear, supports online partial_fit) or "GBDT" (gradient-boosted
-    trees via HistGradientBoostingClassifier — stronger on non-linear feature
-    interactions, batch-only)."""
+    """"SGD" (linear, supports online partial_fit), "GBDT" (gradient-boosted
+    trees via HistGradientBoostingClassifier), or "LOGREG" (regularized linear
+    baseline)."""
+    model_params: dict[str, Any] = field(default_factory=dict)
 
     _clf: Any = field(default=None, repr=False)
     _scaler: Any = field(default=None, repr=False)
@@ -198,7 +200,7 @@ class ChallengerModel:
             log.debug("challenger.predict_failed", exc_info=exc)
             return None
 
-    def fit_batch(self, features: Any, labels: Any, *, epochs: int = 5) -> None:
+    def fit_batch(self, features: Any, labels: Any, *, epochs: int = 5, params: dict[str, Any] | None = None) -> None:
         """Train from scratch on a full labelled batch.
 
         Unlike per-sample ``partial_fit``, the scaler is fitted on the whole
@@ -218,17 +220,36 @@ class ChallengerModel:
         self._scaler = StandardScaler()
         x_scaled = self._scaler.fit_transform(x)
 
+        fit_params = dict(self.model_params)
+        if params:
+            fit_params.update(params)
+        self.model_params = fit_params
+
         if self.model_type.upper() == "GBDT":
             from sklearn.ensemble import HistGradientBoostingClassifier
 
             self._clf = HistGradientBoostingClassifier(
-                max_iter=300,
-                learning_rate=0.05,
-                max_leaf_nodes=31,
+                max_iter=int(fit_params.get("max_iter", 300)),
+                learning_rate=float(fit_params.get("learning_rate", 0.05)),
+                max_leaf_nodes=int(fit_params.get("max_leaf_nodes", 31)),
+                l2_regularization=float(fit_params.get("l2_regularization", 0.0)),
                 early_stopping=True,
                 validation_fraction=0.15,
                 class_weight="balanced",
                 random_state=42,
+            )
+            self._clf.fit(x_scaled, y)
+            self.training_samples = int(len(x_scaled))
+            return
+
+        if self.model_type.upper() == "LOGREG":
+            from sklearn.linear_model import LogisticRegression
+
+            self._clf = LogisticRegression(
+                C=float(fit_params.get("C", 1.0)),
+                class_weight="balanced",
+                random_state=42,
+                max_iter=int(fit_params.get("max_iter", 1000)),
             )
             self._clf.fit(x_scaled, y)
             self.training_samples = int(len(x_scaled))
@@ -288,6 +309,7 @@ class ChallengerModel:
                     "training_samples": self.training_samples,
                     "label_schema_version": self.label_schema_version,
                     "model_type": self.model_type,
+                    "model_params": self.model_params,
                 },
             },
             buf,
@@ -307,6 +329,7 @@ class ChallengerModel:
             training_samples=meta.get("training_samples", 0),
             label_schema_version=meta.get("label_schema_version", LEGACY_LABEL_SCHEMA_VERSION),
             model_type=str(meta.get("model_type", "SGD")),
+            model_params=dict(meta.get("model_params") or {}),
         )
         model._clf = payload.get("clf")
         model._scaler = payload.get("scaler")
