@@ -5,9 +5,12 @@ Thread-safe via a re-entrant lock. All financial arithmetic uses Decimal.
 
 from __future__ import annotations
 
+from datetime import datetime, timezone
 from decimal import Decimal
 from threading import RLock
 from typing import Any
+
+_UTC = timezone.utc
 
 from trader.risk.profiles import RiskLimits
 
@@ -45,6 +48,7 @@ class ExposureTracker:
         self._positions: dict[str, dict[str, Any]] = {}
         self._pending_exposure: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
+        self._capital_updated_at: datetime = datetime.now(_UTC)
 
     # ------------------------------------------------------------------
     # Mutations
@@ -79,11 +83,21 @@ class ExposureTracker:
             if order_id:
                 self._pending_exposure.pop(order_id, None)
 
-    def update_capital(self, new_capital: Decimal) -> None:
-        """Update total capital (e.g. after deposit/withdrawal)."""
+    def update_capital(self, new_capital: Decimal, updated_at: datetime | None = None) -> None:
+        """Update total capital, ignoring stale values.
+
+        updated_at lets callers pass the authoritative timestamp (e.g. REST fetch
+        time or WS event time) so that a delayed WS push cannot overwrite a more
+        recent REST response.
+        """
         with self._lock:
-            if new_capital > Decimal("0"):
-                self._capital = new_capital
+            if new_capital <= Decimal("0"):
+                return
+            ts = updated_at or datetime.now(_UTC)
+            if ts < self._capital_updated_at:
+                return
+            self._capital = new_capital
+            self._capital_updated_at = ts
 
     # ------------------------------------------------------------------
     # Properties

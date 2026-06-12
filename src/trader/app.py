@@ -22,6 +22,7 @@ CRITICAL SAFETY RULES:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import html
 import json
 import os
@@ -1505,7 +1506,7 @@ class TradingApplication:
                 )
                 # P1: Update ExposureTracker capital so exposure_pct is always current
                 if self._exposure_tracker is not None and available != old_capital:
-                    self._exposure_tracker.update_capital(available)
+                    self._exposure_tracker.update_capital(available, updated_at=self._balance_refreshed_at)
                     log.debug(
                         "exposure.capital_updated",
                         old_capital=old_capital,
@@ -2150,7 +2151,7 @@ class TradingApplication:
                         self._balance_refreshed_at = datetime.now(tz=UTC)
                         # P1: Update ExposureTracker capital from WS balance push
                         if self._exposure_tracker is not None and event.available_balance != old_capital:
-                            self._exposure_tracker.update_capital(event.available_balance)
+                            self._exposure_tracker.update_capital(event.available_balance, updated_at=self._balance_refreshed_at)
                             log.debug(
                                 "exposure.capital_updated_ws",
                                 old_capital=old_capital,
@@ -3527,23 +3528,21 @@ class TradingApplication:
                 except Exception as _ml_live_exc:
                     log.debug("ml_live.replace_failed", symbol=symbol, error=str(_ml_live_exc))
 
-            # TODO: move record_signal after block checks
-            if self._trade_journal is not None:
-                await self._trade_journal.record_signal(
-                    proposal=proposal,
-                    feature_vector=vec,
-                    regime_context=regime_ctx,
-                    model_decision=model_decision_meta,
-                )
+            async def _record_signal(blocked: str | None = None) -> None:
+                if self._trade_journal is not None:
+                    await self._trade_journal.record_signal(
+                        proposal=proposal,
+                        feature_vector=vec,
+                        regime_context=regime_ctx,
+                        model_decision=model_decision_meta,
+                        blocked_reason=blocked,
+                    )
 
             # Record feature snapshot for ML training (no lookahead — uses candle open_time)
             snapshot_id = ""
             if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
                 try:
-                    import hashlib
-                    import json as _json
-
-                    _schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+                    _schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
                     _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
                     _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
                     snapshot_id = await self._trade_journal.record_feature_snapshot(
@@ -3684,6 +3683,7 @@ class TradingApplication:
                                     threshold=canary_threshold,
                                     reason=canary_reason,
                                 )
+                                await _record_signal("model_gate_canary_blocked")
                                 return
                         else:
                             # No compatible Champion → do not block the trade
@@ -3694,6 +3694,7 @@ class TradingApplication:
             # Skip execution if operator paused trading
             if self._trading_paused:
                 log.debug("strategy_loop.paused", symbol=symbol)
+                await _record_signal("trading_paused")
                 return
 
             # DB availability guard for CANARY_LIVE / LIVE
@@ -3705,6 +3706,7 @@ class TradingApplication:
                             symbol=symbol,
                             mode=self._settings.TRADING_MODE,
                         )
+                        await _record_signal("no_trade_journal")
                         return
                 if self._settings.DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE:
                     if self._trade_journal is None or not self._trade_journal.durable_state_healthy:
@@ -3716,6 +3718,7 @@ class TradingApplication:
                                 self._trade_journal.write_health() if self._trade_journal is not None else {}
                             ),
                         )
+                        await _record_signal("durable_store_unhealthy")
                         return
 
             # ExecutionEngine: dedup/cooldown/risk → order (or shadow log)
@@ -3733,11 +3736,13 @@ class TradingApplication:
                 )
             except Exception as exc:
                 log.warning("strategy_loop.execution_error", symbol=symbol, error=str(exc))
+                await _record_signal("execution_error")
                 return
 
             from trader.domain.enums import RiskDecisionStatus
 
             if decision is None:
+                await _record_signal("no_decision")
                 return
             if decision.status == RiskDecisionStatus.REJECTED:
                 self._record_diag("risk_rejected")
@@ -3745,11 +3750,17 @@ class TradingApplication:
                 for rule in decision.triggered_rules or []:
                     if rule == "post_multiplier_min_notional_rejected":
                         self._record_diag("post_multiplier_min_notional_rejected")
+                rejected_reason = "risk_rejected"
+                if decision.triggered_rules:
+                    rejected_reason = f"risk_rejected:{decision.triggered_rules[0]}"
+                await _record_signal(rejected_reason)
             if decision.status not in (
                 RiskDecisionStatus.APPROVED,
                 RiskDecisionStatus.RESIZED,
             ):
                 return
+
+            await _record_signal()
 
             # Trade approved — notify Telegram once and log to signal deque
             is_shadow = self._execution_engine._shadow_mode

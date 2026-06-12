@@ -436,6 +436,8 @@ class TradeJournal:
                     ON order_pending_state (symbol, created_at DESC) WHERE resolved_at IS NULL;
                 -- Hybrid ML mode: mark signals where the model replaced the rule-based decision
                 ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb;
+                -- Record why a signal was blocked before reaching the execution engine
+                ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS blocked_reason text;
                 -- Telegram push-notification subscriptions (survive restarts)
                 CREATE TABLE IF NOT EXISTS telegram_subscriptions (
                     chat_id bigint PRIMARY KEY,
@@ -475,6 +477,7 @@ class TradeJournal:
         feature_vector: FeatureVector | None,
         regime_context: RegimeContext | None,
         model_decision: dict[str, Any] | None = None,
+        blocked_reason: str | None = None,
     ) -> None:
         features = None
         if feature_vector is not None:
@@ -492,9 +495,10 @@ class TradeJournal:
             INSERT INTO trade_signals (
                 proposal_id, created_at, strategy_id, symbol, side, confidence,
                 entry_price, take_profit, stop_loss, requested_qty,
-                requested_notional_usd, regime, rationale, features, model_decision
+                requested_notional_usd, regime, rationale, features, model_decision,
+                blocked_reason
             )
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
             ON CONFLICT (proposal_id) DO NOTHING
             """,
             proposal.proposal_id,
@@ -512,6 +516,7 @@ class TradeJournal:
             proposal.rationale,
             json.dumps(features) if features is not None else None,
             json.dumps(model_decision) if model_decision is not None else None,
+            blocked_reason,
         )
 
     async def record_risk_decision(self, symbol: str, decision: RiskDecision) -> None:
