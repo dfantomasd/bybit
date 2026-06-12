@@ -242,6 +242,7 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
             "last_strategy_loop_at": "2026-06-07T10:00:00Z",
             "hour_api_rejected": 0,
             "hour_min_notional_rejected": 0,
+            "model": {"champion_version": "v1"},
         }
     )
     bot._controller.db_diagnostics_provider = AsyncMock(
@@ -253,7 +254,11 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
             "prediction_outcomes": 3000,
             "labelled_samples_15m": 2500,
             "latest_training_run": {"status": "COMPLETED"},
-            "latest_model_version": {"version": "v1"},
+            "latest_model_version": {
+                "version": "v1",
+                "status": "CHAMPION",
+                "metrics": {"quality": "GOOD", "walk_forward_expectancy_bps": 2.5},
+            },
             "shadow_gate_15m": {"total_count": 120, "lift_vs_all_bps": 1.5},
             "paper_pnl_15m": {
                 "baseline": {"count": 50, "total_bps": -2.0},
@@ -270,6 +275,56 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
     assert "Готовность к реальным деньгам" in reply_text
     assert "ГОТОВО" in reply_text
     assert "НЕ ГОТОВО" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value={"model_gate_canary_enabled": False})
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
+            "last_ws_message_age_s": 0,
+            "last_confirmed_candle_age_s": 4,
+            "last_strategy_loop_at": "2026-06-12T10:00:00Z",
+            "hour_api_rejected": 0,
+            "hour_min_notional_rejected": 0,
+            "model": {"champion_version": "none"},
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_candle_1m": datetime.now(UTC) - timedelta(seconds=65),
+            "candles_by_interval": {"1": 40936, "5": 12974, "15": 11533, "60": 1584},
+            "feature_snapshots": 4978,
+            "prediction_outcomes": 37517,
+            "training_eligible_15m": 3378,
+            "latest_training_run": {"status": "COMPLETED"},
+            "latest_model_version": {
+                "version": "v20260612_0934_h15m_dnv1",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "WEAK", "walk_forward_expectancy_bps": -46.91},
+            },
+            "shadow_gate_15m": {"total_count": 111, "lift_vs_all_bps": 6.98},
+            "paper_pnl_15m": {
+                "baseline": {"count": 1000, "total_bps": -47434.6},
+                "model_gate": {"count": 6, "total_bps": -81.2},
+            },
+        }
+    )
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "НЕ ГОТОВО" in reply_text
+    assert "ПОЧТИ" not in reply_text
+    assert "Качество модели GOOD" in reply_text
+    assert "Walk-forward модели &gt; 0 bps" in reply_text
+    assert "Paper model-gate: 20+ сделок и PnL &gt; 0" in reply_text
 
 
 @pytest.mark.asyncio
