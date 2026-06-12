@@ -165,9 +165,7 @@ def test_symbol_select_menu_marks_selected_symbols() -> None:
 async def test_symbol_toggle_button_calls_controller() -> None:
     bot = _make_bot()
     assert bot._controller is not None
-    bot._controller.toggle_symbol = AsyncMock(
-        return_value="✅ <code>DOGEUSDT</code> добавлена"
-    )
+    bot._controller.toggle_symbol = AsyncMock(return_value="✅ <code>DOGEUSDT</code> добавлена")
     update = _fake_update()
 
     await bot._handle_symbol_button(update, "toggle:DOGEUSDT:0")
@@ -182,16 +180,10 @@ def test_control_menu_no_active_button() -> None:
     bot = _make_bot()
     markup = bot._control_menu()
     active_buttons = [
-        btn
-        for row in markup.inline_keyboard
-        for btn in row
-        if "active" in (btn.callback_data or "").lower()
+        btn for row in markup.inline_keyboard for btn in row if "active" in (btn.callback_data or "").lower()
     ]
     assert len(active_buttons) == 1
-    assert (
-        "заблокирован" in active_buttons[0].text.lower()
-        or "blocked" in active_buttons[0].text.lower()
-    )
+    assert "заблокирован" in active_buttons[0].text.lower() or "blocked" in active_buttons[0].text.lower()
 
 
 def test_control_menu_no_risk_escalation() -> None:
@@ -200,9 +192,7 @@ def test_control_menu_no_risk_escalation() -> None:
     markup = bot._control_menu()
     all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
     risk_buttons = [c for c in all_callbacks if c and c.startswith("risk:")]
-    assert not risk_buttons, (
-        f"Risk escalation buttons found in control menu: {risk_buttons}"
-    )
+    assert not risk_buttons, f"Risk escalation buttons found in control menu: {risk_buttons}"
 
 
 def test_control_menu_has_training_and_limits() -> None:
@@ -220,15 +210,8 @@ def test_control_menu_has_training_and_limits() -> None:
 
 def test_submenus_have_home_button() -> None:
     bot = _make_bot()
-    for markup in [
-        bot._control_menu(),
-        bot._canary_menu(),
-        bot._limits_menu(),
-        bot._symbol_select_menu(),
-    ]:
-        all_callbacks = [
-            btn.callback_data for row in markup.inline_keyboard for btn in row
-        ]
+    for markup in [bot._control_menu(), bot._canary_menu(), bot._limits_menu(), bot._symbol_select_menu()]:
+        all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
         assert "view:menu" in all_callbacks
 
 
@@ -298,9 +281,7 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
 async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
     bot = _make_bot()
     assert bot._controller is not None
-    bot._controller.runtime_settings = MagicMock(
-        return_value={"model_gate_canary_enabled": False}
-    )
+    bot._controller.runtime_settings = MagicMock(return_value={"model_gate_canary_enabled": False})
     bot._controller.diagnostics_provider = MagicMock(
         return_value={
             "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
@@ -351,12 +332,8 @@ async def test_canary_readiness_reports_not_ready_without_data() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.runtime_settings = MagicMock(return_value={})
-    bot._controller.diagnostics_provider = MagicMock(
-        return_value={"active_symbols": []}
-    )
-    bot._controller.db_diagnostics_provider = AsyncMock(
-        return_value={"connected": False}
-    )
+    bot._controller.diagnostics_provider = MagicMock(return_value={"active_symbols": []})
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value={"connected": False})
     update = _fake_update()
     ctx = type("_Ctx", (), {"args": []})()
 
@@ -417,9 +394,7 @@ async def test_limits_command_updates_safe_runtime_setting() -> None:
             "execution_candidates": 10,
         }
     )
-    bot._controller.set_runtime_setting = AsyncMock(
-        return_value="Max entries/min set to 2"
-    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Max entries/min set to 2")
     update = _fake_update()
     ctx = type("_Ctx", (), {"args": ["entries", "2"]})()
 
@@ -435,9 +410,7 @@ async def test_limit_button_updates_runtime_setting() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.runtime_settings = MagicMock(return_value={})
-    bot._controller.set_runtime_setting = AsyncMock(
-        return_value="Screener price cap set to 25"
-    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Screener price cap set to 25")
     update = _fake_update()
 
     await bot._handle_limit_button(update, "price_cap:25")
@@ -452,9 +425,7 @@ async def test_custom_feature_symbols_button_accepts_plain_number() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.runtime_settings = MagicMock(return_value={})
-    bot._controller.set_runtime_setting = AsyncMock(
-        return_value="Feature symbols set to 12"
-    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Feature symbols set to 12")
     update = _fake_update()
 
     await bot._handle_limit_button(update, "custom:feature_symbols")
@@ -468,9 +439,7 @@ async def test_custom_max_positions_button_accepts_plain_number() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.runtime_settings = MagicMock(return_value={})
-    bot._controller.set_runtime_setting = AsyncMock(
-        return_value="Max simultaneous positions set to 3"
-    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Max simultaneous positions set to 3")
     update = _fake_update()
 
     await bot._handle_limit_button(update, "custom:max_positions")
