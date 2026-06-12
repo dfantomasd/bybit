@@ -56,6 +56,18 @@ jobs:
         # Separate cleanup PR is tracked for full mypy green.
         continue-on-error: true
 
+      - name: Check .env.example covers all Settings fields
+        run: python scripts/generate_env_example.py
+        env:
+          BYBIT_API_KEY: test-key
+          BYBIT_API_SECRET: test-secret
+          POSTGRES_DSN: postgresql+asyncpg://trader:trader@localhost:5432/trader
+          REDIS_URL: redis://localhost:6379/0
+          TELEGRAM_BOT_TOKEN: "1234567890:test"
+          TELEGRAM_ALLOWED_CHAT_IDS: "[123]"
+          TRADING_MODE: TESTNET
+          LIVE_MODE: "false"
+
   # ---------------------------------------------------------------------------
   # Security scanning
   # ---------------------------------------------------------------------------
