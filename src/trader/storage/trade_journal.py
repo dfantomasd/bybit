@@ -1066,6 +1066,7 @@ class TradeJournal:
             WHERE po.net_return_bps IS NOT NULL
               AND po.label_schema_version = $1
               AND pe.model_version = 'RULE_BASELINE_V1'
+              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
               AND po.resolved_at >= date_trunc('day', now())
             """,
             LABEL_SCHEMA_VERSION,
@@ -1101,6 +1102,7 @@ class TradeJournal:
               AND po.horizon_minutes = $1
               AND po.label_schema_version = $3
               AND pe.model_version = 'RULE_BASELINE_V1'
+              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
               AND pe.created_at > now() - ($2::text || ' days')::interval
             GROUP BY 1, 2, 3
             """,
@@ -1524,6 +1526,7 @@ class TradeJournal:
                 FROM prediction_outcomes po
                 JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
                 WHERE pe.model_version = $1
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
                   AND po.net_return_bps IS NOT NULL
                   AND po.label_schema_version = $4
                   AND po.horizon_minutes = $3
@@ -1542,6 +1545,7 @@ class TradeJournal:
                 FROM prediction_outcomes po
                 JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
                 WHERE pe.model_version = $1
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
                   AND po.net_return_bps IS NOT NULL
                   AND po.label_schema_version = 'directional_net_v1'
                 ORDER BY po.resolved_at DESC NULLS LAST

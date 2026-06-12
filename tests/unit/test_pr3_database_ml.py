@@ -607,7 +607,7 @@ async def test_database_model_telegram_screen() -> None:
     # The method calls self._reply which calls message.reply_text with HTML parse mode.
     await bot._cmd_db_model(fake_update, fake_context)  # type: ignore[arg-type]
     text = fake_message.reply_text.await_args.args[0]
-    assert "Готово для обучения 15m" in text
+    assert "Готово для обучения (горизонт 15м)" in text
     assert "v20260607_1000" in text
     assert "Качество" in text
     assert "ХОРОШО" in text

@@ -1560,7 +1560,7 @@ class TelegramMonitorBot:
                 f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
-                f"Готово для обучения 15m: <code>{labelled_15m}</code>",
+                f"Готово для обучения (горизонт 15м): <code>{labelled_15m}</code>",
                 "",
                 "<b>Простыми словами</b>",
                 f"Данные: <code>{data_note}</code>",
@@ -1603,7 +1603,9 @@ class TelegramMonitorBot:
             lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
             # 1. Данные
             lbl_ok = int(labelled_15m or 0) >= 1000
-            lines.append(f"{'✅' if lbl_ok else '❌'} Данных 15m ≥ 1000 → сейчас: <code>{labelled_15m}</code>")
+            lines.append(
+                f"{'✅' if lbl_ok else '❌'} Семплов (горизонт 15м) ≥ 1000 → сейчас: <code>{labelled_15m}</code>"
+            )
             # 2. Модель обучена, quality GOOD
             trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
             lines.append(

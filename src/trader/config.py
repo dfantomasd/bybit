@@ -123,6 +123,15 @@ class Settings(BaseSettings):
     microprice features. Adds ~5-10 KB/s WS traffic per tracked symbol."""
 
     # ------------------------------------------------------------------
+    # Per-candle training sampler
+    # ------------------------------------------------------------------
+    CANDLE_SAMPLING_ENABLED: bool = True
+    """Record a feature snapshot + rule-direction baseline event on EVERY
+    confirmed 1m candle (decision=SHADOW_CANDLE), not only on trade signals.
+    Multiplies training-sample accumulation ~100x. Sampler events are excluded
+    from signal statistics (buckets, healthcheck, bootstrap baseline)."""
+
+    # ------------------------------------------------------------------
     # Regime-bucket performance gating
     # ------------------------------------------------------------------
     BUCKET_BLOCK_ENABLED: bool = True
