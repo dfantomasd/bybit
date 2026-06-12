@@ -18,7 +18,11 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import structlog
+
 from trader.data.orderbook import compute_depth_imbalance, compute_microprice
+
+log = structlog.get_logger(__name__)
 
 # Ring buffer of throttled snapshots (1/s → ~10 s of history)
 _HISTORY_SLOTS = 10
@@ -90,6 +94,13 @@ class OrderbookTracker:
 
         ts = now or datetime.now(tz=UTC)
         snap = ObSnapshot(ts=ts, imbalance_l5=imbalance, microprice_deviation_bps=micro_dev_bps)
+        if symbol not in self._latest:
+            log.info(
+                "orderbook.updated",
+                symbol=symbol,
+                imbalance_l5=round(imbalance, 4),
+                microprice_deviation_bps=round(micro_dev_bps, 3),
+            )
         self._latest[symbol] = snap
 
         history = self._history.setdefault(symbol, deque(maxlen=self._history_slots))

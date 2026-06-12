@@ -1474,6 +1474,13 @@ class TradingApplication:
             min_net_edge_pct=self._settings.MIN_EXPECTED_NET_EDGE_PCT,
             net_edge_safety_margin_pct=self._settings.NET_EDGE_SAFETY_MARGIN_PCT,
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
+            maker_timeout_s=self._settings.MAKER_TIMEOUT_SECONDS,
+            maker_ttl_s=self._settings.MAKER_TTL_SECONDS,
+            maker_allow_escalation=self._settings.MAKER_ALLOW_ESCALATION,
+            # Late-bound: the tracker is created when the public WS starts
+            imbalance_provider=lambda s: (
+                self._orderbook_tracker.latest_imbalance(s) if self._orderbook_tracker is not None else None
+            ),
         )
 
         # P0.2: Restore pending entries from durable storage before any new entries.

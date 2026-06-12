@@ -14,6 +14,7 @@ from typing import Any
 import structlog
 
 from trader.domain.enums import OrderStatus
+from trader.domain.errors import TradingSystemError
 from trader.domain.models import (
     Balance,
     InstrumentInfo,
@@ -302,6 +303,26 @@ class BybitAdapter:
             symbol=symbol,
             side=side,
         )
+
+    async def get_best_bid_ask(self, category: str, symbol: str) -> tuple[Decimal, Decimal]:
+        """Return (best_bid, best_ask) from the ticker.
+
+        Raises TradingSystemError when either side is unavailable — maker-first
+        pricing must never fall back to a guessed quote.
+        """
+        resp = await self._rest.get_tickers(category=category, symbol=symbol)
+        items = resp.get("result", {}).get("list", [])
+        if not items:
+            raise TradingSystemError(f"No ticker data for {symbol}", code="NO_TICKER")
+        ticker = items[0]
+        bid = Decimal(str(ticker.get("bid1Price") or "0"))
+        ask = Decimal(str(ticker.get("ask1Price") or "0"))
+        if bid <= 0 or ask <= 0 or ask <= bid:
+            raise TradingSystemError(
+                f"Invalid bid/ask for {symbol}: bid={bid} ask={ask}",
+                code="BAD_QUOTE",
+            )
+        return bid, ask
 
     # ------------------------------------------------------------------
     # Instruments
