@@ -35,6 +35,13 @@ from trader.domain.models import (
 
 log = structlog.get_logger(__name__)
 
+# A position absent from an exchange snapshot is removed from the registry
+# only when its entry is older than this. Covers the window between placing
+# an order and the exchange reflecting the position (partial fills, REST lag).
+# Keep small: an over-long grace would mask genuinely closed positions and
+# could double-enter after a real TP/SL closure.
+_SYNC_REMOVAL_GRACE_SECONDS = 3.0
+
 # Default cooldown between successful entries on the same symbol
 _DEFAULT_COOLDOWN_S = 300  # 5 minutes
 # Separate shorter cooldown after an API-level order failure
@@ -482,41 +489,77 @@ class ExecutionEngine:
         return len(self._open_positions)
 
     async def sync_positions(self) -> list[Any] | None:
-        """Sync open positions from the exchange into the local registry.
+        """Reconcile the local position registry with the exchange.
 
-        Call once at startup (after seeding candles) so the engine doesn't
-        open duplicate positions on restart.
+        Runs at startup, periodically, and on private-WS fills. The registry
+        mutation is serialised with ``submit`` under ``_submit_lock`` so a
+        concurrent snapshot cannot wipe an optimistically registered entry;
+        the REST fetch itself stays outside the lock to avoid blocking
+        trading on network latency.
         """
+        positions = await self._fetch_positions()
+        if positions is None:
+            return None
+        async with self._submit_lock:
+            await self._apply_position_snapshot(positions)
+        return positions
+
+    async def _sync_positions_locked(self) -> list[Any] | None:
+        """``sync_positions`` for callers already holding ``_submit_lock``."""
+        positions = await self._fetch_positions()
+        if positions is None:
+            return None
+        await self._apply_position_snapshot(positions)
+        return positions
+
+    async def _fetch_positions(self) -> list[Any] | None:
         try:
-            positions = await self._adapter.get_positions(self._category)
-            previous_symbols = set(self._open_positions)
-            exchange_symbols: set[str] = set()
-            refreshed_positions: dict[str, dict[str, Any]] = {}
-            for pos in positions:
-                if pos.size > Decimal("0"):
-                    exchange_symbols.add(pos.symbol)
-                    refreshed_positions[pos.symbol] = {
-                        "side": pos.side,
-                        "size": pos.size,
-                        "entry_price": pos.entry_price,
-                    }
-                    notional = pos.size * pos.entry_price
-                    await self._exposure.update_position(pos.symbol, pos.side.value, notional)
-            closed_symbols = previous_symbols - exchange_symbols
-            for symbol in closed_symbols:
-                await self._exposure.remove_position(symbol)
-                self._last_entry_at.pop(symbol, None)
-            self._open_positions = refreshed_positions
-            log.info(
-                "execution.positions_synced",
-                count=len(self._open_positions),
-                symbols=list(self._open_positions.keys()),
-                closed_symbols=sorted(closed_symbols),
-            )
-            return positions
+            return await self._adapter.get_positions(self._category)
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
             return None
+
+    async def _apply_position_snapshot(self, positions: list[Any]) -> None:
+        """Merge an exchange snapshot into the registry (never wholesale-replace).
+
+        A symbol disappears from the registry only when the exchange snapshot
+        does not list it AND its entry is older than the grace period — a
+        snapshot fetched milliseconds before a fill lands must not erase the
+        freshly opened position (that would release its exposure and allow a
+        duplicate entry on the next signal).
+        """
+        now = datetime.now(tz=UTC)
+        exchange_symbols: set[str] = set()
+        for pos in positions:
+            if pos.size > Decimal("0"):
+                exchange_symbols.add(pos.symbol)
+                self._open_positions[pos.symbol] = {
+                    "side": pos.side,
+                    "size": pos.size,
+                    "entry_price": pos.entry_price,
+                }
+                notional = pos.size * pos.entry_price
+                await self._exposure.update_position(pos.symbol, pos.side.value, notional)
+        closed_symbols: list[str] = []
+        kept_recent: list[str] = []
+        for symbol in list(self._open_positions):
+            if symbol in exchange_symbols:
+                continue
+            entered_at = self._last_entry_at.get(symbol)
+            if entered_at is not None and (now - entered_at).total_seconds() < _SYNC_REMOVAL_GRACE_SECONDS:
+                kept_recent.append(symbol)
+                continue
+            self._open_positions.pop(symbol, None)
+            self._last_entry_at.pop(symbol, None)
+            await self._exposure.remove_position(symbol)
+            closed_symbols.append(symbol)
+        log.info(
+            "execution.positions_synced",
+            count=len(self._open_positions),
+            symbols=list(self._open_positions.keys()),
+            closed_symbols=sorted(closed_symbols),
+            kept_recent=sorted(kept_recent),
+        )
 
     async def record_position_closed(self, symbol: str) -> None:
         """Call when a position is closed (e.g. TP/SL hit)."""
@@ -1247,7 +1290,7 @@ class ExecutionEngine:
                     )
                     return False
             try:
-                await self.sync_positions()
+                await self._sync_positions_locked()
             except Exception as exc:
                 log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
             if self.has_open_position(symbol):
@@ -1280,7 +1323,7 @@ class ExecutionEngine:
         # trip — a fill landing in that window would otherwise be doubled by
         # the taker order.
         try:
-            await self.sync_positions()
+            await self._sync_positions_locked()
         except Exception as exc:
             log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
         if self.has_open_position(symbol):
@@ -1345,7 +1388,7 @@ class ExecutionEngine:
                 still_open = any(str(o.get("orderLinkId")) == order_link_id for o in open_orders)
                 if not still_open:
                     try:
-                        await self.sync_positions()
+                        await self._sync_positions_locked()
                     except Exception as exc:
                         log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
                     return "filled" if self.has_open_position(symbol) else "gone"
