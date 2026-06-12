@@ -101,9 +101,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     SCALP_STRATEGY_ENABLED: bool = True
     """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
-    MAX_SPREAD_BPS_SCALP: float = 3.0
+    MAX_SPREAD_BPS_SCALP: float = 2.5
     """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
-    MIN_NET_SCALP_RETURN_PCT: float = 0.05
+    MIN_NET_SCALP_RETURN_PCT: float = 0.08
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
     SCALP_COOLDOWN_SECONDS: int = 60
     """Minimum seconds between scalp signals per symbol."""
@@ -114,6 +114,10 @@ class Settings(BaseSettings):
     SCALP_MIN_OB_IMBALANCE: float = 0.15
     """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
     >= +value, SELL needs <= -value). Missing/stale book data fails OPEN."""
+    TREND_MIN_ADX: float = 0.25
+    """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
+    TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
+    """Block fragile trend entries when funding and open interest context disagrees."""
 
     # ------------------------------------------------------------------
     # Orderbook microstructure feed
@@ -358,7 +362,20 @@ class Settings(BaseSettings):
     database means code execution in the trader. Empty = legacy plaintext."""
     MODEL_TYPE: str = "GBDT"
     """Challenger architecture: "GBDT" (gradient-boosted trees, stronger on
-    non-linear feature interactions) or "SGD" (linear, online-updateable)."""
+    non-linear feature interactions), "LOGREG" (regularized linear baseline),
+    or "SGD" (linear, online-updateable)."""
+    MODEL_CANDIDATES: str = "GBDT,LOGREG"
+    """CSV list of model families considered by offline walk-forward selection."""
+    MODEL_WF_FOLDS: int = 5
+    MODEL_WF_MIN_TRAIN_SAMPLES: int = 500
+    MODEL_THRESHOLD_GRID: str = "0,2,5,8,12"
+    """CSV label thresholds in bps evaluated during offline selection."""
+    MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
+    """Minimum model-pass observations expected before trusting promotion metrics."""
+    TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
+    TRAIN_MIN_BUCKET_SAMPLES: int = 50
+    TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
+    """Optional training filter: remove regime/hour buckets with stable negative expectancy."""
     MODEL_SHADOW_SCORING_ENABLED: bool = True
     """Always run shadow scoring even when live decisions disabled."""
     MODEL_AUTO_TRAIN_ENABLED: bool = True

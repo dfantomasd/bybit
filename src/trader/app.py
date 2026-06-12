@@ -3388,6 +3388,8 @@ class TradingApplication:
                 allow_short=True,
                 min_qty_usd=5.0,  # Bybit minimum notional is $5
                 max_risk_pct=0.01,  # 1% of balance per trade
+                min_adx=self._settings.TREND_MIN_ADX,
+                block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
             )
         ]
 

@@ -68,11 +68,15 @@ class EMAcrossoverStrategy(BaseStrategy):
         allow_short: bool = True,
         min_qty_usd: float = 5.0,
         max_risk_pct: float = 0.01,  # 1% of balance per trade
+        min_adx: float = 0.25,
+        block_negative_funding_oi: bool = True,
     ) -> None:
         self._symbol = symbol.upper() if symbol else None
         self._allow_short = allow_short
         self._min_qty_usd = min_qty_usd
         self._max_risk_pct = max_risk_pct
+        self._min_adx = min_adx
+        self._block_negative_funding_oi = block_negative_funding_oi
 
     @property
     def strategy_id(self) -> str:
@@ -106,6 +110,9 @@ class EMAcrossoverStrategy(BaseStrategy):
         macd_hist = f.get("macd_hist")
         volume_z = f.get("volume_zscore")
         atr_pct = f.get("atr_14_pct")
+        adx14 = f.get("adx_14")
+        funding_bps = f.get("funding_rate_bps_clipped", f.get("funding_rate_bps", 0.0)) or 0.0
+        oi_change_pct = f.get("oi_change_pct_60m_clipped", f.get("oi_change_pct_60m", 0.0)) or 0.0
 
         # All must be present
         if any(v is None for v in [ema9_dist, ema21_dist, ema9_slope, rsi14, macd_hist]):
@@ -124,6 +131,10 @@ class EMAcrossoverStrategy(BaseStrategy):
         else:
             return None  # need ATR for stop placement
 
+        if self._min_adx > 0:
+            if adx14 is None or adx14 < self._min_adx:
+                return None
+
         # Volume filter
         if volume_z is not None and volume_z < _VOLUME_ZSCORE_MIN:
             return None
@@ -136,6 +147,8 @@ class EMAcrossoverStrategy(BaseStrategy):
 
         # --- Long signal ---
         if ema9_above_ema21 and ema9_slope > _EMA_SLOPE_MIN:
+            if self._block_negative_funding_oi and funding_bps < -2.0 and oi_change_pct < -0.5:
+                return None
             if _RSI_LONG_MIN <= rsi14 <= _RSI_LONG_MAX and macd_hist > 0:
                 bonus_conditions = sum(
                     [

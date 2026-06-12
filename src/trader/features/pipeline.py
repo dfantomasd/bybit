@@ -13,6 +13,7 @@ Fallback: ``run()`` acts as a staleness watchdog that re-fires computation for a
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -320,6 +321,14 @@ class FeaturePipeline:
         else:
             missing.append("volume_ratio_sma20")
 
+        now = datetime.now(tz=UTC)
+        hour = now.hour
+        dow = now.weekday()
+        features["hour_sin"] = math.sin(2 * math.pi * hour / 24)
+        features["hour_cos"] = math.cos(2 * math.pi * hour / 24)
+        features["dow_sin"] = math.sin(2 * math.pi * dow / 7)
+        features["dow_cos"] = math.cos(2 * math.pi * dow / 7)
+
         # --- Orderbook microstructure ---
         # Always emitted with a presence flag so every symbol shares ONE feature
         # schema (training requires min_samples within a single schema bucket;
@@ -333,6 +342,7 @@ class FeaturePipeline:
             features["ob_data_present"] = 1.0 if present else 0.0
             features["ob_imbalance_l5"] = ob_imb if ob_imb is not None else 0.0
             features["microprice_deviation_bps"] = micro_dev if micro_dev is not None else 0.0
+            features["microprice_deviation_bps_clipped"] = max(-20.0, min(20.0, features["microprice_deviation_bps"]))
             features["ob_imbalance_trend_10s"] = imb_trend if imb_trend is not None else 0.0
 
         # --- Funding rate / open interest (positioning data) ---
@@ -347,6 +357,8 @@ class FeaturePipeline:
             features["mkt_data_present"] = 1.0 if stats else 0.0
             features["funding_rate_bps"] = stats["funding_rate_bps"] if stats else 0.0
             features["oi_change_pct_60m"] = stats["oi_change_pct_60m"] if stats else 0.0
+            features["funding_rate_bps_clipped"] = max(-10.0, min(10.0, features["funding_rate_bps"]))
+            features["oi_change_pct_60m_clipped"] = max(-5.0, min(5.0, features["oi_change_pct_60m"]))
 
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)
@@ -366,7 +378,7 @@ class FeaturePipeline:
 
         return FeatureVector(
             symbol=symbol,
-            timestamp=datetime.now(tz=UTC),
+            timestamp=now,
             values=values,
             feature_names=names,
             quality_score=quality,
