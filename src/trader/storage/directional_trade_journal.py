@@ -351,7 +351,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             LABEL_SCHEMA_VERSION,
         )
         result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
-        current_feature_schema_hash = str(rows[0]["feature_schema_hash"] or "") if rows else ""
+        current_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
         result["training_eligible_schema_15m"] = {
             "feature_schema_hash": current_feature_schema_hash,
             "sample_count": result["labelled_samples_15m"],
