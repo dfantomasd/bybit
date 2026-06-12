@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -103,6 +104,17 @@ async def test_capital_update_and_reservation_release_are_consistent():
     t.release_reservation("order-1")
     assert t.total_exposure_pct == Decimal("0")
     assert t.position_count == 0
+
+
+def test_capital_update_ignores_stale_timestamp():
+    t = _tracker(capital=Decimal("10000"))
+    fresh = datetime.now(tz=UTC)
+
+    t.update_capital(Decimal("20000"), updated_at=fresh)
+    assert t.to_dict()["total_capital"] == "20000"
+
+    t.update_capital(Decimal("5000"), updated_at=fresh - timedelta(seconds=1))
+    assert t.to_dict()["total_capital"] == "20000"
 
 
 @pytest.mark.asyncio

@@ -8,6 +8,7 @@ Provides typed, domain-level methods.
 from __future__ import annotations
 
 import time
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -141,8 +142,9 @@ class BybitAdapter:
         return Balance(
             account_type="UNIFIED",
             currency="USDT",
-            wallet_balance=0,  # type: ignore[arg-type]
-            available_balance=0,  # type: ignore[arg-type]
+            wallet_balance=Decimal("0"),
+            available_balance=Decimal("0"),
+            updated_at=datetime.now(tz=UTC),
         )
 
     # ------------------------------------------------------------------

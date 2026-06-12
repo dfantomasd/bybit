@@ -12,6 +12,7 @@ import hmac
 import json
 import time
 from collections import OrderedDict
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -40,6 +41,21 @@ def _d(value: Any) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _event_time(data: dict[str, Any], fallback: dict[str, Any] | None = None) -> datetime:
+    raw = data.get("updatedTime") or data.get("creationTime") or data.get("createdTime")
+    if raw is None and fallback is not None:
+        raw = fallback.get("updatedTime") or fallback.get("creationTime") or fallback.get("createdTime")
+    if raw is None:
+        return datetime.now(tz=UTC)
+    try:
+        millis = int(raw)
+        if millis > 0:
+            return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return datetime.now(tz=UTC)
+    return datetime.now(tz=UTC)
 
 
 class BybitPrivateWebSocket:
@@ -424,6 +440,7 @@ class BybitPrivateWebSocket:
                     wallet_balance=_d(coin.get("walletBalance", "0")),
                     available_balance=_d(coin.get("availableToWithdraw", coin.get("availableBalance", "0"))),
                     unrealised_pnl=_d(coin.get("unrealisedPnl", "0")),
+                    timestamp=_event_time(coin, item),
                 )
                 await self._emit(event)
 
