@@ -149,3 +149,53 @@ class TestFeaturePipeline:
         )
 
         assert pipeline.latest("BTCUSDT", "1") is None
+
+
+class _FakeMarketStats:
+    def __init__(self, stats):
+        self._stats = stats
+
+    def market_stats(self, symbol):
+        return self._stats
+
+
+class TestMarketStatsFeatures:
+    def test_features_present_with_stats(self):
+        store = _make_store(60)
+        source = _FakeMarketStats({"funding_rate_bps": 1.25, "oi_change_pct_60m": 0.04})
+        pipeline = FeaturePipeline(store, market_stats_source=source)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 1.0
+        assert f["funding_rate_bps"] == 1.25
+        assert f["oi_change_pct_60m"] == 0.04
+
+    def test_features_zero_with_presence_flag_when_no_stats(self):
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store, market_stats_source=_FakeMarketStats(None))
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 0.0
+        assert f["funding_rate_bps"] == 0.0
+        assert f["oi_change_pct_60m"] == 0.0
+
+    def test_schema_unchanged_without_source(self):
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        assert "mkt_data_present" not in vec.feature_names
+
+    def test_source_error_does_not_kill_compute(self):
+        class Exploding:
+            def market_stats(self, symbol):
+                raise RuntimeError("cache corrupted")
+
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store, market_stats_source=Exploding())
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 0.0

@@ -64,10 +64,12 @@ class FeaturePipeline:
         stale_threshold_s: float = 90.0,
         watchdog_interval_s: float = 60.0,
         orderbook_tracker: Any | None = None,
+        market_stats_source: Any | None = None,
     ) -> None:
         self._store = candle_store
         self._health = health_checker
         self._orderbook_tracker = orderbook_tracker
+        self._market_stats_source = market_stats_source
         self._stale_threshold_s = stale_threshold_s
         self._watchdog_interval_s = watchdog_interval_s
         self._stop_event = asyncio.Event()
@@ -332,6 +334,19 @@ class FeaturePipeline:
             features["ob_imbalance_l5"] = ob_imb if ob_imb is not None else 0.0
             features["microprice_deviation_bps"] = micro_dev if micro_dev is not None else 0.0
             features["ob_imbalance_trend_10s"] = imb_trend if imb_trend is not None else 0.0
+
+        # --- Funding rate / open interest (positioning data) ---
+        # Same presence-flag pattern as orderbook features: always emitted so
+        # every symbol shares ONE feature schema.
+        if self._market_stats_source is not None:
+            stats = None
+            try:
+                stats = self._market_stats_source.market_stats(symbol)
+            except Exception:  # noqa: BLE001 - cache read must never kill compute
+                stats = None
+            features["mkt_data_present"] = 1.0 if stats else 0.0
+            features["funding_rate_bps"] = stats["funding_rate_bps"] if stats else 0.0
+            features["oi_change_pct_60m"] = stats["oi_change_pct_60m"] if stats else 0.0
 
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)

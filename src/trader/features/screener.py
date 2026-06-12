@@ -24,14 +24,19 @@ opportunities → stricter selection — not more simultaneous positions.
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+# Open-interest history per symbol: one point per screener refresh (default
+# 900 s) — 8 points cover ~2 hours, enough for the 60-minute change feature.
+_OI_HISTORY_POINTS = 8
 
 # Quote coins we accept (USDT perpetual futures only)
 _ACCEPTED_QUOTE = "USDT"
@@ -239,6 +244,11 @@ class MarketScreener:
         self._stop_event = asyncio.Event()
         self._initialized = asyncio.Event()
 
+        # Funding/open-interest cache fed from the same tickers response the
+        # screener already fetches; consumed by FeaturePipeline as features.
+        self._funding_rates: dict[str, float] = {}
+        self._oi_history: dict[str, deque[tuple[datetime, float]]] = {}
+
         # Published state
         self._wide_universe: list[ScoredSymbol] = []
         self._feature_universe: list[str] = list(_FALLBACK_SYMBOLS)
@@ -386,12 +396,53 @@ class MarketScreener:
         except Exception as exc:
             log.warning("screener.refresh_failed", error=str(exc))
 
+    def market_stats(self, symbol: str) -> dict[str, float] | None:
+        """Return cached funding/open-interest stats for one symbol.
+
+        ``oi_change_pct_60m`` compares the latest open-interest value with the
+        oldest cached point at most ~2 hours back (screener refresh cadence).
+        Returns None until the first tickers refresh covered the symbol.
+        """
+        funding = self._funding_rates.get(symbol)
+        history = self._oi_history.get(symbol)
+        if funding is None or not history:
+            return None
+        now = datetime.now(tz=UTC)
+        latest_ts, latest_oi = history[-1]
+        if (now - latest_ts) > timedelta(hours=2):
+            return None  # stale cache (e.g. symbol dropped from tickers)
+        oi_change_pct = 0.0
+        if latest_oi > 0:
+            cutoff = latest_ts - timedelta(minutes=60)
+            past_oi = next((oi for ts, oi in history if ts >= cutoff and oi > 0), None)
+            if past_oi is not None and past_oi > 0:
+                oi_change_pct = (latest_oi - past_oi) / past_oi
+        return {
+            "funding_rate_bps": funding * 10_000.0,
+            "oi_change_pct_60m": oi_change_pct,
+        }
+
+    def _update_market_stats(self, tickers: list[dict[str, Any]]) -> None:
+        now = datetime.now(tz=UTC)
+        for t in tickers:
+            symbol = str(t.get("symbol", ""))
+            if not symbol.endswith(_ACCEPTED_QUOTE):
+                continue
+            self._funding_rates[symbol] = _safe_float(t.get("fundingRate"))
+            oi_value = _safe_float(t.get("openInterestValue"))
+            if oi_value <= 0:
+                oi_value = _safe_float(t.get("openInterest")) * _safe_float(t.get("lastPrice"))
+            history = self._oi_history.setdefault(symbol, deque(maxlen=_OI_HISTORY_POINTS))
+            history.append((now, oi_value))
+
     async def _screen(
         self,
     ) -> tuple[list[ScoredSymbol], list[str], list[str]]:
         """Fetch tickers, filter, score, and return three-tier result."""
         resp = await self._rest.get_tickers(category="linear")
         tickers: list[dict[str, Any]] = resp.get("result", {}).get("list", [])
+
+        self._update_market_stats(tickers)
 
         rejection_counts: dict[str, int] = {}
 
