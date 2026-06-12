@@ -779,10 +779,12 @@ class TradingApplication:
                     continue
 
                 # Get gate stats specific to this challenger model version
+                from trader.training.labels import LABEL_SCHEMA_VERSION
+
                 gate = await self._trade_journal.get_shadow_gate_stats(
                     model_version=challenger_version,
                     horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version="directional_net_v1",
+                    label_schema_version=LABEL_SCHEMA_VERSION,
                 )
                 total_count = int(gate.get("total_count", 0) or 0)
                 lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
@@ -3339,7 +3341,7 @@ class TradingApplication:
             # The model scores P(net-positive outcome) for the proposed direction.
             # When the score clears the gate threshold the signal becomes a model
             # decision: confidence = model score, rationale = "ML model decision".
-            # The side is kept — the directional_net_v1 label schema scores the
+            # The side is kept — the directional_net label schema scores the
             # proposal's own direction, so a high score IS the model's directional view.
             model_decision_meta: dict[str, Any] | None = None
             if (
@@ -3501,7 +3503,7 @@ class TradingApplication:
                     log.debug("ml_shadow.scoring_failed", symbol=proposal.symbol, error=str(_ml_exc))
 
                 # --- Champion Canary gate: live blocking only when explicitly enabled ---
-                # score_live() returns None when no compatible directional_net_v1 Champion exists.
+                # score_live() returns None when no compatible directional_net Champion exists.
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
                 if self._settings.MODEL_GATE_CANARY_ENABLED:
                     try:

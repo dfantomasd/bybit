@@ -833,7 +833,8 @@ class TelegramMonitorBot:
         fees = float(net_stats.get("total_fees_usd") or 0.0)
         funding = float(net_stats.get("total_funding_usd") or 0.0)
         slippage_est = float(net_stats.get("estimated_slippage_usd") or 0.0)
-        net = float(net_stats.get("net_pnl_usd") or (gross + fees + funding))
+        # Bybit closedPnl already includes fees and funding — it IS the net.
+        net = float(net_stats.get("net_pnl_usd") or gross)
         maker_pct = float(net_stats.get("maker_fill_pct") or 0.0)
         taker_pct = float(net_stats.get("taker_fill_pct") or 100.0)
         fee_drag = abs(fees) + abs(funding) + abs(slippage_est)
@@ -845,9 +846,9 @@ class TelegramMonitorBot:
         text = (
             "📈 <b>Чистый результат за сегодня UTC</b>\n\n"
             f"Закрытых сделок:   <code>{trade_count}</code>\n"
-            f"Валовый PnL:       <code>{gross:+.4f} USDT</code>\n"
-            f"Комиссии:          <code>{fees:+.4f} USDT</code>\n"
-            f"Фандинг:           <code>{funding:+.4f} USDT</code>\n"
+            f"Реализованный PnL: <code>{gross:+.4f} USDT</code>\n"
+            f"  вкл. комиссии:   <code>{fees:+.4f} USDT</code>\n"
+            f"  вкл. фандинг:    <code>{funding:+.4f} USDT</code>\n"
             f"Оценка проскальз.: <code>{slippage_est:+.4f} USDT</code>\n"
             "────────────────────────────\n"
             f"Чистый PnL:        <code>{net:+.4f} USDT</code>\n"
@@ -901,9 +902,9 @@ class TelegramMonitorBot:
         text = (
             "💸 <b>Экономика исполнения за сегодня UTC</b>\n\n"
             f"Закрытых сделок:   <code>{trade_count}</code>\n"
-            f"Валовый PnL:       <code>{gross:+.4f} USDT</code>\n"
-            f"Комиссии (факт):   <code>{fees:+.4f} USDT</code>\n"
-            f"Фандинг:           <code>{funding:+.4f} USDT</code>\n"
+            f"Реализованный PnL: <code>{gross:+.4f} USDT</code>\n"
+            f"  вкл. комиссии:   <code>{fees:+.4f} USDT</code>\n"
+            f"  вкл. фандинг:    <code>{funding:+.4f} USDT</code>\n"
             f"Чистый PnL:        <code>{net:+.4f} USDT</code>\n\n"
             f"Maker / Taker:     <code>{maker_pct:.1f}% / {taker_pct:.1f}%</code>\n\n"
             f"Отклонено (edge мал):     <code>{net_edge_rejected}</code>\n"
