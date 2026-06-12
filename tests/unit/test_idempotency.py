@@ -186,3 +186,24 @@ class TestStateTransitions:
         mgr._store["TN-260605-MOMO-PROP1234-abc123"]["status"] = OrderStatus.WS_CONFIRMED
         await mgr.mark_filled("TN-260605-MOMO-PROP1234-abc123")
         assert mgr.pending_count() == 1
+
+    async def test_terminal_orders_are_pruned_without_dropping_pending(self) -> None:
+        mgr = IdempotencyManager(max_terminal_retained=1)
+        first = _make_intent("TN-260605-MOMO-PROP0001-abc123")
+        second = _make_intent("TN-260605-MOMO-PROP0002-def456")
+        pending = _make_intent("TN-260605-MOMO-PROP0003-fedcba")
+        for intent in (first, second, pending):
+            await mgr.register_intent(intent)
+            await mgr.mark_submitted(intent.order_link_id)
+            await mgr.mark_confirmed(intent.order_link_id, f"ex-{intent.order_link_id[-6:]}")
+
+        mgr._store[first.order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+        await mgr.mark_filled(first.order_link_id)
+        mgr._store[second.order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+        await mgr.mark_filled(second.order_link_id)
+
+        states = mgr.all_states()
+        assert first.order_link_id not in states
+        assert states[second.order_link_id] == OrderStatus.FILLED.value
+        assert states[pending.order_link_id] == OrderStatus.REST_ACCEPTED.value
+        assert mgr.pending_count() == 1
