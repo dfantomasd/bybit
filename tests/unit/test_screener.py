@@ -200,3 +200,60 @@ class TestMarketScreener:
         screener.stop()
         await asyncio.gather(task, return_exceptions=True)
         assert "BTCUSDT" in screener.active_symbols
+
+
+class TestMarketStats:
+    @pytest.mark.asyncio
+    async def test_market_stats_cached_from_tickers(self):
+        ticker = _make_ticker("BTCUSDT", 500_000_000)
+        ticker["fundingRate"] = "0.0001"
+        ticker["openInterestValue"] = "1000000"
+        screener = MarketScreener(
+            rest_client=_make_rest([ticker]),
+            min_volume_usd=0.0,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
+        )
+        await screener._refresh()
+        stats = screener.market_stats("BTCUSDT")
+        assert stats is not None
+        assert stats["funding_rate_bps"] == pytest.approx(1.0)
+        assert stats["oi_change_pct_60m"] == 0.0  # single point — no change yet
+
+    @pytest.mark.asyncio
+    async def test_market_stats_oi_change_from_history(self):
+        ticker = _make_ticker("BTCUSDT", 500_000_000)
+        ticker["fundingRate"] = "0.0001"
+        ticker["openInterestValue"] = "1000000"
+        screener = MarketScreener(
+            rest_client=_make_rest([ticker]),
+            min_volume_usd=0.0,
+            max_spread_bps=100.0,
+            min_top_book_depth_usd=0.0,
+        )
+        await screener._refresh()
+        ticker["openInterestValue"] = "1100000"
+        await screener._refresh()
+        stats = screener.market_stats("BTCUSDT")
+        assert stats is not None
+        assert stats["oi_change_pct_60m"] == pytest.approx(0.10)
+
+    def test_market_stats_none_for_unknown_symbol(self):
+        screener = MarketScreener(rest_client=MagicMock())
+        assert screener.market_stats("NOPEUSDT") is None
+
+    @pytest.mark.asyncio
+    async def test_market_stats_cached_even_for_filtered_symbols(self):
+        # Symbol below volume filter must still get funding/OI cached —
+        # manual symbols outside the top-N need features too.
+        ticker = _make_ticker("TINYUSDT", 1_000)
+        ticker["fundingRate"] = "-0.0002"
+        ticker["openInterestValue"] = "5000"
+        screener = MarketScreener(
+            rest_client=_make_rest([ticker]),
+            min_volume_usd=20_000_000,
+        )
+        await screener._refresh()
+        stats = screener.market_stats("TINYUSDT")
+        assert stats is not None
+        assert stats["funding_rate_bps"] == pytest.approx(-2.0)

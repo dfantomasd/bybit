@@ -2506,6 +2506,7 @@ class TradingApplication:
             stale_threshold_s=90.0,
             watchdog_interval_s=60.0,
             orderbook_tracker=self._orderbook_tracker,
+            market_stats_source=self._screener,
         )
         self._regime_classifier = RegimeClassifier()
 
