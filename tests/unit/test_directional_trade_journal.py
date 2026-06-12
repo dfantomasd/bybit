@@ -103,6 +103,34 @@ async def test_record_signal_accepts_and_persists_model_decision_metadata() -> N
 
 
 @pytest.mark.asyncio
+async def test_record_signal_accepts_and_persists_blocked_reason() -> None:
+    journal = _SignalCaptureJournal()
+    proposal = TradeProposal(
+        strategy_id="trend",
+        symbol="ADAUSDT",
+        market_type=MarketType.LINEAR,
+        side=OrderSide.SELL,
+        requested_qty=Decimal("10"),
+        entry_price=Decimal("0.5"),
+        confidence=0.7,
+        regime=MarketRegime.BEAR_TREND,
+        rationale="blocked test",
+    )
+
+    await journal.record_signal(
+        proposal=proposal,
+        feature_vector=None,
+        regime_context=None,
+        blocked_reason="model_gate_canary_blocked",
+    )
+
+    assert len(journal.executed) == 1
+    query, args = journal.executed[0]
+    assert "blocked_reason" in query
+    assert args[-1] == "model_gate_canary_blocked"
+
+
+@pytest.mark.asyncio
 async def test_profitable_sell_is_persisted_as_positive_directional_outcome() -> None:
     entry_time = datetime(2026, 6, 8, 12, 0, tzinfo=UTC)
     journal = _FakeDirectionalJournal(
