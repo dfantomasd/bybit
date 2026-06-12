@@ -323,14 +323,17 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["prediction_outcomes"] = sum(result["prediction_outcomes_by_horizon"].values())
 
         # Mirror the training query's eligibility exactly (threshold, signal,
-        # training_eligible, one sample per candle) — otherwise this counter
-        # overstates progress versus what train.py will actually accept.
+        # training_eligible, one sample per candle). Training requires the
+        # minimum WITHIN ONE feature_schema_hash, so report the largest single
+        # schema bucket — summing across schemas overstates progress and makes
+        # the auto-trainer fire prematurely (then fail on "insufficient
+        # compatible samples").
         rows = await self._fetch(
             """
-            SELECT count(*) AS cnt
+            SELECT feature_schema_hash, count(*) AS cnt
             FROM (
                 SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
-                       fs.snapshot_id
+                       fs.snapshot_id, fs.feature_schema_hash
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
@@ -343,10 +346,18 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
             ) deduped
+            GROUP BY feature_schema_hash
+            ORDER BY cnt DESC
             """,
             LABEL_SCHEMA_VERSION,
         )
         result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+        result["labelled_samples_15m_by_schema"] = {
+            str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows
+        }
+        # The auto-trainer gate reads training_eligible_15m — keep it in sync
+        # with the per-schema maximum, not the base class's cross-schema union.
+        result["training_eligible_15m"] = result["labelled_samples_15m"]
 
         rows = await self._fetch(
             """
