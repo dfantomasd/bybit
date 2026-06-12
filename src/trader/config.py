@@ -166,7 +166,7 @@ class Settings(BaseSettings):
     """When the model exists but its score is below the gate threshold, keep the
     rule-based proposal instead of dropping it (hybrid mode fallback)."""
 
-    ENTRY_ORDER_MODE: str = "MARKET"
+    ENTRY_ORDER_MODE: str = "MAKER_FIRST"
     """MARKET or MAKER_FIRST. MAKER_FIRST places a POST_ONLY limit at the best
     bid/ask first (maker fee/rebate), then escalates to a market order or aborts
     after MAKER_TIMEOUT_SECONDS — see MAKER_* settings."""
