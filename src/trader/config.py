@@ -352,6 +352,10 @@ class Settings(BaseSettings):
     Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
+    MODEL_ENCRYPT_KEY: SecretStr = SecretStr("")
+    """Fernet key (or arbitrary passphrase) for encrypting model artifacts at
+    rest in Postgres. Artifacts are pickle — without encryption a compromised
+    database means code execution in the trader. Empty = legacy plaintext."""
     MODEL_TYPE: str = "GBDT"
     """Challenger architecture: "GBDT" (gradient-boosted trees, stronger on
     non-linear feature interactions) or "SGD" (linear, online-updateable)."""

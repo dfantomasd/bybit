@@ -28,6 +28,62 @@ log = structlog.get_logger(__name__)
 
 LEGACY_LABEL_SCHEMA_VERSION = "legacy_unknown"
 
+# Encrypted artifact marker. joblib payloads are pickle, and pickle from a
+# compromised database is remote code execution inside the trader process —
+# so artifacts are encrypted at rest when MODEL_ENCRYPT_KEY is set.
+_ARTIFACT_MAGIC = b"FERNET1:"
+
+
+def _artifact_cipher() -> Any | None:
+    """Return a Fernet cipher derived from MODEL_ENCRYPT_KEY, or None.
+
+    Accepts either a ready urlsafe-base64 Fernet key or an arbitrary
+    passphrase (derived deterministically via SHA-256).
+    """
+    import base64
+    import os
+
+    raw = os.environ.get("MODEL_ENCRYPT_KEY", "").strip()
+    if not raw:
+        return None
+    try:
+        from cryptography.fernet import Fernet
+    except ImportError:
+        log.warning("model_artifact.cryptography_unavailable")
+        return None
+    try:
+        return Fernet(raw.encode())
+    except ValueError:
+        derived = base64.urlsafe_b64encode(hashlib.sha256(raw.encode()).digest())
+        return Fernet(derived)
+
+
+def encrypt_artifact(data: bytes) -> bytes:
+    """Encrypt a serialized model when MODEL_ENCRYPT_KEY is configured."""
+
+    cipher = _artifact_cipher()
+    if cipher is None:
+        log.warning("model_artifact.saved_unencrypted hint=set_MODEL_ENCRYPT_KEY")
+        return data
+    return _ARTIFACT_MAGIC + cipher.encrypt(data)
+
+
+def decrypt_artifact(data: bytes) -> bytes:
+    """Decrypt an artifact blob; legacy plain blobs pass through unchanged."""
+
+    if not data.startswith(_ARTIFACT_MAGIC):
+        return data  # legacy unencrypted artifact
+    cipher = _artifact_cipher()
+    if cipher is None:
+        raise RuntimeError("artifact is encrypted but MODEL_ENCRYPT_KEY is not set")
+    from cryptography.fernet import InvalidToken
+
+    try:
+        return cipher.decrypt(bytes(data[len(_ARTIFACT_MAGIC) :]))
+    except InvalidToken as exc:
+        raise RuntimeError("artifact decryption failed: wrong MODEL_ENCRYPT_KEY") from exc
+
+
 try:
     from sklearn.linear_model import SGDClassifier
     from sklearn.preprocessing import StandardScaler
@@ -236,13 +292,13 @@ class ChallengerModel:
             },
             buf,
         )
-        return buf.getvalue()
+        return encrypt_artifact(buf.getvalue())
 
     @classmethod
     def from_bytes(cls, data: bytes, version: str) -> ChallengerModel:
         """Deserialize model from bytes."""
 
-        buf = io.BytesIO(data)
+        buf = io.BytesIO(decrypt_artifact(data))
         payload = joblib.load(buf)
         meta = payload.get("meta", {})
         model = cls(
