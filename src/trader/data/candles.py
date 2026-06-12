@@ -145,4 +145,3 @@ def candle_from_kline_event(event: object) -> Candle:
         volume=float(event.volume),  # type: ignore[attr-defined]
         confirm=event.confirm,  # type: ignore[attr-defined]
     )
-

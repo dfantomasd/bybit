@@ -429,8 +429,8 @@ class Settings(BaseSettings):
     RECONCILIATION_INTERVAL_SECONDS: int = 30
     POSITION_SYNC_INTERVAL_SECONDS: int = 30
     """How often to sync exchange positions into the local execution/risk state."""
-    HEALTH_CHECK_INTERVAL_SECONDS: int = 15  # reserved: health-check polling cadence (not yet wired)
-    DATA_STALENESS_THRESHOLD_SECONDS: int = 5  # reserved: staleness alert thresholds (not yet wired)
+    HEALTH_CHECK_INTERVAL_SECONDS: int = 15
+    DATA_STALENESS_THRESHOLD_SECONDS: int = 5
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
 
@@ -660,4 +660,3 @@ RISK_PROFILE_MAP: dict[RiskProfile, RiskProfileConfig] = {
 def get_risk_profile_config(profile: RiskProfile) -> RiskProfileConfig:
     """Return the ``RiskProfileConfig`` for the given profile."""
     return RISK_PROFILE_MAP[profile]
-
