@@ -2415,7 +2415,7 @@ class TradingApplication:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._shutdown_event.wait()),
+                    self._shutdown_event.wait(),
                     timeout=interval,
                 )
             except TimeoutError:
@@ -2495,7 +2495,7 @@ class TradingApplication:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._shutdown_event.wait()),
+                    self._shutdown_event.wait(),
                     timeout=interval,
                 )
             except TimeoutError:
@@ -2524,7 +2524,7 @@ class TradingApplication:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._shutdown_event.wait()),
+                    self._shutdown_event.wait(),
                     timeout=interval,
                 )
             except TimeoutError:
@@ -3010,7 +3010,7 @@ class TradingApplication:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._shutdown_event.wait()),
+                    self._shutdown_event.wait(),
                     timeout=interval,
                 )
             except TimeoutError:
@@ -3273,7 +3273,7 @@ class TradingApplication:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._shutdown_event.wait()),
+                    self._shutdown_event.wait(),
                     timeout=_SUPERVISOR_CHECK_INTERVAL,
                 )
             except TimeoutError:
@@ -3835,7 +3835,7 @@ class TradingApplication:
 
                 try:
                     await asyncio.wait_for(
-                        asyncio.shield(self._shutdown_event.wait()),
+                        self._shutdown_event.wait(),
                         timeout=_STRATEGY_LOOP_INTERVAL,
                     )
                 except TimeoutError:

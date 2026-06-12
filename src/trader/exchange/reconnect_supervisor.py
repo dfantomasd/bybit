@@ -153,7 +153,7 @@ class ReconnectSupervisor:
             log.info("ws.reconnect_backoff", wait_seconds=round(wait, 2), attempt=attempt)
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=wait,
                 )
                 # stop_event fired during wait

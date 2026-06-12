@@ -195,7 +195,7 @@ class ReconciliationService:
                 self._log.error("reconciliation.periodic_error", error=str(exc))
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=float(interval_seconds),
                 )
                 break  # stop_event fired
