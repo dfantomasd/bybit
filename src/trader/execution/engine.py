@@ -299,6 +299,12 @@ class ExecutionEngine:
                     error=str(_res_exc),
                 )
 
+    def _release_exposure_reservation(self, proposal: TradeProposal) -> None:
+        """Release the RiskManager's pre-submit exposure reservation."""
+        release = getattr(self._exposure, "release_reservation", None)
+        if callable(release):
+            release(str(proposal.proposal_id))
+
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
         return symbol in self._pending_entry_symbols.values()
@@ -772,6 +778,7 @@ class ExecutionEngine:
 
         if not approved:
             return decision
+        exposure_reserved = True
 
         # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
         if not self._shadow_mode:
@@ -783,6 +790,17 @@ class ExecutionEngine:
                     symbol=symbol,
                     side=proposal.side.value,
                 )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
+                return None
+            if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
+                log.warning(
+                    "execution.rejected_no_entry_price_for_net_edge",
+                    symbol=symbol,
+                    side=proposal.side.value,
+                )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
                 return None
 
             # Fetch fee rates; fall back to conservative default if unavailable
@@ -858,6 +876,8 @@ class ExecutionEngine:
                     net_edge_pct=float(round(net_edge_pct, 4)),
                     required_min_net_edge_pct=float(min_edge),
                 )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
                 return None
 
         # 5. Build OrderIntent ─────────────────────────────────────────
@@ -914,6 +934,8 @@ class ExecutionEngine:
                             executable_notional=str(executable_notional),
                             exchange_min=str(exchange_min),
                         )
+                        self._release_exposure_reservation(proposal)
+                        exposure_reserved = False
                         return None
 
                     if executable_notional < sizing_target:
@@ -946,6 +968,8 @@ class ExecutionEngine:
                             )
                         except Exception as _journal_exc:  # noqa: BLE001
                             log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
             # P0.1: Durable write CREATED_LOCAL before any REST call.
             if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -966,6 +990,8 @@ class ExecutionEngine:
                         order_link_id=intent.order_link_id,
                         error=str(_durable_exc),
                     )
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
 
             # P0.3: Register pending entry slot (with symbol for screener protection)
@@ -985,10 +1011,14 @@ class ExecutionEngine:
             if self._is_canary:
                 if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
                     await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     log.warning("canary.blocked_max_positions_pre_rest", symbol=symbol)
                     return None
                 if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
                     await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     log.warning("canary.blocked_max_exposure_pre_rest", symbol=symbol)
                     return None
 
@@ -1012,11 +1042,15 @@ class ExecutionEngine:
                         error=str(_durable_exc),
                     )
                     await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
 
             if self._entry_order_mode == "MAKER_FIRST":
                 entered = await self._execute_maker_first(intent, proposal, decision, instrument_info)
                 if not entered:
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
             else:
                 try:
@@ -1045,6 +1079,8 @@ class ExecutionEngine:
                 except Exception as exc:
                     self._diag_order_failed += 1
                     await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     # Record failure timestamp (NOT an entry cooldown — separate state)
                     self._last_failure_at[symbol] = datetime.now(tz=UTC)
                     log.error(
@@ -1085,6 +1121,8 @@ class ExecutionEngine:
 
         if notional > Decimal("0"):
             await self._exposure.update_position(symbol, proposal.side.value, notional)
+        if exposure_reserved:
+            self._release_exposure_reservation(proposal)
 
         if not self._shadow_mode:
             log.info(
