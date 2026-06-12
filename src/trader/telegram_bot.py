@@ -57,6 +57,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
