@@ -23,9 +23,9 @@ from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps, build_dir
 
 log = structlog.get_logger(__name__)
 
-DEFAULT_TAKER_FEE_BPS = 5.5  # 0.055% taker × 2 legs = 11 bps round trip
+DEFAULT_TAKER_FEE_BPS = 5.5  # 0.055% taker x 2 legs = 11 bps round trip
 DEFAULT_SPREAD_BPS = 8.0  # max_spread_bps from config
-DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0  # expected_slippage_pct × 2 legs = 6 bps
+DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0  # expected_slippage_pct x 2 legs = 6 bps
 DEFAULT_FUNDING_BPS = 1.0  # funding_buffer_pct
 DEFAULT_SAFETY_MARGIN_BPS = 5.0  # mirrors net_edge_safety_margin_pct in engine
 
@@ -325,9 +325,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # Mirror the training query's eligibility exactly (threshold, signal,
         # training_eligible, one sample per candle). Training requires the
         # minimum WITHIN ONE feature_schema_hash, so report the largest single
-        # schema bucket — summing across schemas overstates progress and makes
-        # the auto-trainer fire prematurely (then fail on "insufficient
-        # compatible samples").
+        # schema bucket; summing across schemas overstates progress and makes
+        # the auto-trainer fire prematurely.
         rows = await self._fetch(
             """
             SELECT feature_schema_hash, count(*) AS cnt
@@ -352,16 +351,31 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             LABEL_SCHEMA_VERSION,
         )
         result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+        current_feature_schema_hash = str(rows[0]["feature_schema_hash"] or "") if rows else ""
+        result["training_eligible_schema_15m"] = {
+            "feature_schema_hash": current_feature_schema_hash,
+            "sample_count": result["labelled_samples_15m"],
+            "horizon_minutes": 15,
+            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "label_threshold_bps": 5.0,
+        }
         result["labelled_samples_15m_by_schema"] = {
             str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows
         }
-        # The auto-trainer gate reads training_eligible_15m — keep it in sync
+        # The auto-trainer gate reads training_eligible_15m; keep it in sync
         # with the per-schema maximum, not the base class's cross-schema union.
         result["training_eligible_15m"] = result["labelled_samples_15m"]
 
         rows = await self._fetch(
             """
-            SELECT version, status, training_samples, metrics, training_finished_at, created_at
+            SELECT
+                version,
+                status,
+                training_samples,
+                metrics,
+                COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                training_finished_at,
+                created_at
             FROM model_versions
             WHERE artifact IS NOT NULL
               AND COALESCE(metrics->>'label_schema_version', '') = $1
@@ -370,11 +384,29 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             LABEL_SCHEMA_VERSION,
         )
-        result["latest_model_version"] = dict(rows[0]) if rows else {}
+        latest_model = dict(rows[0]) if rows else {}
+        latest_model_schema_hash = str(latest_model.get("feature_schema_hash") or "")
+        if latest_model and current_feature_schema_hash and latest_model_schema_hash != current_feature_schema_hash:
+            latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
+            latest_model["training_samples"] = 0
+            latest_model["training_samples_compatible"] = 0
+            latest_model["schema_compatible"] = False
+        elif latest_model:
+            latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
+            latest_model["training_samples_compatible"] = latest_model["actual_training_samples"]
+            latest_model["schema_compatible"] = True
+        result["latest_model_version"] = latest_model
 
         rows = await self._fetch(
             """
-            SELECT version, status, training_samples, metrics, training_finished_at, created_at
+            SELECT
+                version,
+                status,
+                training_samples,
+                metrics,
+                COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                training_finished_at,
+                created_at
             FROM model_versions
             WHERE status = 'CHAMPION'
               AND artifact IS NOT NULL
