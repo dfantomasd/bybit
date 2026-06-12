@@ -172,11 +172,23 @@ class BybitPublicWebSocket:
                 watchdog_task = asyncio.create_task(self._watchdog_loop())
 
                 try:
+                    _err_backoff = 0.0
                     async for raw in ws:
                         if self._stop_event.is_set():
                             break
                         self._last_message_ts = time.monotonic()
-                        await self._handle_message(raw)
+                        try:
+                            await self._handle_message(raw)
+                            _err_backoff = 0.0
+                        except Exception as exc:
+                            # Per-message error: back off then continue; don't kill the connection.
+                            _err_backoff = min(_err_backoff * 2 + 0.1, 5.0)
+                            self._log.warning(
+                                "ws_public.handle_error",
+                                error=str(exc),
+                                backoff=round(_err_backoff, 2),
+                            )
+                            await asyncio.sleep(_err_backoff)
                 except Exception as exc:
                     self._log.warning("ws_public.recv_error", error=str(exc))
                 finally:
