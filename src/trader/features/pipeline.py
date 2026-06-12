@@ -165,7 +165,7 @@ class FeaturePipeline:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=self._watchdog_interval_s,
                 )
             except TimeoutError:

@@ -311,7 +311,7 @@ class MarketScreener:
                 import asyncio
 
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=self._interval,
                 )
             except TimeoutError:
