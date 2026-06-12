@@ -106,6 +106,8 @@ class TradingApplication:
         # Regime-bucket expectancy stats: {(regime, volatility, hour): (avg_bps, count)}
         self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
         self._bucket_stats_refreshed_at: datetime | None = None
+        # Per-candle training sampler: last sampled candle open_time per symbol
+        self._last_candle_sample_at: dict[str, datetime] = {}
         self._strategy_ensemble: Any | None = None
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
@@ -1974,7 +1976,11 @@ class TradingApplication:
                             self._last_confirmed_candle_at = datetime.now(tz=UTC)
                             # Event-driven feature recompute for this (symbol, interval)
                             if self._feature_pipeline is not None:
-                                await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
+                                vec = await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
+                                # Per-candle training sampler: a labelled sample per
+                                # confirmed 1m candle instead of per trade signal
+                                if vec is not None:
+                                    await self._sample_confirmed_candle(event.symbol, event.interval, vec)
 
                             # Persist confirmed candle to PostgreSQL (best-effort)
                             if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -2818,6 +2824,69 @@ class TradingApplication:
     def _record_diag(self, event: str) -> None:
         """Record a diagnostics event with the current timestamp."""
         self._diag_events.append((datetime.now(tz=UTC), event))
+
+    async def _sample_confirmed_candle(self, symbol: str, interval: str, vec: Any) -> None:
+        """Record a training sample on every confirmed 1m candle.
+
+        Writes a feature snapshot plus a RULE_BASELINE_V1 prediction event whose
+        direction is the rule trend (EMA9 vs EMA21) and decision=SHADOW_CANDLE.
+        The outcome resolver labels these like any other event, multiplying
+        training-sample accumulation ~100x versus signal-only sampling.
+        SHADOW_CANDLE events are excluded from signal statistics.
+        """
+        assert self._settings is not None
+        if (
+            not self._settings.CANDLE_SAMPLING_ENABLED
+            or interval != _WS_INTERVAL
+            or self._trade_journal is None
+            or not self._trade_journal.is_enabled
+        ):
+            return
+        try:
+            f = dict(zip(vec.feature_names, vec.values, strict=True))
+            ema9 = f.get("ema_9")
+            ema21 = f.get("ema_21")
+            if ema9 is None or ema21 is None:
+                return
+            # ema_* features are normalised distances to close; their ordering
+            # matches the raw EMA ordering, so this is the rule trend direction.
+            side = "Buy" if ema9 > ema21 else "Sell"
+
+            candles = self._candle_store.confirmed(symbol, interval) if self._candle_store else []
+            if not candles:
+                return
+            candle_open_time = candles[-1].open_time
+            # One sample per candle per symbol (Bybit can re-send confirms)
+            if self._last_candle_sample_at.get(symbol) == candle_open_time:
+                return
+            self._last_candle_sample_at[symbol] = candle_open_time
+
+            import hashlib
+            import json as _json
+
+            schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+            snapshot_id = await self._trade_journal.record_feature_snapshot(
+                symbol=symbol,
+                interval=interval,
+                candle_open_time=candle_open_time,
+                feature_schema_hash=schema_hash,
+                feature_names=vec.feature_names,
+                feature_values=vec.values,
+            )
+            if not snapshot_id:
+                return
+            await self._trade_journal.record_prediction_event(
+                symbol=symbol,
+                interval=interval,
+                model_version="RULE_BASELINE_V1",
+                score=0.5,
+                strategy_signal=side,
+                decision="SHADOW_CANDLE",
+                feature_snapshot_id=snapshot_id,
+                metadata={"source": "candle_sampler"},
+            )
+        except Exception as exc:
+            log.debug("candle_sampler.failed", symbol=symbol, error=str(exc))
 
     def _bucket_blocked(self, regime_ctx: Any) -> bool:
         """True when the current (regime, volatility, UTC hour) bucket is toxic.

@@ -263,7 +263,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             # accumulation progress per feature schema.
             schema_rows = await pool.fetch(
                 """
-                SELECT fs.feature_schema_hash, count(*) AS cnt
+                SELECT fs.feature_schema_hash,
+                       count(DISTINCT (fs.symbol, fs.interval, fs.candle_open_time)) AS cnt
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
@@ -286,7 +287,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             top = ", ".join(f"{str(r['feature_schema_hash'])[:8]}:{r['cnt']}" for r in schema_rows[:4])
             msg = (
                 f"Insufficient compatible samples: no feature schema has {min_samples} yet "
-                f"(labelled total={total_labelled}, per-schema=[{top or 'none'}]); "
+                f"(unique labelled candles={total_labelled}, per-schema=[{top or 'none'}]); "
                 f"schema={LABEL_SCHEMA_VERSION}, threshold={label_bps_threshold:g}bps, "
                 f"horizon={horizon_minutes}m"
             )
