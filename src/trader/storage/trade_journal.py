@@ -13,6 +13,11 @@ import asyncpg
 import structlog
 
 from trader.domain.models import FeatureVector, RegimeContext, RiskDecision, TradeProposal
+from trader.training.labels import (
+    LABEL_SCHEMA_VERSION,
+    directional_excursions_bps,
+    directional_return_bps,
+)
 
 log = structlog.get_logger(__name__)
 
@@ -713,7 +718,9 @@ class TradeJournal:
     ) -> dict[str, Any]:
         """Compute today's net PnL from closed_pnl + account_transaction_events.
 
-        Sign convention: profit positive, loss negative, fees negative, funding as-is.
+        Sign convention: profit positive, loss negative; fees/funding are returned
+        as costs (negative = paid). net_pnl_usd equals the closedPnl sum because
+        Bybit's closedPnl already includes trading fees and funding.
         Returns an empty dict with zeros when DB is not enabled.
         """
 
@@ -736,7 +743,7 @@ class TradeJournal:
             return zero
 
         if day_utc is None:
-            day_utc = date.today()  # UTC
+            day_utc = datetime.now(tz=UTC).date()  # true UTC day, independent of container TZ
 
         day_start = datetime(day_utc.year, day_utc.month, day_utc.day, tzinfo=UTC)
         day_end = day_start + timedelta(days=1)
@@ -795,8 +802,14 @@ class TradeJournal:
             maker_pct = (maker_count / total_fills * 100.0) if total_fills > 0 else 0.0
             taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 100.0
 
-            # Net PnL = gross + fees (fees are negative from Bybit) + funding
-            net_pnl = gross_pnl + total_fees + total_funding
+            # Bybit closedPnl ALREADY nets out open/close fees and funding
+            # (help center: Closed P&L = position P&L - fees - funding), so it
+            # IS the realized net result — never add costs to it again.
+            # Transaction-log fee/funding are positive-when-paid; normalise to
+            # the "cost is negative" convention for display.
+            net_pnl = gross_pnl
+            total_fees = -total_fees
+            total_funding = -total_funding
 
             return {
                 "closed_trade_count": trade_count,
@@ -1021,16 +1034,19 @@ class TradeJournal:
         for r in rows:
             entry = float(r["avg_entry_price"] or 0)
             exit_ = float(r["avg_exit_price"] or 0)
+            # Bybit closed-pnl `side` is the side of the CLOSING order: a long
+            # position is closed by Sell, a short by Buy.
+            closing_side = str(r["side"] or "").upper()
+            position = "LONG" if closing_side == "SELL" else ("SHORT" if closing_side == "BUY" else "?")
             net_bps: float | None = None
             if entry > 0 and exit_ > 0:
-                direction = 1.0 if str(r["side"] or "").upper() in ("BUY", "SELL_CLOSE") else -1.0
-                # closed_pnl side is the closing side; entry/exit prices carry direction info
+                direction = 1.0 if position == "LONG" else -1.0
                 net_bps = (exit_ - entry) / entry * 10_000 * direction
             result.append(
                 {
                     "created_at": r["created_at"],
                     "symbol": r["symbol"],
-                    "side": r["side"],
+                    "side": position,
                     "qty": float(r["qty"] or 0),
                     "entry": entry,
                     "exit": exit_,
@@ -1048,10 +1064,11 @@ class TradeJournal:
             FROM prediction_outcomes po
             JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
             WHERE po.net_return_bps IS NOT NULL
-              AND po.label_schema_version = 'directional_net_v1'
+              AND po.label_schema_version = $1
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND po.resolved_at >= date_trunc('day', now())
-            """
+            """,
+            LABEL_SCHEMA_VERSION,
         )
         if rows and rows[0]["avg_bps"] is not None:
             return float(rows[0]["avg_bps"])
@@ -1082,12 +1099,14 @@ class TradeJournal:
             JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
             WHERE po.net_return_bps IS NOT NULL
               AND po.horizon_minutes = $1
+              AND po.label_schema_version = $3
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND pe.created_at > now() - ($2::text || ' days')::interval
             GROUP BY 1, 2, 3
             """,
             horizon_minutes,
             str(lookback_days),
+            LABEL_SCHEMA_VERSION,
         )
         return {
             (str(r["regime"]), str(r["volatility"]), int(r["hour"])): (
@@ -1332,7 +1351,7 @@ class TradeJournal:
         max_favorable_excursion_bps: float,
         max_adverse_excursion_bps: float,
         label: int,
-        label_schema_version: str = "directional_net_v1",
+        label_schema_version: str = LABEL_SCHEMA_VERSION,
     ) -> None:
         """Write or update outcome label for a prediction."""
         await self._execute(
@@ -1378,6 +1397,7 @@ class TradeJournal:
             SELECT
                 pe.prediction_id,
                 pe.symbol,
+                pe.strategy_signal,
                 fs.candle_open_time AS entry_time
             FROM prediction_events pe
             JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
@@ -1387,6 +1407,7 @@ class TradeJournal:
             WHERE po.prediction_id IS NULL
               AND pe.created_at < now() - ($1 * interval '1 minute')
               AND pe.feature_snapshot_id IS NOT NULL
+              AND pe.strategy_signal IN ('Buy', 'Sell')
             LIMIT $2
             """,
             horizon_minutes,
@@ -1397,6 +1418,7 @@ class TradeJournal:
         for row in rows:
             prediction_id = str(row["prediction_id"])
             symbol = row["symbol"]
+            side = str(row["strategy_signal"])
             entry_time = row["entry_time"]
 
             # Entry price: must be the exact confirmed candle that closed at the signal time.
@@ -1436,9 +1458,15 @@ class TradeJournal:
             horizon_high = float(horizon_rows[0]["high"])
             horizon_low = float(horizon_rows[0]["low"])
 
-            net_return_bps = (horizon_close - entry_close) / entry_close * 10_000
-            max_fav = (horizon_high - entry_close) / entry_close * 10_000
-            max_adv = (horizon_low - entry_close) / entry_close * 10_000
+            # Canonical directional math (labels.py): a profitable Sell yields a
+            # POSITIVE return when price falls — never label raw price moves.
+            net_return_bps = directional_return_bps(side=side, entry_price=entry_close, exit_price=horizon_close)
+            max_fav, max_adv = directional_excursions_bps(
+                side=side,
+                entry_price=entry_close,
+                highs=[horizon_high],
+                lows=[horizon_low],
+            )
             label = 1 if net_return_bps > label_bps_threshold else 0
 
             await self.resolve_prediction_outcomes(
@@ -1448,7 +1476,7 @@ class TradeJournal:
                 max_favorable_excursion_bps=max_fav,
                 max_adverse_excursion_bps=max_adv,
                 label=label,
-                label_schema_version="directional_net_v1",
+                label_schema_version=LABEL_SCHEMA_VERSION,
             )
             resolved += 1
 
@@ -1497,7 +1525,7 @@ class TradeJournal:
                 JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
                 WHERE pe.model_version = $1
                   AND po.net_return_bps IS NOT NULL
-                  AND po.label_schema_version = 'directional_net_v1'
+                  AND po.label_schema_version = $4
                   AND po.horizon_minutes = $3
                 ORDER BY po.resolved_at DESC NULLS LAST
                 LIMIT $2
@@ -1505,6 +1533,7 @@ class TradeJournal:
                 model_version,
                 int(limit),
                 int(horizon_minutes),
+                LABEL_SCHEMA_VERSION,
             )
         else:
             rows = await self._fetch(

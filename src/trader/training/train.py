@@ -258,8 +258,35 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         )
 
         if len(rows) < min_samples:
+            # The main query returns rows only when ONE schema bucket reaches
+            # min_samples, so "0" alone is misleading — report the real
+            # accumulation progress per feature schema.
+            schema_rows = await pool.fetch(
+                """
+                SELECT fs.feature_schema_hash, count(*) AS cnt
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = $1
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $2
+                  AND po.label_threshold_bps = $3
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                GROUP BY fs.feature_schema_hash
+                ORDER BY cnt DESC
+                """,
+                horizon_minutes,
+                LABEL_SCHEMA_VERSION,
+                label_bps_threshold,
+            )
+            total_labelled = sum(int(r["cnt"]) for r in schema_rows)
+            top = ", ".join(f"{str(r['feature_schema_hash'])[:8]}:{r['cnt']}" for r in schema_rows[:4])
             msg = (
-                f"Insufficient compatible samples: {len(rows)} < {min_samples}; "
+                f"Insufficient compatible samples: no feature schema has {min_samples} yet "
+                f"(labelled total={total_labelled}, per-schema=[{top or 'none'}]); "
                 f"schema={LABEL_SCHEMA_VERSION}, threshold={label_bps_threshold:g}bps, "
                 f"horizon={horizon_minutes}m"
             )
