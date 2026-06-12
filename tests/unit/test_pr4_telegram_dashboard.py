@@ -220,7 +220,15 @@ async def test_control_train_button_requires_confirm() -> None:
     bot._controller.start_training.assert_not_awaited()
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    assert "confirm:train:500:15:5:yes" in callbacks
+    _confirm_callback(callbacks, "train:500:15:5")
+
+
+def _confirm_callback(callbacks: list[str], action: str) -> str:
+    """Return the confirm:<nonce>:<action>:yes callback for *action*."""
+    suffix = f":{action}:yes"
+    matches = [c for c in callbacks if c.startswith("confirm:") and c.endswith(suffix)]
+    assert matches, f"no confirm button for {action!r} in {callbacks}"
+    return matches[0]
 
 
 @pytest.mark.asyncio
@@ -230,7 +238,9 @@ async def test_confirm_train_button_starts_training() -> None:
     bot._controller.start_training = AsyncMock(return_value="✅ started")
     update = _fake_update()
 
-    await bot._handle_confirm_button(update, "train:500:15:5:yes")
+    markup = bot._confirm_menu("train:500:15:5")
+    payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
+    await bot._handle_confirm_button(update, payload)
 
     bot._controller.start_training.assert_awaited_once_with(500, 15, 5.0)
     reply_text = update.effective_message.reply_text.call_args[0][0]
@@ -406,7 +416,7 @@ async def test_train_command_requires_confirm() -> None:
     assert "Запустить обучение" in reply_text
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    assert "confirm:train:500:15:5:yes" in callbacks
+    _confirm_callback(callbacks, "train:500:15:5")
 
 
 @pytest.mark.asyncio
@@ -494,7 +504,7 @@ async def test_train_button_requires_confirm() -> None:
     assert "Запустить обучение" in reply_text
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    assert "confirm:train:1000:15:5:yes" in callbacks
+    _confirm_callback(callbacks, "train:1000:15:5")
 
 
 @pytest.mark.asyncio
@@ -503,7 +513,9 @@ async def test_stop_confirm_button_runs_emergency_stop() -> None:
     assert bot._controller is not None
     update = _fake_update()
 
-    await bot._handle_confirm_button(update, "stop:yes")
+    markup = bot._confirm_menu("stop")
+    payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
+    await bot._handle_confirm_button(update, payload)
 
     bot._controller.emergency_stop.assert_awaited_once()
     reply_text = update.effective_message.reply_text.call_args[0][0]
@@ -521,3 +533,68 @@ async def test_menu_command_shows_main_menu() -> None:
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Bybit AI Trader" in reply_text
     assert "SHADOW" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_confirm_button_replay_is_rejected() -> None:
+    """A confirm button fires once; the second press must be ignored."""
+    bot = _make_bot()
+    assert bot._controller is not None
+    update = _fake_update()
+
+    markup = bot._confirm_menu("stop")
+    payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
+    await bot._handle_confirm_button(update, payload)
+    bot._controller.emergency_stop.assert_awaited_once()
+
+    replay = _fake_update()
+    await bot._handle_confirm_button(replay, payload)
+    bot._controller.emergency_stop.assert_awaited_once()  # still once
+    reply_text = replay.effective_message.reply_text.call_args[0][0]
+    assert "устарела" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_legacy_confirm_payload_without_nonce_is_rejected() -> None:
+    """Pre-nonce buttons from old chat history must not execute anything."""
+    bot = _make_bot()
+    assert bot._controller is not None
+    update = _fake_update()
+
+    await bot._handle_confirm_button(update, "stop:yes")
+
+    bot._controller.emergency_stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_expired_confirm_nonce_is_rejected() -> None:
+    from datetime import timedelta
+
+    bot = _make_bot()
+    assert bot._controller is not None
+    update = _fake_update()
+
+    markup = bot._confirm_menu("stop")
+    payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
+    nonce = payload.split(":", 1)[0]
+    action, created_at = bot._confirm_nonces[nonce]
+    bot._confirm_nonces[nonce] = (action, created_at - timedelta(seconds=301))
+
+    await bot._handle_confirm_button(update, payload)
+
+    bot._controller.emergency_stop.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_confirm_no_invalidates_nonce() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    update = _fake_update()
+
+    markup = bot._confirm_menu("stop")
+    no_payload = markup.inline_keyboard[0][1].callback_data.removeprefix("confirm:")
+    yes_payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
+    await bot._handle_confirm_button(update, no_payload)
+
+    await bot._handle_confirm_button(_fake_update(), yes_payload)
+    bot._controller.emergency_stop.assert_not_awaited()

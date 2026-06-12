@@ -38,6 +38,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import secrets
 from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -54,6 +55,9 @@ from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
 log = structlog.get_logger(__name__)
+
+# Inline confirm buttons and pending /confirm actions expire after this long.
+_CONFIRM_TTL_SECONDS = 300.0
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -197,8 +201,10 @@ class TelegramMonitorBot:
         # immediately after restart without requiring /start.
         self._subscribed: set[int] = set(config.allowed_chat_ids)
 
-        # Pending confirmations: chat_id → (action_name, coroutine_factory)
-        self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]]]] = {}
+        # Pending confirmations: chat_id → (action_name, coroutine_factory, created_at)
+        self._pending: dict[int, tuple[str, Callable[[], Awaitable[None]], datetime]] = {}
+        # One-shot nonces for inline confirm buttons: nonce → (action, created_at)
+        self._confirm_nonces: dict[str, tuple[str, datetime]] = {}
         # Chats currently in the "enter custom limit value" flow.
         # None means the generic "key value" form; otherwise store the key that
         # should receive the next numeric message from this chat.
@@ -2124,14 +2130,43 @@ class TelegramMonitorBot:
     # ------------------------------------------------------------------
 
     def _confirm_menu(self, action: str) -> InlineKeyboardMarkup:
+        # One-shot nonce: confirm buttons live forever in chat history, so a
+        # bare confirm:<action> payload could be replayed months later. The
+        # nonce binds the button to THIS dialog and expires after the TTL.
+        nonce = secrets.token_urlsafe(4)
+        self._confirm_nonces[nonce] = (action, datetime.now(tz=UTC))
+        self._prune_confirm_nonces()
         return InlineKeyboardMarkup(
             [
                 [
-                    InlineKeyboardButton("✅ Да", callback_data=f"confirm:{action}:yes"),
-                    InlineKeyboardButton("❌ Нет", callback_data=f"confirm:{action}:no"),
+                    InlineKeyboardButton("✅ Да", callback_data=f"confirm:{nonce}:{action}:yes"),
+                    InlineKeyboardButton("❌ Нет", callback_data=f"confirm:{nonce}:{action}:no"),
                 ]
             ]
         )
+
+    def _prune_confirm_nonces(self) -> None:
+        now = datetime.now(tz=UTC)
+        expired = [
+            nonce
+            for nonce, (_, created_at) in self._confirm_nonces.items()
+            if (now - created_at).total_seconds() > _CONFIRM_TTL_SECONDS
+        ]
+        for nonce in expired:
+            self._confirm_nonces.pop(nonce, None)
+        # Hard cap as a second line of defence against unbounded growth
+        while len(self._confirm_nonces) > 100:
+            self._confirm_nonces.pop(next(iter(self._confirm_nonces)), None)
+
+    def _consume_confirm_nonce(self, nonce: str, action: str) -> bool:
+        """Validate and invalidate a confirm nonce (one shot, TTL-bound)."""
+        entry = self._confirm_nonces.pop(nonce, None)
+        if entry is None:
+            return False
+        stored_action, created_at = entry
+        if stored_action != action:
+            return False
+        return (datetime.now(tz=UTC) - created_at).total_seconds() <= _CONFIRM_TTL_SECONDS
 
     async def _cmd_pause(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -2163,17 +2198,28 @@ class TelegramMonitorBot:
         )
 
     async def _handle_confirm_button(self, update: Update, payload: str) -> None:
-        """Handle confirm:<action>:<yes|no> inline buttons for pause/resume."""
+        """Handle confirm:<nonce>:<action>:<yes|no> inline buttons."""
         if self._controller is None:
             await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
             return
         try:
-            action, answer = payload.rsplit(":", maxsplit=1)
+            nonce, rest = payload.split(":", maxsplit=1)
+            action, answer = rest.rsplit(":", maxsplit=1)
         except ValueError:
             await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
             return
         if answer != "yes":
+            self._confirm_nonces.pop(nonce, None)
             await self._button_reply(update, "Действие отменено.", reply_markup=self._main_menu())
+            return
+        if not self._consume_confirm_nonce(nonce, action):
+            # Covers replayed buttons from chat history, expired dialogs, and
+            # legacy pre-nonce buttons (their first segment is not a nonce).
+            await self._button_reply(
+                update,
+                "⏳ Кнопка подтверждения устарела. Запросите действие заново.",
+                reply_markup=self._main_menu(),
+            )
             return
         if action == "pause":
             await self._controller.pause()
@@ -2345,6 +2391,7 @@ class TelegramMonitorBot:
             self._pending[cid] = (
                 f"сменить риск-профиль с {old_profile} на {new_profile_str}",
                 lambda: self._controller.set_risk_profile(new_profile),  # type: ignore[union-attr]
+                datetime.now(tz=UTC),
             )
         await self._reply(
             update,
@@ -2433,7 +2480,10 @@ class TelegramMonitorBot:
         if cid is None or cid not in self._pending:
             await self._reply(update, "Нет действия, которое ждет подтверждения.")
             return
-        action_name, action_fn = self._pending.pop(cid)
+        action_name, action_fn, created_at = self._pending.pop(cid)
+        if (datetime.now(tz=UTC) - created_at).total_seconds() > _CONFIRM_TTL_SECONDS:
+            await self._reply(update, "⏳ Подтверждение устарело. Запросите действие заново.")
+            return
         try:
             await action_fn()
             await self._reply(update, f"✅ Готово: <i>{action_name}</i>")
@@ -3030,6 +3080,7 @@ class TelegramMonitorBot:
             self._pending[cid] = (
                 f"сменить риск-профиль с {old_profile} на {new_profile_str}",
                 lambda: self._controller.set_risk_profile(new_profile),
+                datetime.now(tz=UTC),
             )
         await self._button_reply(
             update,
