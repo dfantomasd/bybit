@@ -390,8 +390,12 @@ class MarketScreener:
 
             if added and self._on_symbols_added is not None:
                 await self._on_symbols_added(added)
-            if removed and self._on_symbols_removed is not None:
-                await self._on_symbols_removed(removed)
+            if removed:
+                for sym in removed:
+                    self._funding_rates.pop(sym, None)
+                    self._oi_history.pop(sym, None)
+                if self._on_symbols_removed is not None:
+                    await self._on_symbols_removed(removed)
 
         except Exception as exc:
             log.warning("screener.refresh_failed", error=str(exc))
