@@ -1390,6 +1390,12 @@ class TradeJournal:
     ) -> int:
         """Resolve prediction outcomes using market_candles data.
 
+        NOTE: This base-class implementation is superseded in production by
+        DirectionalTradeJournal.resolve_outcomes_from_candles (installed at
+        import time via trader.storage.__init__). The subclass uses full-path
+        MFE/MAE, label_schema_version filtering, and a correct cost model.
+        This base version is kept for test isolation only.
+
         For each prediction_event that has no outcome at ``horizon_minutes`` yet,
         and whose candle_open_time + horizon has elapsed, look up entry and horizon
         close prices in market_candles and insert the outcome.

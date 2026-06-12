@@ -19,6 +19,8 @@ class CostModelBps:
 
     All values are positive deductions from gross return. Funding may be
     negative when the position receives funding instead of paying it.
+    ``safety_margin_bps`` mirrors the engine's ``net_edge_safety_margin_pct``
+    so that training labels use the same effective hurdle as the live gate.
     """
 
     entry_fee_bps: float = 0.0
@@ -27,6 +29,7 @@ class CostModelBps:
     entry_slippage_bps: float = 0.0
     exit_slippage_bps: float = 0.0
     funding_bps: float = 0.0
+    safety_margin_bps: float = 0.0
 
     @property
     def total_bps(self) -> float:
@@ -38,6 +41,7 @@ class CostModelBps:
             + self.entry_slippage_bps
             + self.exit_slippage_bps
             + self.funding_bps
+            + self.safety_margin_bps
         )
 
 
