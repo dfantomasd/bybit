@@ -323,8 +323,8 @@ async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
     assert "НЕ ГОТОВО" in reply_text
     assert "ПОЧТИ" not in reply_text
     assert "Качество модели GOOD" in reply_text
-    assert "Walk-forward модели &gt; 0 bps" in reply_text
-    assert "Paper model-gate: 20+ сделок и PnL &gt; 0" in reply_text
+    assert "Walk-forward модели > 0 bps" in reply_text
+    assert "Paper model-gate: 20+ сделок и PnL > 0" in reply_text
 
 
 @pytest.mark.asyncio
