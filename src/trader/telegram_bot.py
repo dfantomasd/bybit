@@ -49,6 +49,7 @@ import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
+
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
