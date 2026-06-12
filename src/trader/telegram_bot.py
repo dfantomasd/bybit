@@ -57,7 +57,6 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
-
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
@@ -3046,8 +3045,8 @@ class TelegramMonitorBot:
         if ctrl and ctrl.runtime_settings:
             try:
                 s = ctrl.runtime_settings()
-                entries_per_min = s.get("entries_per_min_limit", "—")
-                max_pos = s.get("max_simultaneous_positions", "—")
+                entries_per_min = s.get("max_entries_per_minute", "—")
+                max_pos = s.get("max_positions", "—")
             except Exception as _exc:
                 log.debug("telegram.render_home_settings_failed", error=str(_exc))
 
@@ -3091,8 +3090,8 @@ class TelegramMonitorBot:
             except Exception as _exc:
                 log.debug("telegram.render_settings_failed", error=str(_exc))
 
-        entries = s.get("entries_per_min_limit", 1)
-        max_pos = s.get("max_simultaneous_positions", 2)
+        entries = s.get("max_entries_per_minute", 1)
+        max_pos = s.get("max_positions", 2)
         same_side = s.get("max_same_side", 2)
         price_cap = s.get("screener_max_price_usd", 25)
         feat_sym = s.get("feature_max_symbols", 20)
@@ -3287,24 +3286,25 @@ class TelegramMonitorBot:
                 s = self._controller.runtime_settings()
             except Exception as _exc:
                 log.debug("telegram.limit_adjust_settings_failed", error=str(_exc))
-        limits: dict[str, tuple[float, float]] = {
-            "entries_per_min_limit": (1, 10),
-            "max_simultaneous_positions": (1, 10),
-            "max_same_side": (1, 10),
-            "screener_max_price_usd": (0, 1000),
-            "feature_max_symbols": (5, 50),
+        # Maps button key → (runtime_settings read key, set_runtime_setting key, min, max)
+        limit_map: dict[str, tuple[str, str, float, float]] = {
+            "entries_per_min_limit": ("max_entries_per_minute", "entries", 1, 10),
+            "max_simultaneous_positions": ("max_positions", "max_positions", 1, 10),
+            "max_same_side": ("max_same_side", "same_side", 1, 10),
+            "screener_max_price_usd": ("screener_max_price_usd", "price_cap", 0, 1000),
+            "feature_max_symbols": ("feature_max_symbols", "feature_symbols", 5, 50),
         }
-        if setting_key not in limits:
+        if setting_key not in limit_map:
             return
-        min_val, max_val = limits[setting_key]
+        read_key, write_key, min_val, max_val = limit_map[setting_key]
         is_float = setting_key == "screener_max_price_usd"
-        current = float(s.get(setting_key, min_val)) if is_float else int(s.get(setting_key, min_val))
+        current = float(s.get(read_key, min_val)) if is_float else int(s.get(read_key, min_val))
         step = 5.0 if setting_key == "screener_max_price_usd" else 1
         new_val: Any = current + (step if direction == "inc" else -step)
         new_val = max(min_val, min(max_val, new_val))
         if self._controller and self._controller.set_runtime_setting and new_val != current:
             try:
-                await self._controller.set_runtime_setting(setting_key, new_val)
+                await self._controller.set_runtime_setting(write_key, new_val)
             except Exception as exc:
                 log.warning("telegram.limit_adjust_failed", error=str(exc))
         text, markup = await self._render_settings()
