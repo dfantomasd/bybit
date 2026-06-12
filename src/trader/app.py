@@ -258,6 +258,7 @@ class TradingApplication:
         if self._trade_journal is None:
             return
         while not self._shutdown_event.is_set():
+            # Older tests/fakes may not expose durable_state_healthy; treat them as healthy.
             durable_healthy = bool(getattr(self._trade_journal, "durable_state_healthy", True))
             if not self._trade_journal.is_enabled or not durable_healthy:
                 try:
