@@ -256,6 +256,46 @@ class TestMakerFirstExecution:
         assert engine.get_diag_counts()["maker_filled"] == 1
 
     @pytest.mark.asyncio
+    async def test_cancel_failed_order_still_live_fails_closed(self) -> None:
+        engine = _make_engine()
+        engine._adapter.get_open_orders = AsyncMock(
+            side_effect=lambda *_a, **_k: [
+                {"orderLinkId": engine._adapter.place_order.await_args_list[0].args[0].order_link_id}
+            ]
+        )
+        engine._adapter.cancel_order = AsyncMock(side_effect=RuntimeError("network"))
+
+        decision = await engine.submit(_proposal(), Decimal("10000"), Decimal("10000"))
+
+        assert decision is None
+        assert engine._adapter.place_order.await_count == 1  # no taker on top of a live limit
+        # The pending slot must stay blocked until WS/reconciliation resolves it
+        assert engine.has_pending_entries()
+        assert _SYMBOL in engine._last_failure_at
+
+    @pytest.mark.asyncio
+    async def test_late_fill_during_escalation_gate_prevents_taker(self) -> None:
+        engine = _make_engine()
+        # Order vanishes immediately without a position ("gone" → escalation path)
+        positions: list = []
+        engine._adapter.get_positions = AsyncMock(side_effect=lambda *_a, **_k: positions)
+        # The fill lands while the escalation gate fetches the current price
+        original_price_check = engine._adapter.get_conservative_market_price
+
+        async def price_with_racing_fill(*a, **k):
+            positions.append(_position())
+            return await original_price_check(*a, **k)
+
+        engine._adapter.get_conservative_market_price = AsyncMock(side_effect=price_with_racing_fill)
+
+        decision = await engine.submit(_proposal(), Decimal("10000"), Decimal("10000"))
+
+        assert decision is not None
+        assert engine._adapter.place_order.await_count == 1  # no doubled entry
+        assert engine.get_diag_counts()["maker_filled"] == 1
+        assert engine.get_diag_counts()["maker_escalated"] == 0
+
+    @pytest.mark.asyncio
     async def test_no_quote_aborts_entry(self) -> None:
         engine = _make_engine()
         engine._adapter.get_best_bid_ask = AsyncMock(side_effect=RuntimeError("no ticker"))

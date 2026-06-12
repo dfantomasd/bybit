@@ -1931,7 +1931,9 @@ class TradingApplication:
                 if symbol in symbols:
                     subs.append(f"orderbook.50.{symbol}")
 
-        event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
+        # size the buffer so a consumer stall never drops a confirmed kline.
+        event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
 
         self._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",

@@ -1167,17 +1167,45 @@ class ExecutionEngine:
             return True
 
         if state == "open":
-            # 4. Cancel the resting remainder. A cancel error usually means the
-            #    order filled in the race window — re-check the position.
+            # 4. Cancel the resting remainder. A cancel error can mean either a
+            #    racing fill OR a live order we failed to cancel — verify which.
+            cancel_failed = False
             try:
                 await self._adapter.cancel_order(self._category, symbol, intent.order_link_id)
             except Exception as exc:
+                cancel_failed = True
                 log.info(
                     "maker.cancel_failed_checking_fill",
                     symbol=symbol,
                     order_link_id=intent.order_link_id,
                     error=str(exc),
                 )
+            if cancel_failed:
+                # Fail closed: if the order may still be live on the exchange we
+                # must NOT escalate (a taker on top of a live limit doubles the
+                # entry) and must NOT release the pending slot — the private WS
+                # fill/cancel event or stale-pending reconciliation resolves it.
+                try:
+                    open_orders = await self._adapter.get_open_orders(self._category, symbol)
+                    still_live = any(str(o.get("orderLinkId")) == intent.order_link_id for o in open_orders)
+                except Exception as verify_exc:
+                    log.warning(
+                        "maker.cancel_state_unknown_fail_closed",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(verify_exc),
+                    )
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    return False
+                if still_live:
+                    self._diag_maker_aborted += 1
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.warning(
+                        "maker.cancel_failed_order_live",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                    )
+                    return False
             try:
                 await self.sync_positions()
             except Exception as exc:
@@ -1207,6 +1235,18 @@ class ExecutionEngine:
             await self.resolve_pending_durable(intent.order_link_id, symbol)
             await self._journal_order_event(maker_intent, decision, status="MAKER_ABORTED", error=reason)
             return False
+
+        # 5b. Last fill re-check: the escalation gate above took a REST round
+        # trip — a fill landing in that window would otherwise be doubled by
+        # the taker order.
+        try:
+            await self.sync_positions()
+        except Exception as exc:
+            log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+        if self.has_open_position(symbol):
+            self._diag_maker_filled += 1
+            log.info("maker.filled", symbol=symbol, order_link_id=intent.order_link_id, late=True)
+            return True
 
         # 6. Escalate the entry to a market (taker) order under a fresh link id.
         escalation_link_id = (intent.order_link_id[:35] + "E")[:36]
