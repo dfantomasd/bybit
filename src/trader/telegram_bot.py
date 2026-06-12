@@ -49,7 +49,6 @@ import structlog
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
 from telegram.constants import ParseMode
 from telegram.ext import Application, CallbackQueryHandler, CommandHandler, ContextTypes, MessageHandler, filters
-
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
@@ -1018,12 +1017,22 @@ class TelegramMonitorBot:
             "<b>Топ-5 прибыльных символов</b>",
         ]
         lines.extend(
-            _row(f"<code>{row.get('symbol', '?')}</code>", row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps"))
+            _row(
+                f"<code>{row.get('symbol', '?')}</code>",
+                row.get("count"),
+                row.get("avg_net_bps"),
+                row.get("total_net_bps"),
+            )
             for row in symbol_best[:5]
         )
         lines.append("\n<b>Топ-5 убыточных символов</b>")
         lines.extend(
-            _row(f"<code>{row.get('symbol', '?')}</code>", row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps"))
+            _row(
+                f"<code>{row.get('symbol', '?')}</code>",
+                row.get("count"),
+                row.get("avg_net_bps"),
+                row.get("total_net_bps"),
+            )
             for row in symbol_worst[:5]
         )
         lines.append("\n<b>По часам UTC</b>")
@@ -1035,7 +1044,9 @@ class TelegramMonitorBot:
         lines.extend("<code>" + "  ".join(hour_chunks[i : i + 4]) + "</code>" for i in range(0, 24, 4))
         lines.append("\n<b>По режимам</b>")
         lines.extend(
-            _row(str(row.get("regime") or "unknown"), row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps"))
+            _row(
+                str(row.get("regime") or "unknown"), row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps")
+            )
             for row in regimes[:10]
         )
         lines.append("\n<b>По дням недели</b>")
@@ -1109,7 +1120,9 @@ class TelegramMonitorBot:
             await self._reply(update, f"<b>Worst</b>\nОшибка: <code>{exc}</code>", reply_markup=self._main_menu())
             return
         if not rows:
-            await self._reply(update, "<b>Worst</b>\nУбыточных размеченных исходов пока нет.", reply_markup=self._main_menu())
+            await self._reply(
+                update, "<b>Worst</b>\nУбыточных размеченных исходов пока нет.", reply_markup=self._main_menu()
+            )
             return
 
         lines = [f"📉 <b>{len(rows)} худших исходов baseline</b>"]
