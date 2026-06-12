@@ -60,7 +60,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Database
     # ------------------------------------------------------------------
-    POSTGRES_DSN: SecretStr = SecretStr("postgresql+asyncpg://trader:trader@postgres:5432/trader")
+    POSTGRES_DSN: SecretStr = SecretStr(
+        "postgresql+asyncpg://trader:trader@postgres:5432/trader"
+    )
     TRADE_JOURNAL_ENABLED: bool = True
     """Persist signals, risk decisions, order events, and closed PnL in Postgres."""
     PERFORMANCE_FILTER_ENABLED: bool = True
@@ -331,19 +333,27 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ORDERBOOK_MODE: str = "ON_DEMAND"
     """ON_DEMAND = fetch only for top candidates; STREAMING = subscribe for all."""
-    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5  # reserved: STREAMING mode symbol cap (not yet enforced)
+    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = (
+        5  # reserved: STREAMING mode symbol cap (not yet enforced)
+    )
 
     # ------------------------------------------------------------------
     # Adaptive load governor
     # ------------------------------------------------------------------
     ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
     LOAD_GOVERNOR_CHECK_SECONDS: int = 30
-    MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
+    MAX_FEATURE_CYCLE_MS: int = (
+        8000  # reserved: governor cycle-time thresholds (not yet read)
+    )
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
-    MAX_QUEUE_UTILIZATION_PCT: int = 70  # reserved: queue-utilization gate (not yet enforced)
+    MAX_QUEUE_UTILIZATION_PCT: int = (
+        70  # reserved: queue-utilization gate (not yet enforced)
+    )
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3  # reserved: load governor floor (not yet enforced)
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = (
+        3  # reserved: load governor floor (not yet enforced)
+    )
 
     # ------------------------------------------------------------------
     # ML / model
@@ -429,8 +439,12 @@ class Settings(BaseSettings):
     RECONCILIATION_INTERVAL_SECONDS: int = 30
     POSITION_SYNC_INTERVAL_SECONDS: int = 30
     """How often to sync exchange positions into the local execution/risk state."""
-    HEALTH_CHECK_INTERVAL_SECONDS: int = 15  # reserved: health-check polling cadence (not yet wired)
-    DATA_STALENESS_THRESHOLD_SECONDS: int = 5  # reserved: staleness alert thresholds (not yet wired)
+    HEALTH_CHECK_INTERVAL_SECONDS: int = (
+        15  # reserved: health-check polling cadence (not yet wired)
+    )
+    DATA_STALENESS_THRESHOLD_SECONDS: int = (
+        5  # reserved: staleness alert thresholds (not yet wired)
+    )
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
 
@@ -446,7 +460,9 @@ class Settings(BaseSettings):
             if not stripped:
                 return ["1", "5", "15", "60"]
             return [v.strip() for v in stripped.split(",") if v.strip()]
-        raise TypeError("MULTITIMEFRAME_INTERVALS must be a list or comma-separated string")
+        raise TypeError(
+            "MULTITIMEFRAME_INTERVALS must be a list or comma-separated string"
+        )
 
     @field_validator("TELEGRAM_ALLOWED_CHAT_IDS", mode="before")
     @classmethod
@@ -493,9 +509,13 @@ class Settings(BaseSettings):
 
         if self.TRADING_MODE == TradingMode.CANARY_LIVE:
             if not self.LIVE_MODE:
-                raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set.")
+                raise ValueError(
+                    "TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set."
+                )
             if not self.LIVE_ARMED:
-                raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set.")
+                raise ValueError(
+                    "TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set."
+                )
             # SHADOW_MODE defaults to True but must be False in CANARY_LIVE so orders are
             # actually submitted. Auto-clear it here so operators don't need a separate env var.
             self.SHADOW_MODE = False
@@ -660,4 +680,3 @@ RISK_PROFILE_MAP: dict[RiskProfile, RiskProfileConfig] = {
 def get_risk_profile_config(profile: RiskProfile) -> RiskProfileConfig:
     """Return the ``RiskProfileConfig`` for the given profile."""
     return RISK_PROFILE_MAP[profile]
-
