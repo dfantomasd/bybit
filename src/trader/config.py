@@ -283,7 +283,7 @@ class Settings(BaseSettings):
     """How often to refresh the screener universe (seconds)."""
 
     SCREENER_SUBSCRIBE_TIMEOUT_SECONDS: int = 10
-    """Timeout for WS subscribe acknowledgement per symbol (seconds)."""
+    """Reserved: WS subscribe acknowledgement timeout per symbol (not yet enforced in screener)."""
 
     SCREENER_DENYLIST: list[str] = []
     """Symbols explicitly excluded (pre-market, innovation zone, etc.)."""
@@ -304,7 +304,7 @@ class Settings(BaseSettings):
     MAX_SAME_SIDE_POSITIONS: int = 2
     """Maximum open positions on the same side (Buy or Sell)."""
     MAX_CORRELATED_POSITIONS: int = 2
-    """Maximum correlated (same-quote) open positions."""
+    """Reserved: correlation-based position limiting (not yet wired into execution)."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
 
@@ -321,7 +321,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MULTITIMEFRAME_ENABLED: bool = True
     MULTITIMEFRAME_INTERVALS: Annotated[list[str], NoDecode] = ["1", "5", "15", "60"]
-    CANDLE_STORE_MAX_BARS_1M: int = 250
+    CANDLE_STORE_MAX_BARS_1M: int = 250  # reserved: per-interval candle store capacity (not yet read by CandleStore)
     CANDLE_STORE_MAX_BARS_5M: int = 250
     CANDLE_STORE_MAX_BARS_15M: int = 200
     CANDLE_STORE_MAX_BARS_1H: int = 120
@@ -331,19 +331,19 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ORDERBOOK_MODE: str = "ON_DEMAND"
     """ON_DEMAND = fetch only for top candidates; STREAMING = subscribe for all."""
-    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5
+    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5  # reserved: STREAMING mode symbol cap (not yet enforced)
 
     # ------------------------------------------------------------------
     # Adaptive load governor
     # ------------------------------------------------------------------
     ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
     LOAD_GOVERNOR_CHECK_SECONDS: int = 30
-    MAX_FEATURE_CYCLE_MS: int = 8000
+    MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
-    MAX_QUEUE_UTILIZATION_PCT: int = 70
+    MAX_QUEUE_UTILIZATION_PCT: int = 70  # reserved: queue-utilization gate (not yet enforced)
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3  # reserved: load governor floor (not yet enforced)
 
     # ------------------------------------------------------------------
     # ML / model
@@ -429,8 +429,8 @@ class Settings(BaseSettings):
     RECONCILIATION_INTERVAL_SECONDS: int = 30
     POSITION_SYNC_INTERVAL_SECONDS: int = 30
     """How often to sync exchange positions into the local execution/risk state."""
-    HEALTH_CHECK_INTERVAL_SECONDS: int = 15
-    DATA_STALENESS_THRESHOLD_SECONDS: int = 5
+    HEALTH_CHECK_INTERVAL_SECONDS: int = 15  # reserved: health-check polling cadence (not yet wired)
+    DATA_STALENESS_THRESHOLD_SECONDS: int = 5  # reserved: staleness alert thresholds (not yet wired)
     FEATURE_STALENESS_THRESHOLD_SECONDS: int = 10
     MODEL_STALENESS_THRESHOLD_SECONDS: int = 3600
 
@@ -660,3 +660,4 @@ RISK_PROFILE_MAP: dict[RiskProfile, RiskProfileConfig] = {
 def get_risk_profile_config(profile: RiskProfile) -> RiskProfileConfig:
     """Return the ``RiskProfileConfig`` for the given profile."""
     return RISK_PROFILE_MAP[profile]
+
