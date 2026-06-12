@@ -101,7 +101,11 @@ class TradingApplication:
         self._telegram_bot: Any | None = None
         self._ws_public: Any | None = None
         self._candle_store: Any | None = None
+        self._orderbook_tracker: Any | None = None
         self._feature_pipeline: Any | None = None
+        # Regime-bucket expectancy stats: {(regime, volatility, hour): (avg_bps, count)}
+        self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
+        self._bucket_stats_refreshed_at: datetime | None = None
         self._strategy_ensemble: Any | None = None
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
@@ -1258,6 +1262,8 @@ class TradingApplication:
                 "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
                 "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
                 "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
+                "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
                 "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
             }
             top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "нет блокировок"
@@ -1281,6 +1287,28 @@ class TradingApplication:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
             return await self._trade_journal.get_recent_closed_trades(limit=10)
+
+        async def _bucket_stats_provider() -> dict:
+            assert self._settings is not None
+            return {
+                "buckets": [
+                    {
+                        "regime": regime,
+                        "volatility": volatility,
+                        "hour": hour,
+                        "avg_bps": avg_bps,
+                        "count": count,
+                    }
+                    for (regime, volatility, hour), (avg_bps, count) in self._bucket_stats.items()
+                ],
+                "refreshed_at": (
+                    self._bucket_stats_refreshed_at.strftime("%Y-%m-%d %H:%M UTC")
+                    if self._bucket_stats_refreshed_at is not None
+                    else None
+                ),
+                "min_samples": self._settings.BUCKET_MIN_SAMPLES,
+                "block_below_bps": self._settings.BUCKET_BLOCK_AVG_BPS,
+            }
 
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
@@ -1320,6 +1348,7 @@ class TradingApplication:
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
             healthcheck_provider=_healthcheck_provider,
             recent_trades_provider=_recent_trades_provider,
+            bucket_stats_provider=_bucket_stats_provider,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,
@@ -1456,6 +1485,13 @@ class TradingApplication:
             min_net_edge_pct=self._settings.MIN_EXPECTED_NET_EDGE_PCT,
             net_edge_safety_margin_pct=self._settings.NET_EDGE_SAFETY_MARGIN_PCT,
             entry_order_mode=self._settings.ENTRY_ORDER_MODE,
+            maker_timeout_s=self._settings.MAKER_TIMEOUT_SECONDS,
+            maker_ttl_s=self._settings.MAKER_TTL_SECONDS,
+            maker_allow_escalation=self._settings.MAKER_ALLOW_ESCALATION,
+            # Late-bound: the tracker is created when the public WS starts
+            imbalance_provider=lambda s: (
+                self._orderbook_tracker.latest_imbalance(s) if self._orderbook_tracker is not None else None
+            ),
         )
 
         # P0.2: Restore pending entries from durable storage before any new entries.
@@ -1895,7 +1931,20 @@ class TradingApplication:
                 subs.append(f"kline.{interval}.{symbol}")
             subs.append(f"tickers.{symbol}")
 
-        event_queue: asyncio.Queue = asyncio.Queue(maxsize=1000)
+        # Orderbook L2 feed only for execution candidates (not the whole
+        # universe) — imbalance/microprice features cost ~5-10 KB/s per symbol.
+        if self._settings.ORDERBOOK_FEED_ENABLED:
+            from trader.data.orderbook_tracker import OrderbookTracker
+
+            self._orderbook_tracker = OrderbookTracker()
+            ob_symbols = self._screener.execution_candidates if self._screener is not None else symbols[:5]
+            for symbol in ob_symbols:
+                if symbol in symbols:
+                    subs.append(f"orderbook.50.{symbol}")
+
+        # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
+        # size the buffer so a consumer stall never drops a confirmed kline.
+        event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
 
         self._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",
@@ -1907,12 +1956,15 @@ class TradingApplication:
         async def consume_events() -> None:
 
             from trader.data.candles import candle_from_kline_event
-            from trader.domain.events import KlineEvent
+            from trader.domain.events import KlineEvent, OrderBookEvent
 
             while not self._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
-                    if isinstance(event, KlineEvent):
+                    if isinstance(event, OrderBookEvent):
+                        if self._orderbook_tracker is not None:
+                            self._orderbook_tracker.record(event.symbol, event.bids, event.asks)
+                    elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         self._candle_store.add(event.symbol, event.interval, candle)
 
@@ -2445,6 +2497,7 @@ class TradingApplication:
             health_checker=self._health_checker,
             stale_threshold_s=90.0,
             watchdog_interval_s=60.0,
+            orderbook_tracker=self._orderbook_tracker,
         )
         self._regime_classifier = RegimeClassifier()
 
@@ -2764,6 +2817,65 @@ class TradingApplication:
         """Record a diagnostics event with the current timestamp."""
         self._diag_events.append((datetime.now(tz=UTC), event))
 
+    def _bucket_blocked(self, regime_ctx: Any) -> bool:
+        """True when the current (regime, volatility, UTC hour) bucket is toxic.
+
+        A bucket blocks only with >= BUCKET_MIN_SAMPLES resolved outcomes and an
+        average net return below BUCKET_BLOCK_AVG_BPS — small samples never block.
+        """
+        assert self._settings is not None
+        if not self._settings.BUCKET_BLOCK_ENABLED or not self._bucket_stats:
+            return False
+        regime = (
+            regime_ctx.regime.value
+            if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+            else "UNKNOWN"
+        )
+        volatility = (
+            regime_ctx.volatility_level.value
+            if regime_ctx is not None and getattr(regime_ctx, "volatility_level", None) is not None
+            else "UNKNOWN"
+        )
+        hour = datetime.now(tz=UTC).hour
+        stats = self._bucket_stats.get((regime, volatility, hour))
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS
+
+    async def _run_bucket_stats_refresher(self) -> None:
+        """Refresh in-memory bucket expectancy stats from Postgres periodically."""
+        assert self._settings is not None
+        interval = float(self._settings.BUCKET_STATS_REFRESH_SECONDS)
+
+        while not self._shutdown_event.is_set():
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    stats = await self._trade_journal.get_bucket_stats()
+                    self._bucket_stats = stats
+                    self._bucket_stats_refreshed_at = datetime.now(tz=UTC)
+                    blocked = [
+                        key
+                        for key, (avg, cnt) in stats.items()
+                        if cnt >= self._settings.BUCKET_MIN_SAMPLES and avg < self._settings.BUCKET_BLOCK_AVG_BPS
+                    ]
+                    log.info(
+                        "bucket_stats.refreshed",
+                        buckets=len(stats),
+                        blocked=len(blocked),
+                        blocked_keys=blocked[:10],
+                    )
+                except Exception as exc:
+                    log.warning("bucket_stats.refresh_failed", error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    asyncio.shield(self._shutdown_event.wait()),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
+
     def _check_zero_trading(self) -> None:
         """Warn (never block) when signals flow but nothing executes for an hour.
 
@@ -2795,6 +2907,8 @@ class TradingApplication:
                 "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
                 "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
                 "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+                "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
+                "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
                 "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
             }
             top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "unknown"
@@ -2848,6 +2962,8 @@ class TradingApplication:
             "hour_rule_fallback_signals": hour_counts.get("rule_fallback_signal", 0),
             "hour_spread_rejected": hour_counts.get("spread_rejected", 0),
             "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
+            "hour_imbalance_rejected": hour_counts.get("imbalance_rejected", 0),
+            "hour_bucket_blocked": hour_counts.get("bucket_blocked", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
@@ -3083,6 +3199,10 @@ class TradingApplication:
                     max_position_notional_usd=self._settings.SCALP_MAX_POSITION_NOTIONAL_USD,
                     min_qty_usd=5.0,
                     diag_hook=self._record_diag,
+                    imbalance_provider=(
+                        self._orderbook_tracker.latest_imbalance if self._orderbook_tracker is not None else None
+                    ),
+                    min_imbalance=self._settings.SCALP_MIN_OB_IMBALANCE,
                 )
             )
             log.info(
@@ -3192,6 +3312,13 @@ class TradingApplication:
                 except Exception as exc:
                     log.warning("strategy_loop.regime_error", symbol=symbol, error=str(exc))
 
+            # Regime-bucket gate: skip evaluation when this (regime, volatility,
+            # UTC hour) bucket has a proven negative expectancy on our own signals.
+            if self._bucket_blocked(regime_ctx):
+                self._record_diag("bucket_blocked")
+                log.debug("strategy_loop.bucket_blocked", symbol=symbol)
+                return
+
             # Strategy ensemble
             try:
                 proposal = self._strategy_ensemble.evaluate_all(
@@ -3293,6 +3420,8 @@ class TradingApplication:
             # ML shadow scoring — only records metadata, never influences trade decisions
             if self._trade_journal is not None and self._trade_journal.is_enabled and snapshot_id:
                 try:
+                    # Regime context in metadata feeds get_bucket_stats (idea: regime-
+                    # bucketed expectancy gating) — keep keys stable.
                     await self._trade_journal.record_prediction_event(
                         symbol=proposal.symbol,
                         interval=_WS_INTERVAL,
@@ -3301,6 +3430,18 @@ class TradingApplication:
                         strategy_signal=proposal.side.value,
                         decision="SHADOW_BASELINE",
                         feature_snapshot_id=snapshot_id,
+                        metadata={
+                            "regime": (
+                                regime_ctx.regime.value
+                                if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                                else "UNKNOWN"
+                            ),
+                            "volatility": (
+                                regime_ctx.volatility_level.value
+                                if regime_ctx is not None and getattr(regime_ctx, "volatility_level", None) is not None
+                                else "UNKNOWN"
+                            ),
+                        },
                     )
                 except Exception as _baseline_exc:
                     log.debug(
@@ -3737,6 +3878,10 @@ class TradingApplication:
             # One-shot startup backfill: fills candle history so training doesn't wait days
             startup_backfill_task = asyncio.create_task(self._run_startup_backfill(), name="startup-backfill")
             self._background_tasks.append(startup_backfill_task)
+
+            # Regime-bucket stats: hourly expectancy per (regime, volatility, hour)
+            bucket_stats_task = asyncio.create_task(self._run_bucket_stats_refresher(), name="bucket-stats")
+            self._background_tasks.append(bucket_stats_task)
 
             # Auto-training: creates a new shadow challenger when enough fresh labels accumulate
             auto_trainer_task = asyncio.create_task(self._run_auto_model_trainer(), name="auto-model-trainer")

@@ -111,6 +111,29 @@ class Settings(BaseSettings):
     """Global cap on scalp signals per minute across the whole portfolio."""
     SCALP_MAX_POSITION_NOTIONAL_USD: float = 100.0
     """Hard notional cap per scalp position."""
+    SCALP_MIN_OB_IMBALANCE: float = 0.15
+    """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
+    >= +value, SELL needs <= -value). Missing/stale book data fails OPEN."""
+
+    # ------------------------------------------------------------------
+    # Orderbook microstructure feed
+    # ------------------------------------------------------------------
+    ORDERBOOK_FEED_ENABLED: bool = True
+    """Subscribe to orderbook.50 for execution candidates and derive imbalance/
+    microprice features. Adds ~5-10 KB/s WS traffic per tracked symbol."""
+
+    # ------------------------------------------------------------------
+    # Regime-bucket performance gating
+    # ------------------------------------------------------------------
+    BUCKET_BLOCK_ENABLED: bool = True
+    """Skip strategy evaluation in (regime, volatility, UTC hour) buckets whose
+    own historical signals show persistent negative expectancy."""
+    BUCKET_MIN_SAMPLES: int = 30
+    """Minimum resolved outcomes in a bucket before it can be blocked."""
+    BUCKET_BLOCK_AVG_BPS: float = -2.0
+    """Block a bucket when its average net return is below this (bps)."""
+    BUCKET_STATS_REFRESH_SECONDS: int = 3600
+    """How often the in-memory bucket statistics are refreshed from Postgres."""
 
     # ------------------------------------------------------------------
     # Startup candle backfill
@@ -135,13 +158,29 @@ class Settings(BaseSettings):
     rule-based proposal instead of dropping it (hybrid mode fallback)."""
 
     ENTRY_ORDER_MODE: str = "MARKET"
-    """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
+    """MARKET or MAKER_FIRST. MAKER_FIRST places a POST_ONLY limit at the best
+    bid/ask first (maker fee/rebate), then escalates to a market order or aborts
+    after MAKER_TIMEOUT_SECONDS — see MAKER_* settings."""
     ENTRY_LIMIT_TTL_SECONDS: int = 5
     """Seconds to wait for a limit entry fill before cancelling."""
     ENTRY_REPRICE_ATTEMPTS: int = 1
     """Max repricing attempts before abandoning a limit entry."""
     ALLOW_TAKER_ENTRY: bool = False
     """Allow market fallback if limit entry fails. False = skip trade."""
+
+    # ------------------------------------------------------------------
+    # Maker-first execution (ENTRY_ORDER_MODE = "MAKER_FIRST")
+    # ------------------------------------------------------------------
+    MAKER_TIMEOUT_SECONDS: float = 3.0
+    """How long to wait for the POST_ONLY limit to fill before deciding to
+    escalate (when MAKER_ALLOW_ESCALATION) or keep resting until TTL."""
+    MAKER_TTL_SECONDS: float = 5.0
+    """Absolute lifetime of the maker order. With escalation disabled the order
+    rests until TTL, then the remainder is cancelled and the entry aborted."""
+    MAKER_ALLOW_ESCALATION: bool = True
+    """Escalate the unfilled remainder to a market (taker) order after the
+    timeout — only when price has not drifted and the orderbook imbalance does
+    not contradict the direction; otherwise the entry is aborted."""
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""

@@ -139,6 +139,8 @@ class TradingController:
     healthcheck_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # /trades data: recent closed trades
     recent_trades_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
+    # /buckets data: regime-bucket expectancy stats
+    bucket_stats_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -231,6 +233,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("model", self._cmd_db_model))
         app.add_handler(CommandHandler("trades", self._cmd_trades))
         app.add_handler(CommandHandler("healthcheck", self._cmd_healthcheck))
+        app.add_handler(CommandHandler("buckets", self._cmd_buckets))
         app.add_handler(CommandHandler("subscribe", self._cmd_subscribe))
         app.add_handler(CommandHandler("unsubscribe", self._cmd_unsubscribe))
 
@@ -2108,6 +2111,44 @@ class TelegramMonitorBot:
             lines.append("⚠️ Сигналы есть, сделок нет — посмотрите блокеры выше и /limits.")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
+    async def _cmd_buckets(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.bucket_stats_provider is None:
+            await self._reply(update, "Статистика по bucket'ам сейчас недоступна.")
+            return
+        try:
+            data = await self._controller.bucket_stats_provider()
+        except Exception as exc:
+            await self._reply(update, f"❌ Не удалось получить bucket-статистику: <code>{html.escape(str(exc))}</code>")
+            return
+        buckets: list[dict[str, Any]] = data.get("buckets") or []
+        refreshed_at = data.get("refreshed_at")
+        min_samples = int(data.get("min_samples") or 30)
+        block_below = float(data.get("block_below_bps") or -2.0)
+        lines = ["<b>📊 Bucket-статистика (режим × волатильность × час UTC)</b>", ""]
+        if not buckets:
+            lines.append("Пока нет разрешённых исходов — статистика накапливается.")
+        else:
+            # Worst expectancy first; cap output so the message stays readable
+            shown = sorted(buckets, key=lambda b: float(b["avg_bps"]))[:20]
+            for b in shown:
+                blocked = int(b["count"]) >= min_samples and float(b["avg_bps"]) < block_below
+                icon = "🚫" if blocked else "✅"
+                lines.append(
+                    f"{icon} {html.escape(str(b['regime']))}/{html.escape(str(b['volatility']))} "
+                    f"{int(b['hour']):02d}h: <code>{float(b['avg_bps']):+.1f} bps</code> "
+                    f"(n={int(b['count'])})"
+                )
+            if len(buckets) > len(shown):
+                lines.append(f"… и ещё {len(buckets) - len(shown)} bucket(ов)")
+        lines.append("")
+        lines.append(f"Блокировка: n ≥ {min_samples} и avg &lt; {block_below:+.1f} bps")
+        if refreshed_at:
+            lines.append(f"Обновлено: <code>{html.escape(str(refreshed_at))}</code>")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
     async def _on_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Handle free-text input: currently only the custom-limit flow."""
         del context
@@ -2526,6 +2567,7 @@ class TelegramMonitorBot:
             "/net         — чистый PnL с комиссиями и фандингом\n"
             "/trades      — последние 10 закрытых сделок\n"
             "/healthcheck — сигналы/сделки за час и главный блокер\n"
+            "/buckets     — экспектанси по режимам/часам и блокировки\n"
             "/subscribe   — подписаться на уведомления (хранится в БД)\n"
             "/unsubscribe — отписаться от уведомлений\n"
             "/diagnostics — счетчики и задержки циклов\n"

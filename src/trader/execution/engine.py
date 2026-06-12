@@ -16,6 +16,7 @@ Live execution requires LIVE_MODE=true AND TRADING_MODE=LIVE.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
@@ -46,6 +47,12 @@ _STALE_PENDING_THRESHOLD_S = 600  # 10 minutes
 # P0.6: Canary mode hard caps — cannot be overridden by any profile
 CANARY_MAX_OPEN_POSITIONS: int = 2
 CANARY_MAX_TOTAL_EXPOSURE_PCT: Decimal = Decimal("45")
+
+# Maker-first execution
+_MAKER_POLL_INTERVAL_S = 0.5
+# Escalation guard: abort instead of taker when price moved further than this
+# from the maker limit price (percent of price)
+_MAKER_MAX_ESCALATION_DRIFT_PCT = 0.1
 
 
 class ExecutionEngine:
@@ -84,6 +91,10 @@ class ExecutionEngine:
         min_net_edge_pct: float = 0.15,
         net_edge_safety_margin_pct: float = 0.05,
         entry_order_mode: str = "MARKET",
+        maker_timeout_s: float = 3.0,
+        maker_ttl_s: float = 5.0,
+        maker_allow_escalation: bool = True,
+        imbalance_provider: Any | None = None,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -101,12 +112,18 @@ class ExecutionEngine:
         self._funding_buffer_pct = funding_buffer_pct
         self._min_net_edge_pct = min_net_edge_pct
         self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
-        self._entry_order_mode = entry_order_mode
+        self._entry_order_mode = str(entry_order_mode).strip().upper()
+        self._maker_timeout_s = max(0.5, float(maker_timeout_s))
+        self._maker_ttl_s = max(self._maker_timeout_s, float(maker_ttl_s))
+        self._maker_allow_escalation = maker_allow_escalation
+        # Callable(symbol) -> L5 orderbook imbalance in [-1, 1] or None; used by
+        # the maker escalation guard. Missing data fails open (escalation allowed).
+        self._imbalance_provider = imbalance_provider
 
-        # P0: Hard block non-MARKET entry modes — only MARKET is supported during current rollout
-        normalized_entry_mode = str(self._entry_order_mode).strip().upper()
-        if normalized_entry_mode != "MARKET":
-            raise ValueError("Only MARKET entry mode is supported during current rollout")
+        # P0: Hard block unsupported entry modes. MARKET is the default;
+        # MAKER_FIRST is the supervised maker-with-escalation flow below.
+        if self._entry_order_mode not in ("MARKET", "MAKER_FIRST"):
+            raise ValueError("Only MARKET and MAKER_FIRST entry modes are supported")
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -131,6 +148,9 @@ class ExecutionEngine:
         self._diag_net_edge_rejected: int = 0
         self._diag_no_tp_rejected: int = 0
         self._diag_fee_unavailable_rejected: int = 0
+        self._diag_maker_filled: int = 0
+        self._diag_maker_escalated: int = 0
+        self._diag_maker_aborted: int = 0
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -994,51 +1014,56 @@ class ExecutionEngine:
                     await self.resolve_pending_durable(intent.order_link_id, symbol)
                     return None
 
-            try:
-                resp = await self._adapter.place_order(intent)
-                exchange_order_id = resp.get("result", {}).get("orderId", "?")
-                self._diag_order_placed += 1
-                log.info(
-                    "execution.order_placed",
-                    symbol=symbol,
-                    side=proposal.side.value,
-                    qty=str(decision.approved_qty),
-                    exchange_order_id=exchange_order_id,
-                    order_link_id=intent.order_link_id,
-                )
-                if self._trade_journal is not None:
-                    await self._trade_journal.record_order_event(
-                        order_link_id=intent.order_link_id,
-                        proposal_id=intent.proposal_id,
-                        decision_id=intent.decision_id,
+            if self._entry_order_mode == "MAKER_FIRST":
+                entered = await self._execute_maker_first(intent, proposal, decision, instrument_info)
+                if not entered:
+                    return None
+            else:
+                try:
+                    resp = await self._adapter.place_order(intent)
+                    exchange_order_id = resp.get("result", {}).get("orderId", "?")
+                    self._diag_order_placed += 1
+                    log.info(
+                        "execution.order_placed",
                         symbol=symbol,
                         side=proposal.side.value,
-                        qty=decision.approved_qty,
-                        status="PLACED",
+                        qty=str(decision.approved_qty),
                         exchange_order_id=exchange_order_id,
-                    )
-            except Exception as exc:
-                self._diag_order_failed += 1
-                await self.resolve_pending_durable(intent.order_link_id, symbol)
-                # Record failure timestamp (NOT an entry cooldown — separate state)
-                self._last_failure_at[symbol] = datetime.now(tz=UTC)
-                log.error(
-                    "execution.order_failed",
-                    symbol=symbol,
-                    error=str(exc),
-                )
-                if self._trade_journal is not None:
-                    await self._trade_journal.record_order_event(
                         order_link_id=intent.order_link_id,
-                        proposal_id=intent.proposal_id,
-                        decision_id=intent.decision_id,
+                    )
+                    if self._trade_journal is not None:
+                        await self._trade_journal.record_order_event(
+                            order_link_id=intent.order_link_id,
+                            proposal_id=intent.proposal_id,
+                            decision_id=intent.decision_id,
+                            symbol=symbol,
+                            side=proposal.side.value,
+                            qty=decision.approved_qty,
+                            status="PLACED",
+                            exchange_order_id=exchange_order_id,
+                        )
+                except Exception as exc:
+                    self._diag_order_failed += 1
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    # Record failure timestamp (NOT an entry cooldown — separate state)
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.error(
+                        "execution.order_failed",
                         symbol=symbol,
-                        side=proposal.side.value,
-                        qty=decision.approved_qty,
-                        status="FAILED",
                         error=str(exc),
                     )
-                return None
+                    if self._trade_journal is not None:
+                        await self._trade_journal.record_order_event(
+                            order_link_id=intent.order_link_id,
+                            proposal_id=intent.proposal_id,
+                            decision_id=intent.decision_id,
+                            symbol=symbol,
+                            side=proposal.side.value,
+                            qty=decision.approved_qty,
+                            status="FAILED",
+                            error=str(exc),
+                        )
+                    return None
 
         # 7. Update local state ────────────────────────────────────────
         self._last_entry_at[symbol] = datetime.now(tz=UTC)
@@ -1068,6 +1093,291 @@ class ExecutionEngine:
             await self._exposure.update_position(symbol, proposal.side.value, notional)
 
         return decision
+
+    # ------------------------------------------------------------------
+    # Maker-first execution
+    # ------------------------------------------------------------------
+
+    async def _execute_maker_first(
+        self,
+        intent: OrderIntent,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+        instrument_info: InstrumentInfo,
+    ) -> bool:
+        """POST_ONLY limit at the touch, then escalate to taker or abort.
+
+        Returns True when a position entry was achieved (full or partial fill,
+        or successful escalation) — the caller then runs the shared post-entry
+        path. Pending/durable state mechanics mirror the market path exactly.
+        """
+        symbol = intent.symbol
+
+        # 1. Price the maker order off the live touch. No quote → no entry.
+        try:
+            bid, ask = await self._adapter.get_best_bid_ask(self._category, symbol)
+        except Exception as exc:
+            await self._abort_maker_entry(intent, decision, reason=f"no_quote: {exc}")
+            return False
+        tick = instrument_info.tick_size if instrument_info.tick_size > 0 else Decimal("0")
+        if intent.side == OrderSide.BUY:
+            # Improve the bid by one tick when it doesn't cross the ask
+            price = bid + tick if tick > 0 and bid + tick < ask else bid
+        else:
+            price = ask - tick if tick > 0 and ask - tick > bid else ask
+
+        maker_intent = intent.model_copy(
+            update={"order_type": OrderType.LIMIT, "price": price, "time_in_force": "PostOnly"}
+        )
+
+        # 2. Submit POST_ONLY limit
+        try:
+            resp = await self._adapter.place_order(maker_intent)
+        except Exception as exc:
+            self._diag_order_failed += 1
+            await self.resolve_pending_durable(intent.order_link_id, symbol)
+            self._last_failure_at[symbol] = datetime.now(tz=UTC)
+            log.error("execution.order_failed", symbol=symbol, error=str(exc), mode="maker_first")
+            await self._journal_order_event(maker_intent, decision, status="FAILED", error=str(exc))
+            return False
+
+        exchange_order_id = resp.get("result", {}).get("orderId", "?")
+        self._diag_order_placed += 1
+        log.info(
+            "maker.order_placed",
+            symbol=symbol,
+            side=intent.side.value,
+            qty=str(intent.qty),
+            price=str(price),
+            order_link_id=intent.order_link_id,
+            exchange_order_id=exchange_order_id,
+            timeout_s=self._maker_timeout_s,
+            ttl_s=self._maker_ttl_s,
+        )
+        await self._journal_order_event(maker_intent, decision, status="PLACED", exchange_order_id=exchange_order_id)
+
+        # 3. Wait for the fill. With escalation we decide at the timeout;
+        #    without it the order may rest until its full TTL.
+        wait_s = self._maker_timeout_s if self._maker_allow_escalation else self._maker_ttl_s
+        state = await self._wait_maker_fill(symbol, intent.order_link_id, wait_s)
+
+        if state == "filled":
+            self._diag_maker_filled += 1
+            log.info("maker.filled", symbol=symbol, order_link_id=intent.order_link_id)
+            return True
+
+        if state == "open":
+            # 4. Cancel the resting remainder. A cancel error can mean either a
+            #    racing fill OR a live order we failed to cancel — verify which.
+            cancel_failed = False
+            try:
+                await self._adapter.cancel_order(self._category, symbol, intent.order_link_id)
+            except Exception as exc:
+                cancel_failed = True
+                log.info(
+                    "maker.cancel_failed_checking_fill",
+                    symbol=symbol,
+                    order_link_id=intent.order_link_id,
+                    error=str(exc),
+                )
+            if cancel_failed:
+                # Fail closed: if the order may still be live on the exchange we
+                # must NOT escalate (a taker on top of a live limit doubles the
+                # entry) and must NOT release the pending slot — the private WS
+                # fill/cancel event or stale-pending reconciliation resolves it.
+                try:
+                    open_orders = await self._adapter.get_open_orders(self._category, symbol)
+                    still_live = any(str(o.get("orderLinkId")) == intent.order_link_id for o in open_orders)
+                except Exception as verify_exc:
+                    log.warning(
+                        "maker.cancel_state_unknown_fail_closed",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(verify_exc),
+                    )
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    return False
+                if still_live:
+                    self._diag_maker_aborted += 1
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.warning(
+                        "maker.cancel_failed_order_live",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                    )
+                    return False
+            try:
+                await self.sync_positions()
+            except Exception as exc:
+                log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+            if self.has_open_position(symbol):
+                # Partial (or racing full) fill — TP/SL are attached to the
+                # position via tpslMode=Full, the position manager takes over.
+                self._diag_maker_filled += 1
+                log.info(
+                    "maker.filled",
+                    symbol=symbol,
+                    order_link_id=intent.order_link_id,
+                    partial=True,
+                )
+                return True
+
+        # 5. No fill at all ("gone" = PostOnly rejected/cancelled by exchange).
+        allowed, reason = await self._maker_escalation_allowed(intent, price)
+        if not allowed:
+            self._diag_maker_aborted += 1
+            log.info(
+                "maker.aborted",
+                symbol=symbol,
+                order_link_id=intent.order_link_id,
+                reason=reason,
+            )
+            await self.resolve_pending_durable(intent.order_link_id, symbol)
+            await self._journal_order_event(maker_intent, decision, status="MAKER_ABORTED", error=reason)
+            return False
+
+        # 5b. Last fill re-check: the escalation gate above took a REST round
+        # trip — a fill landing in that window would otherwise be doubled by
+        # the taker order.
+        try:
+            await self.sync_positions()
+        except Exception as exc:
+            log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+        if self.has_open_position(symbol):
+            self._diag_maker_filled += 1
+            log.info("maker.filled", symbol=symbol, order_link_id=intent.order_link_id, late=True)
+            return True
+
+        # 6. Escalate the entry to a market (taker) order under a fresh link id.
+        escalation_link_id = (intent.order_link_id[:35] + "E")[:36]
+        market_intent = intent.model_copy(
+            update={
+                "intent_id": uuid.uuid4(),
+                "order_link_id": escalation_link_id,
+                "order_type": OrderType.MARKET,
+                "price": None,
+                "time_in_force": "GTC",
+            }
+        )
+        self.mark_entry_submitted(escalation_link_id, symbol=symbol)
+        if self._trade_journal is not None and self._trade_journal.is_enabled:
+            try:
+                await self._trade_journal.record_order_pending(escalation_link_id, symbol)
+            except Exception as exc:
+                log.debug("maker.record_pending_failed", order_link_id=escalation_link_id, error=str(exc))
+        # The original maker order is terminally cancelled — release its slot.
+        await self.resolve_pending_durable(intent.order_link_id, symbol)
+
+        try:
+            resp = await self._adapter.place_order(market_intent)
+        except Exception as exc:
+            self._diag_order_failed += 1
+            await self.resolve_pending_durable(escalation_link_id, symbol)
+            self._last_failure_at[symbol] = datetime.now(tz=UTC)
+            log.error("execution.order_failed", symbol=symbol, error=str(exc), mode="maker_escalation")
+            await self._journal_order_event(market_intent, decision, status="FAILED", error=str(exc))
+            return False
+
+        exchange_order_id = resp.get("result", {}).get("orderId", "?")
+        self._diag_order_placed += 1
+        self._diag_maker_escalated += 1
+        log.info(
+            "maker.escalated",
+            symbol=symbol,
+            side=intent.side.value,
+            qty=str(intent.qty),
+            order_link_id=escalation_link_id,
+            exchange_order_id=exchange_order_id,
+        )
+        await self._journal_order_event(market_intent, decision, status="PLACED", exchange_order_id=exchange_order_id)
+        return True
+
+    async def _wait_maker_fill(self, symbol: str, order_link_id: str, wait_s: float) -> str:
+        """Poll the open-orders list until fill, disappearance or timeout.
+
+        Returns "filled" (position confirmed), "gone" (order vanished without a
+        position — e.g. PostOnly rejected) or "open" (still resting at timeout).
+        """
+        deadline = asyncio.get_event_loop().time() + wait_s
+        while True:
+            try:
+                open_orders = await self._adapter.get_open_orders(self._category, symbol)
+                still_open = any(str(o.get("orderLinkId")) == order_link_id for o in open_orders)
+                if not still_open:
+                    try:
+                        await self.sync_positions()
+                    except Exception as exc:
+                        log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+                    return "filled" if self.has_open_position(symbol) else "gone"
+            except Exception as exc:
+                # Transient API error — keep waiting, the order state is unknown
+                log.debug("maker.fill_poll_failed", symbol=symbol, error=str(exc))
+            if asyncio.get_event_loop().time() >= deadline:
+                return "open"
+            await asyncio.sleep(_MAKER_POLL_INTERVAL_S)
+
+    async def _maker_escalation_allowed(self, intent: OrderIntent, maker_price: Decimal) -> tuple[bool, str]:
+        """Safety gate before paying taker: config, book pressure, price drift."""
+        if not self._maker_allow_escalation:
+            return False, "escalation_disabled"
+
+        # Imbalance must not contradict the direction (fail open when unknown)
+        if self._imbalance_provider is not None:
+            try:
+                imbalance = self._imbalance_provider(intent.symbol)
+            except Exception:
+                imbalance = None
+            if imbalance is not None:
+                against = imbalance < 0 if intent.side == OrderSide.BUY else imbalance > 0
+                if against:
+                    return False, f"imbalance_against:{round(imbalance, 3)}"
+
+        # Price must not have run away from where the maker order was resting
+        try:
+            current = await self._adapter.get_conservative_market_price(
+                self._category, intent.symbol, intent.side.value
+            )
+        except Exception as exc:
+            return False, f"no_price:{exc}"
+        if maker_price <= 0:
+            return False, "bad_maker_price"
+        drift_pct = abs(float((current - maker_price) / maker_price)) * 100.0
+        if drift_pct > _MAKER_MAX_ESCALATION_DRIFT_PCT:
+            return False, f"price_drifted:{round(drift_pct, 4)}pct"
+        return True, "ok"
+
+    async def _abort_maker_entry(self, intent: OrderIntent, decision: RiskDecision, reason: str) -> None:
+        """Release pending state and journal an aborted maker entry."""
+        self._diag_maker_aborted += 1
+        log.info("maker.aborted", symbol=intent.symbol, order_link_id=intent.order_link_id, reason=reason)
+        await self.resolve_pending_durable(intent.order_link_id, intent.symbol)
+        await self._journal_order_event(intent, decision, status="MAKER_ABORTED", error=reason)
+
+    async def _journal_order_event(
+        self,
+        intent: OrderIntent,
+        decision: RiskDecision,
+        *,
+        status: str,
+        exchange_order_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._trade_journal is None:
+            return
+        try:
+            await self._trade_journal.record_order_event(
+                order_link_id=intent.order_link_id,
+                proposal_id=intent.proposal_id,
+                decision_id=intent.decision_id,
+                symbol=intent.symbol,
+                side=intent.side.value,
+                qty=intent.qty,
+                status=status,
+                exchange_order_id=exchange_order_id,
+                error=error,
+            )
+        except Exception as exc:
+            log.debug("execution.journal_event_failed", status=status, error=str(exc))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -1160,6 +1470,9 @@ class ExecutionEngine:
             "net_edge_rejected": self._diag_net_edge_rejected,
             "no_tp_rejected": self._diag_no_tp_rejected,
             "fee_unavailable_rejected": self._diag_fee_unavailable_rejected,
+            "maker_filled": self._diag_maker_filled,
+            "maker_escalated": self._diag_maker_escalated,
+            "maker_aborted": self._diag_maker_aborted,
         }
 
     def pending_entry_diagnostics(self) -> dict[str, Any]:

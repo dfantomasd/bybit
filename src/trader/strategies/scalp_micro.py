@@ -88,6 +88,12 @@ class ScalpMicroStrategy(BaseStrategy):
         min_qty_usd:        Exchange minimum notional.
         diag_hook:          Optional callable(reason) for rejection diagnostics
                             (e.g. "spread_rejected", "scalp_net_edge_rejected").
+        imbalance_provider: Callable(symbol) -> latest L5 orderbook imbalance in
+                            [-1, 1], or None when unknown. Unknown fails OPEN
+                            (signal allowed) — the book feed is an enhancement,
+                            not a dependency.
+        min_imbalance:      Required |imbalance| agreeing with the signal side
+                            (BUY needs >= +min, SELL needs <= -min).
     """
 
     # Shared across all instances: global trade-rate governor
@@ -108,6 +114,8 @@ class ScalpMicroStrategy(BaseStrategy):
         max_position_notional_usd: float = 100.0,
         min_qty_usd: float = 5.0,
         diag_hook: Callable[[str], None] | None = None,
+        imbalance_provider: Callable[[str], float | None] | None = None,
+        min_imbalance: float = 0.15,
     ) -> None:
         self._store = candle_store
         self._interval = interval
@@ -122,6 +130,8 @@ class ScalpMicroStrategy(BaseStrategy):
         self._max_position_notional_usd = max_position_notional_usd
         self._min_qty_usd = min_qty_usd
         self._diag_hook = diag_hook
+        self._imbalance_provider = imbalance_provider
+        self._min_imbalance = min_imbalance
         self._last_signal_at: dict[str, datetime] = {}
 
     @property
@@ -235,6 +245,26 @@ class ScalpMicroStrategy(BaseStrategy):
                 side = OrderSide.SELL
         if side is None:
             return None
+
+        # --- Orderbook imbalance confirmation (fail open: no data = no block) ---
+        # A signal against the visible book pressure is the classic adverse-fill
+        # setup; require imbalance to agree with the direction when known.
+        if self._imbalance_provider is not None:
+            imbalance = self._imbalance_provider(symbol)
+            if imbalance is not None:
+                confirms = (
+                    imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
+                )
+                if not confirms:
+                    self._diag("imbalance_rejected")
+                    log.debug(
+                        "scalp_micro.imbalance_rejected",
+                        symbol=symbol,
+                        side=side.value,
+                        imbalance=round(imbalance, 3),
+                        min_imbalance=self._min_imbalance,
+                    )
+                    return None
 
         # --- Net edge check: gross edge is the TP distance ---
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0

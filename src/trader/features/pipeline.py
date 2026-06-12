@@ -63,9 +63,11 @@ class FeaturePipeline:
         interval_s: float = 5.0,
         stale_threshold_s: float = 90.0,
         watchdog_interval_s: float = 60.0,
+        orderbook_tracker: Any | None = None,
     ) -> None:
         self._store = candle_store
         self._health = health_checker
+        self._orderbook_tracker = orderbook_tracker
         self._stale_threshold_s = stale_threshold_s
         self._watchdog_interval_s = watchdog_interval_s
         self._stop_event = asyncio.Event()
@@ -315,6 +317,28 @@ class FeaturePipeline:
             features["volume_ratio_sma20"] = val_vol_ratio
         else:
             missing.append("volume_ratio_sma20")
+
+        # --- Orderbook microstructure (only for symbols with a live L2 feed) ---
+        # Stale/missing books contribute to `missing` rather than fake-neutral
+        # values, so the model never trains on fabricated orderbook data.
+        if self._orderbook_tracker is not None:
+            ob_imb = self._orderbook_tracker.latest_imbalance(symbol)
+            if ob_imb is not None:
+                features["ob_imbalance_l5"] = ob_imb
+            else:
+                missing.append("ob_imbalance_l5")
+
+            micro_dev = self._orderbook_tracker.microprice_deviation_bps(symbol)
+            if micro_dev is not None:
+                features["microprice_deviation_bps"] = micro_dev
+            else:
+                missing.append("microprice_deviation_bps")
+
+            imb_trend = self._orderbook_tracker.imbalance_trend_10s(symbol)
+            if imb_trend is not None:
+                features["ob_imbalance_trend_10s"] = imb_trend
+            else:
+                missing.append("ob_imbalance_trend_10s")
 
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)
