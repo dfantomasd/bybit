@@ -258,11 +258,12 @@ class TradingApplication:
         if self._trade_journal is None:
             return
         while not self._shutdown_event.is_set():
-            if not self._trade_journal.is_enabled or not self._trade_journal.durable_state_healthy:
+            durable_healthy = bool(getattr(self._trade_journal, "durable_state_healthy", True))
+            if not self._trade_journal.is_enabled or not durable_healthy:
                 try:
                     connected = await self._trade_journal.reconnect_if_needed(
                         min_interval=_TRADE_JOURNAL_RECONNECT_INTERVAL,
-                        force=not self._trade_journal.durable_state_healthy,
+                        force=not durable_healthy,
                     )
                     if connected:
                         log.info("trade_journal.reconnected")
