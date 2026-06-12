@@ -1068,18 +1068,12 @@ class ExecutionEngine:
         # 7. Update local state ────────────────────────────────────────
         self._last_entry_at[symbol] = datetime.now(tz=UTC)
 
-        if not self._shadow_mode:
-            await self.sync_positions()
-            if not self.has_open_position(symbol):
-                log.warning(
-                    "execution.order_accepted_position_not_confirmed",
-                    symbol=symbol,
-                    order_link_id=intent.order_link_id,
-                )
-            return decision
-
         entry_price = proposal.entry_price or Decimal("0")
         notional = decision.approved_qty * entry_price
+        # Set the position registry entry optimistically for BOTH live and shadow
+        # paths so the strategy loop cannot open a duplicate entry while a fill
+        # confirmation is still in-flight. For live orders the WS position event
+        # (or the next startup sync) will replace this with real exchange data.
         self._open_positions[symbol] = {
             "side": proposal.side,
             "size": decision.approved_qty,
@@ -1091,6 +1085,14 @@ class ExecutionEngine:
 
         if notional > Decimal("0"):
             await self._exposure.update_position(symbol, proposal.side.value, notional)
+
+        if not self._shadow_mode:
+            log.info(
+                "execution.live_order_placed_optimistic_position_set",
+                symbol=symbol,
+                order_link_id=intent.order_link_id,
+            )
+            return decision
 
         return decision
 
