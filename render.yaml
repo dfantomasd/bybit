@@ -79,6 +79,8 @@ services:
       # ML shadow model (shadow scoring only; no live influence)
       - key: MODEL_ENABLED
         value: "false"
+      - key: MODEL_TYPE
+        value: GBDT
       - key: MODEL_SHADOW_SCORING_ENABLED
         value: "true"
       - key: MODEL_ALLOW_LIVE_DECISIONS

@@ -141,6 +141,12 @@ class TradingController:
     recent_trades_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     # /buckets data: regime-bucket expectancy stats
     bucket_stats_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    # Strategy loss diagnostics
+    pnl_analysis_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    compare_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
+    costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -226,6 +232,13 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         app.add_handler(CommandHandler("net", self._cmd_net_results))
         app.add_handler(CommandHandler("costs", self._cmd_costs))
+        app.add_handler(CommandHandler("costs_detailed", self._cmd_costs_detailed))
+        app.add_handler(CommandHandler("pnl_analysis", self._cmd_pnl_analysis))
+        app.add_handler(CommandHandler("compare", self._cmd_compare))
+        app.add_handler(CommandHandler("worst", self._cmd_worst))
+        app.add_handler(CommandHandler("strategy_report", self._cmd_strategy_report))
+        app.add_handler(CommandHandler("report", self._cmd_strategy_report))
+        app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -410,16 +423,23 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
+            [
+                InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
+                InlineKeyboardButton("⚖️ Compare", callback_data="view:compare"),
+            ],
+            [InlineKeyboardButton("📑 Отчет стратегии", callback_data="view:strategy_report")],
             # — Риски и лимиты —
             [
                 InlineKeyboardButton("🎚 Риски и лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
             ],
+            [InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed")],
             # — Модель и обучение —
             [
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                 InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
             ],
+            [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
             # — Настройки —
             [
                 InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
@@ -917,6 +937,384 @@ class TelegramMonitorBot:
 
         await self._reply(update, text, reply_markup=self._main_menu())
 
+    async def _cmd_costs_detailed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show paper-strategy gross/net edge and maker share diagnostics."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.costs_detailed_provider is None:
+            await self._reply(update, "<b>Издержки детально</b>\nПока недоступно.", reply_markup=self._main_menu())
+            return
+        try:
+            data = await self._controller.costs_detailed_provider()
+        except Exception as exc:
+            log.warning("telegram.costs_detailed_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>Издержки детально</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        def _period_line(title: str, row: dict[str, Any]) -> str:
+            return (
+                f"<b>{title}</b>\n"
+                f"Сделок: <code>{int(row.get('count') or 0)}</code>\n"
+                f"Gross avg: <code>{float(row.get('avg_gross_bps') or 0.0):+.2f} bps</code>\n"
+                f"Net avg:   <code>{float(row.get('avg_net_bps') or 0.0):+.2f} bps</code>\n"
+                f"Cost avg:  <code>{float(row.get('avg_cost_bps') or 0.0):+.2f} bps</code>"
+            )
+
+        today = data.get("today") or {}
+        total = data.get("all_time") or {}
+        lines = [
+            "🧾 <b>Издержки детально</b>",
+            "База: <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "",
+            _period_line("Сегодня UTC", today),
+            "",
+            _period_line("Всего", total),
+        ]
+        maker_share = data.get("maker_share_pct")
+        maker_count = int(data.get("maker_count") or 0)
+        exec_count = int(data.get("execution_count") or 0)
+        if maker_share is not None and exec_count > 0:
+            lines.append(f"\nMaker fills: <code>{float(maker_share):.1f}%</code> ({maker_count}/{exec_count})")
+        lines.append("\nПроскальзывание пока не считается: нет надежной связки signal → fill/close для всех режимов.")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_pnl_analysis(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show baseline PnL breakdowns by symbol, hour, regime and weekday."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.pnl_analysis_provider is None:
+            await self._reply(update, "<b>PnL-анализ</b>\nПока недоступен.", reply_markup=self._main_menu())
+            return
+        try:
+            data = await self._controller.pnl_analysis_provider()
+        except Exception as exc:
+            log.warning("telegram.pnl_analysis_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>PnL-анализ</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+
+        def _row(label: str, count: Any, avg: Any, total: Any | None = None) -> str:
+            total_part = f", Σ <code>{float(total or 0.0):+.1f}</code>" if total is not None else ""
+            return f"{label}: <code>{int(count or 0)}</code>, avg <code>{float(avg or 0.0):+.2f}</code>{total_part}"
+
+        symbol_best = data.get("symbols_best") or []
+        symbol_worst = data.get("symbols_worst") or []
+        regimes = data.get("regimes") or []
+        weekdays = data.get("weekdays") or []
+        hours = {int(row.get("hour") or 0): row for row in data.get("hours") or []}
+        lines = [
+            "🔬 <b>PnL-анализ baseline</b>",
+            "Фильтр: <code>directional_net_v1</code>, <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "",
+            "<b>Топ-5 прибыльных символов</b>",
+        ]
+        lines.extend(
+            _row(
+                f"<code>{row.get('symbol', '?')}</code>",
+                row.get("count"),
+                row.get("avg_net_bps"),
+                row.get("total_net_bps"),
+            )
+            for row in symbol_best[:5]
+        )
+        lines.append("\n<b>Топ-5 убыточных символов</b>")
+        lines.extend(
+            _row(
+                f"<code>{row.get('symbol', '?')}</code>",
+                row.get("count"),
+                row.get("avg_net_bps"),
+                row.get("total_net_bps"),
+            )
+            for row in symbol_worst[:5]
+        )
+        lines.append("\n<b>По часам UTC</b>")
+        hour_chunks: list[str] = []
+        for hour in range(24):
+            row = hours.get(hour, {})
+            label = f"{hour:02d}-{(hour + 1) % 24:02d}"
+            hour_chunks.append(f"{label}:{float(row.get('avg_net_bps') or 0.0):+.1f}/{int(row.get('count') or 0)}")
+        lines.extend("<code>" + "  ".join(hour_chunks[i : i + 4]) + "</code>" for i in range(0, 24, 4))
+        lines.append("\n<b>По режимам</b>")
+        lines.extend(
+            _row(
+                str(row.get("regime") or "unknown"), row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps")
+            )
+            for row in regimes[:10]
+        )
+        lines.append("\n<b>По дням недели</b>")
+        lines.extend(
+            _row(str(row.get("weekday") or "?"), row.get("count"), row.get("avg_net_bps"), row.get("total_net_bps"))
+            for row in weekdays
+        )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_compare(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Compare baseline, model gate-pass and equal-size random baseline sample."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.compare_provider is None:
+            await self._reply(update, "<b>Compare</b>\nПока недоступно.", reply_markup=self._main_menu())
+            return
+        try:
+            data = await self._controller.compare_provider()
+        except Exception as exc:
+            log.warning("telegram.compare_failed", error=str(exc))
+            await self._reply(update, f"<b>Compare</b>\nОшибка: <code>{exc}</code>", reply_markup=self._main_menu())
+            return
+
+        def _sample_line(title: str, row: dict[str, Any]) -> str:
+            return (
+                f"{title:<10} "
+                f"n=<code>{int(row.get('count') or 0):4d}</code>  "
+                f"sum=<code>{float(row.get('sum_net_bps') or 0.0):+9.1f}</code>  "
+                f"avg=<code>{float(row.get('avg_net_bps') or 0.0):+7.2f}</code>"
+            )
+
+        baseline = data.get("baseline") or {}
+        gate = data.get("gate_pass") or {}
+        random_sample = data.get("random_sample") or {}
+        model_version = data.get("model_version") or "none"
+        p_value = data.get("p_value")
+        lines = [
+            "⚖️ <b>Compare</b>",
+            f"Модель: <code>{model_version}</code>",
+            "<code>sample     n     sum_bps     avg_bps</code>",
+            _sample_line("baseline", baseline),
+            _sample_line("gate", gate),
+            _sample_line("random", random_sample),
+        ]
+        if p_value is None:
+            lines.append("\np-value: <code>n/a</code> — мало данных для проверки.")
+        else:
+            lines.append(f"\np-value gate vs baseline: <code>{float(p_value):.4f}</code>")
+        if int(gate.get("count") or 0) < 20:
+            lines.append("⚠️ Gate-pass сделок меньше 20: статистика ещё очень шумная.")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_worst(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show worst labelled baseline outcomes with key features and model decision."""
+        if not await self._authorised(update):
+            return
+        limit = 10
+        if context.args:
+            try:
+                limit = max(1, min(20, int(context.args[0])))
+            except (TypeError, ValueError):
+                limit = 10
+        if self._controller is None or self._controller.worst_trades_provider is None:
+            await self._reply(update, "<b>Worst</b>\nПока недоступно.", reply_markup=self._main_menu())
+            return
+        try:
+            rows = await self._controller.worst_trades_provider(limit)
+        except Exception as exc:
+            log.warning("telegram.worst_failed", error=str(exc))
+            await self._reply(update, f"<b>Worst</b>\nОшибка: <code>{exc}</code>", reply_markup=self._main_menu())
+            return
+        if not rows:
+            await self._reply(
+                update, "<b>Worst</b>\nУбыточных размеченных исходов пока нет.", reply_markup=self._main_menu()
+            )
+            return
+
+        lines = [f"📉 <b>{len(rows)} худших исходов baseline</b>"]
+        for row in rows:
+            features = row.get("features") or {}
+            feat_text = (
+                f"rsi={features.get('rsi_14', 'n/a')}, "
+                f"atr%={features.get('atr_14_pct', 'n/a')}, "
+                f"ob={features.get('ob_imbalance_l5', 'n/a')}, "
+                f"micro={features.get('microprice_deviation_bps', 'n/a')}"
+            )
+            score = row.get("model_score")
+            score_text = f"{float(score):.3f}" if score is not None else "n/a"
+            ts = self._fmt_timestamp(row.get("created_at")) if row.get("created_at") else "n/a"
+            lines.append(
+                "\n"
+                f"<code>{row.get('symbol', '?')}</code> {row.get('side', '?')} {ts}\n"
+                f"net: <code>{float(row.get('net_return_bps') or 0.0):+.2f} bps</code>, "
+                f"model: <code>{row.get('model_decision') or 'n/a'}</code> score=<code>{score_text}</code>\n"
+                f"<code>{feat_text}</code>"
+            )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_model_performance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Show model metric history from model_versions.metrics."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.model_performance_provider is None:
+            await self._reply(update, "<b>История моделей</b>\nПока недоступна.", reply_markup=self._main_menu())
+            return
+        try:
+            rows = await self._controller.model_performance_provider()
+        except Exception as exc:
+            log.warning("telegram.model_performance_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
+                reply_markup=self._main_menu(),
+            )
+            return
+        if not rows:
+            await self._reply(update, "<b>История моделей</b>\nВерсий модели пока нет.", reply_markup=self._main_menu())
+            return
+        lines = ["📉 <b>История моделей</b>", "<code>date UTC          q        prec   lift   wf</code>"]
+        for row in rows:
+            ts = self._fmt_timestamp(row.get("training_finished_at")) if row.get("training_finished_at") else "n/a"
+            quality = str(row.get("quality") or "n/a")[:8]
+            precision = row.get("precision")
+            lift = row.get("lift_bps")
+            walk_forward = row.get("walk_forward_bps")
+            precision_text = " n/a" if precision is None else f"{float(precision) * 100:4.1f}%"
+            lift_text = " n/a" if lift is None else f"{float(lift):+5.1f}"
+            wf_text = " n/a" if walk_forward is None else f"{float(walk_forward):+5.1f}"
+            lines.append(f"<code>{ts[:16]:16} {quality:8} {precision_text} {lift_text} {wf_text}</code>")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_strategy_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Build one compact strategy diagnostics report for canary decisions."""
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None:
+            await self._reply(update, "<b>Отчет стратегии</b>\nПока недоступен.", reply_markup=self._main_menu())
+            return
+
+        async def _safe(name: str, call: Callable[[], Awaitable[Any]] | None, default: Any) -> Any:
+            if call is None:
+                return default
+            try:
+                return await call()
+            except Exception as exc:
+                log.warning("telegram.strategy_report_section_failed", section=name, error=str(exc))
+                return default
+
+        pnl = await _safe("pnl", self._controller.pnl_analysis_provider, {})
+        compare = await _safe("compare", self._controller.compare_provider, {})
+        costs = await _safe("costs", self._controller.costs_detailed_provider, {})
+        models = await _safe("models", self._controller.model_performance_provider, [])
+        worst: list[dict[str, Any]] = []
+        if self._controller.worst_trades_provider is not None:
+            try:
+                worst = await self._controller.worst_trades_provider(3)
+            except Exception as exc:
+                log.warning("telegram.strategy_report_worst_failed", error=str(exc))
+
+        baseline = compare.get("baseline") or {}
+        gate = compare.get("gate_pass") or {}
+        random_sample = compare.get("random_sample") or {}
+        p_value = compare.get("p_value")
+        best_symbols = pnl.get("symbols_best") or []
+        worst_symbols = pnl.get("symbols_worst") or []
+        regimes = pnl.get("regimes") or []
+        total_costs = costs.get("all_time") or {}
+        today_costs = costs.get("today") or {}
+        latest_model = models[0] if models else {}
+
+        baseline_avg = float(baseline.get("avg_net_bps") or 0.0)
+        gate_avg = float(gate.get("avg_net_bps") or 0.0)
+        gate_count = int(gate.get("count") or 0)
+        gate_sum = float(gate.get("sum_net_bps") or 0.0)
+        baseline_sum = float(baseline.get("sum_net_bps") or 0.0)
+        random_avg = float(random_sample.get("avg_net_bps") or 0.0)
+        quality = str(latest_model.get("quality") or "n/a")
+        walk_forward = latest_model.get("walk_forward_bps")
+        issues: list[str] = []
+        if baseline_avg <= 0:
+            issues.append(f"baseline avg отрицательный: {baseline_avg:+.2f} bps")
+        if gate_count < 20:
+            issues.append(f"gate-pass мало сделок: {gate_count}/20")
+        if gate_count >= 20 and gate_avg <= 0:
+            issues.append(f"gate-pass avg отрицательный: {gate_avg:+.2f} bps")
+        if p_value is None or float(p_value) >= 0.05:
+            issues.append("преимущество gate статистически не доказано")
+        if quality not in ("GOOD", "ХОРОШО"):
+            issues.append(f"качество модели: {quality}")
+        if walk_forward is not None and float(walk_forward) <= 0:
+            issues.append(f"walk-forward: {float(walk_forward):+.2f} bps")
+
+        def _symbol_line(row: dict[str, Any]) -> str:
+            return (
+                f"<code>{row.get('symbol', '?')}</code> "
+                f"avg=<code>{float(row.get('avg_net_bps') or 0.0):+.1f}</code> "
+                f"n=<code>{int(row.get('count') or 0)}</code>"
+            )
+
+        def _regime_line(row: dict[str, Any]) -> str:
+            return (
+                f"{row.get('regime') or 'unknown'}: "
+                f"<code>{float(row.get('avg_net_bps') or 0.0):+.1f}</code> "
+                f"n=<code>{int(row.get('count') or 0)}</code>"
+            )
+
+        verdict = "НЕ ГОТОВ к CANARY" if issues else "можно рассматривать маленький CANARY"
+        lines = [
+            "📑 <b>Отчет стратегии</b>",
+            f"Вердикт: <b>{verdict}</b>",
+            "",
+            "<b>PnL выборки</b>",
+            f"Baseline: n=<code>{int(baseline.get('count') or 0)}</code>, "
+            f"Σ=<code>{baseline_sum:+.1f}</code>, avg=<code>{baseline_avg:+.2f}</code>",
+            f"Gate:     n=<code>{gate_count}</code>, Σ=<code>{gate_sum:+.1f}</code>, avg=<code>{gate_avg:+.2f}</code>",
+            f"Random:   n=<code>{int(random_sample.get('count') or 0)}</code>, avg=<code>{random_avg:+.2f}</code>",
+            f"p-value: <code>{'n/a' if p_value is None else f'{float(p_value):.4f}'}</code>",
+            "",
+            "<b>Что мешает</b>",
+        ]
+        lines.extend(f"• {issue}" for issue in issues[:6])
+        if not issues:
+            lines.append("• явных блокеров в диагностике не найдено; размер CANARY всё равно держать минимальным")
+
+        lines.append("\n<b>Лучшие символы</b>")
+        lines.extend(_symbol_line(row) for row in best_symbols[:3])
+        lines.append("\n<b>Худшие символы</b>")
+        lines.extend(_symbol_line(row) for row in worst_symbols[:3])
+        lines.append("\n<b>Режимы рынка</b>")
+        lines.extend(_regime_line(row) for row in regimes[:4])
+
+        lines.append("\n<b>Издержки baseline</b>")
+        lines.append(
+            f"Сегодня net avg=<code>{float(today_costs.get('avg_net_bps') or 0.0):+.2f}</code>, "
+            f"cost avg=<code>{float(today_costs.get('avg_cost_bps') or 0.0):+.2f}</code>"
+        )
+        lines.append(
+            f"Всего net avg=<code>{float(total_costs.get('avg_net_bps') or 0.0):+.2f}</code>, "
+            f"cost avg=<code>{float(total_costs.get('avg_cost_bps') or 0.0):+.2f}</code>"
+        )
+
+        if latest_model:
+            precision = latest_model.get("precision")
+            lift = latest_model.get("lift_bps")
+            precision_text = "n/a" if precision is None else f"{float(precision) * 100:.1f}%"
+            lift_text = "n/a" if lift is None else f"{float(lift):+.1f} bps"
+            wf_text = "n/a" if walk_forward is None else f"{float(walk_forward):+.1f} bps"
+            lines.append(
+                f"\n<b>Последняя модель</b>\nquality=<code>{quality}</code>, precision=<code>{precision_text}</code>, "
+                f"lift=<code>{lift_text}</code>, wf=<code>{wf_text}</code>"
+            )
+
+        if worst:
+            lines.append("\n<b>3 худших исхода</b>")
+            for row in worst:
+                ts = self._fmt_timestamp(row.get("created_at")) if row.get("created_at") else "n/a"
+                lines.append(
+                    f"<code>{row.get('symbol', '?')}</code> {row.get('side', '?')} "
+                    f"<code>{float(row.get('net_return_bps') or 0.0):+.1f} bps</code> {ts[:16]}"
+                )
+
+        lines.append("\nDrill-down: /pnl_analysis /compare /worst 10 /costs_detailed /model_performance")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
     async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
@@ -1019,19 +1417,45 @@ class TelegramMonitorBot:
         runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
         latest_run = db_diag.get("latest_training_run", {}) or {}
         latest_model = db_diag.get("latest_model_version", {}) or {}
+        model_info = diag.get("model", {}) or {}
+        model_metrics = latest_model.get("metrics") or latest_run.get("metrics") or {}
+        if isinstance(model_metrics, str):
+            try:
+                model_metrics = json.loads(model_metrics)
+            except json.JSONDecodeError:
+                model_metrics = {}
         gate = db_diag.get("shadow_gate_15m", {}) or {}
         paper = db_diag.get("paper_pnl_15m", {}) or {}
         paper_baseline = paper.get("baseline", {}) or {}
         paper_gate = paper.get("model_gate", {}) or {}
 
+        def _as_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)
-        gate_lift = gate.get("lift_vs_all_bps")
+        gate_lift = _as_float(gate.get("lift_vs_all_bps"))
         paper_gate_count = int(paper_gate.get("count") or 0)
-        paper_gate_bps = float(paper_gate.get("total_bps") or 0.0)
+        paper_gate_bps = _as_float(paper_gate.get("total_bps")) or 0.0
         paper_base_count = int(paper_baseline.get("count") or 0)
+        model_version = latest_model.get("version")
+        model_quality = str(model_metrics.get("quality") or "n/a")
+        walk_forward_bps = _as_float(model_metrics.get("walk_forward_expectancy_bps"))
+        champion_ver = model_info.get("champion_version", "none")
+        if champion_ver == "none" and latest_model.get("status") == "CHAMPION":
+            champion_ver = model_version or "none"
+        model_quality_ok = bool(model_version) and model_quality in ("GOOD", "ХОРОШО")
+        walk_forward_ok = walk_forward_bps is not None and walk_forward_bps > 0
+        champion_ok = champion_ver not in ("none", "", None)
+        gate_ready = gate_total >= 50 and gate_lift is not None and gate_lift > 0
+        paper_gate_ready = paper_gate_count >= 20 and paper_gate_bps > 0
         ws_age = diag.get("last_ws_message_age_s")
         loop_at = diag.get("last_strategy_loop_at")
         hour_api_rejected = int(diag.get("hour_api_rejected") or 0)
@@ -1116,10 +1540,42 @@ class TelegramMonitorBot:
         )
         require(
             "Модель обучена",
-            bool(latest_model.get("version")),
-            f"запуск={self._ru(latest_run.get('status', 'none'))}, модель={latest_model.get('version') or 'нет'}",
+            bool(model_version),
+            f"запуск={self._ru(latest_run.get('status', 'none'))}, модель={model_version or 'нет'}",
             "Нажмите 'Обучить 1000' или выполните python -m trader.training.train --min-samples 1000.",
             "10-20 минут после накопления 1000 примеров",
+        )
+        require(
+            "Качество модели GOOD",
+            model_quality_ok,
+            self._ru(model_quality) if model_version else "модель еще не обучена",
+            "Не включайте CANARY_LIVE: дождитесь новой модели с quality=GOOD или меняйте стратегию/признаки.",
+        )
+        require(
+            "Walk-forward модели > 0 bps",
+            walk_forward_ok,
+            f"{walk_forward_bps:+.2f} bps" if walk_forward_bps is not None else "n/a",
+            "Не промоутируйте модель и не включайте model-gate, пока walk-forward отрицательный.",
+        )
+        require(
+            "Основная модель CHAMPION",
+            champion_ok,
+            f"есть: {champion_ver}" if champion_ok else "нет",
+            "Промоутируйте только кандидата, который прошел quality, walk-forward, gate lift и paper-gate PnL.",
+        )
+        require(
+            "Lift фильтра > 0 bps на 50+ сигналах",
+            gate_ready,
+            f"{gate_lift:+.2f} bps на {gate_total} сигналах"
+            if gate_lift is not None
+            else f"n/a на {gate_total} сигналах",
+            "Дайте модели поработать в тени; если lift остается <= 0, меняйте стратегию/признаки.",
+        )
+        require(
+            "Paper model-gate: 20+ сделок и PnL > 0",
+            paper_gate_ready,
+            f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps",
+            "Дождитесь 20+ бумажных сделок; если PnL <= 0, CANARY_LIVE запускать нельзя.",
         )
         in_canary_live = self._config.trading_mode == "CANARY_LIVE"
         if in_canary_live:
@@ -1162,29 +1618,6 @@ class TelegramMonitorBot:
             trainable_15m < 2000,
             f"Размеченных 15m примеров {trainable_15m}; для более уверенного CANARY лучше 2000+.",
             "Можно начать с 1000 для первого кандидата, но перед реальными деньгами лучше добрать данные.",
-        )
-        warn_if(
-            gate_total < 50,
-            f"Фильтр модели проверен только на {gate_total} теневых решениях; желательно 50+.",
-            "Оставьте SHADOW работать после обучения, чтобы модель набрала статистику pass/block.",
-        )
-        if gate_lift is not None:
-            warn_if(
-                float(gate_lift) <= 0,
-                f"Lift фильтра модели {float(gate_lift):+.2f} bps; фильтр пока не улучшает отбор.",
-                "Не включайте MODEL_GATE_CANARY_ENABLED, пока lift не станет положительным.",
-            )
-        else:
-            warnings.append(("Lift фильтра модели еще не измерен.", "Дождитесь исходов после обучения модели."))
-        warn_if(
-            paper_gate_count < 20,
-            f"Paper model-gate сделок {paper_gate_count}; желательно 20+.",
-            "Дайте модели поработать в тени.",
-        )
-        warn_if(
-            paper_gate_count >= 20 and paper_gate_bps <= 0,
-            f"Paper model-gate PnL {paper_gate_bps:+.1f} bps.",
-            "Не промоутируйте модель, пока бумажный результат фильтра отрицательный.",
         )
         warn_if(
             paper_base_count == 0,
@@ -1244,10 +1677,14 @@ class TelegramMonitorBot:
         for _label, _ok, _detail, _fix, eta in failed:
             if eta:
                 estimates.append(f"• {_label}: {eta}")
+        if not estimates and failed:
+            estimates.append(
+                "• Данные уже могут быть собраны, но CANARY нельзя включать до положительного качества модели и paper-gate PnL."
+            )
         if not estimates and warnings:
-            estimates.append("• Основные условия закрыты; нужно добрать только качество/статистику модели.")
+            estimates.append("• Обязательные условия закрыты; остались только некритичные предупреждения.")
         if not estimates:
-            estimates.append("• Технически готово сейчас.")
+            estimates.append("• Технически и модельно готово сейчас.")
 
         required_env = {
             "POSTGRES_DSN": "хранилище сделок и модели",
@@ -1299,7 +1736,8 @@ class TelegramMonitorBot:
             [
                 "",
                 "<b>Следующий шаг</b>",
-                "CANARY держим маленьким: 1-2 позиции, минимальный notional, модель сначала только наблюдает.",
+                "Если есть ❌ по модели или paper-gate, CANARY_LIVE не включаем: модель продолжает наблюдать в SHADOW.",
+                "Если все обязательные условия ✅, CANARY держим маленьким: 1-2 позиции, минимальный notional.",
                 "Telegram не включает live: реальные деньги включаются только через env vars на Render.",
             ]
         )
@@ -2265,6 +2703,11 @@ class TelegramMonitorBot:
             "pnl": self._cmd_pnl,
             "diagnostics": self._cmd_diagnostics,
             "costs": self._cmd_costs,
+            "costs_detailed": self._cmd_costs_detailed,
+            "pnl_analysis": self._cmd_pnl_analysis,
+            "compare": self._cmd_compare,
+            "strategy_report": self._cmd_strategy_report,
+            "model_performance": self._cmd_model_performance,
         }
         if action == "menu":
             await self._button_reply(update, self._menu_text(), reply_markup=self._main_menu())
@@ -2584,6 +3027,9 @@ class TelegramMonitorBot:
             "/start       — меню, включая выбор торговых пар\n"
             "/pnl         — история закрытого PnL\n"
             "/net         — чистый PnL с комиссиями и фандингом\n"
+            "/strategy_report — единый отчет по качеству стратегии\n"
+            "/report      — короткий alias для /strategy_report\n"
+            "/pnl_analysis /compare /worst [N] /costs_detailed /model_performance — drill-down диагностика\n"
             "/trades      — последние 10 закрытых сделок\n"
             "/healthcheck — сигналы/сделки за час и главный блокер\n"
             "/buckets     — экспектанси по режимам/часам и блокировки\n"

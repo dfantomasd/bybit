@@ -1314,6 +1314,31 @@ class TradingApplication:
                 "block_below_bps": self._settings.BUCKET_BLOCK_AVG_BPS,
             }
 
+        async def _pnl_analysis_provider() -> dict:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return await self._trade_journal.get_strategy_pnl_analysis()
+
+        async def _compare_provider() -> dict:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return await self._trade_journal.get_model_compare_analysis()
+
+        async def _worst_trades_provider(limit: int) -> list[dict]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_worst_prediction_outcomes(limit=limit)
+
+        async def _costs_detailed_provider() -> dict:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return await self._trade_journal.get_detailed_costs()
+
+        async def _model_performance_provider() -> list[dict]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_model_performance_history()
+
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
                 await self._trade_journal.add_telegram_subscription(chat_id)
@@ -1353,6 +1378,11 @@ class TradingApplication:
             healthcheck_provider=_healthcheck_provider,
             recent_trades_provider=_recent_trades_provider,
             bucket_stats_provider=_bucket_stats_provider,
+            pnl_analysis_provider=_pnl_analysis_provider,
+            compare_provider=_compare_provider,
+            worst_trades_provider=_worst_trades_provider,
+            costs_detailed_provider=_costs_detailed_provider,
+            model_performance_provider=_model_performance_provider,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,

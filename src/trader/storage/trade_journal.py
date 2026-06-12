@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -1677,6 +1678,552 @@ class TradeJournal:
             self._last_read_error = str(exc)
             log.debug("trade_journal.shadow_gate_stats_failed", error=str(exc))
             return {}
+
+    @staticmethod
+    def _decode_json_field(value: Any) -> Any:
+        if isinstance(value, str):
+            try:
+                return json.loads(value)
+            except json.JSONDecodeError:
+                return value
+        return value
+
+    @staticmethod
+    def _sample_variance(values: list[float]) -> float | None:
+        if len(values) < 2:
+            return None
+        avg = sum(values) / len(values)
+        return sum((value - avg) ** 2 for value in values) / (len(values) - 1)
+
+    @staticmethod
+    def _two_sided_normal_pvalue(sample: list[float], population: list[float]) -> float | None:
+        if len(sample) < 2 or len(population) < 2:
+            return None
+        sample_var = TradeJournal._sample_variance(sample)
+        population_var = TradeJournal._sample_variance(population)
+        if sample_var is None or population_var is None:
+            return None
+        se = math.sqrt(sample_var / len(sample) + population_var / len(population))
+        if se <= 0:
+            return None
+        z_score = abs((sum(sample) / len(sample)) - (sum(population) / len(population))) / se
+        return math.erfc(z_score / math.sqrt(2.0))
+
+    async def _analysis_model_version(self) -> dict[str, Any]:
+        rows = await self._fetch(
+            """
+            SELECT version, status, training_finished_at, created_at
+            FROM model_versions
+            WHERE artifact IS NOT NULL
+            ORDER BY CASE WHEN status = 'CHAMPION' THEN 0 ELSE 1 END,
+                     training_finished_at DESC NULLS LAST,
+                     created_at DESC
+            LIMIT 1
+            """
+        )
+        return dict(rows[0]) if rows else {}
+
+    async def get_strategy_pnl_analysis(self, horizon_minutes: int = 15) -> dict[str, Any]:
+        """Aggregate baseline strategy expectancy by common operator slices."""
+        if not self.is_enabled:
+            return {"connected": False}
+        try:
+            args = (LABEL_SCHEMA_VERSION, int(horizon_minutes))
+            symbol_rows = await self._fetch(
+                """
+                SELECT pe.symbol,
+                       count(*) AS count,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       sum(po.net_return_bps) AS total_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY pe.symbol
+                ORDER BY avg_net_return_bps DESC
+                """,
+                *args,
+            )
+            hour_rows = await self._fetch(
+                """
+                SELECT EXTRACT(HOUR FROM pe.created_at AT TIME ZONE 'UTC')::int AS hour_utc,
+                       count(*) AS count,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       sum(po.net_return_bps) AS total_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY hour_utc
+                ORDER BY hour_utc
+                """,
+                *args,
+            )
+            regime_rows = await self._fetch(
+                """
+                SELECT COALESCE(pe.metadata->>'regime', 'UNKNOWN') AS regime,
+                       count(*) AS count,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       sum(po.net_return_bps) AS total_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY regime
+                ORDER BY avg_net_return_bps ASC
+                """,
+                *args,
+            )
+            weekday_rows = await self._fetch(
+                """
+                SELECT EXTRACT(ISODOW FROM pe.created_at AT TIME ZONE 'UTC')::int AS weekday,
+                       count(*) AS count,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       sum(po.net_return_bps) AS total_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY weekday
+                ORDER BY weekday
+                """,
+                *args,
+            )
+
+            def row_dict(row: Any) -> dict[str, Any]:
+                data = dict(row)
+                for key in ("avg_net_return_bps", "total_net_return_bps"):
+                    if data.get(key) is not None:
+                        data[key] = float(data[key])
+                if data.get("count") is not None:
+                    data["count"] = int(data["count"])
+                return data
+
+            symbols = [row_dict(row) for row in symbol_rows]
+            return {
+                "connected": True,
+                "horizon_minutes": int(horizon_minutes),
+                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "top_symbols": symbols[:5],
+                "worst_symbols": list(reversed(symbols[-5:])),
+                "hours": [row_dict(row) for row in hour_rows],
+                "regimes": [row_dict(row) for row in regime_rows],
+                "weekdays": [row_dict(row) for row in weekday_rows],
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.strategy_pnl_analysis_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
+
+    async def get_model_compare_analysis(self, horizon_minutes: int = 15) -> dict[str, Any]:
+        """Compare baseline, model gate pass, and same-size random baseline sample."""
+        if not self.is_enabled:
+            return {"connected": False}
+        try:
+            model = await self._analysis_model_version()
+            model_version = str(model.get("version") or "")
+            baseline_rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                ORDER BY pe.created_at ASC
+                LIMIT 5000
+                """,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+            )
+            baseline = [float(row["net_return_bps"] or 0.0) for row in baseline_rows]
+            gate: list[float] = []
+            if model_version:
+                gate_rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
+                      AND po.label_schema_version = $2
+                      AND po.horizon_minutes = $3
+                      AND po.net_return_bps IS NOT NULL
+                    ORDER BY pe.created_at ASC
+                    LIMIT 5000
+                    """,
+                    model_version,
+                    LABEL_SCHEMA_VERSION,
+                    int(horizon_minutes),
+                )
+                gate = [float(row["net_return_bps"] or 0.0) for row in gate_rows]
+            random_sample: list[float] = []
+            if gate:
+                random_rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE pe.model_version = 'RULE_BASELINE_V1'
+                      AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                      AND po.label_schema_version = $1
+                      AND po.horizon_minutes = $2
+                      AND po.net_return_bps IS NOT NULL
+                    ORDER BY random()
+                    LIMIT $3
+                    """,
+                    LABEL_SCHEMA_VERSION,
+                    int(horizon_minutes),
+                    len(gate),
+                )
+                random_sample = [float(row["net_return_bps"] or 0.0) for row in random_rows]
+
+            def stats(values: list[float]) -> dict[str, Any]:
+                return {
+                    "count": len(values),
+                    "total_bps": sum(values),
+                    "avg_bps": (sum(values) / len(values)) if values else None,
+                }
+
+            return {
+                "connected": True,
+                "horizon_minutes": int(horizon_minutes),
+                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "model_version": model_version or None,
+                "model_status": model.get("status"),
+                "baseline": stats(baseline),
+                "gate_pass": stats(gate),
+                "random_baseline_sample": stats(random_sample),
+                "p_value_vs_baseline": self._two_sided_normal_pvalue(gate, baseline),
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.model_compare_analysis_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
+
+    async def get_worst_prediction_outcomes(self, limit: int = 10, horizon_minutes: int = 15) -> list[dict[str, Any]]:
+        """Return worst resolved baseline strategy outcomes with features and model gate metadata."""
+        if not self.is_enabled:
+            return []
+        limit = max(1, min(int(limit), 20))
+        try:
+            rows = await self._fetch(
+                """
+                SELECT pe.symbol,
+                       pe.strategy_signal,
+                       pe.created_at,
+                       po.net_return_bps,
+                       fs.feature_names,
+                       fs.feature_values,
+                       mpe.model_version AS gate_model_version,
+                       mpe.score AS gate_score,
+                       mpe.decision AS gate_decision
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                LEFT JOIN LATERAL (
+                    SELECT model_version, score, decision
+                    FROM prediction_events model_pe
+                    WHERE model_pe.feature_snapshot_id = pe.feature_snapshot_id
+                      AND model_pe.model_version <> 'RULE_BASELINE_V1'
+                      AND model_pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                    ORDER BY model_pe.created_at DESC
+                    LIMIT 1
+                ) mpe ON true
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $2
+                  AND po.horizon_minutes = $3
+                  AND po.net_return_bps < 0
+                ORDER BY po.net_return_bps ASC
+                LIMIT $1
+                """,
+                limit,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+            )
+            key_features = ["rsi_14", "atr_14_pct", "ob_imbalance_l5", "microprice_deviation_bps"]
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                data = dict(row)
+                names = self._decode_json_field(data.get("feature_names")) or []
+                values = self._decode_json_field(data.get("feature_values")) or []
+                feature_map: dict[str, float | None] = {}
+                if isinstance(names, list) and isinstance(values, list):
+                    by_name = {str(name): values[idx] for idx, name in enumerate(names) if idx < len(values)}
+                    for feature in key_features:
+                        raw_value = by_name.get(feature)
+                        try:
+                            feature_map[feature] = float(raw_value) if raw_value is not None else None
+                        except (TypeError, ValueError):
+                            feature_map[feature] = None
+                result.append(
+                    {
+                        "symbol": data.get("symbol"),
+                        "side": data.get("strategy_signal"),
+                        "created_at": data.get("created_at"),
+                        "net_return_bps": float(data.get("net_return_bps") or 0.0),
+                        "features": feature_map,
+                        "model_version": data.get("gate_model_version"),
+                        "score": float(data["gate_score"]) if data.get("gate_score") is not None else None,
+                        "decision": data.get("gate_decision"),
+                    }
+                )
+            return result
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.worst_prediction_outcomes_failed", error=str(exc))
+            return []
+
+    async def get_detailed_costs(self, horizon_minutes: int = 15) -> dict[str, Any]:
+        """Return bps-level gross/net outcome costs plus maker share when available."""
+        if not self.is_enabled:
+            return {"connected": False}
+        try:
+            day_start = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+            today_rows = await self._fetch(
+                """
+                SELECT count(*) AS count,
+                       avg(po.gross_return_bps) AS avg_gross_return_bps,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       avg(po.cost_bps) AS avg_cost_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                  AND pe.created_at >= $3
+                """,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+                day_start,
+            )
+            all_rows = await self._fetch(
+                """
+                SELECT count(*) AS count,
+                       avg(po.gross_return_bps) AS avg_gross_return_bps,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       avg(po.cost_bps) AS avg_cost_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                """,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+            )
+
+            def outcome_stats(rows: list[Any]) -> dict[str, Any]:
+                row = dict(rows[0]) if rows else {}
+                return {
+                    "count": int(row.get("count") or 0),
+                    "avg_gross_return_bps": (
+                        float(row["avg_gross_return_bps"]) if row.get("avg_gross_return_bps") is not None else None
+                    ),
+                    "avg_net_return_bps": (
+                        float(row["avg_net_return_bps"]) if row.get("avg_net_return_bps") is not None else None
+                    ),
+                    "avg_cost_bps": float(row["avg_cost_bps"]) if row.get("avg_cost_bps") is not None else None,
+                }
+
+            maker_rows = await self._fetch(
+                """
+                SELECT count(*) FILTER (WHERE is_maker = true) AS maker_count,
+                       count(*) FILTER (WHERE is_maker IS NOT NULL) AS known_count
+                FROM execution_events
+                """
+            )
+            maker_row = dict(maker_rows[0]) if maker_rows else {}
+            maker_count = int(maker_row.get("maker_count") or 0)
+            known_count = int(maker_row.get("known_count") or 0)
+            return {
+                "connected": True,
+                "horizon_minutes": int(horizon_minutes),
+                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "today": outcome_stats(today_rows),
+                "all": outcome_stats(all_rows),
+                "maker_fill_pct": (maker_count / known_count * 100.0) if known_count else None,
+                "maker_fill_count": maker_count,
+                "known_fill_count": known_count,
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.detailed_costs_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
+
+    async def get_model_performance_history(self, limit: int = 12) -> list[dict[str, Any]]:
+        """Return recent model registry metrics for Telegram diagnostics."""
+        if not self.is_enabled:
+            return []
+        try:
+            rows = await self._fetch(
+                """
+                SELECT version, status, training_finished_at, created_at, training_samples, metrics
+                FROM model_versions
+                WHERE metrics IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT $1
+                """,
+                max(1, min(int(limit), 30)),
+            )
+            result: list[dict[str, Any]] = []
+            for row in rows:
+                data = dict(row)
+                metrics = self._decode_json_field(data.get("metrics")) or {}
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                result.append(
+                    {
+                        "version": data.get("version"),
+                        "status": data.get("status"),
+                        "created_at": data.get("training_finished_at") or data.get("created_at"),
+                        "training_samples": data.get("training_samples"),
+                        "quality": metrics.get("quality", "n/a"),
+                        "precision": metrics.get("precision"),
+                        "lift_bps": metrics.get("lift_bps"),
+                        "walk_forward_expectancy_bps": metrics.get("walk_forward_expectancy_bps"),
+                    }
+                )
+            return result
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.model_performance_history_failed", error=str(exc))
+            return []
+
+    async def get_dashboard_data(self, horizon_minutes: int = 15) -> dict[str, Any]:
+        """Return compact Chart.js-ready diagnostics for /dashboard."""
+        if not self.is_enabled:
+            return {"connected": False}
+        try:
+            model = await self._analysis_model_version()
+            model_version = str(model.get("version") or "")
+            baseline_rows = await self._fetch(
+                """
+                SELECT pe.created_at, po.net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                ORDER BY pe.created_at ASC
+                LIMIT 3000
+                """,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+            )
+            gate_rows = []
+            if model_version:
+                gate_rows = await self._fetch(
+                    """
+                    SELECT pe.created_at, po.net_return_bps
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
+                      AND po.label_schema_version = $2
+                      AND po.horizon_minutes = $3
+                      AND po.net_return_bps IS NOT NULL
+                    ORDER BY pe.created_at ASC
+                    LIMIT 3000
+                    """,
+                    model_version,
+                    LABEL_SCHEMA_VERSION,
+                    int(horizon_minutes),
+                )
+
+            def equity(rows: list[Any]) -> list[dict[str, Any]]:
+                total = 0.0
+                points: list[dict[str, Any]] = []
+                for row in rows:
+                    data = dict(row)
+                    total += float(data.get("net_return_bps") or 0.0)
+                    ts = data.get("created_at")
+                    points.append({"x": ts.isoformat() if isinstance(ts, datetime) else str(ts), "y": total})
+                return points
+
+            baseline_returns = [float(row["net_return_bps"] or 0.0) for row in baseline_rows]
+            bins: list[int] = []
+            if baseline_returns:
+                min_ret = math.floor(min(baseline_returns) / 10.0) * 10
+                max_ret = math.ceil(max(baseline_returns) / 10.0) * 10
+                bins = list(range(int(min_ret), int(max_ret) + 10, 10))
+            hist = []
+            for start in bins:
+                end = start + 10
+                hist.append(
+                    {
+                        "bucket": f"{start:+d}..{end:+d}",
+                        "count": sum(start <= value < end for value in baseline_returns),
+                    }
+                )
+
+            heat_rows = await self._fetch(
+                """
+                SELECT EXTRACT(ISODOW FROM pe.created_at AT TIME ZONE 'UTC')::int AS weekday,
+                       EXTRACT(HOUR FROM pe.created_at AT TIME ZONE 'UTC')::int AS hour_utc,
+                       sum(po.net_return_bps) AS total_net_return_bps,
+                       count(*) AS count
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY weekday, hour_utc
+                ORDER BY weekday, hour_utc
+                """,
+                LABEL_SCHEMA_VERSION,
+                int(horizon_minutes),
+            )
+            return {
+                "connected": True,
+                "horizon_minutes": int(horizon_minutes),
+                "model_version": model_version or None,
+                "equity_baseline": equity(baseline_rows),
+                "equity_gate_pass": equity(gate_rows),
+                "histogram": hist,
+                "heatmap": [
+                    {
+                        "weekday": int(row["weekday"]),
+                        "hour": int(row["hour_utc"]),
+                        "total_bps": float(row["total_net_return_bps"] or 0.0),
+                        "count": int(row["count"] or 0),
+                    }
+                    for row in heat_rows
+                ],
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.dashboard_data_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
 
     async def get_db_diagnostics(self) -> dict[str, Any]:
         """Return read-only diagnostics for Telegram 🗄 screen."""

@@ -63,3 +63,60 @@ class TestFitBatch:
         model = ChallengerModel(version="v_test", feature_names=["f0", "f1"])
         model.fit_batch(np.zeros((10, 2), dtype=np.float32), np.zeros((5,), dtype=np.int32))
         assert model.training_samples == 0
+
+
+class TestGbdtModel:
+    def test_gbdt_learns_separable_signal(self) -> None:
+        x, y = _imbalanced_separable()
+        model = ChallengerModel(
+            version="v_test_gbdt",
+            feature_names=[f"f{i}" for i in range(5)],
+            model_type="GBDT",
+        )
+        model.fit_batch(x[:800], y[:800])
+        assert model.training_samples == 800
+
+        scores = []
+        for row in x[800:]:
+            pred = model.predict(row.tolist())
+            assert pred is not None
+            scores.append(pred.score)
+        scores_arr = np.array(scores)
+        val_y = y[800:]
+        assert scores_arr[val_y == 1].mean() > scores_arr[val_y == 0].mean() + 0.2
+
+    def test_gbdt_partial_fit_is_noop(self) -> None:
+        x, y = _imbalanced_separable(n=200)
+        model = ChallengerModel(
+            version="v_test_gbdt",
+            feature_names=[f"f{i}" for i in range(5)],
+            model_type="GBDT",
+        )
+        model.fit_batch(x, y)
+        before = model.training_samples
+        model.partial_fit(x[0].tolist(), int(y[0]))
+        assert model.training_samples == before  # online updates skipped
+
+    def test_gbdt_roundtrip_serialization(self) -> None:
+        x, y = _imbalanced_separable(n=300)
+        model = ChallengerModel(
+            version="v_test_gbdt",
+            feature_names=[f"f{i}" for i in range(5)],
+            model_type="GBDT",
+        )
+        model.fit_batch(x, y)
+        restored = ChallengerModel.from_bytes(model.to_bytes(), version="v_test_gbdt")
+        assert restored.model_type == "GBDT"
+        assert restored.training_samples == len(x)
+        original = model.predict(x[0].tolist())
+        roundtrip = restored.predict(x[0].tolist())
+        assert original is not None and roundtrip is not None
+        assert roundtrip.score == original.score
+
+    def test_legacy_artifact_defaults_to_sgd(self) -> None:
+        x, y = _imbalanced_separable(n=200)
+        model = ChallengerModel(version="v_legacy", feature_names=[f"f{i}" for i in range(5)])
+        model.fit_batch(x, y)
+        payload = model.to_bytes()
+        restored = ChallengerModel.from_bytes(payload, version="v_legacy")
+        assert restored.model_type == "SGD"
