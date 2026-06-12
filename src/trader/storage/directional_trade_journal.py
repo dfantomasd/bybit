@@ -23,11 +23,11 @@ from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps, build_dir
 
 log = structlog.get_logger(__name__)
 
-DEFAULT_TAKER_FEE_BPS = 5.5          # 0.055% taker × 2 legs = 11 bps round trip
-DEFAULT_SPREAD_BPS = 8.0              # max_spread_bps from config
+DEFAULT_TAKER_FEE_BPS = 5.5  # 0.055% taker × 2 legs = 11 bps round trip
+DEFAULT_SPREAD_BPS = 8.0  # max_spread_bps from config
 DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0  # expected_slippage_pct × 2 legs = 6 bps
-DEFAULT_FUNDING_BPS = 1.0             # funding_buffer_pct
-DEFAULT_SAFETY_MARGIN_BPS = 5.0      # mirrors net_edge_safety_margin_pct in engine
+DEFAULT_FUNDING_BPS = 1.0  # funding_buffer_pct
+DEFAULT_SAFETY_MARGIN_BPS = 5.0  # mirrors net_edge_safety_margin_pct in engine
 
 _SourceBinding = tuple[str, str, datetime]
 _CURRENT_SOURCE_BINDING: ContextVar[_SourceBinding | None] = ContextVar(
