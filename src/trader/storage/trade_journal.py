@@ -136,12 +136,22 @@ class TradeJournal:
         if not self._enabled:
             return False
         if self._pool is not None:
-            return True
+            if not force and self.durable_state_healthy:
+                return True
+            try:
+                await self._pool.close()
+            except Exception as close_exc:
+                log.debug("trade_journal.reconnect_pool_close_failed", error=str(close_exc))
+            self._pool = None
         if not force and self._last_connect_attempt_at is not None:
             age = datetime.now(tz=UTC) - self._last_connect_attempt_at
             if age < timedelta(seconds=min_interval):
                 return False
         await self.connect()
+        if self.is_enabled:
+            self._consecutive_write_errors = 0
+            self._last_write_error = None
+            self._last_write_error_at = None
         return self.is_enabled
 
     async def close(self) -> None:
