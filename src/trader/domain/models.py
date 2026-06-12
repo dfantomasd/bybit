@@ -372,6 +372,9 @@ class InstrumentInfo(BaseModel):
     # Leverage (linear / inverse)
     max_leverage: Decimal | None = None
 
+    # Optional liquidity context, usually 24h turnover in quote currency.
+    turnover_24h: Decimal | None = None
+
     # Trading status
     status: str = "Trading"
 

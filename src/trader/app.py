@@ -258,19 +258,52 @@ class TradingApplication:
         if self._trade_journal is None:
             return
         while not self._shutdown_event.is_set():
-            if not self._trade_journal.is_enabled:
+            # Older tests/fakes may not expose durable_state_healthy; treat them as healthy.
+            durable_healthy = bool(getattr(self._trade_journal, "durable_state_healthy", True))
+            if not self._trade_journal.is_enabled or not durable_healthy:
                 try:
                     connected = await self._trade_journal.reconnect_if_needed(
-                        min_interval=_TRADE_JOURNAL_RECONNECT_INTERVAL
+                        min_interval=_TRADE_JOURNAL_RECONNECT_INTERVAL,
+                        force=not durable_healthy,
                     )
                     if connected:
                         log.info("trade_journal.reconnected")
+                        await self._restore_execution_pending_entries()
                 except Exception as exc:
                     log.debug("trade_journal.reconnect_failed", error=str(exc))
             try:
                 await asyncio.wait_for(self._shutdown_event.wait(), timeout=_TRADE_JOURNAL_RECONNECT_INTERVAL)
             except TimeoutError:
                 continue
+
+    async def _restore_execution_pending_entries(self) -> None:
+        """Reload unresolved durable pending entries into ExecutionEngine."""
+        if self._trade_journal is None or self._execution_engine is None or not self._trade_journal.is_enabled:
+            return
+        try:
+            pending_records = await self._trade_journal.get_pending_durable_orders()
+            unresolved_records = []
+            skipped_resolved = []
+            for record in pending_records:
+                oid = str(record.get("order_link_id") or "")
+                if oid and await self._trade_journal.is_order_resolved(oid):
+                    skipped_resolved.append(oid)
+                    continue
+                unresolved_records.append(record)
+            if skipped_resolved:
+                log.info(
+                    "execution_engine.pending_restore_skipped_resolved",
+                    ids=skipped_resolved,
+                )
+            if unresolved_records:
+                self._execution_engine.restore_pending_entries_with_symbols(unresolved_records)
+                log.info(
+                    "execution_engine.pending_restored",
+                    count=len(unresolved_records),
+                    ids=[r.get("order_link_id") for r in unresolved_records],
+                )
+        except Exception as exc:
+            log.warning("execution_engine.pending_restore_failed", error=str(exc))
 
     async def _start_http_server(self) -> asyncio.Task:
         from trader.api.fastapi_app import create_app
@@ -1528,34 +1561,8 @@ class TradingApplication:
             ),
         )
 
-        # P0.2: Restore pending entries from durable storage before any new entries.
-        # Orders with a persisted terminal resolution (order_pending_state.resolved_at)
-        # are skipped: a terminal status seen before a restart must not re-block the slot.
-        if self._trade_journal is not None:
-            try:
-                pending_records = await self._trade_journal.get_pending_durable_orders()
-                unresolved_records = []
-                skipped_resolved = []
-                for record in pending_records:
-                    oid = str(record.get("order_link_id") or "")
-                    if oid and await self._trade_journal.is_order_resolved(oid):
-                        skipped_resolved.append(oid)
-                        continue
-                    unresolved_records.append(record)
-                if skipped_resolved:
-                    log.info(
-                        "execution_engine.pending_restore_skipped_resolved",
-                        ids=skipped_resolved,
-                    )
-                if unresolved_records:
-                    self._execution_engine.restore_pending_entries_with_symbols(unresolved_records)
-                    log.info(
-                        "execution_engine.pending_restored",
-                        count=len(unresolved_records),
-                        ids=[r.get("order_link_id") for r in unresolved_records],
-                    )
-            except Exception as exc:
-                log.warning("execution_engine.pending_restore_failed", error=str(exc))
+        # P0.2: Restore unresolved pending entries from durable storage before any new entries.
+        await self._restore_execution_pending_entries()
 
         # Sync open positions from exchange so we don't double-enter on restart
         await self._execution_engine.sync_positions()

@@ -247,5 +247,6 @@ class OrderMapper:
             tick_size=_d(price_filter.get("tickSize", "0.01")),
             min_notional=_d(lot_size.get("minNotionalValue")) if lot_size.get("minNotionalValue") else None,
             max_leverage=_d(leverage_filter.get("maxLeverage")) if leverage_filter.get("maxLeverage") else None,
+            turnover_24h=_d(data.get("turnover24h")) if data.get("turnover24h") else None,
             status=data.get("status", "Trading"),
         )

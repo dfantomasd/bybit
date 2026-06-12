@@ -218,6 +218,29 @@ class PositionSizer:
             if notional < self._info.min_notional:
                 return Decimal("0"), (f"notional {notional} < min_notional {self._info.min_notional}")
 
+        # ----------------------------------------------------------------
+        # Liquidity cap — do not size an entry above 5% of average hourly
+        # 24h turnover. Missing liquidity data fails open but is visible in
+        # logs so operators know the protection was skipped.
+        # ----------------------------------------------------------------
+        if entry_price is not None and entry_price > Decimal("0"):
+            turnover_24h = self._info.turnover_24h
+            if turnover_24h is not None and turnover_24h > Decimal("0"):
+                max_position_notional = (turnover_24h / Decimal("24")) * _DEFAULT_MAX_VOLUME_FRACTION
+                notional = approved_qty * entry_price
+                if notional > max_position_notional:
+                    capped_qty = self.round_to_step(max_position_notional / entry_price, self._info.qty_step)
+                    if capped_qty < self._info.min_order_qty:
+                        return Decimal("0"), (
+                            f"liquidity cap {max_position_notional:.4f} below min_order_qty {self._info.min_order_qty}"
+                        )
+                    approved_qty = capped_qty
+            else:
+                logger.warning(
+                    "position_sizer.liquidity_data_missing",
+                    extra={"symbol": self._info.symbol},
+                )
+
         return approved_qty, ""
 
     def round_to_step(self, qty: Decimal, step: Decimal) -> Decimal:

@@ -70,6 +70,25 @@ async def test_total_portfolio_cap_still_applies():
 
 
 @pytest.mark.asyncio
+async def test_pending_reservation_counts_towards_position_limit():
+    """Pending exposure must close the race between risk approval and order registration."""
+    t = _tracker(capital=Decimal("10000"))
+    limits = get_risk_limits(RiskProfile.CONSERVATIVE)
+
+    for idx in range(limits.max_simultaneous_positions):
+        can_add, reason = t.can_add_position(f"COIN{idx}USDT", Decimal("10"), order_id=f"order-{idx}")
+        assert can_add, reason
+
+    can_add, reason = t.can_add_position("EXTRAUSDT", Decimal("10"), order_id="order-extra")
+    assert not can_add
+    assert "max simultaneous positions" in reason
+
+    t.release_reservation("order-0")
+    can_add, reason = t.can_add_position("EXTRAUSDT", Decimal("10"), order_id="order-extra")
+    assert can_add, reason
+
+
+@pytest.mark.asyncio
 async def test_notional_is_not_multiplied_by_leverage():
     """P0.4: stored notional must equal qty × price (gross, not margin)."""
     capital = Decimal("10000")
