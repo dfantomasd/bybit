@@ -1019,19 +1019,45 @@ class TelegramMonitorBot:
         runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
         latest_run = db_diag.get("latest_training_run", {}) or {}
         latest_model = db_diag.get("latest_model_version", {}) or {}
+        model_info = diag.get("model", {}) or {}
+        model_metrics = latest_model.get("metrics") or latest_run.get("metrics") or {}
+        if isinstance(model_metrics, str):
+            try:
+                model_metrics = json.loads(model_metrics)
+            except json.JSONDecodeError:
+                model_metrics = {}
         gate = db_diag.get("shadow_gate_15m", {}) or {}
         paper = db_diag.get("paper_pnl_15m", {}) or {}
         paper_baseline = paper.get("baseline", {}) or {}
         paper_gate = paper.get("model_gate", {}) or {}
 
+        def _as_float(value: Any) -> float | None:
+            if value is None:
+                return None
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                return None
+
         trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)
-        gate_lift = gate.get("lift_vs_all_bps")
+        gate_lift = _as_float(gate.get("lift_vs_all_bps"))
         paper_gate_count = int(paper_gate.get("count") or 0)
-        paper_gate_bps = float(paper_gate.get("total_bps") or 0.0)
+        paper_gate_bps = _as_float(paper_gate.get("total_bps")) or 0.0
         paper_base_count = int(paper_baseline.get("count") or 0)
+        model_version = latest_model.get("version")
+        model_quality = str(model_metrics.get("quality") or "n/a")
+        walk_forward_bps = _as_float(model_metrics.get("walk_forward_expectancy_bps"))
+        champion_ver = model_info.get("champion_version", "none")
+        if champion_ver == "none" and latest_model.get("status") == "CHAMPION":
+            champion_ver = model_version or "none"
+        model_quality_ok = bool(model_version) and model_quality in ("GOOD", "ХОРОШО")
+        walk_forward_ok = walk_forward_bps is not None and walk_forward_bps > 0
+        champion_ok = champion_ver not in ("none", "", None)
+        gate_ready = gate_total >= 50 and gate_lift is not None and gate_lift > 0
+        paper_gate_ready = paper_gate_count >= 20 and paper_gate_bps > 0
         ws_age = diag.get("last_ws_message_age_s")
         loop_at = diag.get("last_strategy_loop_at")
         hour_api_rejected = int(diag.get("hour_api_rejected") or 0)
@@ -1116,10 +1142,40 @@ class TelegramMonitorBot:
         )
         require(
             "Модель обучена",
-            bool(latest_model.get("version")),
-            f"запуск={self._ru(latest_run.get('status', 'none'))}, модель={latest_model.get('version') or 'нет'}",
+            bool(model_version),
+            f"запуск={self._ru(latest_run.get('status', 'none'))}, модель={model_version or 'нет'}",
             "Нажмите 'Обучить 1000' или выполните python -m trader.training.train --min-samples 1000.",
             "10-20 минут после накопления 1000 примеров",
+        )
+        require(
+            "Качество модели GOOD",
+            model_quality_ok,
+            self._ru(model_quality) if model_version else "модель еще не обучена",
+            "Не включайте CANARY_LIVE: дождитесь новой модели с quality=GOOD или меняйте стратегию/признаки.",
+        )
+        require(
+            "Walk-forward модели > 0 bps",
+            walk_forward_ok,
+            f"{walk_forward_bps:+.2f} bps" if walk_forward_bps is not None else "n/a",
+            "Не промоутируйте модель и не включайте model-gate, пока walk-forward отрицательный.",
+        )
+        require(
+            "Основная модель CHAMPION",
+            champion_ok,
+            f"есть: {champion_ver}" if champion_ok else "нет",
+            "Промоутируйте только кандидата, который прошел quality, walk-forward, gate lift и paper-gate PnL.",
+        )
+        require(
+            "Lift фильтра > 0 bps на 50+ сигналах",
+            gate_ready,
+            f"{gate_lift:+.2f} bps на {gate_total} сигналах" if gate_lift is not None else f"n/a на {gate_total} сигналах",
+            "Дайте модели поработать в тени; если lift остается <= 0, меняйте стратегию/признаки.",
+        )
+        require(
+            "Paper model-gate: 20+ сделок и PnL > 0",
+            paper_gate_ready,
+            f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps",
+            "Дождитесь 20+ бумажных сделок; если PnL <= 0, CANARY_LIVE запускать нельзя.",
         )
         in_canary_live = self._config.trading_mode == "CANARY_LIVE"
         if in_canary_live:
@@ -1162,29 +1218,6 @@ class TelegramMonitorBot:
             trainable_15m < 2000,
             f"Размеченных 15m примеров {trainable_15m}; для более уверенного CANARY лучше 2000+.",
             "Можно начать с 1000 для первого кандидата, но перед реальными деньгами лучше добрать данные.",
-        )
-        warn_if(
-            gate_total < 50,
-            f"Фильтр модели проверен только на {gate_total} теневых решениях; желательно 50+.",
-            "Оставьте SHADOW работать после обучения, чтобы модель набрала статистику pass/block.",
-        )
-        if gate_lift is not None:
-            warn_if(
-                float(gate_lift) <= 0,
-                f"Lift фильтра модели {float(gate_lift):+.2f} bps; фильтр пока не улучшает отбор.",
-                "Не включайте MODEL_GATE_CANARY_ENABLED, пока lift не станет положительным.",
-            )
-        else:
-            warnings.append(("Lift фильтра модели еще не измерен.", "Дождитесь исходов после обучения модели."))
-        warn_if(
-            paper_gate_count < 20,
-            f"Paper model-gate сделок {paper_gate_count}; желательно 20+.",
-            "Дайте модели поработать в тени.",
-        )
-        warn_if(
-            paper_gate_count >= 20 and paper_gate_bps <= 0,
-            f"Paper model-gate PnL {paper_gate_bps:+.1f} bps.",
-            "Не промоутируйте модель, пока бумажный результат фильтра отрицательный.",
         )
         warn_if(
             paper_base_count == 0,
@@ -1244,10 +1277,12 @@ class TelegramMonitorBot:
         for _label, _ok, _detail, _fix, eta in failed:
             if eta:
                 estimates.append(f"• {_label}: {eta}")
+        if not estimates and failed:
+            estimates.append("• Данные уже могут быть собраны, но CANARY нельзя включать до положительного качества модели и paper-gate PnL.")
         if not estimates and warnings:
-            estimates.append("• Основные условия закрыты; нужно добрать только качество/статистику модели.")
+            estimates.append("• Обязательные условия закрыты; остались только некритичные предупреждения.")
         if not estimates:
-            estimates.append("• Технически готово сейчас.")
+            estimates.append("• Технически и модельно готово сейчас.")
 
         required_env = {
             "POSTGRES_DSN": "хранилище сделок и модели",
@@ -1299,7 +1334,8 @@ class TelegramMonitorBot:
             [
                 "",
                 "<b>Следующий шаг</b>",
-                "CANARY держим маленьким: 1-2 позиции, минимальный notional, модель сначала только наблюдает.",
+                "Если есть ❌ по модели или paper-gate, CANARY_LIVE не включаем: модель продолжает наблюдать в SHADOW.",
+                "Если все обязательные условия ✅, CANARY держим маленьким: 1-2 позиции, минимальный notional.",
                 "Telegram не включает live: реальные деньги включаются только через env vars на Render.",
             ]
         )
