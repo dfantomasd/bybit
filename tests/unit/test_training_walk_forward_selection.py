@@ -33,7 +33,11 @@ def test_walk_forward_splits_fallback_when_too_small() -> None:
 def test_candidate_specs_include_requested_families_only() -> None:
     specs = _candidate_specs("LOGREG")
 
-    assert specs == [{"model_type": "LOGREG", "C": 0.1}, {"model_type": "LOGREG", "C": 1.0}, {"model_type": "LOGREG", "C": 10.0}]
+    assert specs == [
+        {"model_type": "LOGREG", "C": 0.1},
+        {"model_type": "LOGREG", "C": 1.0},
+        {"model_type": "LOGREG", "C": 10.0},
+    ]
 
 
 def test_negative_bucket_filter_excludes_stable_losers() -> None:

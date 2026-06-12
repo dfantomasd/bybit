@@ -133,7 +133,9 @@ def _summarise_walk_forward(fold_metrics: list[dict[str, Any]]) -> dict[str, Any
     lift_values = [float(m["lift_bps"]) for m in fold_metrics if m.get("lift_bps") is not None]
     pass_counts = [int(m.get("selected_pass_count") or 0) for m in fold_metrics]
     score_thresholds = [float(m["best_threshold"]) for m in fold_metrics if m.get("best_threshold") is not None]
-    pass_rates = [float(m["best_threshold_pass_rate"]) for m in fold_metrics if m.get("best_threshold_pass_rate") is not None]
+    pass_rates = [
+        float(m["best_threshold_pass_rate"]) for m in fold_metrics if m.get("best_threshold_pass_rate") is not None
+    ]
 
     arr = np.array(expectancies, dtype=np.float32)
     return {
@@ -456,7 +458,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             )
             return 1
 
-        click.echo(f"Training on {len(rows)} compatible samples (schema={LABEL_SCHEMA_VERSION}, horizon={horizon_minutes}m)")
+        click.echo(
+            f"Training on {len(rows)} compatible samples (schema={LABEL_SCHEMA_VERSION}, horizon={horizon_minutes}m)"
+        )
 
         x_list: list[list[float]] = []
         returns_list: list[float] = []
@@ -542,7 +546,10 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 excluded_buckets = []
 
         label_thresholds = sorted(
-            set(_parse_float_csv(str(settings.MODEL_THRESHOLD_GRID), [0.0, 2.0, 5.0, 8.0, 12.0]) + [float(label_bps_threshold)])
+            set(
+                _parse_float_csv(str(settings.MODEL_THRESHOLD_GRID), [0.0, 2.0, 5.0, 8.0, 12.0])
+                + [float(label_bps_threshold)]
+            )
         )
         candidates = _candidate_specs(str(settings.MODEL_CANDIDATES))
         min_train_for_wf = max(min_samples, int(settings.MODEL_WF_MIN_TRAIN_SAMPLES))
@@ -583,7 +590,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                     )
                     try:
                         fold_model.fit_batch(x_arr[train_idx], y_train, params=fold_model.model_params)
-                        metrics = _evaluate_model(fold_model, x_arr[val_idx], y_val, returns_bps[val_idx], sides[val_idx])
+                        metrics = _evaluate_model(
+                            fold_model, x_arr[val_idx], y_val, returns_bps[val_idx], sides[val_idx]
+                        )
                     except Exception as exc:
                         log.warning(
                             "Candidate fold failed: model_type=%s label_threshold=%s fold=%s error=%s",
