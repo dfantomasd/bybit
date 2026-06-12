@@ -17,6 +17,7 @@ from typing import Annotated, Any
 
 from pydantic import SecretStr, field_validator
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
+
 from trader.domain.enums import BybitRegion, RiskProfile, TradingMode
 
 
