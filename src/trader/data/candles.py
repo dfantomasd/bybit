@@ -46,6 +46,11 @@ class CandleStore:
 
         If the last stored candle has the same ``open_time``, it is
         replaced (live bar update). Otherwise, the candle is appended.
+
+        Asyncio-safety: this method contains no ``await`` and therefore
+        no coroutine yield point.  Under asyncio's cooperative scheduling
+        the entire body executes atomically between any two event-loop
+        ticks, so concurrent callers cannot interleave.  No lock is needed.
         """
         key = (symbol.upper(), interval)
         if key not in self._data:
@@ -140,3 +145,4 @@ def candle_from_kline_event(event: object) -> Candle:
         volume=float(event.volume),  # type: ignore[attr-defined]
         confirm=event.confirm,  # type: ignore[attr-defined]
     )
+
