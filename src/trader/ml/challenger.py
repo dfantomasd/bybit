@@ -37,13 +37,24 @@ _ARTIFACT_MAGIC = b"FERNET1:"
 def _artifact_cipher() -> Any | None:
     """Return a Fernet cipher derived from MODEL_ENCRYPT_KEY, or None.
 
+    Reads MODEL_ENCRYPT_KEY from application Settings (pydantic-settings).
     Accepts either a ready urlsafe-base64 Fernet key or an arbitrary
     passphrase (derived deterministically via SHA-256).
     """
     import base64
-    import os
 
-    raw = os.environ.get("MODEL_ENCRYPT_KEY", "").strip()
+    try:
+        from trader.config import Settings
+
+        settings = Settings()
+        key_secret = settings.MODEL_ENCRYPT_KEY
+        raw = key_secret.get_secret_value().strip() if key_secret else ""
+    except Exception:
+        # Fallback: read directly from environment (e.g. during testing)
+        import os
+
+        raw = os.environ.get("MODEL_ENCRYPT_KEY", "").strip()
+
     if not raw:
         return None
     try:
