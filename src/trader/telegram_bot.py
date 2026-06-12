@@ -2168,7 +2168,7 @@ class TelegramMonitorBot:
             await self._button_reply(update, "Управление сейчас недоступно.", reply_markup=self._main_menu())
             return
         try:
-            action, answer = payload.split(":", maxsplit=1)
+            action, answer = payload.rsplit(":", maxsplit=1)
         except ValueError:
             await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
             return
@@ -2207,6 +2207,41 @@ class TelegramMonitorBot:
                 "🚨 <b>Аварийная остановка выполнена.</b> Новые входы остановлены; для возобновления перезапустите сервис.",
                 reply_markup=self._main_menu(),
             )
+            return
+        if action.startswith("train:"):
+            if self._controller.start_training is None:
+                await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
+                return
+            try:
+                _, min_s_raw, horizon_raw, label_raw = action.split(":", maxsplit=3)
+                min_samples = int(min_s_raw)
+                horizon = int(horizon_raw)
+                label_bps = float(label_raw)
+                msg = await self._controller.start_training(min_samples, horizon, label_bps)
+            except Exception as exc:
+                msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            return
+        if action == "train_all":
+            if self._controller.start_training_all is None:
+                await self._button_reply(update, "Обучение ВСЕ сейчас недоступно.", reply_markup=self._main_menu())
+                return
+            try:
+                msg = await self._controller.start_training_all()
+            except Exception as exc:
+                msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            return
+        if action.startswith("promote:"):
+            if self._controller.promote_model is None:
+                await self._button_reply(update, "Промоут сейчас недоступен.", reply_markup=self._main_menu())
+                return
+            version = action.split(":", maxsplit=1)[1]
+            try:
+                msg = await self._controller.promote_model(version)
+            except Exception as exc:
+                msg = f"❌ Промоут не удался: <code>{html.escape(str(exc))}</code>"
+            await self._button_reply(update, msg, reply_markup=self._main_menu())
             return
         await self._button_reply(update, "Неизвестное подтверждение.", reply_markup=self._main_menu())
 
@@ -2334,12 +2369,13 @@ class TelegramMonitorBot:
         if min_samples < 50 or horizon <= 0 or label_bps < 0:
             await self._reply(update, "Параметры обучения отклонены: примеров>=50, горизонт>0, bps>=0.")
             return
-        try:
-            msg = await self._controller.start_training(min_samples, horizon, label_bps)
-        except Exception as exc:
-            await self._reply(update, f"❌ Обучение не стартовало: <code>{exc}</code>")
-            return
-        await self._reply(update, msg, reply_markup=self._main_menu())
+        await self._reply(
+            update,
+            "🧠 <b>Запустить обучение?</b>\n\n"
+            f"Примеры: <code>{min_samples}</code>, горизонт: <code>{horizon}m</code>, "
+            f"порог: <code>{label_bps:g} bps</code>.",
+            reply_markup=self._confirm_menu(f"train:{min_samples}:{horizon}:{label_bps:g}"),
+        )
 
     async def _cmd_limits(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not await self._authorised(update):
@@ -2834,21 +2870,24 @@ class TelegramMonitorBot:
             if not version:
                 await self._button_reply(update, "Нет модели-кандидата для промоута.", reply_markup=self._main_menu())
                 return
-            try:
-                msg = await self._controller.promote_model(version)
-            except Exception as exc:
-                msg = f"❌ Промоут не удался: <code>{html.escape(str(exc))}</code>"
-            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "🏆 <b>Промоутировать модель в CHAMPION?</b>\n\n"
+                f"Версия: <code>{html.escape(str(version))}</code>\n"
+                "Backend повторно проверит качество, schema, lift и shadow-gate статистику.",
+                reply_markup=self._confirm_menu(f"promote:{version}"),
+            )
             return
         if action == "train":
             if self._controller.start_training is None:
                 await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
                 return
-            try:
-                msg = await self._controller.start_training(500, 15, 5.0)
-            except Exception as exc:
-                msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
-            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "🧠 <b>Запустить обучение?</b>\n\n"
+                "Примеры: <code>500</code>, горизонт: <code>15m</code>, порог: <code>5 bps</code>.",
+                reply_markup=self._confirm_menu("train:500:15:5"),
+            )
             return
         if action == "limits":
             await self._button_reply(update, self._limits_text(), reply_markup=self._limits_menu())
@@ -2873,11 +2912,12 @@ class TelegramMonitorBot:
             if self._controller.start_training_all is None:
                 await self._button_reply(update, "Обучение ВСЕ сейчас недоступно.", reply_markup=self._main_menu())
                 return
-            try:
-                msg = await self._controller.start_training_all()
-            except Exception as exc:
-                msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
-            await self._button_reply(update, msg, reply_markup=self._main_menu())
+            await self._button_reply(
+                update,
+                "🧠 <b>Запустить обучение по всем горизонтам?</b>\n\n"
+                "Это длительная операция и изменит кандидатов модели.",
+                reply_markup=self._confirm_menu("train_all"),
+            )
             return
         if self._controller.start_training is None:
             await self._button_reply(update, "Запуск обучения сейчас недоступен.", reply_markup=self._main_menu())
@@ -2887,10 +2927,16 @@ class TelegramMonitorBot:
             min_samples = int(min_s_raw)
             horizon = int(horizon_raw)
             label_bps = float(label_raw)
-            msg = await self._controller.start_training(min_samples, horizon, label_bps)
+            msg = (
+                "🧠 <b>Запустить обучение?</b>\n\n"
+                f"Примеры: <code>{min_samples}</code>, горизонт: <code>{horizon}m</code>, "
+                f"порог: <code>{label_bps:g} bps</code>."
+            )
+            markup = self._confirm_menu(f"train:{min_samples}:{horizon}:{label_bps:g}")
         except Exception as exc:
             msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
-        await self._button_reply(update, msg, reply_markup=self._main_menu())
+            markup = self._main_menu()
+        await self._button_reply(update, msg, reply_markup=markup)
 
     async def _handle_limit_button(self, update: Update, payload: str) -> None:
         if self._controller is None or self._controller.set_runtime_setting is None:

@@ -208,6 +208,35 @@ def test_control_menu_has_training_and_limits() -> None:
     assert "view:model_help" in all_callbacks
 
 
+@pytest.mark.asyncio
+async def test_control_train_button_requires_confirm() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.start_training = AsyncMock(return_value="started")
+    update = _fake_update()
+
+    await bot._handle_control_button(update, "train")
+
+    bot._controller.start_training.assert_not_awaited()
+    reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
+    callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
+    assert "confirm:train:500:15:5:yes" in callbacks
+
+
+@pytest.mark.asyncio
+async def test_confirm_train_button_starts_training() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.start_training = AsyncMock(return_value="✅ started")
+    update = _fake_update()
+
+    await bot._handle_confirm_button(update, "train:500:15:5:yes")
+
+    bot._controller.start_training.assert_awaited_once_with(500, 15, 5.0)
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "started" in reply_text
+
+
 def test_submenus_have_home_button() -> None:
     bot = _make_bot()
     for markup in [bot._control_menu(), bot._canary_menu(), bot._limits_menu(), bot._symbol_select_menu()]:
@@ -363,7 +392,7 @@ def test_limits_menu_has_common_presets() -> None:
 
 
 @pytest.mark.asyncio
-async def test_train_command_starts_shadow_training() -> None:
+async def test_train_command_requires_confirm() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.start_training = AsyncMock(return_value="training started")
@@ -372,9 +401,12 @@ async def test_train_command_starts_shadow_training() -> None:
 
     await bot._cmd_train(update, ctx)  # type: ignore[arg-type]
 
-    bot._controller.start_training.assert_awaited_once_with(500, 15, 5.0)
+    bot._controller.start_training.assert_not_awaited()
     reply_text = update.effective_message.reply_text.call_args[0][0]
-    assert "training started" in reply_text
+    assert "Запустить обучение" in reply_text
+    reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
+    callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
+    assert "confirm:train:500:15:5:yes" in callbacks
 
 
 @pytest.mark.asyncio
@@ -449,7 +481,7 @@ async def test_custom_max_positions_button_accepts_plain_number() -> None:
 
 
 @pytest.mark.asyncio
-async def test_train_button_starts_shadow_training() -> None:
+async def test_train_button_requires_confirm() -> None:
     bot = _make_bot()
     assert bot._controller is not None
     bot._controller.start_training = AsyncMock(return_value="training started")
@@ -457,9 +489,12 @@ async def test_train_button_starts_shadow_training() -> None:
 
     await bot._handle_train_button(update, "1000:15:5")
 
-    bot._controller.start_training.assert_awaited_once_with(1000, 15, 5.0)
+    bot._controller.start_training.assert_not_awaited()
     reply_text = update.effective_message.reply_text.call_args[0][0]
-    assert "training started" in reply_text
+    assert "Запустить обучение" in reply_text
+    reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
+    callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
+    assert "confirm:train:1000:15:5:yes" in callbacks
 
 
 @pytest.mark.asyncio
