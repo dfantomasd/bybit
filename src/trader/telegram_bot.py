@@ -3457,9 +3457,9 @@ class TelegramMonitorBot:
 
     async def _update_dashboard(
         self,
-        query,
+        query: "CallbackQuery",
         text: str,
-        reply_markup,
+        reply_markup: InlineKeyboardMarkup,
         parse_mode: str = "HTML",
     ) -> None:
         """Edit the existing dashboard message, or send a new one if editing fails."""
@@ -3486,8 +3486,8 @@ class TelegramMonitorBot:
                     )
                     self._dashboard_message_id = msg.message_id
                     self._dashboard_chat_id = msg.chat_id
-                except Exception:
-                    pass
+                except Exception as _exc:
+                    log.debug("telegram.fallback_send_failed", error=str(_exc))
 
     async def _render_home(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the main dashboard text and keyboard."""
@@ -3508,8 +3508,8 @@ class TelegramMonitorBot:
                 s = ctrl.runtime_settings()
                 entries_per_min = s.get("entries_per_min_limit", "—")
                 max_pos = s.get("max_simultaneous_positions", "—")
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug("telegram.render_home_settings_failed", error=str(_exc))
 
         text = (
             "🏠 <b>Bybit AI Trader</b>\n"
@@ -3548,8 +3548,8 @@ class TelegramMonitorBot:
         if ctrl and ctrl.runtime_settings:
             try:
                 s = ctrl.runtime_settings()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug("telegram.render_settings_failed", error=str(_exc))
 
         entries = s.get("entries_per_min_limit", 1)
         max_pos = s.get("max_simultaneous_positions", 2)
@@ -3777,7 +3777,7 @@ class TelegramMonitorBot:
             update, f"Неизвестное действие: {action}", reply_markup=self._main_menu()
         )
 
-    async def _handle_limit_adjust(self, query, data: str) -> None:
+    async def _handle_limit_adjust(self, query: "CallbackQuery", data: str) -> None:
         """Handle limit +/- buttons from the new settings dashboard."""
         parts = data.split(":")
         if len(parts) != 2:
@@ -3787,8 +3787,8 @@ class TelegramMonitorBot:
         if self._controller and self._controller.runtime_settings:
             try:
                 s = self._controller.runtime_settings()
-            except Exception:
-                pass
+            except Exception as _exc:
+                log.debug("telegram.limit_adjust_settings_failed", error=str(_exc))
         limits: dict[str, tuple[float, float]] = {
             "entries_per_min_limit": (1, 10),
             "max_simultaneous_positions": (1, 10),
@@ -3838,8 +3838,8 @@ class TelegramMonitorBot:
                         parse_mode=ParseMode.HTML,
                         disable_web_page_preview=True,
                     )
-                except Exception:
-                    pass
+                except Exception as _exc2:
+                    log.debug("telegram.fallback_send_view_failed", error=str(_exc2))
 
     async def _handle_view_button(self, update: Update, action: str) -> None:
         fake_context = type("_Context", (), {"args": []})()
