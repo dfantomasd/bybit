@@ -3457,7 +3457,7 @@ class TelegramMonitorBot:
 
     async def _update_dashboard(
         self,
-        query: "CallbackQuery",
+        query: CallbackQuery,
         text: str,
         reply_markup: InlineKeyboardMarkup,
         parse_mode: str = "HTML",
@@ -3777,7 +3777,7 @@ class TelegramMonitorBot:
             update, f"Неизвестное действие: {action}", reply_markup=self._main_menu()
         )
 
-    async def _handle_limit_adjust(self, query: "CallbackQuery", data: str) -> None:
+    async def _handle_limit_adjust(self, query: CallbackQuery, data: str) -> None:
         """Handle limit +/- buttons from the new settings dashboard."""
         parts = data.split(":")
         if len(parts) != 2:
