@@ -318,27 +318,20 @@ class FeaturePipeline:
         else:
             missing.append("volume_ratio_sma20")
 
-        # --- Orderbook microstructure (only for symbols with a live L2 feed) ---
-        # Stale/missing books contribute to `missing` rather than fake-neutral
-        # values, so the model never trains on fabricated orderbook data.
+        # --- Orderbook microstructure ---
+        # Always emitted with a presence flag so every symbol shares ONE feature
+        # schema (training requires min_samples within a single schema bucket;
+        # conditional features fragment it). 0.0 + ob_data_present=0 lets the
+        # model distinguish "no book data" from a genuinely neutral book.
         if self._orderbook_tracker is not None:
             ob_imb = self._orderbook_tracker.latest_imbalance(symbol)
-            if ob_imb is not None:
-                features["ob_imbalance_l5"] = ob_imb
-            else:
-                missing.append("ob_imbalance_l5")
-
             micro_dev = self._orderbook_tracker.microprice_deviation_bps(symbol)
-            if micro_dev is not None:
-                features["microprice_deviation_bps"] = micro_dev
-            else:
-                missing.append("microprice_deviation_bps")
-
             imb_trend = self._orderbook_tracker.imbalance_trend_10s(symbol)
-            if imb_trend is not None:
-                features["ob_imbalance_trend_10s"] = imb_trend
-            else:
-                missing.append("ob_imbalance_trend_10s")
+            present = ob_imb is not None and micro_dev is not None
+            features["ob_data_present"] = 1.0 if present else 0.0
+            features["ob_imbalance_l5"] = ob_imb if ob_imb is not None else 0.0
+            features["microprice_deviation_bps"] = micro_dev if micro_dev is not None else 0.0
+            features["ob_imbalance_trend_10s"] = imb_trend if imb_trend is not None else 0.0
 
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)

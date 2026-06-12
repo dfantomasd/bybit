@@ -320,17 +320,27 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
         result["prediction_outcomes"] = sum(result["prediction_outcomes_by_horizon"].values())
 
+        # Mirror the training query's eligibility exactly (threshold, signal,
+        # training_eligible, one sample per candle) — otherwise this counter
+        # overstates progress versus what train.py will actually accept.
         rows = await self._fetch(
             """
-            SELECT count(DISTINCT fs.snapshot_id) AS cnt
-            FROM feature_snapshots fs
-            JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-            WHERE po.horizon_minutes = 15
-              AND po.label IS NOT NULL
-              AND po.label_schema_version = $1
-              AND fs.feature_values IS NOT NULL
-              AND pe.model_version = 'RULE_BASELINE_V1'
+            SELECT count(*) AS cnt
+            FROM (
+                SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
+                       fs.snapshot_id
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = 15
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $1
+                  AND po.label_threshold_bps = 5.0
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+            ) deduped
             """,
             LABEL_SCHEMA_VERSION,
         )
