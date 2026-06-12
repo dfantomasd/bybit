@@ -99,7 +99,7 @@ async def test_record_signal_accepts_and_persists_model_decision_metadata() -> N
     assert len(journal.executed) == 1
     query, args = journal.executed[0]
     assert "model_decision" in query
-    assert json.loads(args[-1]) == model_decision
+    assert json.loads(args[-2]) == model_decision  # args[-1] is blocked_reason
 
 
 @pytest.mark.asyncio
