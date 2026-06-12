@@ -2885,6 +2885,37 @@ class TradingApplication:
                 feature_snapshot_id=snapshot_id,
                 metadata={"source": "candle_sampler"},
             )
+
+            # Challenger shadow gate on every sampled candle. Signal-only shadow
+            # scoring accumulates GATE_PASS/GATE_BLOCK observations slower than
+            # the auto-trainer rotates model versions, so per-version gate stats
+            # (lift, paper gate) would otherwise stay at zero forever.
+            if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
+                shadow_prediction = self._model_registry.score_shadow(vec.values)
+                if shadow_prediction is not None:
+                    threshold = self._model_gate_threshold(None)
+                    gate_decision = None
+                    gate_reason = "shadow_gate_disabled"
+                    if self._settings.MODEL_SHADOW_GATE_ENABLED:
+                        gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                        gate_reason = (
+                            "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
+                        )
+                    await self._trade_journal.record_prediction_event(
+                        symbol=symbol,
+                        interval=interval,
+                        model_version=shadow_prediction.model_version,
+                        score=shadow_prediction.score,
+                        strategy_signal=side,
+                        decision=gate_decision,
+                        feature_snapshot_id=snapshot_id,
+                        metadata={
+                            "source": "candle_sampler_shadow",
+                            "confidence": shadow_prediction.confidence,
+                            "gate_reason": gate_reason,
+                            "threshold": threshold,
+                        },
+                    )
         except Exception as exc:
             log.debug("candle_sampler.failed", symbol=symbol, error=str(exc))
 
