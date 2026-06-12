@@ -489,7 +489,7 @@ class TradingApplication:
         )
 
     async def _start_model_training_all(self) -> str:
-        """Start sequential training on all available data for every horizon (5m, 15m, 30m)."""
+        """Start sequential training on all available data for every horizon (5m, 15m, 30m, 60m)."""
         async with self._training_start_lock:
             if self._training_task is not None and not self._training_task.done():
                 return "⏳ Обучение уже идет."
@@ -504,14 +504,14 @@ class TradingApplication:
             self._background_tasks.append(self._training_task)
         return (
             "🧠🔁 <b>Обучение ВСЕ запущено</b>\n"
-            "Горизонты: <code>5m, 15m, 30m</code> | Порог: <code>5 bps</code>\n"
+            "Горизонты: <code>5m, 15m, 30m, 60m</code> | Порог: <code>5 bps</code>\n"
             "Используются все доступные примеры (мин. 100).\n"
             "Результаты придут по мере завершения каждого горизонта."
         )
 
     async def _run_model_training_all(self) -> None:
         """Run training sequentially for all horizons using all available labeled data."""
-        horizons = [5, 15, 30]
+        horizons = [5, 15, 30, 60]
         label_bps = 5.0
         min_samples = 100
         results: list[str] = []
@@ -2357,7 +2357,7 @@ class TradingApplication:
     async def _run_outcome_resolver(self) -> None:
         """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
         interval = 300.0  # every 5 minutes
-        horizons = [5, 15, 30]
+        horizons = [5, 15, 30, 60]
 
         while not self._shutdown_event.is_set():
             if self._trade_journal is not None and self._trade_journal.is_enabled:
