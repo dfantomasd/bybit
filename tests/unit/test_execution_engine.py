@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -288,6 +289,9 @@ class TestExecutionEngine:
         await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
         assert engine.has_open_position("BTCUSDT")
         engine._adapter.get_positions = AsyncMock(return_value=[])
+        # Age the entry past the snapshot-removal grace period — a freshly
+        # opened position is deliberately protected from stale snapshots.
+        engine._last_entry_at["BTCUSDT"] -= timedelta(seconds=10)
 
         await engine.sync_positions()
 
