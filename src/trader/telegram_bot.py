@@ -766,14 +766,26 @@ class TelegramMonitorBot:
             await self._reply(update, "<b>Закрытый PnL</b>\nЗакрытых сделок пока нет.")
             return
         total = Decimal("0")
+        today_total = Decimal("0")
+        wins = 0
+        day_start_ms = int(datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0).timestamp() * 1000)
         shown = records[:20]
         lines = [f"<b>Закрытый PnL — последние {len(shown)} сделок</b>", ""]
         for r in shown:
             sym = r.get("symbol", "?")
             pnl = Decimal(str(r.get("closedPnl", "0")))
             total += pnl
+            if pnl >= 0:
+                wins += 1
+            try:
+                if int(r.get("updatedTime") or r.get("createdTime") or 0) >= day_start_ms:
+                    today_total += pnl
+            except (TypeError, ValueError):
+                pass
+            # Bybit closed-pnl `side` is the side of the CLOSING order:
+            # a long position is closed by Sell, a short by Buy.
             side_raw = str(r.get("side", "")).upper()
-            side = "LONG" if side_raw == "BUY" else ("SHORT" if side_raw == "SELL" else side_raw or "?")
+            side = "LONG" if side_raw == "SELL" else ("SHORT" if side_raw == "BUY" else side_raw or "?")
             qty = r.get("qty", "")
             entry = r.get("avgEntryPrice", "")
             exit_p = r.get("avgExitPrice", "")
@@ -782,10 +794,14 @@ class TelegramMonitorBot:
             qty_part = f" ×{qty}" if qty else ""
             lines.append(f"{icon} <code>{sym}</code> {side}{qty_part}{price_part}  <b>{pnl:+.4f} USDT</b>")
         total_icon = "📈" if total >= 0 else "📉"
+        winrate = wins / len(shown) * 100 if shown else 0.0
         lines.append(f"\n{total_icon} <b>Итого за {len(shown)} сделок:</b> <code>{total:+.4f} USDT</code>")
+        lines.append(f"Win-rate: <code>{wins}/{len(shown)} ({winrate:.0f}%)</code>")
+        lines.append(f"Сегодня (UTC): <code>{today_total:+.4f} USDT</code>")
         lines.append(
-            "\n💡 <i>LONG = куплено и закрыто; SHORT = продано и закрыто.\n"
-            "Сумма — реализованный PnL по Bybit (без учёта незакрытых позиций).</i>"
+            "\n💡 <i>Направление — сторона позиции (лонг закрывается продажей).\n"
+            "Сумма — реализованный PnL по Bybit (без учёта незакрытых позиций).\n"
+            "Чистый результат с комиссиями и фандингом — /net.</i>"
         )
         await self._reply(update, "\n".join(lines))
 

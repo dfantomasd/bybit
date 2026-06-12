@@ -1021,16 +1021,19 @@ class TradeJournal:
         for r in rows:
             entry = float(r["avg_entry_price"] or 0)
             exit_ = float(r["avg_exit_price"] or 0)
+            # Bybit closed-pnl `side` is the side of the CLOSING order: a long
+            # position is closed by Sell, a short by Buy.
+            closing_side = str(r["side"] or "").upper()
+            position = "LONG" if closing_side == "SELL" else ("SHORT" if closing_side == "BUY" else "?")
             net_bps: float | None = None
             if entry > 0 and exit_ > 0:
-                direction = 1.0 if str(r["side"] or "").upper() in ("BUY", "SELL_CLOSE") else -1.0
-                # closed_pnl side is the closing side; entry/exit prices carry direction info
+                direction = 1.0 if position == "LONG" else -1.0
                 net_bps = (exit_ - entry) / entry * 10_000 * direction
             result.append(
                 {
                     "created_at": r["created_at"],
                     "symbol": r["symbol"],
-                    "side": r["side"],
+                    "side": position,
                     "qty": float(r["qty"] or 0),
                     "entry": entry,
                     "exit": exit_,
