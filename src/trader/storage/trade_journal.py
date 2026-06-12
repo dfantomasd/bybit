@@ -1039,18 +1039,20 @@ class TradeJournal:
             closing_side = str(r["side"] or "").upper()
             position = "LONG" if closing_side == "SELL" else ("SHORT" if closing_side == "BUY" else "?")
             net_bps: float | None = None
-            if entry > 0 and exit_ > 0:
-                direction = 1.0 if position == "LONG" else -1.0
-                net_bps = (exit_ - entry) / entry * 10_000 * direction
+            qty = float(r["qty"] or 0)
+            closed_pnl = float(r["closed_pnl"] or 0)
+            # Use Bybit's closedPnl (already net of fees+funding) normalised by position value.
+            if entry > 0 and qty > 0:
+                net_bps = closed_pnl / (entry * qty) * 10_000
             result.append(
                 {
                     "created_at": r["created_at"],
                     "symbol": r["symbol"],
                     "side": position,
-                    "qty": float(r["qty"] or 0),
+                    "qty": qty,
                     "entry": entry,
                     "exit": exit_,
-                    "pnl_usdt": float(r["closed_pnl"] or 0),
+                    "pnl_usdt": closed_pnl,
                     "net_bps": net_bps,
                 }
             )
@@ -1547,12 +1549,13 @@ class TradeJournal:
                 WHERE pe.model_version = $1
                   AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
                   AND po.net_return_bps IS NOT NULL
-                  AND po.label_schema_version = 'directional_net_v1'
+                  AND po.label_schema_version = $3
                 ORDER BY po.resolved_at DESC NULLS LAST
                 LIMIT $2
                 """,
                 model_version,
                 int(limit),
+                LABEL_SCHEMA_VERSION,
             )
         return [float(r["net_return_bps"]) for r in rows]
 
@@ -1800,10 +1803,11 @@ class TradeJournal:
                       AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
                       AND po.horizon_minutes = 15
                       AND po.label IS NOT NULL
-                      AND po.label_schema_version = 'directional_net_v1'
+                      AND po.label_schema_version = $2
                     GROUP BY pe.decision
                     """,
                     latest_model_version,
+                    LABEL_SCHEMA_VERSION,
                 )
                 gate: dict[str, Any] = {"model_version": latest_model_version}
                 total_count = 0

@@ -170,12 +170,6 @@ class Settings(BaseSettings):
     """MARKET or MAKER_FIRST. MAKER_FIRST places a POST_ONLY limit at the best
     bid/ask first (maker fee/rebate), then escalates to a market order or aborts
     after MAKER_TIMEOUT_SECONDS — see MAKER_* settings."""
-    ENTRY_LIMIT_TTL_SECONDS: int = 5
-    """Seconds to wait for a limit entry fill before cancelling."""
-    ENTRY_REPRICE_ATTEMPTS: int = 1
-    """Max repricing attempts before abandoning a limit entry."""
-    ALLOW_TAKER_ENTRY: bool = False
-    """Allow market fallback if limit entry fails. False = skip trade."""
 
     # ------------------------------------------------------------------
     # Maker-first execution (ENTRY_ORDER_MODE = "MAKER_FIRST")

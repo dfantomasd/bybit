@@ -2008,7 +2008,7 @@ class TelegramMonitorBot:
             f"Статус: <code>{self._ru(latest_model.get('status', 'none'))}</code>",
             f"Качество: <code>{self._ru(str(metrics.get('quality') or 'нет данных'))}</code>",
             "",
-            f"Walk-forward expectancy: <code>{_fmt(metrics.get('walk_forward_expectancy_bps') or metrics.get('best_threshold_avg_net_return_bps'), ' bps')}</code>",
+            f"Val-split expectancy: <code>{_fmt(metrics.get('walk_forward_expectancy_bps') or metrics.get('best_threshold_avg_net_return_bps'), ' bps')}</code>",
             f"Precision (val): <code>{_fmt(metrics.get('val_precision') or metrics.get('precision'))}</code>",
             f"AUC (val): <code>{_fmt(metrics.get('val_auc') or metrics.get('auc'))}</code>",
             f"Bootstrap p-value: <code>{_fmt(metrics.get('bootstrap_p_value'))}</code>",
