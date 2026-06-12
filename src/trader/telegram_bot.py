@@ -141,6 +141,12 @@ class TradingController:
     recent_trades_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     # /buckets data: regime-bucket expectancy stats
     bucket_stats_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    # Strategy loss diagnostics
+    pnl_analysis_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    compare_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
+    costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -226,6 +232,11 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("pnl", self._cmd_pnl))
         app.add_handler(CommandHandler("net", self._cmd_net_results))
         app.add_handler(CommandHandler("costs", self._cmd_costs))
+        app.add_handler(CommandHandler("costs_detailed", self._cmd_costs_detailed))
+        app.add_handler(CommandHandler("pnl_analysis", self._cmd_pnl_analysis))
+        app.add_handler(CommandHandler("compare", self._cmd_compare))
+        app.add_handler(CommandHandler("worst", self._cmd_worst))
+        app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -410,16 +421,22 @@ class TelegramMonitorBot:
                 InlineKeyboardButton("📈 Результаты", callback_data="view:pnl"),
                 InlineKeyboardButton("🧠 Почему нет сделок", callback_data="view:signals"),
             ],
+            [
+                InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
+                InlineKeyboardButton("⚖️ Compare", callback_data="view:compare"),
+            ],
             # — Риски и лимиты —
             [
                 InlineKeyboardButton("🎚 Риски и лимиты", callback_data="control:limits"),
                 InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
             ],
+            [InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed")],
             # — Модель и обучение —
             [
                 InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                 InlineKeyboardButton("🚦 Готовность CANARY", callback_data="view:canary"),
             ],
+            [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
             # — Настройки —
             [
                 InlineKeyboardButton("✅ Выбрать пары", callback_data="view:symbol_select"),
@@ -2305,6 +2322,10 @@ class TelegramMonitorBot:
             "pnl": self._cmd_pnl,
             "diagnostics": self._cmd_diagnostics,
             "costs": self._cmd_costs,
+            "costs_detailed": self._cmd_costs_detailed,
+            "pnl_analysis": self._cmd_pnl_analysis,
+            "compare": self._cmd_compare,
+            "model_performance": self._cmd_model_performance,
         }
         if action == "menu":
             await self._button_reply(update, self._menu_text(), reply_markup=self._main_menu())
