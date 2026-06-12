@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from decimal import Decimal
 
 import pytest
 
 from trader.domain.enums import OrderSide, OrderStatus
 from trader.domain.events import ExecutionUpdateEvent, OrderUpdateEvent, PositionUpdateEvent
-from trader.exchange.bybit_ws_private import BybitPrivateWebSocket
+from trader.exchange.bybit_ws_private import _MAX_SEEN_EVENTS, BybitPrivateWebSocket
 
 
 def _make_ws(queue: asyncio.Queue) -> BybitPrivateWebSocket:
@@ -67,6 +68,32 @@ async def test_execution_deduplication():
     await ws._handle_execution(data)  # duplicate
 
     assert queue.qsize() == 1, "Duplicate execution must be deduplicated"
+
+
+@pytest.mark.asyncio
+async def test_private_ws_seen_event_cache_is_bounded():
+    """Dedup cache must not grow forever on a long-running private stream."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    ws = _make_ws(queue)
+
+    for idx in range(_MAX_SEEN_EVENTS + 25):
+        duplicate = ws._mark_seen(f"event-{idx}")
+        assert duplicate is False
+
+    assert len(ws._seen_events) == _MAX_SEEN_EVENTS
+    assert "event-0" not in ws._seen_events
+    assert ws._mark_seen(f"event-{_MAX_SEEN_EVENTS + 24}") is True
+
+
+def test_private_ws_auth_expiry_has_network_latency_budget():
+    """Auth expiry should leave more than a tiny 1s margin for Render/network jitter."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=50)
+    ws = _make_ws(queue)
+
+    expires_ms = int(ws._build_auth_msg()["args"][1])
+    margin_s = expires_ms / 1000 - time.time()
+
+    assert margin_s >= 8.0
 
 
 @pytest.mark.asyncio

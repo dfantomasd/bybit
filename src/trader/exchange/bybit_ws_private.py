@@ -11,6 +11,7 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
 from decimal import Decimal
 from typing import Any
 
@@ -29,6 +30,8 @@ logger = structlog.get_logger(__name__)
 
 _HEARTBEAT_INTERVAL = 20.0
 _WATCHDOG_TIMEOUT = 30.0
+_AUTH_EXPIRES_SECONDS = 10
+_MAX_SEEN_EVENTS = 20_000
 _PRIVATE_TOPICS = ["order", "execution", "position", "wallet"]
 
 
@@ -76,8 +79,9 @@ class BybitPrivateWebSocket:
         self._stop_event = asyncio.Event()
         self._last_message_ts: float = 0.0
 
-        # Deduplication: {orderId_updateTime} → True
-        self._seen_events: set[str] = set()
+        # Deduplication keys are retained as a bounded LRU so long-running
+        # private streams cannot grow memory without limit.
+        self._seen_events: OrderedDict[str, None] = OrderedDict()
 
         self._reconnect_count: int = 0
 
@@ -188,7 +192,7 @@ class BybitPrivateWebSocket:
 
     def _build_auth_msg(self) -> dict:
         """Build Bybit V5 WebSocket auth message using HMAC-SHA256."""
-        expires = int((time.time() + 1) * 1000)  # 1 second in future
+        expires = int((time.time() + _AUTH_EXPIRES_SECONDS) * 1000)
         sign_str = f"GET/realtime{expires}"
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
@@ -287,9 +291,8 @@ class BybitPrivateWebSocket:
             order_id = item.get("orderId", "")
             update_time = item.get("updatedTime", "")
             dedup_key = f"{order_id}_{update_time}"
-            if dedup_key in self._seen_events:
+            if self._mark_seen(dedup_key):
                 continue
-            self._seen_events.add(dedup_key)
 
             # Map exchange status to OrderStatus
             exchange_status = item.get("orderStatus", "")
@@ -338,9 +341,8 @@ class BybitPrivateWebSocket:
             exec_id = item.get("execId", "")
             order_id = item.get("orderId", "")
             dedup_key = f"exec_{exec_id}_{order_id}"
-            if dedup_key in self._seen_events:
+            if self._mark_seen(dedup_key):
                 continue
-            self._seen_events.add(dedup_key)
 
             try:
                 side = OrderSide(item.get("side", "Buy"))
@@ -440,6 +442,16 @@ class BybitPrivateWebSocket:
             "PendingCancel": OrderStatus.CANCEL_REQUESTED,
         }
         return mapping.get(exchange_status, OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED)
+
+    def _mark_seen(self, key: str) -> bool:
+        """Return True when ``key`` is a duplicate; otherwise remember it."""
+        if key in self._seen_events:
+            self._seen_events.move_to_end(key)
+            return True
+        self._seen_events[key] = None
+        while len(self._seen_events) > _MAX_SEEN_EVENTS:
+            self._seen_events.popitem(last=False)
+        return False
 
     async def _emit(self, event: BaseEvent) -> None:
         """Put event onto queue non-blocking."""
