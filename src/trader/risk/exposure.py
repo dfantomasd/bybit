@@ -5,12 +5,10 @@ Thread-safe via a re-entrant lock. All financial arithmetic uses Decimal.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from threading import RLock
 from typing import Any
-
-_UTC = timezone.utc
 
 from trader.risk.profiles import RiskLimits
 
@@ -48,7 +46,7 @@ class ExposureTracker:
         self._positions: dict[str, dict[str, Any]] = {}
         self._pending_exposure: dict[str, dict[str, Any]] = {}
         self._lock = RLock()
-        self._capital_updated_at: datetime = datetime.now(_UTC)
+        self._capital_updated_at: datetime = datetime.now(UTC)
 
     # ------------------------------------------------------------------
     # Mutations
@@ -93,7 +91,7 @@ class ExposureTracker:
         with self._lock:
             if new_capital <= Decimal("0"):
                 return
-            ts = updated_at or datetime.now(_UTC)
+            ts = updated_at or datetime.now(UTC)
             if ts < self._capital_updated_at:
                 return
             self._capital = new_capital
