@@ -34,6 +34,7 @@ from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
 
 import uvicorn
+
 from trader.domain.enums import SystemStatus, TradingMode
 from trader.monitoring.logging import configure_logging, get_logger
 
@@ -4196,3 +4197,4 @@ def main_sync() -> None:
 
 if __name__ == "__main__":
     main_sync()
+
