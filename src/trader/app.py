@@ -4197,4 +4197,3 @@ def main_sync() -> None:
 
 if __name__ == "__main__":
     main_sync()
-
