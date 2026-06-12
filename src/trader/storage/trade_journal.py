@@ -16,8 +16,8 @@ import structlog
 from trader.domain.models import FeatureVector, RegimeContext, RiskDecision, TradeProposal
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
-    directional_excursions_bps,
-    directional_return_bps,
+    CostModelBps,
+    build_directional_outcome,
 )
 
 log = structlog.get_logger(__name__)
@@ -1366,25 +1366,37 @@ class TradeJournal:
         max_favorable_excursion_bps: float,
         max_adverse_excursion_bps: float,
         label: int,
+        gross_return_bps: float = 0.0,
+        cost_bps: float = 0.0,
+        label_threshold_bps: float = 5.0,
         label_schema_version: str = LABEL_SCHEMA_VERSION,
     ) -> None:
         """Write or update outcome label for a prediction."""
         await self._execute(
             """
             INSERT INTO prediction_outcomes (
-                prediction_id, horizon_minutes, net_return_bps,
+                prediction_id, horizon_minutes, gross_return_bps, cost_bps,
+                label_threshold_bps, net_return_bps,
                 max_favorable_excursion_bps, max_adverse_excursion_bps,
                 label, resolved_at, label_schema_version
             )
-            VALUES ($1::uuid, $2, $3, $4, $5, $6, now(), $7)
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, $7, $8, $9, now(), $10)
             ON CONFLICT (prediction_id, horizon_minutes) DO UPDATE SET
+                gross_return_bps = EXCLUDED.gross_return_bps,
+                cost_bps = EXCLUDED.cost_bps,
+                label_threshold_bps = EXCLUDED.label_threshold_bps,
                 net_return_bps = EXCLUDED.net_return_bps,
+                max_favorable_excursion_bps = EXCLUDED.max_favorable_excursion_bps,
+                max_adverse_excursion_bps = EXCLUDED.max_adverse_excursion_bps,
                 label = EXCLUDED.label,
                 resolved_at = now(),
                 label_schema_version = EXCLUDED.label_schema_version
             """,
             prediction_id,
             horizon_minutes,
+            gross_return_bps,
+            cost_bps,
+            label_threshold_bps,
             net_return_bps,
             max_favorable_excursion_bps,
             max_adverse_excursion_bps,
@@ -1481,22 +1493,26 @@ class TradeJournal:
 
             # Canonical directional math (labels.py): a profitable Sell yields a
             # POSITIVE return when price falls — never label raw price moves.
-            net_return_bps = directional_return_bps(side=side, entry_price=entry_close, exit_price=horizon_close)
-            max_fav, max_adv = directional_excursions_bps(
+            outcome = build_directional_outcome(
                 side=side,
                 entry_price=entry_close,
+                exit_price=horizon_close,
                 highs=[horizon_high],
                 lows=[horizon_low],
+                cost_model=CostModelBps(),
+                label_threshold_bps=label_bps_threshold,
             )
-            label = 1 if net_return_bps > label_bps_threshold else 0
 
             await self.resolve_prediction_outcomes(
                 prediction_id=prediction_id,
                 horizon_minutes=horizon_minutes,
-                net_return_bps=net_return_bps,
-                max_favorable_excursion_bps=max_fav,
-                max_adverse_excursion_bps=max_adv,
-                label=label,
+                gross_return_bps=outcome.gross_return_bps,
+                cost_bps=0.0,
+                label_threshold_bps=label_bps_threshold,
+                net_return_bps=outcome.net_return_bps,
+                max_favorable_excursion_bps=outcome.max_favorable_excursion_bps,
+                max_adverse_excursion_bps=outcome.max_adverse_excursion_bps,
+                label=outcome.label,
                 label_schema_version=LABEL_SCHEMA_VERSION,
             )
             resolved += 1
