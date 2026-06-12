@@ -352,6 +352,9 @@ class Settings(BaseSettings):
     Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
+    MODEL_TYPE: str = "GBDT"
+    """Challenger architecture: "GBDT" (gradient-boosted trees, stronger on
+    non-linear feature interactions) or "SGD" (linear, online-updateable)."""
     MODEL_SHADOW_SCORING_ENABLED: bool = True
     """Always run shadow scoring even when live decisions disabled."""
     MODEL_AUTO_TRAIN_ENABLED: bool = True

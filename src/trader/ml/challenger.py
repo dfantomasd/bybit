@@ -96,6 +96,10 @@ class ChallengerModel:
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     allow_live_decisions: bool = False
     label_schema_version: str = LABEL_SCHEMA_VERSION
+    model_type: str = "SGD"
+    """"SGD" (linear, supports online partial_fit) or "GBDT" (gradient-boosted
+    trees via HistGradientBoostingClassifier — stronger on non-linear feature
+    interactions, batch-only)."""
 
     _clf: Any = field(default=None, repr=False)
     _scaler: Any = field(default=None, repr=False)
@@ -155,14 +159,31 @@ class ChallengerModel:
         if x.ndim != 2 or len(x) == 0 or len(x) != len(y):
             return
         # Batch training replaces any previous estimator state.
+        self._scaler = StandardScaler()
+        x_scaled = self._scaler.fit_transform(x)
+
+        if self.model_type.upper() == "GBDT":
+            from sklearn.ensemble import HistGradientBoostingClassifier
+
+            self._clf = HistGradientBoostingClassifier(
+                max_iter=300,
+                learning_rate=0.05,
+                max_leaf_nodes=31,
+                early_stopping=True,
+                validation_fraction=0.15,
+                class_weight="balanced",
+                random_state=42,
+            )
+            self._clf.fit(x_scaled, y)
+            self.training_samples = int(len(x_scaled))
+            return
+
         self._clf = SGDClassifier(
             loss="log_loss",
             max_iter=1,
             warm_start=True,
             random_state=42,
         )
-        self._scaler = StandardScaler()
-        x_scaled = self._scaler.fit_transform(x)
         classes = np.array([0, 1], dtype=np.int32)
         counts = np.bincount(y, minlength=2).astype(np.float64)
         weight_by_class = np.where(counts > 0, counts.sum() / (2.0 * np.maximum(counts, 1.0)), 1.0)
@@ -182,6 +203,10 @@ class ChallengerModel:
         """Online update with a single labelled sample."""
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
+            return
+        if self.model_type.upper() == "GBDT":
+            # Gradient-boosted trees cannot be updated online; the periodic
+            # batch retrain covers new data instead.
             return
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
@@ -206,6 +231,7 @@ class ChallengerModel:
                     "feature_names": self.feature_names,
                     "training_samples": self.training_samples,
                     "label_schema_version": self.label_schema_version,
+                    "model_type": self.model_type,
                 },
             },
             buf,
@@ -224,6 +250,7 @@ class ChallengerModel:
             feature_names=meta.get("feature_names", []),
             training_samples=meta.get("training_samples", 0),
             label_schema_version=meta.get("label_schema_version", LEGACY_LABEL_SCHEMA_VERSION),
+            model_type=str(meta.get("model_type", "SGD")),
         )
         model._clf = payload.get("clf")
         model._scaler = payload.get("scaler")

@@ -360,7 +360,11 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         sides_val = sides[train_size:]
 
         version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m_dnv1"
-        model = ChallengerModel(version=version, feature_names=feature_names)
+        model = ChallengerModel(
+            version=version,
+            feature_names=feature_names,
+            model_type=settings.MODEL_TYPE,
+        )
 
         # Fit on the chronological train split, evaluate on the held-out tail,
         # then refit from scratch on all data — the saved artifact uses every
@@ -380,6 +384,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         artifact = model.to_bytes()
         stored_metrics = metrics | {
             "features": len(feature_names),
+            "model_type": model.model_type,
             "feature_schema_hash": feature_schema_hash,
             "horizon_minutes": horizon_minutes,
             "label_bps_threshold": label_bps_threshold,
