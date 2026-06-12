@@ -2995,10 +2995,7 @@ class TradingApplication:
                 return
             self._last_candle_sample_at[symbol] = candle_open_time
 
-            import hashlib
-            import json as _json
-
-            schema_hash = hashlib.sha256(_json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+            schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
             snapshot_id = await self._trade_journal.record_feature_snapshot(
                 symbol=symbol,
                 interval=interval,
@@ -4200,3 +4197,4 @@ def main_sync() -> None:
 
 if __name__ == "__main__":
     main_sync()
+
