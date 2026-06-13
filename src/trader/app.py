@@ -151,6 +151,11 @@ class TradingApplication:
         self._model_gate_block_counter: int = 0
         self._model_gate_quality: dict[str, Any] = {}
         self._model_gate_quality_checked_at: datetime | None = None
+        # Cycle timing exposed to load governor
+        self._last_strategy_cycle_ms: float = 0.0
+        self._last_feature_cycle_ms: float = 0.0
+        # LLM client (instantiated when LLM_ENABLED=True)
+        self._llm_client: Any | None = None
 
     def _active_symbols(self) -> list[str]:
         """Return screener's current active symbols, or fallback list if screener is absent/empty."""
@@ -2048,7 +2053,9 @@ class TradingApplication:
             from trader.data.orderbook_tracker import OrderbookTracker
 
             self._orderbook_tracker = OrderbookTracker()
-            ob_symbols = self._screener.execution_candidates if self._screener is not None else symbols[:5]
+            ob_candidates = self._screener.execution_candidates if self._screener is not None else symbols[:5]
+            ob_cap = self._settings.MAX_ORDERBOOK_ACTIVE_SYMBOLS
+            ob_symbols = ob_candidates[:ob_cap] if ob_cap > 0 else ob_candidates
             for symbol in ob_symbols:
                 if symbol in symbols:
                     subs.append(f"orderbook.50.{symbol}")
@@ -2083,7 +2090,9 @@ class TradingApplication:
                             self._last_confirmed_candle_at = datetime.now(tz=UTC)
                             # Event-driven feature recompute for this (symbol, interval)
                             if self._feature_pipeline is not None:
+                                _feat_t0 = asyncio.get_event_loop().time()
                                 vec = await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
+                                self._last_feature_cycle_ms = (asyncio.get_event_loop().time() - _feat_t0) * 1000.0
                                 # Per-candle training sampler: a labelled sample per
                                 # confirmed 1m candle instead of per trade signal
                                 if vec is not None:
@@ -2435,6 +2444,8 @@ class TradingApplication:
 
         check_interval = float(self._settings.LOAD_GOVERNOR_CHECK_SECONDS)
         max_lag_ms = float(self._settings.MAX_EVENT_LOOP_LAG_MS)
+        max_feature_ms = float(self._settings.MAX_FEATURE_CYCLE_MS)
+        max_strategy_ms = float(self._settings.MAX_STRATEGY_CYCLE_MS)
         min_symbols = int(self._settings.LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS)
 
         # Original feature_max from screener (set at startup)
@@ -2461,7 +2472,9 @@ class TradingApplication:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                 ws_stale = ws_age > 30.0
 
-            overloaded = lag_ms > max_lag_ms or ws_stale
+            strategy_slow = max_strategy_ms > 0 and self._last_strategy_cycle_ms > max_strategy_ms
+            feature_slow = max_feature_ms > 0 and self._last_feature_cycle_ms > max_feature_ms
+            overloaded = lag_ms > max_lag_ms or ws_stale or strategy_slow or feature_slow
             current = self._screener._feature_max
 
             if overloaded and current > min_symbols:
@@ -2471,6 +2484,8 @@ class TradingApplication:
                     "load_governor.reducing_symbols",
                     lag_ms=round(lag_ms, 1),
                     ws_stale=ws_stale,
+                    strategy_cycle_ms=round(self._last_strategy_cycle_ms, 1),
+                    feature_cycle_ms=round(self._last_feature_cycle_ms, 1),
                     from_max=current,
                     to_max=new_max,
                     min_symbols=min_symbols,
@@ -3815,6 +3830,31 @@ class TradingApplication:
                             error=str(_canary_exc),
                         )
 
+            # LLM risk-multiplier scoring (optional, gated by LLM_ENABLED)
+            if self._settings.LLM_ENABLED and self._llm_client is not None:
+                try:
+                    regime_str = (
+                        regime_ctx.regime.value
+                        if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                        else "UNKNOWN"
+                    )
+                    llm_mult = await self._llm_client.get_risk_multiplier(
+                        symbol=proposal.symbol,
+                        side=proposal.side.value,
+                        regime=regime_str,
+                        confidence=proposal.confidence,
+                        rationale=proposal.rationale,
+                    )
+                    if llm_mult < 1.0:
+                        proposal = proposal.model_copy(update={"expected_risk": llm_mult})
+                        log.debug(
+                            "llm.applied_multiplier",
+                            symbol=proposal.symbol,
+                            multiplier=llm_mult,
+                        )
+                except Exception as _llm_exc:
+                    log.debug("llm.scoring_failed", symbol=symbol, error=str(_llm_exc))
+
             # Skip execution if operator paused trading
             if self._trading_paused:
                 log.debug("strategy_loop.paused", symbol=symbol)
@@ -3924,6 +3964,7 @@ class TradingApplication:
             nonlocal _balance_tick, _effective_blocked_symbols
 
             while not self._shutdown_event.is_set():
+                _cycle_t0 = asyncio.get_event_loop().time()
                 self._last_strategy_loop_at = datetime.now(tz=UTC)
                 # Refresh balance every N iterations
                 _balance_tick += 1
@@ -3970,6 +4011,8 @@ class TradingApplication:
                             error=str(result),
                             error_type=type(result).__name__,
                         )
+
+                self._last_strategy_cycle_ms = (asyncio.get_event_loop().time() - _cycle_t0) * 1000.0
 
                 try:
                     await asyncio.wait_for(
@@ -4088,6 +4131,12 @@ class TradingApplication:
         if self._trade_journal:
             await self._trade_journal.close()
 
+        if self._llm_client is not None:
+            try:
+                await self._llm_client.close()
+            except Exception as exc:
+                log.debug("llm_client.close_failed", error=str(exc))
+
         self._status = SystemStatus.STOPPED
         log.info("graceful_shutdown_complete")
 
@@ -4109,6 +4158,21 @@ class TradingApplication:
             await self._start_trade_journal()
             await self._start_bybit_adapter()
             await self._start_telegram_bot()
+
+            if self._settings.LLM_ENABLED:
+                from trader.llm.client import LLMClient
+
+                self._llm_client = LLMClient(
+                    base_url=self._settings.LLM_BASE_URL,
+                    model=self._settings.LLM_MODEL,
+                    budget_cap_usd=self._settings.LLM_BUDGET_CAP_USD,
+                )
+                log.info(
+                    "llm_client.started",
+                    provider=self._settings.LLM_PROVIDER,
+                    model=self._settings.LLM_MODEL,
+                    budget_cap_usd=self._settings.LLM_BUDGET_CAP_USD,
+                )
 
             # Start private WebSocket for real-time order/position/balance events
             await self._start_private_ws()
