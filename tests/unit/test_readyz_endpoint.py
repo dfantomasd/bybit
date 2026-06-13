@@ -128,8 +128,6 @@ class TestStateStoreEndpoints:
         is_live: bool = False,
         open_position_count: int = 0,
     ) -> MagicMock:
-        from types import SimpleNamespace
-
         store = MagicMock()
         store.system_status = system_status
         store.trading_mode = trading_mode

@@ -313,7 +313,7 @@ class TradingApplication:
     # HTTP state proxy
     # ------------------------------------------------------------------
 
-    def _make_state_proxy(self) -> "_AppStateProxy":
+    def _make_state_proxy(self) -> _AppStateProxy:
         return _AppStateProxy(self)
 
     async def _start_http_server(self) -> asyncio.Task:

@@ -628,6 +628,7 @@ async def test_database_model_telegram_screen() -> None:
 async def test_load_latest_challenger_falls_back_when_schema_missing() -> None:
     """Registry loads a SHADOW_CHALLENGER even if metrics->label_schema_version is absent."""
     import io
+
     import joblib
     from sklearn.linear_model import SGDClassifier
     from sklearn.preprocessing import StandardScaler
