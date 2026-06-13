@@ -106,3 +106,36 @@ def test_position_sizer_rejects_stop_below_fractional_atr_floor():
 
     assert qty == Decimal("0")
     assert "min ATR multiple" in reason
+
+
+def test_position_sizer_available_balance_cap_uses_profile_leverage():
+    info = InstrumentInfo(
+        symbol="LEVUSDT",
+        market_type=MarketType.LINEAR,
+        base_coin="LEV",
+        quote_coin="USDT",
+        min_order_qty=Decimal("0.001"),
+        max_order_qty=Decimal("1000000"),
+        qty_step=Decimal("0.001"),
+        tick_size=Decimal("0.0001"),
+        min_notional=Decimal("5"),
+    )
+    limits = get_risk_limits(RiskProfile.MODERATE)
+    sizer = PositionSizer(limits, info)
+
+    qty, reason = sizer.calculate(
+        capital=Decimal("10000"),
+        stop_distance_pct=Decimal("0.02"),
+        desired_risk_pct=Decimal("1"),
+        current_exposure_pct=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        event_risk_score=0.0,
+        data_quality_score=1.0,
+        spread=None,
+        atr=None,
+        available_balance=Decimal("10"),
+        entry_price=Decimal("10"),
+    )
+
+    assert reason == ""
+    assert qty == (Decimal("10") * limits.max_leverage / Decimal("10")).quantize(Decimal("0.001"))

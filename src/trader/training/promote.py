@@ -105,140 +105,45 @@ async def _shadow_gate_stats(
 
 
 async def _promote(version: str, confirm: bool) -> None:
-    import asyncpg
-
     from trader.config import Settings
-    from trader.ml.challenger import ChallengerModel, ModelStatus
+    from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+    from trader.storage.trade_journal import TradeJournal
 
     settings = Settings()
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    journal = TradeJournal(
+        postgres_dsn=settings.POSTGRES_DSN.get_secret_value(),
+        enabled=settings.TRADE_JOURNAL_ENABLED,
+    )
+    await journal.connect()
 
     try:
-        row = await pool.fetchrow(
-            "SELECT version, status, training_samples, artifact, metrics FROM model_versions WHERE version = $1",
-            version,
+        engine = AutoPromotionEngine(
+            trade_journal=journal,
+            config=AutoPromotionConfig.from_settings(settings),
         )
-        if not row:
-            click.echo(f"Model version {version!r} not found", err=True)
+        decision = await engine.should_promote(None, version)
+        if not decision.promote:
+            click.echo(f"Promotion criteria not met: {', '.join(decision.reasons)}", err=True)
             return
 
-        if row["status"] not in (ModelStatus.SHADOW_CHALLENGER, ModelStatus.VALIDATED):
-            click.echo(f"Cannot promote model in status {row['status']!r}", err=True)
-            return
-
-        if row["artifact"] is None:
-            click.echo(f"Model version {version!r} has no artifact", err=True)
-            return
-
-        metrics = _parse_metrics(row["metrics"] or {})
-        label_schema_version = str(metrics.get("label_schema_version") or "")
-        if label_schema_version != LABEL_SCHEMA_VERSION:
-            click.echo(
-                f"Promotion blocked: incompatible label schema {label_schema_version!r}; "
-                f"required {LABEL_SCHEMA_VERSION!r}",
-                err=True,
-            )
-            return
-
-        horizon_minutes = int(metrics.get("horizon_minutes") or 15)
-        gate = await _shadow_gate_stats(pool, version=version, horizon_minutes=horizon_minutes)
-        resolved_observations = int(gate.get("total_count") or 0)
-        pass_count = int(gate.get("pass_count") or 0)
-        expectancy, missing_reason = _required_gate_float(
-            gate,
-            "pass_avg_net_return_bps",
-            "missing_shadow_pass_expectancy",
-        )
-        if missing_reason is not None:
-            click.echo(f"Promotion criteria not met: {missing_reason}", err=True)
-            return
-        assert expectancy is not None
-        lift_bps, missing_reason = _required_gate_float(
-            gate,
-            "lift_vs_all_bps",
-            "missing_shadow_lift",
-        )
-        if missing_reason is not None:
-            click.echo(f"Promotion criteria not met: {missing_reason}", err=True)
-            return
-        assert lift_bps is not None
-        quality = str(metrics.get("quality") or "")
-
-        model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=version)
-        model.training_samples = int(row["training_samples"] or model.training_samples)
-        model.label_schema_version = label_schema_version
-
-        can, reason = model.can_promote(
-            min_samples=settings.MODEL_MIN_TRAINING_SAMPLES,
-            min_resolved_observations=settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION,
-            resolved_observations=resolved_observations,
-            walk_forward_expectancy=float(expectancy),
-            quality=quality,
-            required_quality=settings.MODEL_GATE_CANARY_MIN_QUALITY,
-        )
-        if not can:
-            click.echo(f"Promotion criteria not met: {reason}", err=True)
-            return
-
-        # Require at minimum 30 observed outcomes for statistical significance
-        if int(gate.get("total_count", 0)) < 30:
-            click.echo("Promotion criteria not met: insufficient_gate_observations", err=True)
-            return
-
-        min_pass_count = max(10, settings.MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION // 3)
-        if pass_count < min_pass_count:
-            click.echo(
-                f"Promotion criteria not met: insufficient_gate_passes: {pass_count} < {min_pass_count}",
-                err=True,
-            )
-            return
-        if lift_bps <= 0:
-            click.echo(
-                f"Promotion criteria not met: non_positive_shadow_lift: {lift_bps:+.4f} bps",
-                err=True,
-            )
-            return
-
-        click.echo(
-            f"Model {version} meets promotion criteria "
-            f"({model.training_samples} training samples, {resolved_observations} resolved shadow observations, "
-            f"{pass_count} gate passes, pass expectancy={expectancy:+.2f} bps, lift={lift_bps:+.2f} bps)"
-        )
+        click.echo(f"Model {version} meets promotion criteria ({decision.metrics})")
 
         if not confirm:
             click.echo("Add --confirm to actually promote this model to CHAMPION")
             return
 
-        async with pool.acquire() as conn:
-            async with conn.transaction():
-                await conn.execute("SELECT pg_advisory_xact_lock($1)", 926_202_606)
-                champion = await conn.fetchrow(
-                    "SELECT version FROM model_versions WHERE status='CHAMPION' ORDER BY training_finished_at DESC NULLS LAST LIMIT 1"
-                )
-                from_version = str(champion["version"]) if champion else None
-                await conn.execute("UPDATE model_versions SET status='ARCHIVED' WHERE status='CHAMPION'")
-                await conn.execute(
-                    "UPDATE model_versions SET status='CHAMPION' WHERE version=$1 AND status IN ('SHADOW_CHALLENGER','VALIDATED')",
-                    version,
-                )
-                await conn.execute(
-                    """
-                    INSERT INTO model_promotion_log (
-                        event_type, from_version, to_version, reasons, metrics
-                    )
-                    VALUES ('PROMOTED_MANUAL', $1, $2, $3::jsonb, $4::jsonb)
-                    """,
-                    from_version,
-                    version,
-                    json.dumps(["manual_confirmed", "criteria_met"]),
-                    json.dumps({"gate": gate, "training_samples": model.training_samples}),
-                )
+        promoted = await engine.promote(version)
+        if not promoted.promote:
+            click.echo(
+                f"Promotion criteria not met after re-check: {', '.join(promoted.reasons)}",
+                err=True,
+            )
+            return
 
         click.echo(f"Model {version} promoted to CHAMPION")
 
     finally:
-        await pool.close()
+        await journal.close()
 
 
 @click.command()

@@ -16,6 +16,7 @@ Live execution requires LIVE_MODE=true AND TRADING_MODE=LIVE.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
@@ -595,16 +596,19 @@ class ExecutionEngine:
             return
         try:
             lev_str = str(int(max_leverage)) if max_leverage == max_leverage.to_integral_value() else str(max_leverage)
-            await self._adapter._rest.set_leverage(
+            leverage_result = self._adapter._rest.set_leverage(
                 category=self._category,
                 symbol=symbol,
                 buy_leverage=lev_str,
                 sell_leverage=lev_str,
             )
+            if inspect.isawaitable(leverage_result):
+                await leverage_result
             self._leverage_confirmed[symbol] = max_leverage
             log.info("execution.leverage_set", symbol=symbol, leverage=lev_str)
         except Exception as exc:
             log.warning("execution.leverage_set_failed", symbol=symbol, error=str(exc))
+            raise
 
     # ------------------------------------------------------------------
     # Main entry point
@@ -756,6 +760,7 @@ class ExecutionEngine:
                 await self._ensure_leverage(symbol, max_lev)
             except Exception as exc:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
+                return None
 
         # 4. Risk evaluation ───────────────────────────────────────────
         # Extract spread and ATR for RiskManager sizing

@@ -6,6 +6,7 @@ signing and eliminate pybit version incompatibilities.
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -199,6 +200,9 @@ class BybitRestClient:
                 code="INVALID_RESPONSE",
             )
 
+        if http_status == 429 or response.get("retCode") == 10006:
+            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method="GET")
+            await asyncio.sleep(wait)
         _raise_for_ret_code(response, context=path)
         return response
 
@@ -252,6 +256,9 @@ class BybitRestClient:
                 code="INVALID_RESPONSE",
             )
 
+        if http_status == 429 or response.get("retCode") == 10006:
+            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method="POST")
+            await asyncio.sleep(wait)
         _raise_for_ret_code(response, context=path)
         return response
 
