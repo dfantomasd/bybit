@@ -102,7 +102,7 @@ class ExecutionEngine:
         maker_ttl_s: float = 5.0,
         maker_allow_escalation: bool = True,
         imbalance_provider: Any | None = None,
-        max_correlated_positions: int = 10,
+        max_correlated_positions: int = 0,
         max_queue_utilization_pct: int = 100,
     ) -> None:
         self._adapter = adapter

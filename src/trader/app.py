@@ -1633,12 +1633,14 @@ class TradingApplication:
         assert self._bybit_adapter is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars={
-                "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
-                "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
-                "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
-                "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
-            })
+            self._candle_store = CandleStore(
+                max_bars={
+                    "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
+                    "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
+                    "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
+                    "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
+                }
+            )
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
@@ -1955,12 +1957,14 @@ class TradingApplication:
         assert self._health_checker is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars={
-                "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
-                "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
-                "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
-                "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
-            })
+            self._candle_store = CandleStore(
+                max_bars={
+                    "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
+                    "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
+                    "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
+                    "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
+                }
+            )
 
         selector = EndpointSelector(
             self._settings.BYBIT_REGION,
