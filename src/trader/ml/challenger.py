@@ -605,6 +605,30 @@ class ModelRegistry:
         if rows:
             return rows[0]
 
+        evidence_rows = await self._journal._fetch(
+            """
+            SELECT 1
+            FROM model_versions
+            WHERE status = 'CHAMPION'
+              AND artifact IS NOT NULL
+              AND COALESCE(metrics->>'label_schema_version', '') = $1
+              AND COALESCE(
+                      NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                      NULLIF(metrics->>'wf_mean_bps', ''),
+                      NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                  ) IS NOT NULL
+            LIMIT 1
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        if evidence_rows:
+            log.warning(
+                "model_registry.no_paper_ready_walk_forward_champion min_paper_gate_count=%s required_schema=%s",
+                min_paper_gate_count,
+                LABEL_SCHEMA_VERSION,
+            )
+            return None
+
         fallback_rows = await self._journal._fetch(
             """
             SELECT version, artifact, training_samples, metrics, training_finished_at, created_at

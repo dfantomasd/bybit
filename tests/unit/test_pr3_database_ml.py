@@ -226,6 +226,7 @@ async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
         side_effect=[
             [],
             [],
+            [],
             [
                 {
                     "version": "challenger_v1",
@@ -306,6 +307,7 @@ async def test_select_best_champion_falls_back_when_no_walk_forward(monkeypatch:
     journal._fetch = AsyncMock(
         side_effect=[
             [],
+            [],
             [
                 {
                     "version": "fallback_good",
@@ -322,6 +324,29 @@ async def test_select_best_champion_falls_back_when_no_walk_forward(monkeypatch:
 
     assert row is not None
     assert row["version"] == "fallback_good"
+    assert journal._fetch.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_select_best_champion_does_not_fallback_when_walk_forward_lacks_paper_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A calculated WF champion with too little paper evidence must fail closed."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        side_effect=[
+            [],
+            [{"has_walk_forward": True}],
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is None
     assert journal._fetch.await_count == 2
 
 
