@@ -27,6 +27,7 @@ from trader.training.labels import LABEL_SCHEMA_VERSION
 log = structlog.get_logger(__name__)
 
 LEGACY_LABEL_SCHEMA_VERSION = "legacy_unknown"
+DEFAULT_CHAMPION_MIN_PAPER_GATE_COUNT = 50
 
 # Encrypted artifact marker. joblib payloads are pickle, and pickle from a
 # compromised database is remote code execution inside the trader process —
@@ -67,6 +68,25 @@ def _artifact_cipher() -> Any | None:
     except ValueError:
         derived = base64.urlsafe_b64encode(hashlib.sha256(raw.encode()).digest())
         return Fernet(derived)
+
+
+def _champion_min_paper_gate_count() -> int:
+    try:
+        from trader.config import Settings
+
+        return max(
+            0,
+            int(getattr(Settings(), "MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", DEFAULT_CHAMPION_MIN_PAPER_GATE_COUNT)),
+        )
+    except Exception:
+        import os
+
+        try:
+            return max(
+                0, int(os.environ.get("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", DEFAULT_CHAMPION_MIN_PAPER_GATE_COUNT))
+            )
+        except ValueError:
+            return DEFAULT_CHAMPION_MIN_PAPER_GATE_COUNT
 
 
 def encrypt_artifact(data: bytes) -> bytes:
@@ -461,31 +481,19 @@ class ModelRegistry:
             log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
-        """Load the latest compatible CHAMPION model."""
+        """Load the best compatible CHAMPION model."""
 
         if self._journal is None or not self._journal.is_enabled:
             return None
         try:
-            rows = await self._journal._fetch(
-                """
-                SELECT version, artifact, training_samples, metrics
-                FROM model_versions
-                WHERE status = 'CHAMPION'
-                  AND artifact IS NOT NULL
-                  AND COALESCE(metrics->>'label_schema_version', '') = $1
-                ORDER BY training_finished_at DESC NULLS LAST
-                LIMIT 1
-                """,
-                LABEL_SCHEMA_VERSION,
-            )
-            if not rows:
+            row = await self.select_best_champion()
+            if not row:
                 self._champion = None
                 log.warning(
                     "model_registry.no_compatible_champion required_schema=%s",
                     LABEL_SCHEMA_VERSION,
                 )
                 return None
-            row = rows[0]
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
             model = ChallengerModel.from_bytes(bytes(row["artifact"]), version=str(row["version"]))
             model.status = ModelStatus.CHAMPION
@@ -504,6 +512,122 @@ class ModelRegistry:
         except Exception as exc:
             log.debug("model_registry.load_champion_failed", exc_info=exc)
             return None
+
+    async def select_best_champion(self) -> Any | None:
+        """Select the safest CHAMPION by out-of-sample evidence.
+
+        Primary mode requires a calculated walk-forward expectancy and enough
+        paper-gate samples. Positive walk-forward models are preferred; within
+        that bucket lift breaks ties before freshness. If every champion is
+        missing walk-forward evidence, retain legacy GOOD/freshness ordering and
+        emit a warning so operators can see the degraded selection mode.
+        """
+
+        if self._journal is None or not self._journal.is_enabled:
+            return None
+
+        min_paper_gate_count = _champion_min_paper_gate_count()
+        rows = await self._journal._fetch(
+            """
+            SELECT version, artifact, training_samples, metrics, training_finished_at, created_at,
+                   COALESCE(
+                       NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                       NULLIF(metrics->>'wf_mean_bps', ''),
+                       NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                   )::double precision AS walk_forward_bps,
+                   COALESCE(
+                       NULLIF(metrics->>'lift_bps', ''),
+                       NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                       NULLIF(metrics#>>'{model_gate,lift_bps}', '')
+                   )::double precision AS lift_bps,
+                   COALESCE(
+                       NULLIF(metrics#>>'{paper_gate,count}', ''),
+                       NULLIF(metrics#>>'{model_gate,count}', ''),
+                       NULLIF(metrics->>'paper_gate_count', ''),
+                       NULLIF(metrics->>'total_pass_count', ''),
+                       NULLIF(metrics->>'best_threshold_pass_count', '')
+                   )::integer AS paper_gate_count
+            FROM model_versions
+            WHERE status = 'CHAMPION'
+              AND artifact IS NOT NULL
+              AND COALESCE(metrics->>'label_schema_version', '') = $1
+              AND COALESCE(
+                      NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                      NULLIF(metrics->>'wf_mean_bps', ''),
+                      NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                  ) IS NOT NULL
+              AND COALESCE(
+                      NULLIF(metrics#>>'{paper_gate,count}', ''),
+                      NULLIF(metrics#>>'{model_gate,count}', ''),
+                      NULLIF(metrics->>'paper_gate_count', ''),
+                      NULLIF(metrics->>'total_pass_count', ''),
+                      NULLIF(metrics->>'best_threshold_pass_count', '')
+                  )::integer >= $2
+            ORDER BY
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN 0 ELSE 1 END,
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN COALESCE(
+                    NULLIF(metrics->>'lift_bps', ''),
+                    NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                    NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                    '0'
+                )::double precision END DESC NULLS LAST,
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN training_finished_at END DESC NULLS LAST,
+                COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision DESC,
+                COALESCE(
+                    NULLIF(metrics->>'lift_bps', ''),
+                    NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                    NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                    '0'
+                )::double precision DESC,
+                training_finished_at DESC NULLS LAST,
+                created_at DESC
+            LIMIT 1
+            """,
+            LABEL_SCHEMA_VERSION,
+            min_paper_gate_count,
+        )
+        if rows:
+            return rows[0]
+
+        fallback_rows = await self._journal._fetch(
+            """
+            SELECT version, artifact, training_samples, metrics, training_finished_at, created_at
+            FROM model_versions
+            WHERE status = 'CHAMPION'
+              AND artifact IS NOT NULL
+              AND COALESCE(metrics->>'label_schema_version', '') = $1
+            ORDER BY
+                CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
+                training_finished_at DESC NULLS LAST,
+                created_at DESC
+            LIMIT 1
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        if fallback_rows:
+            log.warning(
+                "model_registry.champion_walk_forward_fallback min_paper_gate_count=%s required_schema=%s",
+                min_paper_gate_count,
+                LABEL_SCHEMA_VERSION,
+            )
+            return fallback_rows[0]
+        return None
 
     async def load_latest_challenger(self) -> ChallengerModel | None:
         """Load the latest compatible challenger for non-authoritative scoring.
