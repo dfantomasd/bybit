@@ -115,3 +115,74 @@ class TestRuntimeSettingsEndpoint:
         assert resp.status_code == 200
         assert resp.json()["message"] == "max_positions updated"
         assert updates == [("max_positions", 3)]
+
+
+class TestStateStoreEndpoints:
+    """Verify that /status, /positions, and /model use state_store when wired."""
+
+    def _make_state_store(
+        self,
+        *,
+        system_status: SystemStatus = SystemStatus.RUNNING,
+        trading_mode: TradingMode = TradingMode.SHADOW,
+        is_live: bool = False,
+        open_position_count: int = 0,
+    ) -> MagicMock:
+        store = MagicMock()
+        store.system_status = system_status
+        store.trading_mode = trading_mode
+        store.is_live = is_live
+        store.open_position_count = open_position_count
+        store.open_positions = []
+        store.current_regimes = {}
+        store.active_model_metadata = None
+        return store
+
+    def test_status_returns_running_when_state_store_wired(self) -> None:
+        state_store = self._make_state_store(system_status=SystemStatus.RUNNING)
+        app = create_app(api_key="key", state_store=state_store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/status", headers={"X-API-Key": "key"})
+
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["system_status"] == SystemStatus.RUNNING.value
+        assert data["trading_mode"] == TradingMode.SHADOW.value
+
+    def test_model_returns_no_model_deployed_when_metadata_none(self) -> None:
+        state_store = self._make_state_store()
+        state_store.active_model_metadata = None
+        app = create_app(api_key="key", state_store=state_store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/model", headers={"X-API-Key": "key"})
+
+        assert resp.status_code == 200
+        assert resp.json() == {"status": "no_model_deployed"}
+
+    def test_positions_returns_list_when_state_store_wired(self) -> None:
+        from types import SimpleNamespace
+
+        state_store = self._make_state_store()
+        state_store.open_positions = [
+            SimpleNamespace(
+                symbol="BTCUSDT",
+                market_type="LINEAR",
+                side="Buy",
+                size=0.001,
+                entry_price=50000,
+                mark_price=None,
+                unrealised_pnl=0,
+                leverage=1,
+            )
+        ]
+        app = create_app(api_key="key", state_store=state_store)
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/positions", headers={"X-API-Key": "key"})
+
+        assert resp.status_code == 200
+        positions = resp.json()
+        assert len(positions) == 1
+        assert positions[0]["symbol"] == "BTCUSDT"

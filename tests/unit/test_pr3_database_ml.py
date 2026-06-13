@@ -197,7 +197,8 @@ async def test_registry_load_active_prefers_champion() -> None:
                     "training_samples": champion.training_samples,
                 }
             ],
-            [],
+            [],  # challenger primary (schema-filtered) → empty
+            [],  # challenger fallback (no schema filter) → empty
         ]
     )
 
@@ -209,7 +210,7 @@ async def test_registry_load_active_prefers_champion() -> None:
     assert loaded.status == ModelStatus.CHAMPION
     assert registry.champion is loaded
     assert registry.challenger is None
-    assert journal._fetch.await_count == 2
+    assert journal._fetch.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -617,3 +618,73 @@ async def test_database_model_telegram_screen() -> None:
     assert "Paper baseline" in text
     assert "Paper model gate" in text
     assert "score_below_regime_threshold" in text
+
+
+# ---------------------------------------------------------------------------
+# Challenger fallback: load model even when label_schema_version not in metrics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_latest_challenger_falls_back_when_schema_missing() -> None:
+    """Registry loads a SHADOW_CHALLENGER even if metrics->label_schema_version is absent."""
+    import io
+
+    import joblib
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.preprocessing import StandardScaler
+
+    # Build a minimal artifact without label_schema_version in metrics
+    buf = io.BytesIO()
+    clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True, random_state=42)
+    scaler = StandardScaler()
+    joblib.dump(
+        {
+            "clf": clf,
+            "scaler": scaler,
+            "meta": {
+                "version": "v_legacy_no_schema",
+                "feature_names": ["ema_9", "rsi_14"],
+                "training_samples": 100,
+                # intentionally missing label_schema_version
+                "model_type": "SGD",
+                "model_params": {},
+            },
+        },
+        buf,
+    )
+    artifact_bytes = buf.getvalue()
+
+    # Primary query (schema filter) returns nothing; fallback returns the row
+    journal = MagicMock()
+    journal.is_enabled = True
+
+    primary_call = AsyncMock(return_value=[])
+    fallback_row: dict[str, Any] = {
+        "version": "v_legacy_no_schema",
+        "status": "SHADOW_CHALLENGER",
+        "artifact": artifact_bytes,
+        "training_samples": 100,
+        "metrics": {},
+    }
+    fallback_call = AsyncMock(return_value=[fallback_row])
+
+    call_count = 0
+
+    async def _fetch(sql: str, *args: Any) -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return await primary_call(sql, *args)
+        return await fallback_call(sql, *args)
+
+    journal._fetch = _fetch
+
+    registry = ModelRegistry(trade_journal=journal)
+    model = await registry.load_latest_challenger()
+
+    assert model is not None
+    assert model.version == "v_legacy_no_schema"
+    assert model.training_samples == 100
+    assert model.allow_live_decisions is False
+    assert call_count == 2  # primary failed, fallback used
