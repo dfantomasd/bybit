@@ -346,19 +346,41 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
 
+            -- Model promotion audit log. Columns cover both automatic
+            -- DB-backed promotion and older manual/pure-eval audit payloads.
             CREATE TABLE IF NOT EXISTS model_promotion_log (
                 promotion_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
                 event_type text NOT NULL,
+                decision text,
+                challenger_version text,
+                champion_version text,
+                new_champion_version text,
                 from_version text,
                 to_version text,
                 reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
                 metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+                metrics_snapshot jsonb,
+                decided_at timestamptz NOT NULL DEFAULT now(),
                 created_at timestamptz NOT NULL DEFAULT now()
             );
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS decision text,
+                ADD COLUMN IF NOT EXISTS challenger_version text,
+                ADD COLUMN IF NOT EXISTS champion_version text,
+                ADD COLUMN IF NOT EXISTS new_champion_version text,
+                ADD COLUMN IF NOT EXISTS from_version text,
+                ADD COLUMN IF NOT EXISTS to_version text,
+                ADD COLUMN IF NOT EXISTS reasons jsonb DEFAULT '[]'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics jsonb DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics_snapshot jsonb,
+                ADD COLUMN IF NOT EXISTS decided_at timestamptz DEFAULT now(),
+                ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
             CREATE INDEX IF NOT EXISTS idx_model_promotion_log_created
                 ON model_promotion_log (created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_model_promotion_log_versions
                 ON model_promotion_log (from_version, to_version, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_decided_at
+                ON model_promotion_log (decided_at DESC);
 
             -- Training run history
             CREATE TABLE IF NOT EXISTS training_runs (
@@ -2559,6 +2581,138 @@ class TradeJournal:
             max_loss_usd,
         )
         return {str(row["symbol"]) for row in rows}
+
+    async def log_promotion_event(
+        self,
+        *,
+        event_type: str,
+        decision: str,
+        challenger_version: str | None = None,
+        champion_version: str | None = None,
+        new_champion_version: str | None = None,
+        reasons: list[str] | None = None,
+        metrics_snapshot: dict[str, Any] | None = None,
+    ) -> None:
+        import json as _json
+
+        await self._execute(
+            """
+            INSERT INTO model_promotion_log
+                (event_type, decision, challenger_version, champion_version,
+                 new_champion_version, reasons, metrics_snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+            """,
+            event_type,
+            decision,
+            challenger_version,
+            champion_version,
+            new_champion_version,
+            _json.dumps(reasons or []),
+            _json.dumps(metrics_snapshot or {}),
+        )
+
+    async def promote_challenger_to_champion(
+        self,
+        version: str,
+        *,
+        event_data: dict[str, Any] | None = None,
+    ) -> None:
+        """Atomically archive the current champion and promote the challenger."""
+        if not self.is_enabled:
+            return
+        assert self._pool is not None
+        import json as _json
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                prev = await conn.fetchrow("SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1")
+                prev_version = prev["version"] if prev else None
+                await conn.execute("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'CHAMPION'")
+                await conn.execute(
+                    """
+                    UPDATE model_versions
+                    SET status = 'CHAMPION'
+                    WHERE version = $1 AND status IN ('SHADOW_CHALLENGER', 'VALIDATED')
+                    """,
+                    version,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO model_promotion_log
+                        (event_type, decision, challenger_version, champion_version,
+                         new_champion_version, reasons, metrics_snapshot)
+                    VALUES ('PROMOTION', 'APPROVED', $1, $2, $1, '[]'::jsonb, $3::jsonb)
+                    """,
+                    version,
+                    prev_version,
+                    _json.dumps(event_data or {}),
+                )
+        log.info(
+            "trade_journal.promote_challenger_to_champion",
+            version=version,
+            prev_champion=prev_version,
+        )
+
+    async def rollback_champion(
+        self,
+        *,
+        current_version: str,
+        reason: str,
+        event_data: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Find the most recent ARCHIVED model, restore it as CHAMPION, roll back current.
+
+        Returns the restored version string, or None if no candidate exists.
+        """
+        if not self.is_enabled:
+            return None
+        assert self._pool is not None
+        import json as _json
+
+        async with self._pool.acquire() as conn:
+            async with conn.transaction():
+                restore = await conn.fetchrow(
+                    """
+                    SELECT version FROM model_versions
+                    WHERE status = 'ARCHIVED'
+                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """
+                )
+                if restore is None:
+                    log.warning(
+                        "trade_journal.rollback_no_candidate",
+                        current_version=current_version,
+                    )
+                    return None
+                restore_version: str = restore["version"]
+                await conn.execute(
+                    "UPDATE model_versions SET status = 'ROLLED_BACK' WHERE version = $1",
+                    current_version,
+                )
+                await conn.execute(
+                    "UPDATE model_versions SET status = 'CHAMPION' WHERE version = $1",
+                    restore_version,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO model_promotion_log
+                        (event_type, decision, champion_version, new_champion_version,
+                         reasons, metrics_snapshot)
+                    VALUES ('ROLLBACK', 'AUTO', $1, $2, $3::jsonb, $4::jsonb)
+                    """,
+                    current_version,
+                    restore_version,
+                    _json.dumps([reason]),
+                    _json.dumps(event_data or {}),
+                )
+        log.warning(
+            "trade_journal.rollback_champion",
+            rolled_back=current_version,
+            restored=restore_version,
+            reason=reason,
+        )
+        return restore_version
 
     async def _execute(self, query: str, *args: Any) -> None:
         if not self.is_enabled:
