@@ -3299,16 +3299,57 @@ class TelegramMonitorBot:
     async def _render_model(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the model info screen."""
         ctrl = self._controller
-        text_parts = ["🧠 <b>Модель и обучение</b>\n"]
+        lines: list[str] = ["🧠 <b>Модель и обучение</b>\n"]
         if ctrl and hasattr(ctrl, "db_diagnostics_provider") and ctrl.db_diagnostics_provider:
             try:
                 info = await ctrl.db_diagnostics_provider()
-                for k, v in (info or {}).items():
-                    text_parts.append(f"<b>{k}</b>: <code>{v}</code>")
+                latest = info.get("latest_model_version") or {}
+                gate = info.get("shadow_gate_15m") or {}
+                eligible = int(info.get("training_eligible_15m") or 0)
+
+                metrics: dict[str, Any] = latest.get("metrics") or {}
+                if isinstance(metrics, str):
+                    try:
+                        metrics = json.loads(metrics) or {}
+                    except Exception:
+                        metrics = {}
+
+                version = html.escape(str(latest.get("version") or "нет"))
+                status = html.escape(self._ru(str(latest.get("status") or "—")))
+                quality = html.escape(self._ru(str(metrics.get("quality") or "—")))
+                lift = metrics.get("lift_bps")
+                precision = metrics.get("precision")
+                best_thresh = metrics.get("best_threshold")
+                samples = int(latest.get("training_samples") or 0)
+                schema_ok = bool(latest.get("schema_compatible", False))
+
+                lift_str = f"{float(lift):+.1f} bps" if lift is not None else "нет"
+                prec_str = f"{float(precision):.1%}" if precision is not None else "нет"
+                thresh_str = str(best_thresh) if best_thresh is not None else "нет"
+
+                gate_lift = gate.get("lift_vs_all_bps")
+                gate_total = int(gate.get("total_count") or 0)
+                gate_pass = int(gate.get("pass_count") or 0)
+                gate_lift_str = f"{float(gate_lift):+.1f} bps" if gate_lift is not None else "нет"
+
+                lines += [
+                    f"Версия: <code>{version}</code>",
+                    f"Статус: <code>{status}</code>  Качество: <code>{quality}</code>",
+                    f"Lift (val-split): <code>{lift_str}</code>",
+                    f"Precision: <code>{prec_str}</code>  Порог: <code>{thresh_str}</code>",
+                    f"Обучено: <code>{samples}</code> образцов",
+                    f"Схема совместима: <code>{'да' if schema_ok else 'нет'}</code>",
+                    "",
+                    "<b>Shadow gate (15m):</b>",
+                    f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
+                    f"Gate lift: <code>{gate_lift_str}</code>",
+                    "",
+                    f"Данных для обучения (15m): <code>{eligible}</code>",
+                ]
             except Exception as exc:
-                text_parts.append(f"Ошибка: <code>{exc}</code>")
+                lines.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
-            text_parts.append("Данные недоступны")
+            lines.append("Данные недоступны")
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
@@ -3317,7 +3358,7 @@ class TelegramMonitorBot:
                 [InlineKeyboardButton("🏠 Главная", callback_data="view:home")],
             ]
         )
-        return "\n".join(text_parts), keyboard
+        return "\n".join(lines), keyboard
 
     async def _render_help(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the help screen."""

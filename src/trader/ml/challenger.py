@@ -523,13 +523,16 @@ class ModelRegistry:
                 WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
                   AND artifact IS NOT NULL
                   AND COALESCE(metrics->>'label_schema_version', '') = $1
-                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                ORDER BY
+                    CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
+                    training_finished_at DESC NULLS LAST,
+                    created_at DESC
                 LIMIT 1
                 """,
                 LABEL_SCHEMA_VERSION,
             )
             if not rows:
-                # Fallback: load latest artifact regardless of schema version tag.
+                # Fallback: load best-quality artifact regardless of schema version tag.
                 # This covers models trained before label_schema_version was stored
                 # in the metrics JSON.  We still refuse to promote them to CHAMPION.
                 rows = await self._journal._fetch(
@@ -538,7 +541,10 @@ class ModelRegistry:
                     FROM model_versions
                     WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
                       AND artifact IS NOT NULL
-                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    ORDER BY
+                        CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
+                        training_finished_at DESC NULLS LAST,
+                        created_at DESC
                     LIMIT 1
                     """
                 )
