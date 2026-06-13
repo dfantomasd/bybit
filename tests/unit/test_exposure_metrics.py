@@ -8,7 +8,7 @@ from decimal import Decimal
 import pytest
 
 from trader.domain.enums import RiskProfile
-from trader.risk.exposure import ExposureTracker
+from trader.risk.exposure import ExposureTracker, _get_family
 from trader.risk.profiles import get_risk_limits
 
 
@@ -115,6 +115,15 @@ def test_capital_update_ignores_stale_timestamp():
 
     t.update_capital(Decimal("5000"), updated_at=fresh - timedelta(seconds=1))
     assert t.to_dict()["total_capital"] == "20000"
+
+
+def test_crypto_family_uses_base_asset_not_prefix():
+    assert _get_family("ETHUSDT") == "ETH"
+    assert _get_family("WETHUSDT") == "ETH"
+    assert _get_family("BTC-USDT") == "BTC"
+    assert _get_family("ETHFIUSDT") is None
+    assert _get_family("BTCDOMUSDT") is None
+    assert _get_family("SOLVUSDT") is None
 
 
 @pytest.mark.asyncio

@@ -50,6 +50,17 @@ def _ceil_to_step(qty: Decimal, step: Decimal) -> Decimal:
     return steps * step
 
 
+def _clamp_unit_decimal(value: Any, default: Decimal = Decimal("1")) -> Decimal:
+    """Return value clamped to [0, 1], falling back when conversion fails."""
+    if value is None:
+        return default
+    try:
+        raw = Decimal(str(value))
+    except Exception:
+        return default
+    return max(Decimal("0"), min(Decimal("1"), raw))
+
+
 # Regime-based risk multipliers
 _REGIME_MULTIPLIERS: dict[MarketRegime, Decimal] = {
     MarketRegime.BULL_TREND: Decimal("1.0"),
@@ -359,16 +370,12 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 13. Apply LLM risk_multiplier (clamped to [0.0, 1.0])
-        # CRITICAL: LLM multiplier can ONLY reduce, never increase
+        # 13. Apply signal confidence and optional LLM risk_multiplier.
+        # CRITICAL: both multipliers are clamped to [0.0, 1.0] and can only reduce.
         # ----------------------------------------------------------------
-        llm_multiplier = Decimal("1.0")
-        # LLM multiplier would come from proposal.expected_risk or similar
-        # For now, use confidence as a proxy (lower confidence = smaller size)
-        raw_llm_mult = Decimal(str(proposal.confidence))
-        # CRITICAL: clamp to [0.0, 1.0] — cannot exceed 1.0
-        llm_multiplier = max(Decimal("0"), min(Decimal("1"), raw_llm_mult))
-        approved_qty = approved_qty * llm_multiplier
+        confidence_multiplier = _clamp_unit_decimal(proposal.confidence)
+        llm_multiplier = _clamp_unit_decimal(proposal.expected_risk)
+        approved_qty = approved_qty * confidence_multiplier * llm_multiplier
 
         # ----------------------------------------------------------------
         # 14. Apply regime risk multiplier
