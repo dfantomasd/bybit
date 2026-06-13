@@ -259,6 +259,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
               AND po.label IS NOT NULL
               AND po.label_schema_version = $1
               AND fs.feature_values IS NOT NULL
+              AND fs.training_eligible = true
               AND pe.model_version = 'RULE_BASELINE_V1'
             """,
             LABEL_SCHEMA_VERSION,

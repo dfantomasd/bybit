@@ -370,3 +370,18 @@ def test_promote_stats_sql_filters_training_eligible() -> None:
 
     src = inspect.getsource(promote)
     assert "training_eligible" in src, "promote.py must reference training_eligible to exclude bad snapshots"
+
+
+# ---------------------------------------------------------------------------
+# P1.1. labelled_samples_15m training_eligible filter
+# ---------------------------------------------------------------------------
+
+
+def test_labelled_samples_15m_filters_training_eligible() -> None:
+    """get_db_diagnostics labelled_samples_15m query must filter training_eligible=true."""
+    import inspect
+
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    src = inspect.getsource(DirectionalTradeJournal.get_db_diagnostics)
+    assert "training_eligible" in src, "get_db_diagnostics must filter training_eligible=true in labelled_samples_15m"

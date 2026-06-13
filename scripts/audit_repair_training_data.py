@@ -143,9 +143,6 @@ async def _report(pool: object, *, apply: bool) -> None:
     suspicious = int(rows[0]["suspicious_snapshots"])
     click.echo(f"\n  snapshots created before candle close (still eligible): {suspicious}")
 
-    if rows[0]["invalid_reason"] if False else False:
-        pass  # type hint workaround
-
     rows = await pool.fetch(
         """
         SELECT invalid_reason, count(*) AS cnt
