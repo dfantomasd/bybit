@@ -545,8 +545,7 @@ class ModelRegistry:
                 if rows:
                     row_ver = str(rows[0]["version"]) if rows else "unknown"
                     log.warning(
-                        "model_registry.challenger_schema_mismatch_fallback "
-                        "version=%s required_schema=%s",
+                        "model_registry.challenger_schema_mismatch_fallback version=%s required_schema=%s",
                         row_ver,
                         LABEL_SCHEMA_VERSION,
                     )

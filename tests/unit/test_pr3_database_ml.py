@@ -624,6 +624,7 @@ async def test_database_model_telegram_screen() -> None:
 # Challenger fallback: load model even when label_schema_version not in metrics
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_load_latest_challenger_falls_back_when_schema_missing() -> None:
     """Registry loads a SHADOW_CHALLENGER even if metrics->label_schema_version is absent."""
