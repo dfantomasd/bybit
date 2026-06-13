@@ -3330,7 +3330,11 @@ class TradingApplication:
                         model_version=(
                             self._model_registry.champion.version
                             if self._model_registry is not None and self._model_registry.champion is not None
-                            else "none"
+                            else (
+                                f"challenger:{self._model_registry.challenger.version}"
+                                if self._model_registry is not None and self._model_registry.challenger is not None
+                                else "none"
+                            )
                         ),
                         paused=self._trading_paused,
                         execution_candidates=(
@@ -3476,6 +3480,10 @@ class TradingApplication:
                 self._model_registry = ModelRegistry(trade_journal=self._trade_journal)
                 if self._trade_journal is not None and self._trade_journal.is_enabled:
                     await self._model_registry.load_active_model()
+                    try:
+                        self._update_model_gate_quality_from_diag(await self._trade_journal.get_db_diagnostics())
+                    except Exception as _qe:
+                        log.debug("model_gate.startup_quality_refresh_failed", error=str(_qe))
                 log.info("model_registry.initialized")
             except Exception as _mr_exc:
                 log.warning("model_registry.init_failed", error=str(_mr_exc))

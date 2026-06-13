@@ -1668,7 +1668,8 @@ class TradeJournal:
                 decision = str(row["decision"])
                 count = int(row["cnt"])
                 avg_return = float(row["avg_net_return_bps"] or 0.0)
-                precision = float(row["precision"] or 0.0)
+                raw_precision = row["precision"]
+                precision = float(raw_precision) if raw_precision is not None else None
                 total_count += count
                 weighted_return += avg_return * count
                 key = "pass" if decision == "GATE_PASS" else "block"
@@ -2400,7 +2401,8 @@ class TradeJournal:
                     decision = str(row["decision"])
                     count = int(row["cnt"])
                     avg_return = float(row["avg_net_return_bps"] or 0.0)
-                    precision = float(row["precision"] or 0.0)
+                    raw_precision = row["precision"]
+                    precision = float(raw_precision) if raw_precision is not None else None
                     total_count += count
                     weighted_return += avg_return * count
                     key = "pass" if decision == "GATE_PASS" else "block"

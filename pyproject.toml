@@ -109,6 +109,7 @@ exclude = ["migrations/", "scripts/"]
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["src"]
 addopts = ["--cov=trader", "--cov-report=term-missing", "--cov-report=xml", "-v"]
 filterwarnings = [
     "ignore::DeprecationWarning",
