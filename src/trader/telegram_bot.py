@@ -3140,12 +3140,14 @@ class TelegramMonitorBot:
                 disable_web_page_preview=True,
             )
             from telegram import Message as TGMessage
+
             if isinstance(query.message, TGMessage):
                 self._dashboard_message_id = query.message.message_id
                 self._dashboard_chat_id = query.message.chat_id
         except (BadRequest, Exception) as exc:
             log.debug("telegram.edit_failed_sending_new", error=str(exc))
             from telegram import Message as TGMessage
+
             if isinstance(query.message, TGMessage):
                 try:
                     msg = await query.message.reply_text(

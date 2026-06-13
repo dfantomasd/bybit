@@ -97,15 +97,11 @@ class TradeJournal:
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
             "last_read_error_at": (
-                _reat.isoformat()
-                if (_reat := getattr(self, "_last_read_error_at", None)) is not None
-                else None
+                _reat.isoformat() if (_reat := getattr(self, "_last_read_error_at", None)) is not None else None
             ),
             "last_read_error": getattr(self, "_last_read_error", None),
             "last_connect_error_at": (
-                _ceat.isoformat()
-                if (_ceat := getattr(self, "_last_connect_error_at", None)) is not None
-                else None
+                _ceat.isoformat() if (_ceat := getattr(self, "_last_connect_error_at", None)) is not None else None
             ),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }

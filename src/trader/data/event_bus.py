@@ -46,7 +46,9 @@ class EventBus:
         self._metrics = metrics
 
         # Main queues
-        self._queues: dict[str, asyncio.Queue[Any]] = {name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES}
+        self._queues: dict[str, asyncio.Queue[Any]] = {
+            name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES
+        }
 
         # Dead letter queue for critical dropped events (unbounded)
         self._dead_letter: asyncio.Queue[Any] = asyncio.Queue()
