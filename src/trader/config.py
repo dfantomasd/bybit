@@ -387,6 +387,17 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
+    MODEL_ONLINE_LEARNING_ENABLED: bool = False
+    """Incrementally update the SGD challenger after each resolved prediction outcome.
+    Only applies to SGD model type; GBDT/LOGREG are skipped silently."""
+    MODEL_DRIFT_DETECTION_ENABLED: bool = False
+    """Trigger auto-retrain when feature distribution drift is detected (PSI-based)."""
+    MODEL_DRIFT_PSI_THRESHOLD: float = 0.2
+    """PSI threshold above which a retrain is triggered (0.1=minor, 0.2=major shift)."""
+    MODEL_DRIFT_WINDOW_HOURS: int = 6
+    """Recent window in hours for the drift detector's current distribution."""
+    MODEL_DRIFT_BASELINE_HOURS: int = 72
+    """Baseline window in hours for the drift detector's reference distribution."""
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
     AND the lift is statistically significant (bootstrap p-value).

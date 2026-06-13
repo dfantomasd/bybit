@@ -763,24 +763,81 @@ class TradingApplication:
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
                 enough_increment = latest_samples > 0 and (trainable - latest_samples) >= increment_samples
-                if not (enough_initial or enough_increment):
-                    continue
 
-                msg = await self._start_model_training(min_samples, horizon, label_bps)
-                log.info(
-                    "model_auto_training.started",
-                    trainable=trainable,
-                    latest_samples=latest_samples,
-                    min_samples=min_samples,
-                    increment_samples=increment_samples,
-                )
-                if self._telegram_bot is not None:
-                    await self._telegram_bot.notify(
-                        "🤖 <b>Auto-training triggered</b>\n"
-                        f"trainable_15m=<code>{trainable}</code>, "
-                        f"latest_model_samples=<code>{latest_samples}</code>\n"
-                        f"{msg}"
+                drift_triggered = False
+                if self._settings.MODEL_DRIFT_DETECTION_ENABLED and not (enough_initial or enough_increment):
+                    try:
+                        drift = await self._trade_journal.get_feature_drift_psi(
+                            window_hours=self._settings.MODEL_DRIFT_WINDOW_HOURS,
+                            baseline_hours=self._settings.MODEL_DRIFT_BASELINE_HOURS,
+                        )
+                        max_psi = float(drift.get("max_psi") or 0.0)
+                        if max_psi >= self._settings.MODEL_DRIFT_PSI_THRESHOLD:
+                            drift_triggered = True
+                            log.info(
+                                "model_auto_training.drift_detected",
+                                max_psi=max_psi,
+                                threshold=self._settings.MODEL_DRIFT_PSI_THRESHOLD,
+                            )
+                            if self._telegram_bot is not None:
+                                await self._telegram_bot.notify(
+                                    "⚠️ <b>Feature drift detected</b>\n"
+                                    f"max_psi=<code>{max_psi:.3f}</code> "
+                                    f"(threshold={self._settings.MODEL_DRIFT_PSI_THRESHOLD})\n"
+                                    "Triggering auto-retrain…"
+                                )
+                    except Exception as exc:
+                        log.debug("model_auto_training.drift_check_failed", error=str(exc))
+
+                if not (enough_initial or enough_increment or drift_triggered):
+                    pass
+                else:
+                    msg = await self._start_model_training(min_samples, horizon, label_bps)
+                    log.info(
+                        "model_auto_training.started",
+                        trainable=trainable,
+                        latest_samples=latest_samples,
+                        min_samples=min_samples,
+                        increment_samples=increment_samples,
+                        drift_triggered=drift_triggered,
                     )
+                    if self._telegram_bot is not None:
+                        await self._telegram_bot.notify(
+                            "🤖 <b>Auto-training triggered</b>\n"
+                            f"trainable_15m=<code>{trainable}</code>, "
+                            f"latest_model_samples=<code>{latest_samples}</code>\n"
+                            f"{msg}"
+                        )
+
+                if self._settings.MODEL_ONLINE_LEARNING_ENABLED and self._model_registry is not None:
+                    try:
+                        outcomes = await self._trade_journal.get_unlearned_prediction_outcomes(
+                            limit=200,
+                            horizon_minutes=horizon,
+                        )
+                        if outcomes:
+                            learned_ids = []
+                            for outcome in outcomes:
+                                features = outcome.get("features")
+                                label = outcome.get("label")
+                                if features is None or label is None:
+                                    continue
+                                try:
+                                    self._model_registry.partial_fit_challenger(
+                                        [float(v) for v in features], int(label)
+                                    )
+                                    learned_ids.append(outcome["prediction_id"])
+                                except Exception as exc:
+                                    log.debug("model_online_learning.sample_failed", error=str(exc))
+                            if learned_ids:
+                                await self._trade_journal.mark_outcomes_learned(learned_ids)
+                                log.info(
+                                    "model_online_learning.updated",
+                                    samples=len(learned_ids),
+                                )
+                    except Exception as exc:
+                        log.warning("model_online_learning.failed", error=str(exc))
+
             except Exception as exc:
                 log.warning("model_auto_training.failed", error=str(exc))
 
@@ -1343,6 +1400,11 @@ class TradingApplication:
                 return {"connected": False, "error": "trade_journal_unavailable"}
             return await self._trade_journal.get_champion_health()
 
+        async def _attribution_provider() -> dict:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return await self._trade_journal.get_pnl_attribution(days=7)
+
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
                 await self._trade_journal.add_telegram_subscription(chat_id)
@@ -1388,6 +1450,7 @@ class TradingApplication:
             costs_detailed_provider=_costs_detailed_provider,
             model_performance_provider=_model_performance_provider,
             champion_health_provider=_champion_health_provider,
+            attribution_provider=_attribution_provider,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,

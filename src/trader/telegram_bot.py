@@ -162,6 +162,7 @@ class TradingController:
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    attribution_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -267,6 +268,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("db", self._cmd_db_model))
         app.add_handler(CommandHandler("model", self._cmd_db_model))
         app.add_handler(CommandHandler("trades", self._cmd_trades))
+        app.add_handler(CommandHandler("attribution", self._cmd_attribution))
         app.add_handler(CommandHandler("healthcheck", self._cmd_healthcheck))
         app.add_handler(CommandHandler("buckets", self._cmd_buckets))
         app.add_handler(CommandHandler("subscribe", self._cmd_subscribe))
@@ -2903,6 +2905,41 @@ class TelegramMonitorBot:
                 f"{html.escape(str(t.get('side', '?')))} "
                 f"PnL: <code>{pnl:+.4f} USDT</code>{net_str}"
             )
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_attribution(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.attribution_provider is None:
+            await self._reply(update, "Risk attribution сейчас недоступна.")
+            return
+        try:
+            data = await self._controller.attribution_provider()
+        except Exception as exc:
+            await self._reply(
+                update,
+                f"❌ Не удалось получить attribution: <code>{html.escape(str(exc))}</code>",
+            )
+            return
+        days = data.get("days", 7)
+        total_pnl = float(data.get("total_pnl") or 0)
+        by_symbol: list[dict] = data.get("by_symbol") or []
+        total_mark = "🟢" if total_pnl > 0 else ("🔴" if total_pnl < 0 else "⚪")
+        lines = [f"<b>📊 Risk Attribution (последние {days}д)</b>", ""]
+        lines.append(f"Итого PnL: {total_mark} <code>{total_pnl:+.4f} USDT</code>")
+        lines.append("")
+        if not by_symbol:
+            lines.append("Нет закрытых сделок за период.")
+        else:
+            for row in by_symbol[:15]:
+                sym = html.escape(str(row.get("symbol", "?")))
+                rpnl = float(row.get("total_pnl") or 0)
+                trades = int(row.get("trades") or 0)
+                wins = int(row.get("wins") or 0)
+                losses = int(row.get("losses") or 0)
+                mark = "🟢" if rpnl > 0 else ("🔴" if rpnl < 0 else "⚪")
+                lines.append(f"{mark} <code>{sym:<12}</code> {rpnl:+.4f} USDT  [{trades}т W{wins}/L{losses}]")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_healthcheck(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
