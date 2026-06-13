@@ -10,7 +10,7 @@ from __future__ import annotations
 import time
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -169,7 +169,7 @@ class BybitAdapter:
     async def get_open_orders(self, category: str, symbol: str | None = None) -> list[dict[str, Any]]:
         """Return open orders as raw dicts (mapper can be applied later)."""
         resp = await self._rest.get_open_orders(category=category, symbol=symbol)
-        return (resp.get("result") or {}).get("list", [])
+        return cast(list[dict[str, Any]], (resp.get("result") or {}).get("list", []))
 
     async def place_order(self, intent: OrderIntent) -> dict[str, Any]:
         """Submit an order to Bybit after idempotency and mapper processing.

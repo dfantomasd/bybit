@@ -31,9 +31,9 @@ _REGISTRY: CollectorRegistry | None = None
 
 def _get_registry() -> CollectorRegistry:
     """Return the global prometheus registry."""
-    from prometheus_client import REGISTRY  # type: ignore[attr-defined]
+    from prometheus_client import REGISTRY
 
-    return REGISTRY  # type: ignore[return-value]
+    return REGISTRY
 
 
 # ---------------------------------------------------------------------------

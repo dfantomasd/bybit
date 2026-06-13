@@ -77,7 +77,7 @@ class ReconciliationService:
         rest_client: Any,
         order_store: Any,
         position_store: Any,
-        event_queue: asyncio.Queue,
+        event_queue: asyncio.Queue[ReconciliationEvent],
         metrics: Any = None,
         logger: Any = None,
     ) -> None:
