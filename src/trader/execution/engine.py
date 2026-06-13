@@ -208,10 +208,10 @@ class ExecutionEngine:
                 return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
 
             if self._max_queue_utilization_pct < 100 and self._max_concurrent_pending > 0:
-                utilization = self._pending_entry_count * 100 // self._max_concurrent_pending
+                utilization = self._pending_entry_count * 100 / self._max_concurrent_pending
                 if utilization >= self._max_queue_utilization_pct:
                     return (
-                        f"queue_utilization: {utilization}% >= {self._max_queue_utilization_pct}%"
+                        f"queue_utilization: {utilization:.1f}% >= {self._max_queue_utilization_pct}%"
                         f" ({self._pending_entry_count}/{self._max_concurrent_pending} pending)"
                     )
 

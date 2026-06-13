@@ -3838,12 +3838,18 @@ class TradingApplication:
                         if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
                         else "UNKNOWN"
                     )
-                    llm_mult = await self._llm_client.get_risk_multiplier(
-                        symbol=proposal.symbol,
-                        side=proposal.side.value,
-                        regime=regime_str,
-                        confidence=proposal.confidence,
-                        rationale=proposal.rationale,
+                    # Hard cap: LLM must not hold the 10s strategy loop hostage.
+                    # _STRATEGY_LOOP_INTERVAL / 4 gives each symbol ~2.5s budget.
+                    _llm_deadline = _STRATEGY_LOOP_INTERVAL / 4
+                    llm_mult = await asyncio.wait_for(
+                        self._llm_client.get_risk_multiplier(
+                            symbol=proposal.symbol,
+                            side=proposal.side.value,
+                            regime=regime_str,
+                            confidence=proposal.confidence,
+                            rationale=proposal.rationale,
+                        ),
+                        timeout=_llm_deadline,
                     )
                     if llm_mult < 1.0:
                         proposal = proposal.model_copy(update={"expected_risk": llm_mult})
@@ -3852,6 +3858,8 @@ class TradingApplication:
                             symbol=proposal.symbol,
                             multiplier=llm_mult,
                         )
+                except TimeoutError:
+                    log.debug("llm.timeout", symbol=symbol, deadline_s=_llm_deadline)
                 except Exception as _llm_exc:
                     log.debug("llm.scoring_failed", symbol=symbol, error=str(_llm_exc))
 
