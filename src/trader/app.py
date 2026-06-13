@@ -1540,6 +1540,8 @@ class TradingApplication:
             imbalance_provider=lambda s: (
                 self._orderbook_tracker.latest_imbalance(s) if self._orderbook_tracker is not None else None
             ),
+            max_correlated_positions=self._settings.MAX_CORRELATED_POSITIONS,
+            max_queue_utilization_pct=self._settings.MAX_QUEUE_UTILIZATION_PCT,
         )
 
         # P0.2: Restore unresolved pending entries from durable storage before any new entries.
@@ -1600,6 +1602,7 @@ class TradingApplication:
             has_pending_order=lambda symbol: (
                 self._execution_engine is not None and self._execution_engine.has_pending_order_for_symbol(symbol)
             ),
+            min_execution_candidates=self._settings.LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES,
         )
 
         # Run first screen synchronously so we have symbols before WS starts
@@ -1630,7 +1633,12 @@ class TradingApplication:
         assert self._bybit_adapter is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars=500)
+            self._candle_store = CandleStore(max_bars={
+                "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
+                "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
+                "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
+                "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
+            })
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
@@ -1947,7 +1955,12 @@ class TradingApplication:
         assert self._health_checker is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars=500)
+            self._candle_store = CandleStore(max_bars={
+                "1": self._settings.CANDLE_STORE_MAX_BARS_1M,
+                "5": self._settings.CANDLE_STORE_MAX_BARS_5M,
+                "15": self._settings.CANDLE_STORE_MAX_BARS_15M,
+                "60": self._settings.CANDLE_STORE_MAX_BARS_1H,
+            })
 
         selector = EndpointSelector(
             self._settings.BYBIT_REGION,

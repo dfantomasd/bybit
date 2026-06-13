@@ -216,6 +216,7 @@ class MarketScreener:
         on_symbols_removed: Callable[[list[str]], Awaitable[None]] | None = None,
         has_open_position: Callable[[str], bool] | None = None,
         has_pending_order: Callable[[str], bool] | None = None,
+        min_execution_candidates: int = 0,
         # Backward-compat aliases
         max_symbols: int | None = None,
     ) -> None:
@@ -240,6 +241,7 @@ class MarketScreener:
         self._on_symbols_removed = on_symbols_removed
         self._has_open_position = has_open_position
         self._has_pending_order = has_pending_order
+        self._min_exec_candidates = min_execution_candidates
 
         self._stop_event = asyncio.Event()
         self._initialized = asyncio.Event()
@@ -540,6 +542,20 @@ class MarketScreener:
 
         # Tier 3: execution candidates (top-M of feature)
         exec_symbols = list(dict.fromkeys([*manual_ranked, *feature_symbols]))[: self._exec_candidates]
+
+        # Enforce minimum floor: when market conditions leave fewer qualified
+        # symbols than the floor, extend from the feature universe.
+        if self._min_exec_candidates > 0 and len(exec_symbols) < self._min_exec_candidates:
+            existing = set(exec_symbols)
+            extras = [s for s in feature_symbols if s not in existing][: self._min_exec_candidates - len(exec_symbols)]
+            if extras:
+                log.debug(
+                    "screener.exec_candidates_floor_applied",
+                    before=len(exec_symbols),
+                    added=len(extras),
+                    floor=self._min_exec_candidates,
+                )
+            exec_symbols = exec_symbols + extras
 
         self._metrics.rejection_reasons = rejection_counts
 

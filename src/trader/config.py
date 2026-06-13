@@ -304,7 +304,7 @@ class Settings(BaseSettings):
     MAX_SAME_SIDE_POSITIONS: int = 2
     """Maximum open positions on the same side (Buy or Sell)."""
     MAX_CORRELATED_POSITIONS: int = 2
-    """Reserved: correlation-based position limiting (not yet wired into execution)."""
+    """Maximum open positions in the same base-asset family (BTC, ETH, SOL, BNB). 0 = disabled."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
 
@@ -321,7 +321,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MULTITIMEFRAME_ENABLED: bool = True
     MULTITIMEFRAME_INTERVALS: Annotated[list[str], NoDecode] = ["1", "5", "15", "60"]
-    CANDLE_STORE_MAX_BARS_1M: int = 250  # reserved: per-interval candle store capacity (not yet read by CandleStore)
+    CANDLE_STORE_MAX_BARS_1M: int = 250
     CANDLE_STORE_MAX_BARS_5M: int = 250
     CANDLE_STORE_MAX_BARS_15M: int = 200
     CANDLE_STORE_MAX_BARS_1H: int = 120
@@ -338,12 +338,14 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
     LOAD_GOVERNOR_CHECK_SECONDS: int = 30
-    MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
+    MAX_FEATURE_CYCLE_MS: int = 8000
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
-    MAX_QUEUE_UTILIZATION_PCT: int = 70  # reserved: queue-utilization gate (not yet enforced)
+    MAX_QUEUE_UTILIZATION_PCT: int = 70
+    """Pending-entry queue utilization threshold (%) above which new live entries are blocked."""
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3  # reserved: load governor floor (not yet enforced)
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3
+    """Minimum execution candidates the screener must maintain even under market illiquidity."""
 
     # ------------------------------------------------------------------
     # ML / model
