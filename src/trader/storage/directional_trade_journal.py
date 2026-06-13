@@ -430,7 +430,15 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             latest_model["schema_compatible"] = False
         elif latest_model:
             latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
-            latest_model_schema = str((latest_model.get("metrics") or {}).get("label_schema_version") or "")
+            _metrics_raw = latest_model.get("metrics")
+            if isinstance(_metrics_raw, str):
+                try:
+                    import json as _json
+                    _metrics_raw = _json.loads(_metrics_raw)
+                except Exception:
+                    _metrics_raw = {}
+            _metrics_dict = _metrics_raw if isinstance(_metrics_raw, dict) else {}
+            latest_model_schema = str(_metrics_dict.get("label_schema_version") or "")
             latest_model["schema_compatible"] = latest_model_schema == LABEL_SCHEMA_VERSION
             latest_model["training_samples_compatible"] = (
                 latest_model["actual_training_samples"] if latest_model["schema_compatible"] else 0
