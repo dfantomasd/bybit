@@ -135,3 +135,8 @@ exclude_lines = [
 [tool.bandit]
 exclude_dirs = ["tests", "migrations"]
 skips = ["B101"]  # allow assert outside tests via ruff
+
+[tool.pip-audit]
+# CVE-2025-3000 affects torch; no upstream fix released yet.
+# Revisit when a patched torch version is available.
+ignore-vuln = ["CVE-2025-3000"]
