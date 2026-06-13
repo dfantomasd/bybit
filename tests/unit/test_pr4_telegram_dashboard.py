@@ -645,3 +645,17 @@ async def test_confirm_no_invalidates_nonce() -> None:
 
     await bot._handle_confirm_button(_fake_update(), yes_payload)
     bot._controller.emergency_stop.assert_not_awaited()
+
+
+def test_split_message_keeps_chunks_below_telegram_limit() -> None:
+    text = "<b>header</b>\n" + ("x" * 9100)
+    chunks = TelegramMonitorBot._split_message(text)
+
+    assert len(chunks) >= 3
+    assert all(len(chunk) <= 4000 for chunk in chunks)
+
+
+def test_plain_text_fallback_strips_html_tags() -> None:
+    text = "<b>Модель</b> &amp; <code>v1</code>"
+
+    assert TelegramMonitorBot._plain_text(text) == "Модель & v1"
