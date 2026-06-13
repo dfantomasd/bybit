@@ -14,9 +14,11 @@ from trader.domain.enums import (
     OrderSide,
     OrderType,
     RiskDecisionStatus,
+    VolatilityLevel,
 )
 from trader.domain.models import (
     InstrumentInfo,
+    RegimeContext,
     RiskDecision,
     TradeProposal,
 )
@@ -129,6 +131,24 @@ class TestExecutionEngine:
         engine = _make_engine()
         assert not engine.has_open_position("BTCUSDT")
         assert engine.open_position_count() == 0
+
+
+    @pytest.mark.asyncio
+    async def test_passes_spread_bps_to_risk_manager_as_percent(self):
+        engine = _make_engine(approved=True, shadow_mode=True)
+        proposal = _proposal()
+        regime = RegimeContext(
+            symbol=proposal.symbol,
+            regime=MarketRegime.BULL_TREND,
+            volatility_level=VolatilityLevel.NORMAL,
+            confidence=0.8,
+            spread_bps=50.0,
+        )
+
+        await engine.submit(proposal, Decimal("1000"), Decimal("1000"), regime_context=regime)
+
+        kwargs = engine._risk_manager.evaluate.await_args.kwargs
+        assert kwargs["spread"] == Decimal("0.5")
 
     @pytest.mark.asyncio
     async def test_approved_proposal_recorded(self):
