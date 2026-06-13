@@ -402,6 +402,71 @@ async def test_model_performance_history_includes_score_and_selection_reason() -
 
 
 @pytest.mark.asyncio
+async def test_champion_health_includes_checks_alternative_and_promotion_log() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+    calls = 0
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [
+                {
+                    "version": "champion",
+                    "status": "CHAMPION",
+                    "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "training_samples": 1000,
+                    "metrics": {
+                        "quality": "GOOD",
+                        "walk_forward_expectancy_bps": 4.0,
+                        "lift_bps": 2.0,
+                        "paper_gate": {"count": 80},
+                        "wf_folds": 5,
+                        "wf_positive_folds": 4,
+                        "wf_std_bps": 3.0,
+                        "walk_forward_chronology": "strict_after_train",
+                    },
+                }
+            ]
+        if calls == 2:
+            return [
+                {
+                    "version": "candidate",
+                    "status": "VALIDATED",
+                    "training_finished_at": datetime(2026, 6, 7, 11, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 11, 1, tzinfo=UTC),
+                    "training_samples": 1000,
+                    "metrics": {"quality": "GOOD", "walk_forward_expectancy_bps": 3.0},
+                }
+            ]
+        return [
+            {
+                "event_type": "PROMOTED",
+                "from_version": "old",
+                "to_version": "champion",
+                "reasons": ["criteria_met"],
+                "metrics": {},
+                "metrics_snapshot": {},
+                "created_at": datetime(2026, 6, 7, 12, 1, tzinfo=UTC),
+            }
+        ]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    health = await journal.get_champion_health()
+
+    assert health["champion"]["version"] == "champion"
+    assert health["best_alternative"]["version"] == "candidate"
+    assert all(check["ok"] for check in health["checks"])
+    assert health["promotion_log"][0]["event_type"] == "PROMOTED"
+
+
+@pytest.mark.asyncio
 async def test_market_candle_upsert_sql() -> None:
     """upsert_market_candle should build correct SQL and not duplicate on conflict."""
     from trader.storage.trade_journal import TradeJournal

@@ -1338,6 +1338,11 @@ class TradingApplication:
                 return []
             return await self._trade_journal.get_model_performance_history()
 
+        async def _champion_health_provider() -> dict:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return await self._trade_journal.get_champion_health()
+
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
                 await self._trade_journal.add_telegram_subscription(chat_id)
@@ -1382,6 +1387,7 @@ class TradingApplication:
             worst_trades_provider=_worst_trades_provider,
             costs_detailed_provider=_costs_detailed_provider,
             model_performance_provider=_model_performance_provider,
+            champion_health_provider=_champion_health_provider,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,
