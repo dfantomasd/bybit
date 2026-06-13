@@ -132,7 +132,6 @@ class TestExecutionEngine:
         assert not engine.has_open_position("BTCUSDT")
         assert engine.open_position_count() == 0
 
-
     @pytest.mark.asyncio
     async def test_passes_spread_bps_to_risk_manager_as_percent(self):
         engine = _make_engine(approved=True, shadow_mode=True)

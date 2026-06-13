@@ -38,6 +38,7 @@ from __future__ import annotations
 import html
 import json
 import os
+import re
 import secrets
 from collections import deque
 from collections.abc import Awaitable, Callable
@@ -423,6 +424,36 @@ class TelegramMonitorBot:
             chunks.append(current.rstrip())
         return chunks or [text[:limit]]
 
+    @staticmethod
+    def _plain_text(text: str) -> str:
+        """Convert Telegram HTML-ish text into readable plaintext fallback."""
+
+        return html.unescape(re.sub(r"<[^>]+>", "", text))
+
+    async def _safe_reply_text(
+        self,
+        message: Any,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
+        from telegram.error import BadRequest
+
+        try:
+            await message.reply_text(
+                text,
+                parse_mode=ParseMode.HTML,
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
+            )
+        except BadRequest as exc:
+            log.debug("telegram.reply_html_failed_plaintext_fallback", error=str(exc))
+            await message.reply_text(
+                self._plain_text(text),
+                disable_web_page_preview=True,
+                reply_markup=reply_markup,
+            )
+
     async def _reply_chunks(
         self,
         message: Any,
@@ -431,10 +462,9 @@ class TelegramMonitorBot:
     ) -> None:
         chunks = self._split_message(text)
         for index, chunk in enumerate(chunks):
-            await message.reply_text(
+            await self._safe_reply_text(
+                message,
                 chunk,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
                 reply_markup=reply_markup if index == len(chunks) - 1 else None,
             )
 
@@ -741,10 +771,9 @@ class TelegramMonitorBot:
                 log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
             start = 1 if edited and len(chunks) > 1 else 0
             for index, chunk in enumerate(chunks[start:], start=start):
-                await message.reply_text(
+                await self._safe_reply_text(
+                    message,
                     chunk,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
                     reply_markup=reply_markup if index == len(chunks) - 1 else None,
                 )
             return
