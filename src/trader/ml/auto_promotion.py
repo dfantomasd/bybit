@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -376,10 +376,58 @@ class AutoPromotionEngine:
             WHERE status = 'ARCHIVED'
               AND artifact IS NOT NULL
               AND version <> $1
-            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+              AND COALESCE(metrics->>'label_schema_version', '') = $3
+              AND COALESCE(
+                      NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                      NULLIF(metrics->>'wf_mean_bps', ''),
+                      NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                  ) IS NOT NULL
+              AND COALESCE(
+                      NULLIF(metrics#>>'{paper_gate,count}', ''),
+                      NULLIF(metrics#>>'{model_gate,count}', ''),
+                      NULLIF(metrics->>'paper_gate_count', ''),
+                      NULLIF(metrics->>'total_pass_count', ''),
+                      NULLIF(metrics->>'best_threshold_pass_count', '')
+                  )::integer >= $2
+            ORDER BY
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN 0 ELSE 1 END,
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN COALESCE(
+                    NULLIF(metrics->>'lift_bps', ''),
+                    NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                    NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                    '0'
+                )::double precision END DESC NULLS LAST,
+                CASE WHEN COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision > 0 THEN training_finished_at END DESC NULLS LAST,
+                COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision DESC,
+                COALESCE(
+                    NULLIF(metrics->>'lift_bps', ''),
+                    NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                    NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                    '0'
+                )::double precision DESC,
+                training_finished_at DESC NULLS LAST,
+                created_at DESC
             LIMIT 1
             """,
             champion_version,
+            self._config.min_shadow_signals,
+            LABEL_SCHEMA_VERSION,
         )
         rollback_version = str(rollback_row["version"]) if rollback_row else None
         if reasons and rollback_version is None:
@@ -475,7 +523,7 @@ class AutoPromotionEngine:
             log.debug("model_auto_promotion.log_failed", error=str(exc))
 
     async def _fetch(self, query: str, *args: Any) -> list[Any]:
-        return await self._journal._fetch(query, *args)
+        return cast(list[Any], await self._journal._fetch(query, *args))
 
     async def _fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
         rows = await self._fetch(query, *args)

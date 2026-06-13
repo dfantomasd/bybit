@@ -225,6 +225,7 @@ async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
     journal._fetch = AsyncMock(
         side_effect=[
             [],
+            [],
             [
                 {
                     "version": "challenger_v1",
@@ -248,6 +249,80 @@ async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
     if pred is not None:
         assert pred.model_version == "challenger_v1"
         assert pred.is_live_decision is False
+
+
+@pytest.mark.asyncio
+async def test_select_best_champion_prefers_positive_walk_forward_lift_over_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive out-of-sample evidence wins; freshness only breaks equal lift."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+    older_better = ChallengerModel(version="older_better", feature_names=["f1"])
+    newer_loss = ChallengerModel(version="newer_loss", feature_names=["f1"])
+    for i in range(10):
+        older_better.partial_fit([float(i)], label=i % 2)
+        newer_loss.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        return_value=[
+            {
+                "version": "older_better",
+                "artifact": older_better.to_bytes(),
+                "training_samples": older_better.training_samples,
+                "metrics": {
+                    "label_schema_version": "directional_net_v1",
+                    "quality": "GOOD",
+                    "walk_forward_expectancy_bps": 1.2,
+                    "lift_bps": 5.9,
+                    "paper_gate": {"count": 75},
+                },
+            }
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is not None
+    assert row["version"] == "older_better"
+    query = journal._fetch.await_args.args[0]
+    assert "walk_forward_expectancy_bps" in query
+    assert "paper_gate,count" in query
+    assert "CASE WHEN COALESCE" in query
+
+
+@pytest.mark.asyncio
+async def test_select_best_champion_falls_back_when_no_walk_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When WF has not been calculated at all, registry keeps legacy ordering with warning."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+    fallback = ChallengerModel(version="fallback_good", feature_names=["f1"])
+    for i in range(10):
+        fallback.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        side_effect=[
+            [],
+            [
+                {
+                    "version": "fallback_good",
+                    "artifact": fallback.to_bytes(),
+                    "training_samples": fallback.training_samples,
+                    "metrics": {"label_schema_version": "directional_net_v1", "quality": "GOOD"},
+                }
+            ],
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is not None
+    assert row["version"] == "fallback_good"
+    assert journal._fetch.await_count == 2
 
 
 # ---------------------------------------------------------------------------
