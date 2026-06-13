@@ -211,6 +211,14 @@ class ExposureTracker:
                 }
             return True, ""
 
+    def count_family_positions(self, symbol: str) -> int:
+        """Count open (or pending) positions in the same base-asset family as *symbol*."""
+        with self._lock:
+            family = _get_family(symbol)
+            if family is None:
+                return 0
+            return sum(1 for s in self._symbols_with_exposure() if _get_family(s) == family)
+
     def get_correlation_adjustment(
         self,
         symbol: str,

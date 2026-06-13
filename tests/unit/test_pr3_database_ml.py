@@ -328,26 +328,49 @@ async def test_select_best_champion_falls_back_when_no_walk_forward(monkeypatch:
 
 
 @pytest.mark.asyncio
-async def test_select_best_champion_does_not_fallback_when_walk_forward_lacks_paper_gate(
+async def test_select_best_champion_picks_best_metrics_when_walk_forward_lacks_paper_gate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A calculated WF champion with too little paper evidence must fail closed."""
+    """When WF evidence exists but paper_gate_count < threshold, pick best model by metrics."""
     monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+    best = ChallengerModel(version="best_wf", feature_names=["f1"])
+    for i in range(10):
+        best.partial_fit([float(i)], label=i % 2)
 
     journal = MagicMock()
     journal.is_enabled = True
     journal._fetch = AsyncMock(
         side_effect=[
-            [],
-            [{"has_walk_forward": True}],
+            [],  # Tier 1: no models with paper_gate_count >= 50
+            [{"has_walk_forward": True}],  # Tier 2 evidence check: walk_forward exists
+            [  # Tier 2 best-metrics query
+                {
+                    "version": "best_wf",
+                    "artifact": best.to_bytes(),
+                    "training_samples": best.training_samples,
+                    "metrics": {
+                        "label_schema_version": "directional_net_v1",
+                        "quality": "GOOD",
+                        "walk_forward_expectancy_bps": -1.4,
+                        "lift_bps": 4.4,
+                    },
+                    "walk_forward_bps": -1.4,
+                    "lift_bps": 4.4,
+                }
+            ],
         ]
     )
 
     registry = ModelRegistry(trade_journal=journal)
     row = await registry.select_best_champion()
 
-    assert row is None
-    assert journal._fetch.await_count == 2
+    assert row is not None
+    assert row["version"] == "best_wf"
+    assert journal._fetch.await_count == 3
+    # Verify the third query orders by walk_forward and lift
+    last_query = journal._fetch.call_args_list[2].args[0]
+    assert "walk_forward_expectancy_bps" in last_query
+    assert "lift_bps" in last_query
 
 
 # ---------------------------------------------------------------------------

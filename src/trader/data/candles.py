@@ -30,12 +30,22 @@ class CandleStore:
     - Stores up to ``max_bars`` confirmed candles per key.
     - The last candle in the deque may be unconfirmed (live bar update).
     - Confirmed candles are appended; unconfirmed overwrite the tail.
+
+    ``max_bars`` can be a single ``int`` (same limit for all intervals) or a
+    ``dict[str, int]`` mapping interval strings (e.g. ``"1"``, ``"5"``,
+    ``"15"``, ``"60"``) to per-interval limits.  Unknown intervals fall back
+    to ``_DEFAULT_MAXLEN``.
     """
 
-    def __init__(self, max_bars: int = _DEFAULT_MAXLEN) -> None:
+    def __init__(self, max_bars: int | dict[str, int] = _DEFAULT_MAXLEN) -> None:
         self._max_bars = max_bars
         # key: (symbol, interval) → deque[Candle]
         self._data: dict[tuple[str, str], collections.deque[Candle]] = {}
+
+    def _maxlen_for(self, interval: str) -> int:
+        if isinstance(self._max_bars, dict):
+            return self._max_bars.get(interval, _DEFAULT_MAXLEN)
+        return self._max_bars
 
     # ------------------------------------------------------------------
     # Write
@@ -54,12 +64,12 @@ class CandleStore:
         """
         key = (symbol.upper(), interval)
         if key not in self._data:
-            self._data[key] = collections.deque(maxlen=self._max_bars)
+            self._data[key] = collections.deque(maxlen=self._maxlen_for(interval))
 
         buf = self._data[key]
         if buf and buf[-1].open_time == candle.open_time:
             # Update in-progress bar
-            buf[-1] = candle  # type: ignore[index]  # deque supports item assignment
+            buf[-1] = candle
         else:
             buf.append(candle)
 

@@ -169,7 +169,8 @@ class BybitAdapter:
     async def get_open_orders(self, category: str, symbol: str | None = None) -> list[dict[str, Any]]:
         """Return open orders as raw dicts (mapper can be applied later)."""
         resp = await self._rest.get_open_orders(category=category, symbol=symbol)
-        return (resp.get("result") or {}).get("list", [])
+        result: list[dict[str, Any]] = (resp.get("result") or {}).get("list", [])
+        return result
 
     async def place_order(self, intent: OrderIntent) -> dict[str, Any]:
         """Submit an order to Bybit after idempotency and mapper processing.

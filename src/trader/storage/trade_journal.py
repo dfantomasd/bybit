@@ -97,11 +97,11 @@ class TradeJournal:
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
             "last_read_error_at": (
-                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
+                _reat.isoformat() if (_reat := getattr(self, "_last_read_error_at", None)) is not None else None
             ),
             "last_read_error": getattr(self, "_last_read_error", None),
             "last_connect_error_at": (
-                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
+                _ceat.isoformat() if (_ceat := getattr(self, "_last_connect_error_at", None)) is not None else None
             ),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
@@ -489,6 +489,7 @@ class TradeJournal:
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS online_learned_at timestamptz;
                 -- Persistent pending-entry resolution state: survives restarts so a
                 -- terminal order status seen before a crash never re-blocks the slot.
                 CREATE TABLE IF NOT EXISTS order_pending_state (
@@ -736,7 +737,7 @@ class TradeJournal:
             datetime.now(tz=UTC),
         )
 
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+    async def record_transaction_log_entries(self, entries: list[dict[str, Any]]) -> int:
         """Persist Bybit transaction log entries. Returns count inserted."""
         if not self.is_enabled or not entries:
             return 0
@@ -1159,6 +1160,219 @@ class TradeJournal:
         if rows and rows[0]["avg_bps"] is not None:
             return float(rows[0]["avg_bps"])
         return None
+
+    async def get_pnl_attribution(self, days: int = 7) -> dict[str, Any]:
+        """Return per-symbol PnL attribution for the last *days* calendar days.
+
+        Used by the Telegram /attribution command.
+        """
+        cutoff = datetime.now(UTC) - timedelta(days=max(1, days))
+        rows = await self._fetch(
+            """
+            SELECT symbol,
+                   count(*)                      AS trades,
+                   sum(closed_pnl)               AS total_pnl,
+                   avg(closed_pnl)               AS avg_pnl,
+                   sum(CASE WHEN closed_pnl > 0 THEN 1 ELSE 0 END) AS wins,
+                   sum(CASE WHEN closed_pnl < 0 THEN 1 ELSE 0 END) AS losses
+            FROM closed_pnl
+            WHERE created_at >= $1
+            GROUP BY symbol
+            ORDER BY sum(closed_pnl) DESC
+            """,
+            cutoff,
+        )
+        by_symbol = []
+        total_pnl = 0.0
+        for r in rows:
+            sym_pnl = float(r["total_pnl"] or 0)
+            total_pnl += sym_pnl
+            trades = int(r["trades"] or 0)
+            wins = int(r["wins"] or 0)
+            by_symbol.append(
+                {
+                    "symbol": r["symbol"],
+                    "trades": trades,
+                    "total_pnl": sym_pnl,
+                    "avg_pnl": float(r["avg_pnl"] or 0),
+                    "win_rate": wins / trades if trades > 0 else 0.0,
+                    "wins": wins,
+                    "losses": int(r["losses"] or 0),
+                }
+            )
+        return {
+            "by_symbol": by_symbol,
+            "total_pnl": total_pnl,
+            "days": days,
+            "generated_at": datetime.now(UTC),
+        }
+
+    async def get_feature_drift_psi(
+        self,
+        *,
+        window_hours: int = 6,
+        baseline_hours: int = 72,
+        n_bins: int = 10,
+        max_features: int = 20,
+    ) -> dict[str, Any]:
+        """Compute Population Stability Index between recent and baseline feature distributions.
+
+        Returns a dict with per-feature PSI values and the max PSI across features.
+        PSI < 0.1 = stable, 0.1-0.2 = minor shift, > 0.2 = significant drift.
+        """
+        now = datetime.now(UTC)
+        window_start = now - timedelta(hours=window_hours)
+        baseline_start = now - timedelta(hours=baseline_hours + window_hours)
+        baseline_end = window_start
+
+        recent_rows = await self._fetch(
+            """
+            SELECT feature_names, feature_values
+            FROM feature_snapshots
+            WHERE created_at >= $1 AND training_eligible = true
+            ORDER BY created_at DESC
+            LIMIT 2000
+            """,
+            window_start,
+        )
+        baseline_rows = await self._fetch(
+            """
+            SELECT feature_names, feature_values
+            FROM feature_snapshots
+            WHERE created_at >= $1 AND created_at < $2 AND training_eligible = true
+            ORDER BY created_at DESC
+            LIMIT 2000
+            """,
+            baseline_start,
+            baseline_end,
+        )
+
+        if len(recent_rows) < 30 or len(baseline_rows) < 30:
+            return {
+                "max_psi": 0.0,
+                "per_feature": {},
+                "status": "insufficient_data",
+                "recent_samples": len(recent_rows),
+                "baseline_samples": len(baseline_rows),
+            }
+
+        import numpy as np
+
+        def _rows_to_matrix(rows: list[Any]) -> tuple[list[str], list[list[float]]]:
+            names: list[str] = []
+            matrix: list[list[float]] = []
+            for r in rows:
+                fnames = list(r["feature_names"] or [])
+                fvals = list(r["feature_values"] or [])
+                if not fnames or not fvals or len(fnames) != len(fvals):
+                    continue
+                if not names:
+                    names = fnames[:max_features]
+                matrix.append([float(v) for v in fvals[: len(names)]])
+            return names, matrix
+
+        f_names, recent_mat = _rows_to_matrix(recent_rows)
+        _, baseline_mat = _rows_to_matrix(baseline_rows)
+        if not f_names or not recent_mat or not baseline_mat:
+            return {"max_psi": 0.0, "per_feature": {}, "status": "parse_error"}
+
+        recent_arr = np.array(recent_mat, dtype=np.float32)
+        baseline_arr = np.array(baseline_mat, dtype=np.float32)
+        n_feat = min(len(f_names), recent_arr.shape[1], baseline_arr.shape[1])
+
+        per_feature: dict[str, float] = {}
+        eps = 1e-8
+        for i in range(n_feat):
+            r_col = recent_arr[:, i]
+            b_col = baseline_arr[:, i]
+            combined = np.concatenate([r_col, b_col])
+            bins = np.percentile(combined, np.linspace(0, 100, n_bins + 1))
+            bins = np.unique(bins)
+            if len(bins) < 2:
+                continue
+            r_hist, _ = np.histogram(r_col, bins=bins)
+            b_hist, _ = np.histogram(b_col, bins=bins)
+            r_pct = r_hist / (r_hist.sum() + eps)
+            b_pct = b_hist / (b_hist.sum() + eps)
+            r_pct = np.maximum(r_pct, eps)
+            b_pct = np.maximum(b_pct, eps)
+            psi = float(np.sum((r_pct - b_pct) * np.log(r_pct / b_pct)))
+            per_feature[f_names[i]] = round(psi, 4)
+
+        max_psi = max(per_feature.values()) if per_feature else 0.0
+        return {
+            "max_psi": max_psi,
+            "per_feature": per_feature,
+            "status": "ok",
+            "recent_samples": len(recent_rows),
+            "baseline_samples": len(baseline_rows),
+        }
+
+    async def get_unlearned_prediction_outcomes(
+        self, limit: int = 200, horizon_minutes: int = 15
+    ) -> list[dict[str, Any]]:
+        """Return resolved prediction outcomes not yet used for online (partial_fit) learning.
+
+        Each row contains feature_values + label so the caller can call
+        model_registry.partial_fit_challenger(features, label) immediately.
+        """
+        rows = await self._fetch(
+            """
+            SELECT po.prediction_id, po.label,
+                   fs.feature_values
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+            WHERE po.label IS NOT NULL
+              AND po.online_learned_at IS NULL
+              AND po.horizon_minutes = $1
+              AND po.label_schema_version = $2
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND fs.training_eligible = true
+              AND fs.feature_values IS NOT NULL
+            ORDER BY po.resolved_at ASC
+            LIMIT $3
+            """,
+            horizon_minutes,
+            LABEL_SCHEMA_VERSION,
+            limit,
+        )
+        result = []
+        for r in rows:
+            fv = list(r["feature_values"] or [])
+            if not fv:
+                continue
+            result.append(
+                {
+                    "prediction_id": r["prediction_id"],
+                    "label": int(r["label"]),
+                    "features": [float(v) for v in fv],
+                }
+            )
+        return result
+
+    async def mark_outcomes_learned(self, prediction_ids: list[Any]) -> None:
+        """Stamp online_learned_at on outcomes processed by the online learner."""
+        if not prediction_ids:
+            return
+        import uuid as _uuid
+
+        valid_ids: list[str] = []
+        for pid in prediction_ids:
+            try:
+                valid_ids.append(str(_uuid.UUID(str(pid))))
+            except (ValueError, AttributeError):
+                log.debug("mark_outcomes_learned.invalid_uuid_skipped", pid=pid)
+        if not valid_ids:
+            return
+        await self._execute(
+            """
+            UPDATE prediction_outcomes
+            SET online_learned_at = now()
+            WHERE prediction_id = ANY($1::uuid[])
+            """,
+            valid_ids,
+        )
 
     async def get_bucket_stats(
         self,
@@ -2891,7 +3105,8 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return await conn.fetch(query, *args)
+                rows: list[asyncpg.Record] = await conn.fetch(query, *args)
+                return rows
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

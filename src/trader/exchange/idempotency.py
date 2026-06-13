@@ -142,7 +142,7 @@ class IdempotencyManager:
         entry = self._store.get(order_link_id)
         if entry is None:
             return None
-        return entry["status"]
+        return OrderStatus(entry["status"])
 
     # ------------------------------------------------------------------
     # State mutations

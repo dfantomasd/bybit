@@ -22,6 +22,10 @@ async def test_seed_candle_store_fetches_and_persists_configured_intervals() -> 
         MULTITIMEFRAME_ENABLED=True,
         MULTITIMEFRAME_INTERVALS=["1", "5", "15", "60"],
         BYBIT_API_KEY=_Secret(),
+        CANDLE_STORE_MAX_BARS_1M=250,
+        CANDLE_STORE_MAX_BARS_5M=250,
+        CANDLE_STORE_MAX_BARS_15M=200,
+        CANDLE_STORE_MAX_BARS_1H=120,
     )
 
     rest = SimpleNamespace(

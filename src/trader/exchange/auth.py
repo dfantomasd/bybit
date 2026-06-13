@@ -76,10 +76,17 @@ class RSAAuthenticator:
         self._padding = padding.PKCS1v15()
         self._hash_algo = hashes.SHA256()
 
-        # Load private key once at init time
-        self._private_key = serialization.load_pem_private_key(
-            private_key_pem.encode("utf-8"),
-            password=None,
+        from typing import cast as _cast
+
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+
+        # Load private key once at init time — Bybit RSA auth uses PKCS#1 keys
+        self._private_key: RSAPrivateKey = _cast(
+            RSAPrivateKey,
+            serialization.load_pem_private_key(
+                private_key_pem.encode("utf-8"),
+                password=None,
+            ),
         )
 
     def sign(self, timestamp: int, recv_window: int, params: str) -> str:

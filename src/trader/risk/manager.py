@@ -360,13 +360,14 @@ class RiskManager:
 
         # ----------------------------------------------------------------
         # 13. Apply LLM risk_multiplier (clamped to [0.0, 1.0])
-        # CRITICAL: LLM multiplier can ONLY reduce, never increase
+        # CRITICAL: LLM multiplier can ONLY reduce, never increase.
+        # expected_risk carries the LLM multiplier when LLM_ENABLED=True;
+        # otherwise fall back to strategy confidence as a sizing proxy.
         # ----------------------------------------------------------------
-        llm_multiplier = Decimal("1.0")
-        # LLM multiplier would come from proposal.expected_risk or similar
-        # For now, use confidence as a proxy (lower confidence = smaller size)
-        raw_llm_mult = Decimal(str(proposal.confidence))
-        # CRITICAL: clamp to [0.0, 1.0] — cannot exceed 1.0
+        if proposal.expected_risk is not None:
+            raw_llm_mult = Decimal(str(proposal.expected_risk))
+        else:
+            raw_llm_mult = Decimal(str(proposal.confidence))
         llm_multiplier = max(Decimal("0"), min(Decimal("1"), raw_llm_mult))
         approved_qty = approved_qty * llm_multiplier
 

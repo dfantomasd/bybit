@@ -19,7 +19,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -102,6 +102,8 @@ class ExecutionEngine:
         maker_ttl_s: float = 5.0,
         maker_allow_escalation: bool = True,
         imbalance_provider: Any | None = None,
+        max_correlated_positions: int = 0,
+        max_queue_utilization_pct: int = 100,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -136,6 +138,8 @@ class ExecutionEngine:
         self._max_entries_per_minute = max_new_entries_per_minute
         self._max_concurrent_pending = max_concurrent_pending_entries
         self._max_same_side = max_same_side_positions
+        self._max_correlated_positions = max_correlated_positions
+        self._max_queue_utilization_pct = max_queue_utilization_pct
         self._startup_warmup = timedelta(seconds=startup_warmup_seconds)
         self._started_at: datetime = datetime.now(tz=UTC)
         # Rolling window of entry timestamps for per-minute rate limiting
@@ -202,6 +206,14 @@ class ExecutionEngine:
             self._prune_recent_entries()
             if len(self._recent_entries) >= self._max_entries_per_minute:
                 return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
+
+            if self._max_queue_utilization_pct < 100 and self._max_concurrent_pending > 0:
+                utilization = self._pending_entry_count * 100 / self._max_concurrent_pending
+                if utilization >= self._max_queue_utilization_pct:
+                    return (
+                        f"queue_utilization: {utilization:.1f}% >= {self._max_queue_utilization_pct}%"
+                        f" ({self._pending_entry_count}/{self._max_concurrent_pending} pending)"
+                    )
 
             if self._pending_entry_count >= self._max_concurrent_pending:
                 return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
@@ -336,7 +348,7 @@ class ExecutionEngine:
                 total_pending=self._pending_entry_count,
             )
 
-    def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
+    def restore_pending_entries_with_symbols(self, records: list[dict[str, Any]]) -> None:
         """Restore pending entries from detailed records (includes symbol mapping).
 
         Empty and duplicate IDs are silently discarded. Count is synced
@@ -378,7 +390,7 @@ class ExecutionEngine:
         )
 
         # Build merged record dict — durable_order_state takes priority over order_events
-        merged: dict[str, dict] = {}
+        merged: dict[str, dict[str, Any]] = {}
         try:
             for rec in await self._trade_journal.get_pending_order_events():
                 oid = str(rec.get("order_link_id", ""))
@@ -514,7 +526,7 @@ class ExecutionEngine:
 
     async def _fetch_positions(self) -> list[Any] | None:
         try:
-            return await self._adapter.get_positions(self._category)
+            return cast(list[Any], await self._adapter.get_positions(self._category))
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
             return None
@@ -649,6 +661,18 @@ class ExecutionEngine:
             log.debug("execution.skipped_open_position", symbol=symbol)
             return None
 
+        # 1a. Correlation gate ─────────────────────────────────────────
+        if self._max_correlated_positions > 0:
+            family_count = self._exposure.count_family_positions(symbol)
+            if family_count >= self._max_correlated_positions:
+                log.info(
+                    "execution.skipped_correlated_positions",
+                    symbol=symbol,
+                    family_count=family_count,
+                    max_correlated=self._max_correlated_positions,
+                )
+                return None
+
         # P0.2/P0.3: Block new entries while pending ones await resolution
         if self.has_pending_entries():
             self._diag_skip_pending += 1
@@ -772,7 +796,7 @@ class ExecutionEngine:
             except (ValueError, IndexError):
                 pass
         try:
-            decision = await self._risk_manager.evaluate(
+            decision: RiskDecision = await self._risk_manager.evaluate(
                 proposal=proposal,
                 capital=capital,
                 available_balance=available_balance,
