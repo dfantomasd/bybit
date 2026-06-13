@@ -622,11 +622,62 @@ class ModelRegistry:
             LABEL_SCHEMA_VERSION,
         )
         if evidence_rows:
-            log.warning(
-                "model_registry.no_paper_ready_walk_forward_champion min_paper_gate_count=%s required_schema=%s",
-                min_paper_gate_count,
+            # Walk-forward evidence exists but paper_gate_count < threshold.
+            # Pick the best available champion by metrics rather than returning None,
+            # so the bot never falls back to a recency-only selection.
+            best_rows = await self._journal._fetch(
+                """
+                SELECT version, artifact, training_samples, metrics, training_finished_at, created_at,
+                       COALESCE(
+                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                           NULLIF(metrics->>'wf_mean_bps', ''),
+                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                       )::double precision AS walk_forward_bps,
+                       COALESCE(
+                           NULLIF(metrics->>'lift_bps', ''),
+                           NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                           NULLIF(metrics#>>'{model_gate,lift_bps}', '')
+                       )::double precision AS lift_bps
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+                  AND artifact IS NOT NULL
+                  AND COALESCE(metrics->>'label_schema_version', '') = $1
+                  AND COALESCE(
+                          NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                          NULLIF(metrics->>'wf_mean_bps', ''),
+                          NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                      ) IS NOT NULL
+                ORDER BY
+                    CASE WHEN COALESCE(
+                        NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                        NULLIF(metrics->>'wf_mean_bps', ''),
+                        NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                    )::double precision > 0 THEN 0 ELSE 1 END,
+                    COALESCE(
+                        NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                        NULLIF(metrics->>'wf_mean_bps', ''),
+                        NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                    )::double precision DESC,
+                    COALESCE(
+                        NULLIF(metrics->>'lift_bps', ''),
+                        NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                        NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                        '0'
+                    )::double precision DESC,
+                    training_finished_at DESC NULLS LAST
+                LIMIT 1
+                """,
                 LABEL_SCHEMA_VERSION,
             )
+            if best_rows:
+                log.warning(
+                    "model_registry.best_available_champion_below_paper_gate "
+                    "min_paper_gate_count=%s required_schema=%s version=%s",
+                    min_paper_gate_count,
+                    LABEL_SCHEMA_VERSION,
+                    best_rows[0]["version"],
+                )
+                return best_rows[0]
             return None
 
         fallback_rows = await self._journal._fetch(
@@ -638,6 +689,17 @@ class ModelRegistry:
               AND COALESCE(metrics->>'label_schema_version', '') = $1
             ORDER BY
                 CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
+                COALESCE(
+                    NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                    NULLIF(metrics->>'wf_mean_bps', ''),
+                    NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                )::double precision DESC NULLS LAST,
+                COALESCE(
+                    NULLIF(metrics->>'lift_bps', ''),
+                    NULLIF(metrics#>>'{paper_gate,lift_bps}', ''),
+                    NULLIF(metrics#>>'{model_gate,lift_bps}', ''),
+                    '0'
+                )::double precision DESC NULLS LAST,
                 training_finished_at DESC NULLS LAST,
                 created_at DESC
             LIMIT 1
