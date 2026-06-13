@@ -434,6 +434,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             if isinstance(_metrics_raw, str):
                 try:
                     import json as _json
+
                     _metrics_raw = _json.loads(_metrics_raw)
                 except Exception:
                     _metrics_raw = {}

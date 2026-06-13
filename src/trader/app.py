@@ -812,23 +812,21 @@ class TradingApplication:
             return 0.0
 
     async def _run_auto_model_promoter(self) -> None:
-        """Promote challenger to champion automatically when it consistently beats the champion.
-
-        Conservative criteria (all must pass):
-          1. Challenger status is SHADOW_CHALLENGER (not already champion).
-          2. >= MODEL_AUTO_PROMOTE_MIN_SIGNALS resolved gate decisions FOR THIS SPECIFIC MODEL VERSION.
-          3. Live lift_vs_all_bps >= MODEL_AUTO_PROMOTE_MIN_LIFT_BPS.
-          4. Live lift_vs_all_bps > current champion's walk-forward expectancy (conservative).
-          5. Model quality is GOOD.
-        """
+        """Promote the best eligible challenger and roll back degraded champions."""
         assert self._settings is not None
         if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
             log.info("model_auto_promote.disabled")
             return
 
-        check_seconds = max(120, int(self._settings.MODEL_AUTO_PROMOTE_CHECK_SECONDS))
-        min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
-        min_lift_bps = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
+        from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+
+        config = AutoPromotionConfig.from_settings(self._settings)
+        check_seconds = config.check_seconds
+        last_monitor_at = datetime.now(tz=UTC) - timedelta(seconds=config.monitor_seconds)
+
+        async def _reload_registry() -> None:
+            if self._model_registry is not None:
+                await self._model_registry.load_active_model()
 
         while not self._shutdown_event.is_set():
             try:
@@ -841,137 +839,50 @@ class TradingApplication:
                 continue
 
             try:
-                diag = await self._trade_journal.get_db_diagnostics()
-                latest_model = diag.get("latest_model_version", {}) or {}
-
-                challenger_version = str(latest_model.get("version", "") or "")
-                challenger_status = str(latest_model.get("status", "") or "")
-
-                if challenger_status != "SHADOW_CHALLENGER" or not challenger_version:
-                    continue
-
-                # Get gate stats specific to this challenger model version
-                from trader.training.labels import LABEL_SCHEMA_VERSION
-
-                gate = await self._trade_journal.get_shadow_gate_stats(
-                    model_version=challenger_version,
-                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version=LABEL_SCHEMA_VERSION,
+                engine = AutoPromotionEngine(
+                    trade_journal=self._trade_journal,
+                    config=config,
+                    reload_registry=_reload_registry,
                 )
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
-                quality = str(gate.get("quality", "") or "").upper()
+                now = datetime.now(tz=UTC)
+                if (now - last_monitor_at).total_seconds() >= config.monitor_seconds:
+                    rollback = await engine.rollback_if_needed()
+                    last_monitor_at = now
+                    if rollback.rollback and self._telegram_bot is not None:
+                        await self._telegram_bot.notify(
+                            "↩️ <b>Авто-откат модели</b>\n"
+                            f"Было: <code>{rollback.champion_version}</code>\n"
+                            f"Стало: <code>{rollback.rollback_version}</code>\n"
+                            f"Причины: <code>{html.escape(', '.join(rollback.reasons))}</code>"
+                        )
 
-                if total_count < min_signals:
-                    log.debug(
-                        "model_auto_promote.waiting",
-                        reason="insufficient_signals",
-                        version=challenger_version,
-                        total_count=total_count,
-                        min_signals=min_signals,
-                    )
+                challenger_version = await engine.best_challenger()
+                if not challenger_version:
+                    log.debug("model_auto_promote.waiting", reason="no_eligible_challenger")
                     continue
 
-                if lift_bps < min_lift_bps:
-                    log.debug(
-                        "model_auto_promote.waiting",
-                        reason="insufficient_lift",
-                        version=challenger_version,
-                        lift_bps=lift_bps,
-                        min_lift_bps=min_lift_bps,
-                    )
-                    continue
-
-                # Quality must be GOOD
-                if quality != "GOOD":
-                    log.debug(
-                        "model_auto_promote.waiting",
-                        reason="quality_not_good",
-                        version=challenger_version,
-                        quality=quality,
-                    )
-                    continue
-
-                # Conservative: challenger must beat champion's own walk-forward expectancy
-                champion_wf_bps = await self._get_champion_walk_forward_bps()
-                if lift_bps <= champion_wf_bps:
-                    log.debug(
-                        "model_auto_promote.waiting",
-                        reason="not_better_than_champion",
-                        version=challenger_version,
-                        lift_bps=lift_bps,
-                        champion_wf_bps=champion_wf_bps,
-                    )
-                    continue
-
-                # Statistical significance: bootstrap difference-of-means between
-                # the challenger's resolved returns and the baseline's. Guards
-                # against promoting a lucky streak.
-                from trader.training.bootstrap import bootstrap_pvalue
-
-                min_boot = max(50, int(self._settings.MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES))
-                n_iter = max(100, int(self._settings.MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS))
-                pvalue_threshold = float(self._settings.MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD)
-                horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-                challenger_returns = await self._trade_journal.get_returns_for_model(
-                    challenger_version, limit=200, horizon_minutes=horizon
-                )
-                baseline_returns = await self._trade_journal.get_returns_for_model(
-                    "RULE_BASELINE_V1", limit=200, horizon_minutes=horizon
-                )
-                if len(challenger_returns) < min_boot or len(baseline_returns) < min_boot:
-                    log.debug(
-                        "model_auto_promote.waiting",
-                        reason="insufficient_bootstrap_samples",
-                        version=challenger_version,
-                        challenger_returns=len(challenger_returns),
-                        baseline_returns=len(baseline_returns),
-                        min_required=min_boot,
-                    )
-                    continue
-                boot = bootstrap_pvalue(challenger_returns, baseline_returns, n_iter=n_iter)
-                log.info(
-                    "model_auto_promote.bootstrap",
-                    version=challenger_version,
-                    p_value=boot.p_value,
-                    mean_diff_bps=round(boot.mean_diff_bps, 4),
-                    n_iterations=boot.n_iterations,
-                    n_challenger=boot.n_challenger,
-                    n_baseline=boot.n_baseline,
-                )
-                if boot.p_value >= pvalue_threshold:
+                decision = await engine.promote(challenger_version)
+                if not decision.promote:
                     log.info(
                         "model_auto_promote.waiting",
-                        reason="lift_not_significant",
                         version=challenger_version,
-                        p_value=boot.p_value,
-                        pvalue_threshold=pvalue_threshold,
+                        reasons=decision.reasons,
+                        metrics=decision.metrics,
                     )
                     continue
 
-                log.info(
-                    "model_auto_promote.triggered",
-                    version=challenger_version,
-                    total_count=total_count,
-                    lift_bps=lift_bps,
-                    champion_wf_bps=champion_wf_bps,
-                    quality=quality,
-                    p_value=boot.p_value,
-                )
-                result = await self._start_model_promote(challenger_version)
-
-                # Promote and Canary are separate manual steps — no auto-enable Canary
-                # MODEL_GATE_CANARY_ENABLED remains false by default
+                # Promotion and Canary are separate safety steps. This does not
+                # auto-enable MODEL_GATE_CANARY_ENABLED.
 
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
                         f"🤖 <b>Авто-промоут</b>\n"
                         f"Версия: <code>{challenger_version}</code>\n"
-                        f"Сигналов: <code>{total_count}</code> | "
-                        f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"Bootstrap p-value: <code>{boot.p_value:.4f}</code> ({boot.n_iterations} итераций)\n"
-                        f"Качество: <code>{quality}</code>\n"
-                        f"{result}"
+                        f"Сигналов: <code>{decision.metrics.get('total_count')}</code> | "
+                        f"Lift: <code>{float(decision.metrics.get('lift_bps') or 0.0):+.2f} bps</code>\n"
+                        f"WF: <code>{float(decision.metrics.get('wf_bps') or 0.0):+.2f} bps</code>, "
+                        f"p-value: <code>{float(decision.metrics.get('bootstrap_p_value') or 0.0):.4f}</code>\n"
+                        f"Предыдущий чемпион: <code>{decision.champion_version or 'none'}</code>"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
