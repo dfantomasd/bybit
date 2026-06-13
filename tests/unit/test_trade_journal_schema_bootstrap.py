@@ -99,3 +99,17 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     assert "idx_prediction_events_model_decision_time" in sql
     assert "idx_prediction_outcomes_horizon_schema" in sql
     assert "idx_order_pending_state_symbol_unresolved" in sql
+
+
+@pytest.mark.asyncio
+async def test_market_candles_schema_defines_low_column_once() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    create_market_candles = next(
+        sql for sql in pool.conn.executed_sql if "CREATE TABLE IF NOT EXISTS market_candles" in sql
+    )
+    assert create_market_candles.count("low numeric NOT NULL") == 1

@@ -391,6 +391,23 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             LABEL_SCHEMA_VERSION,
         )
+        if not rows:
+            rows = await self._fetch(
+                """
+                SELECT
+                    version,
+                    status,
+                    training_samples,
+                    metrics,
+                    COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                    training_finished_at,
+                    created_at
+                FROM model_versions
+                WHERE artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
         latest_model = dict(rows[0]) if rows else {}
         latest_model_schema_hash = str(latest_model.get("feature_schema_hash") or "")
         if latest_model and current_feature_schema_hash and latest_model_schema_hash != current_feature_schema_hash:
@@ -400,8 +417,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             latest_model["schema_compatible"] = False
         elif latest_model:
             latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
-            latest_model["training_samples_compatible"] = latest_model["actual_training_samples"]
-            latest_model["schema_compatible"] = True
+            latest_model_schema = str((latest_model.get("metrics") or {}).get("label_schema_version") or "")
+            latest_model["schema_compatible"] = latest_model_schema == LABEL_SCHEMA_VERSION
+            latest_model["training_samples_compatible"] = (
+                latest_model["actual_training_samples"] if latest_model["schema_compatible"] else 0
+            )
         result["latest_model_version"] = latest_model
 
         rows = await self._fetch(

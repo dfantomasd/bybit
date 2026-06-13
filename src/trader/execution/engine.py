@@ -762,7 +762,8 @@ class ExecutionEngine:
         spread: Decimal | None = None
         atr: Decimal | None = None
         if regime_context is not None and regime_context.spread_bps is not None:
-            spread = Decimal(str(regime_context.spread_bps)) / Decimal("10000")
+            # PositionSizer expects percent units: 50 bps => 0.5%, not 0.005 fraction.
+            spread = Decimal(str(regime_context.spread_bps)) / Decimal("100")
         if feature_vector is not None:
             # ATR is computed as atr_14_pct in feature pipeline (ATR / price as fraction)
             try:
