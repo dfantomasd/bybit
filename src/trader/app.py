@@ -328,6 +328,9 @@ class TradingApplication:
         fastapi_app = create_app(
             api_key=internal_api_key,
             health_checker=self._health_checker,
+            trade_journal=self._trade_journal,
+            runtime_settings=self._runtime_settings,
+            set_runtime_setting=self._set_runtime_setting,
         )
 
         config = uvicorn.Config(

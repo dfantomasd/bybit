@@ -92,13 +92,19 @@ class PositionSizer:
             return Decimal("0"), f"spread {spread}% exceeds threshold {_DEFAULT_SPREAD_THRESHOLD_PCT}%"
 
         # ----------------------------------------------------------------
-        # ATR filter — stop must be at least MIN_ATR_MULTIPLE * ATR
+        # ATR filter — stop must be at least MIN_ATR_MULTIPLE * ATR.
+        # ``atr`` is normally ATR / price from ``atr_14_pct``. If an absolute
+        # ATR slips through, normalize it to a price fraction before comparing.
         # ----------------------------------------------------------------
         if atr is not None and atr > Decimal("0"):
-            stop_price_distance = stop_distance_pct * (entry_price or Decimal("1"))
-            min_stop_distance = _DEFAULT_MIN_ATR_MULTIPLE * atr
-            if stop_price_distance < min_stop_distance:
-                return Decimal("0"), (f"stop distance {stop_price_distance} < min ATR multiple {min_stop_distance}")
+            atr_fraction = atr
+            if atr_fraction > Decimal("1") and entry_price is not None and entry_price > Decimal("0"):
+                atr_fraction = atr_fraction / entry_price
+            min_stop_distance_pct = _DEFAULT_MIN_ATR_MULTIPLE * atr_fraction
+            if stop_distance_pct < min_stop_distance_pct:
+                return Decimal("0"), (
+                    f"stop distance {stop_distance_pct:.6f} < min ATR multiple {min_stop_distance_pct:.6f}"
+                )
 
         # ----------------------------------------------------------------
         # Clamp desired_risk_pct to profile range

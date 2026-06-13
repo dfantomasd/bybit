@@ -64,6 +64,19 @@ def _fake_update(chat_id: int = 12345) -> MagicMock:
     return u
 
 
+def _fake_callback_update(chat_id: int = 12345) -> MagicMock:
+    update = _fake_update(chat_id=chat_id)
+    query = MagicMock()
+    query.answer = AsyncMock()
+    query.edit_message_text = AsyncMock()
+    query.message = MagicMock()
+    query.message.reply_text = AsyncMock()
+    query.message.message_id = 1
+    query.message.chat_id = chat_id
+    update.callback_query = query
+    return update
+
+
 def _fake_text_update(text: str, chat_id: int = 12345) -> MagicMock:
     update = _fake_update(chat_id=chat_id)
     update.effective_message.text = text
@@ -378,7 +391,7 @@ async def test_canary_readiness_reports_not_ready_without_data() -> None:
 
     await bot._cmd_canary_ready(update, ctx)  # type: ignore[arg-type]
 
-    reply_text = update.effective_message.reply_text.call_args[0][0]
+    reply_text = "\n".join(call.args[0] for call in update.effective_message.reply_text.await_args_list)
     assert "Готовность к реальным деньгам" in reply_text
     assert "НЕ ГОТОВО" in reply_text
 
@@ -460,6 +473,40 @@ async def test_limit_button_updates_runtime_setting() -> None:
     bot._controller.set_runtime_setting.assert_awaited_once_with("price_cap", 25.0)
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Screener price cap set to 25" in reply_text
+
+
+@pytest.mark.asyncio
+async def test_settings_plus_button_updates_runtime_setting() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(
+        return_value={
+            "max_entries_per_minute": 1,
+            "max_positions": 2,
+            "max_same_side": 1,
+            "screener_max_price_usd": 25,
+            "feature_max_symbols": 20,
+        }
+    )
+    bot._controller.set_runtime_setting = AsyncMock(return_value="Max entries/min set to 2")
+    update = _fake_callback_update()
+
+    await bot._handle_limit_button(update, "entries_per_min_limit:inc")
+
+    bot._controller.set_runtime_setting.assert_awaited_once_with("entries", 2)
+    update.callback_query.edit_message_text.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_long_reply_is_split_below_telegram_limit() -> None:
+    bot = _make_bot()
+    update = _fake_update()
+
+    await bot._reply(update, "x" * 8000)
+
+    assert update.effective_message.reply_text.await_count >= 2
+    for call in update.effective_message.reply_text.await_args_list:
+        assert len(call.args[0]) <= 4000
 
 
 @pytest.mark.asyncio
