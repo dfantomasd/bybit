@@ -358,7 +358,6 @@ class TelegramMonitorBot:
     async def notify_signal(self, entry: SignalEntry) -> None:
         icon = "🟢" if entry.side == "BUY" else "🔴"
         mode = "ТЕНЬ" if entry.shadow else "LIVE"
-        rationale = html.escape(entry.rationale)
         text = (
             f"{icon} <b>Сигнал [{mode}]</b>\n"
             f"{entry.symbol} {entry.side} | уверенность: <code>{entry.confidence:.2f}</code>\n"
