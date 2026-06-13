@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
@@ -51,6 +51,8 @@ def create_app(
     health_checker: Any | None = None,
     state_store: Any | None = None,
     trade_journal: Any | None = None,
+    runtime_settings: Callable[[], dict[str, Any]] | None = None,
+    set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -79,8 +81,8 @@ def create_app(
         CORSMiddleware,
         allow_origins=allowed_origins or [],
         allow_credentials=False,
-        allow_methods=["GET"],
-        allow_headers=["X-API-Key"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-API-Key"],
     )
 
     # Security headers middleware
@@ -356,6 +358,46 @@ document.getElementById('heatmap').innerHTML = table;
 </html>
 """
         return HTMLResponse(content=html)
+
+    @app.get(
+        "/api/settings",
+        summary="Runtime settings",
+        tags=["observability"],
+    )
+    async def get_settings(_auth: None = auth_dep) -> dict[str, Any]:
+        """Return safe runtime settings for operator UI controls."""
+        if runtime_settings is None:
+            raise HTTPException(status_code=503, detail="Runtime settings are unavailable")
+        return {"settings": runtime_settings()}
+
+    @app.post(
+        "/api/settings",
+        summary="Update runtime setting",
+        tags=["observability"],
+    )
+    async def post_settings(request: Request, _auth: None = auth_dep) -> dict[str, Any]:
+        """Update one whitelisted runtime setting through the application controller."""
+        if runtime_settings is None or set_runtime_setting is None:
+            raise HTTPException(status_code=503, detail="Runtime settings are unavailable")
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON object body is required")
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="Missing setting key")
+        if "value" not in payload:
+            raise HTTPException(status_code=400, detail="Missing setting value")
+        try:
+            message = await set_runtime_setting(key, payload["value"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log.warning("api_settings_update_failed", key=key, error=str(exc))
+            raise HTTPException(status_code=500, detail="Setting update failed") from exc
+        return {"message": message, "settings": runtime_settings()}
 
     @app.get(
         "/model",

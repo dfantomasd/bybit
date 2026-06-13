@@ -56,8 +56,8 @@ _ADX_FLAT = 0.20  # adx_14 feature is normalised to [0, 1]; 0.20 == ADX 20
 _VOLUME_IMPULSE_MULT = 1.5
 _BOUNCE_LOOKBACK = 5
 _BOUNCE_ZONE_ATR_MULT = 0.35  # price must be within this many ATRs of the extreme
-_TP_ATR_MULT = 0.5
-_SL_ATR_MULT = 0.25
+_TP_ATR_MULT = 1.0
+_SL_ATR_MULT = 0.5
 _MIN_ATR_PCT = 0.0005  # skip dead markets: TP would be inside the spread
 _MAX_ATR_PCT = 0.03  # skip violent markets: SL gets blown through
 

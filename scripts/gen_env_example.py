@@ -50,7 +50,7 @@ def main() -> None:
             type_str = _type_hint(annotation)
             lines.append(f"# Type: {type_str}")
         except Exception:
-            pass
+            lines.append("# Type: unknown")
 
         default_display = None
         if default is not None and str(default) not in (

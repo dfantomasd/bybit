@@ -72,3 +72,46 @@ class TestReadyzEndpoint:
         client = TestClient(app, raise_server_exceptions=False)
         resp = client.get("/readyz")
         assert resp.status_code == 200
+
+
+class TestRuntimeSettingsEndpoint:
+    def test_get_settings_requires_auth(self):
+        app = create_app(api_key="key", runtime_settings=lambda: {"max_positions": 2})
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/settings")
+
+        assert resp.status_code == 401
+
+    def test_get_settings_returns_runtime_settings(self):
+        app = create_app(api_key="key", runtime_settings=lambda: {"max_positions": 2})
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.get("/api/settings", headers={"X-API-Key": "key"})
+
+        assert resp.status_code == 200
+        assert resp.json()["settings"]["max_positions"] == 2
+
+    def test_post_settings_updates_runtime_setting(self):
+        updates: list[tuple[str, object]] = []
+
+        async def set_runtime_setting(key: str, value: object) -> str:
+            updates.append((key, value))
+            return f"{key} updated"
+
+        app = create_app(
+            api_key="key",
+            runtime_settings=lambda: {"max_positions": 3},
+            set_runtime_setting=set_runtime_setting,
+        )
+        client = TestClient(app, raise_server_exceptions=False)
+
+        resp = client.post(
+            "/api/settings",
+            headers={"X-API-Key": "key"},
+            json={"key": "max_positions", "value": 3},
+        )
+
+        assert resp.status_code == 200
+        assert resp.json()["message"] == "max_positions updated"
+        assert updates == [("max_positions", 3)]

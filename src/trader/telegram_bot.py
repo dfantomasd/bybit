@@ -44,7 +44,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
@@ -57,6 +57,7 @@ from telegram.ext import (
     MessageHandler,
     filters,
 )
+
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
 
@@ -65,6 +66,7 @@ log = structlog.get_logger(__name__)
 # Inline confirm buttons and pending /confirm actions expire after this long.
 _CONFIRM_TTL_SECONDS = 300.0
 _CONFIRM_MAX_PENDING = 1000
+_TELEGRAM_MESSAGE_LIMIT = 4000
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -339,12 +341,14 @@ class TelegramMonitorBot:
             return
         for chat_id in list(self._subscribed):
             try:
-                await self._app.bot.send_message(
-                    chat_id=chat_id,
-                    text=text,
-                    parse_mode=ParseMode.HTML,
-                    disable_web_page_preview=True,
-                )
+                chunks = self._split_message(text)
+                for chunk in chunks:
+                    await self._app.bot.send_message(
+                        chat_id=chat_id,
+                        text=chunk,
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                    )
             except Exception as exc:
                 log.warning("telegram_notify_failed", chat_id=chat_id, error=str(exc))
 
@@ -394,11 +398,44 @@ class TelegramMonitorBot:
         reply_markup: InlineKeyboardMarkup | None = None,
     ) -> None:
         if update.effective_message is not None:
-            await update.effective_message.reply_text(
-                text,
+            await self._reply_chunks(update.effective_message, text, reply_markup=reply_markup)
+
+    @staticmethod
+    def _split_message(text: str, limit: int = _TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+        """Split Telegram HTML text conservatively below the API message limit."""
+
+        if len(text) <= limit:
+            return [text]
+        chunks: list[str] = []
+        current = ""
+        for line in text.splitlines(keepends=True):
+            if len(current) + len(line) <= limit:
+                current += line
+                continue
+            if current:
+                chunks.append(current.rstrip())
+                current = ""
+            while len(line) > limit:
+                chunks.append(line[:limit].rstrip())
+                line = line[limit:]
+            current = line
+        if current:
+            chunks.append(current.rstrip())
+        return chunks or [text[:limit]]
+
+    async def _reply_chunks(
+        self,
+        message: Any,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
+        chunks = self._split_message(text)
+        for index, chunk in enumerate(chunks):
+            await message.reply_text(
+                chunk,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
-                reply_markup=reply_markup,
+                reply_markup=reply_markup if index == len(chunks) - 1 else None,
             )
 
     def _chat_id(self, update: Update) -> int | None:
@@ -687,22 +724,29 @@ class TelegramMonitorBot:
 
         query = update.callback_query
         if query is not None and query.message is not None:
+            message = cast(Any, query.message)
+            chunks = self._split_message(text)
+            edited = False
             try:
                 await query.edit_message_text(
-                    text,
+                    chunks[0],
                     parse_mode=ParseMode.HTML,
                     disable_web_page_preview=True,
-                    reply_markup=reply_markup,
+                    reply_markup=reply_markup if len(chunks) == 1 else None,
                 )
-                return
+                edited = True
+                if len(chunks) == 1:
+                    return
             except BadRequest as exc:
                 log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
-            await query.message.reply_text(
-                text,
-                parse_mode=ParseMode.HTML,
-                disable_web_page_preview=True,
-                reply_markup=reply_markup,
-            )
+            start = 1 if edited and len(chunks) > 1 else 0
+            for index, chunk in enumerate(chunks[start:], start=start):
+                await message.reply_text(
+                    chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
+                )
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
@@ -2158,6 +2202,10 @@ class TelegramMonitorBot:
                 "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
             )
             training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
+            champion_display = str(champion_ver or "none")
+            if champion_display == "none" and challenger_ver not in ("none", "", None):
+                champion_display = "none (CHAMPION нет; кандидат только наблюдает)"
+            challenger_display = str(challenger_ver or "none")
             if gate_lift is None:
                 gate_note = "фильтр модели еще не оценен"
             elif float(gate_lift) > 0:
@@ -2189,8 +2237,8 @@ class TelegramMonitorBot:
                 "<b>Модель</b>",
                 f"Последнее обучение: <code>{last_training}</code>",
                 f"Обучающих примеров: <code>{samples}</code>",
-                f"Основная модель: <code>{champion_ver}</code>",
-                f"Кандидат: <code>{challenger_ver}</code>",
+                f"Основная модель: <code>{html.escape(champion_display)}</code>",
+                f"Кандидат: <code>{html.escape(challenger_display)}</code>",
                 f"Последняя модель в БД: <code>{db_model_version or 'нет'}</code> <code>{self._ru(db_model_status)}</code>",
                 f"Последний запуск: <code>{self._ru(latest_run_status)}</code>, примеров=<code>{latest_run_samples}</code>",
                 f"Версия из запуска: <code>{latest_run_model}</code>",
@@ -3276,10 +3324,16 @@ class TelegramMonitorBot:
 
     async def _handle_limit_adjust(self, query: CallbackQuery, data: str) -> None:
         """Handle limit +/- buttons from the new settings dashboard."""
+        try:
+            await query.answer()
+        except Exception as exc:
+            log.debug("telegram.limit_adjust_answer_failed", error=str(exc))
         parts = data.split(":")
         if len(parts) != 2:
             return
         setting_key, direction = parts
+        if direction not in {"inc", "dec"}:
+            return
         s: dict[str, Any] = {}
         if self._controller and self._controller.runtime_settings:
             try:
@@ -3307,6 +3361,15 @@ class TelegramMonitorBot:
                 await self._controller.set_runtime_setting(write_key, new_val)
             except Exception as exc:
                 log.warning("telegram.limit_adjust_failed", error=str(exc))
+                if query.message:
+                    message = cast(Any, query.message)
+                    await message.reply_text(
+                        f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>",
+                        parse_mode=ParseMode.HTML,
+                        disable_web_page_preview=True,
+                        reply_markup=self._limits_menu(),
+                    )
+                return
         text, markup = await self._render_settings()
         # Re-use _update_dashboard via the query object directly
         from telegram.error import BadRequest
@@ -3664,13 +3727,11 @@ class TelegramMonitorBot:
             await self._button_reply(update, text, reply_markup=self._limits_menu())
             return
         # Handle new +/- increment/decrement buttons from _render_settings
-        if ":inc" in payload or ":dec" in payload:
-            parts = payload.split(":")
-            if len(parts) == 2:
-                query = update.callback_query
-                if query is not None:
-                    await self._handle_limit_adjust(query, payload)
-                    return
+        if payload.endswith(":inc") or payload.endswith(":dec"):
+            query = update.callback_query
+            if query is not None:
+                await self._handle_limit_adjust(query, payload)
+                return
         try:
             key, raw_value = payload.split(":", maxsplit=1)
             value: Any = float(raw_value) if key == "price_cap" else int(raw_value)
