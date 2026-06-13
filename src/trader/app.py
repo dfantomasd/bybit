@@ -153,7 +153,8 @@ class TradingApplication:
         self._model_gate_quality_checked_at: datetime | None = None
         # Cycle timing exposed to load governor
         self._last_strategy_cycle_ms: float = 0.0
-        self._last_feature_cycle_ms: float = 0.0
+        self._last_feature_cycle_ms: float = 0.0  # max across symbols in the last strategy window
+        self._feature_cycle_ms_accum: float = 0.0  # accumulator reset each strategy cycle
         # LLM client (instantiated when LLM_ENABLED=True)
         self._llm_client: Any | None = None
 
@@ -2092,7 +2093,9 @@ class TradingApplication:
                             if self._feature_pipeline is not None:
                                 _feat_t0 = asyncio.get_event_loop().time()
                                 vec = await self._feature_pipeline.on_confirmed_candle(event.symbol, event.interval)
-                                self._last_feature_cycle_ms = (asyncio.get_event_loop().time() - _feat_t0) * 1000.0
+                                _feat_ms = (asyncio.get_event_loop().time() - _feat_t0) * 1000.0
+                                if _feat_ms > self._feature_cycle_ms_accum:
+                                    self._feature_cycle_ms_accum = _feat_ms
                                 # Per-candle training sampler: a labelled sample per
                                 # confirmed 1m candle instead of per trade signal
                                 if vec is not None:
@@ -4021,6 +4024,9 @@ class TradingApplication:
                         )
 
                 self._last_strategy_cycle_ms = (asyncio.get_event_loop().time() - _cycle_t0) * 1000.0
+                # Publish max feature cycle from this window and reset accumulator
+                self._last_feature_cycle_ms = self._feature_cycle_ms_accum
+                self._feature_cycle_ms_accum = 0.0
 
                 try:
                     await asyncio.wait_for(

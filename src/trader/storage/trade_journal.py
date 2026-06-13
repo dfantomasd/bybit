@@ -1355,13 +1355,23 @@ class TradeJournal:
         """Stamp online_learned_at on outcomes processed by the online learner."""
         if not prediction_ids:
             return
+        import uuid as _uuid
+
+        valid_ids: list[str] = []
+        for pid in prediction_ids:
+            try:
+                valid_ids.append(str(_uuid.UUID(str(pid))))
+            except (ValueError, AttributeError):
+                log.debug("mark_outcomes_learned.invalid_uuid_skipped", pid=pid)
+        if not valid_ids:
+            return
         await self._execute(
             """
             UPDATE prediction_outcomes
             SET online_learned_at = now()
             WHERE prediction_id = ANY($1::uuid[])
             """,
-            [str(pid) for pid in prediction_ids],
+            valid_ids,
         )
 
     async def get_bucket_stats(
