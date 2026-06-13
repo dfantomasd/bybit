@@ -99,6 +99,7 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     assert "idx_prediction_events_model_decision_time" in sql
     assert "idx_prediction_outcomes_horizon_schema" in sql
     assert "idx_order_pending_state_symbol_unresolved" in sql
+    assert "uq_model_versions_one_champion" in sql
 
 
 @pytest.mark.asyncio

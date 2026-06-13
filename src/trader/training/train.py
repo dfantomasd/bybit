@@ -25,6 +25,7 @@ from typing import Any
 import click
 import numpy as np
 
+from trader.ml.model_selection import model_selection_metrics
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -711,6 +712,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             "train_samples": int(len(x_arr)),
             "run_id": run_id,
         }
+        stored_metrics |= model_selection_metrics(stored_metrics)
         await pool.execute(
             """
             INSERT INTO model_versions (version, status, training_samples, feature_schema_hash, artifact, metrics,

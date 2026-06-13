@@ -14,6 +14,7 @@ import asyncpg
 import structlog
 
 from trader.domain.models import FeatureVector, RegimeContext, RiskDecision, TradeProposal
+from trader.ml.model_selection import model_selection_metrics, selection_reason
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
@@ -345,6 +346,36 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
+            WITH ranked AS (
+                SELECT model_id,
+                       row_number() OVER (
+                           ORDER BY
+                               CASE WHEN COALESCE(
+                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                   NULLIF(metrics->>'wf_mean_bps', ''),
+                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                               )::double precision > 0 THEN 0 ELSE 1 END,
+                               COALESCE(
+                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                   NULLIF(metrics->>'wf_mean_bps', ''),
+                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
+                                   '-1000000'
+                               )::double precision DESC,
+                               COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                               training_finished_at DESC NULLS LAST,
+                               created_at DESC
+                       ) AS rn
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+            )
+            UPDATE model_versions mv
+            SET status = 'ARCHIVED'
+            FROM ranked
+            WHERE mv.model_id = ranked.model_id
+              AND ranked.rn > 1;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
+                ON model_versions ((status))
+                WHERE status = 'CHAMPION';
 
             -- Model promotion audit log. Columns cover both automatic
             -- DB-backed promotion and older manual/pure-eval audit payloads.
@@ -2163,6 +2194,7 @@ class TradeJournal:
                 metrics = self._decode_json_field(data.get("metrics")) or {}
                 if not isinstance(metrics, dict):
                     metrics = {}
+                normalized = model_selection_metrics(metrics)
                 result.append(
                     {
                         "version": data.get("version"),
@@ -2171,8 +2203,12 @@ class TradeJournal:
                         "training_samples": data.get("training_samples"),
                         "quality": metrics.get("quality", "n/a"),
                         "precision": metrics.get("precision"),
-                        "lift_bps": metrics.get("lift_bps"),
-                        "walk_forward_expectancy_bps": metrics.get("walk_forward_expectancy_bps"),
+                        "lift_bps": normalized["lift_bps"],
+                        "walk_forward_expectancy_bps": normalized["walk_forward_bps"],
+                        "walk_forward_bps": normalized["walk_forward_bps"],
+                        "model_score": metrics.get("model_score", normalized["model_score"]),
+                        "paper_gate_count": normalized["paper_gate_count"],
+                        "selection_reason": selection_reason(metrics),
                     }
                 )
             return result

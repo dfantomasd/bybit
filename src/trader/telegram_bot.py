@@ -1409,18 +1409,23 @@ class TelegramMonitorBot:
             return
         lines = [
             "📉 <b>История моделей</b>",
-            "<code>date UTC          q        prec   lift   wf</code>",
+            "<code>date UTC          q        score    n   lift   wf</code>",
         ]
         for row in rows:
             ts = self._fmt_timestamp(row.get("created_at")) if row.get("created_at") else "n/a"
             quality = str(row.get("quality") or "n/a")[:8]
-            precision = row.get("precision")
+            score = row.get("model_score")
+            paper_count = int(row.get("paper_gate_count") or 0)
             lift = row.get("lift_bps")
             walk_forward = row.get("walk_forward_bps")
-            precision_text = " n/a" if precision is None else f"{float(precision) * 100:4.1f}%"
+            score_text = "   n/a" if score is None else f"{float(score):+6.1f}"
             lift_text = " n/a" if lift is None else f"{float(lift):+5.1f}"
             wf_text = " n/a" if walk_forward is None else f"{float(walk_forward):+5.1f}"
-            lines.append(f"<code>{ts[:16]:16} {quality:8} {precision_text} {lift_text} {wf_text}</code>")
+            reason = str(row.get("selection_reason") or "")[:34]
+            lines.append(
+                f"<code>{ts[:16]:16} {quality:8} {score_text} {paper_count:4d} {lift_text} {wf_text}</code>"
+                + (f"\n<code>  {reason}</code>" if reason else "")
+            )
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_strategy_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

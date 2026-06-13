@@ -366,6 +366,42 @@ async def test_trade_journal_schema_includes_durable_order_state() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_performance_history_includes_score_and_selection_reason() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        return [
+            {
+                "version": "v_good",
+                "status": "CHAMPION",
+                "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                "training_samples": 900,
+                "metrics": {
+                    "quality": "GOOD",
+                    "precision": 0.62,
+                    "lift_bps": 4.2,
+                    "walk_forward_expectancy_bps": 3.1,
+                    "paper_gate": {"count": 80},
+                },
+            }
+        ]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    rows = await journal.get_model_performance_history()
+
+    assert rows[0]["version"] == "v_good"
+    assert rows[0]["model_score"] > 0
+    assert rows[0]["paper_gate_count"] == 80
+    assert rows[0]["selection_reason"] == "selected:positive_walk_forward_lift"
+
+
+@pytest.mark.asyncio
 async def test_market_candle_upsert_sql() -> None:
     """upsert_market_candle should build correct SQL and not duplicate on conflict."""
     from trader.storage.trade_journal import TradeJournal
