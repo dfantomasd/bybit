@@ -20,14 +20,35 @@ _CRYPTO_FAMILIES: dict[str, list[str]] = {
     "SOL": ["SOL", "MSOL", "JSOL", "BSOL"],
 }
 
+_QUOTE_SUFFIXES = (
+    "USDT",
+    "USDC",
+    "USD",
+    "BTC",
+    "ETH",
+    "EUR",
+    "TRY",
+)
+
+
+def _base_asset(symbol: str) -> str:
+    """Extract the base asset without matching partial token prefixes."""
+    upper = symbol.upper().strip()
+    for separator in ("-", "_", "/"):
+        if separator in upper:
+            return upper.split(separator, 1)[0]
+    for suffix in _QUOTE_SUFFIXES:
+        if upper.endswith(suffix) and len(upper) > len(suffix):
+            return upper[: -len(suffix)]
+    return upper
+
 
 def _get_family(symbol: str) -> str | None:
     """Return the family name for a symbol's base asset, or None."""
-    upper = symbol.upper()
+    base = _base_asset(symbol)
     for family, members in _CRYPTO_FAMILIES.items():
-        for member in members:
-            if upper.startswith(member):
-                return family
+        if base in members:
+            return family
     return None
 
 

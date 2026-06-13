@@ -2550,6 +2550,26 @@ class TradingApplication:
             except TimeoutError:
                 pass
 
+    async def _run_transaction_log_sync(self) -> None:
+        """Periodically sync Bybit transaction log outside the hot strategy loop."""
+        assert self._settings is not None
+        interval = max(1.0, float(self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS))
+
+        while not self._shutdown_event.is_set():
+            self._last_tx_log_sync_at = datetime.now(tz=UTC)
+            try:
+                await self._sync_transaction_log()
+            except Exception as exc:
+                log.debug("transaction_log.periodic_sync_failed", error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
+
     async def _start_feature_pipeline(self) -> None:
         """Start event-driven feature pipeline with 60 s staleness watchdog."""
         from trader.features.pipeline import FeaturePipeline
@@ -3855,19 +3875,6 @@ class TradingApplication:
                 await self._manage_open_positions()
                 self._check_zero_trading()
 
-                # Sync transaction log periodically
-                now = datetime.now(tz=UTC)
-                tx_interval = self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
-                if (
-                    self._last_tx_log_sync_at is None
-                    or (now - self._last_tx_log_sync_at).total_seconds() >= tx_interval
-                ):
-                    self._last_tx_log_sync_at = now
-                    try:
-                        await self._sync_transaction_log()
-                    except Exception as _tx_exc:
-                        log.debug("strategy_loop.tx_log_sync_failed", error=str(_tx_exc))
-
                 balance = self._cached_balance
                 capital = balance
 
@@ -4060,6 +4067,9 @@ class TradingApplication:
             # Periodic order/position reconciliation (non-critical, shadow skipped)
             reconciliation_task = asyncio.create_task(self._run_reconciliation(), name="reconciliation")
             self._background_tasks.append(reconciliation_task)
+
+            tx_log_task = asyncio.create_task(self._run_transaction_log_sync(), name="transaction-log-sync")
+            self._background_tasks.append(tx_log_task)
 
             # Risk monitor: updates equity/drawdown, checks WS staleness
             risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
