@@ -23,6 +23,8 @@ from trader.training.labels import (
 
 log = structlog.get_logger(__name__)
 
+_MODEL_PROMOTION_ADVISORY_LOCK_ID = 926_202_606
+
 
 def _decimal_or_none(value: Any) -> Decimal | None:
     if value in (None, ""):
@@ -38,6 +40,22 @@ def _parse_dec(v: Any) -> Decimal | None:
         return Decimal(str(v)) if v not in (None, "", "0", 0) else None
     except Exception:
         return None
+
+
+def _champion_selection_thresholds() -> tuple[int, int, float]:
+    min_paper_gate_count = 50
+    min_wf_positive_folds = 3
+    max_wf_std_bps = 25.0
+    try:
+        from trader.config import Settings
+
+        settings = Settings()
+        min_paper_gate_count = int(settings.MODEL_CHAMPION_MIN_PAPER_GATE_COUNT)
+        min_wf_positive_folds = int(settings.MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS)
+        max_wf_std_bps = float(settings.MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS)
+    except Exception as exc:
+        log.debug("trade_journal.champion_threshold_defaults", error=str(exc))
+    return min_paper_gate_count, min_wf_positive_folds, max_wf_std_bps
 
 
 def _parse_ts(v: Any) -> datetime | None:
@@ -2222,6 +2240,7 @@ class TradeJournal:
         """Return operator-facing champion health, candidate, and promotion audit context."""
         if not self.is_enabled:
             return {"connected": False}
+        min_paper_gate_count, min_wf_positive_folds, max_wf_std_bps = _champion_selection_thresholds()
         try:
             champion_rows = await self._fetch(
                 """
@@ -2291,16 +2310,23 @@ class TradeJournal:
                 wf_std = champion.get("wf_std_bps")
                 checks = [
                     {"name": "walk_forward_positive", "ok": wf is not None and float(wf) > 0, "value": wf},
-                    {"name": "paper_gate_count", "ok": paper_count >= 50, "value": paper_count},
+                    {
+                        "name": "paper_gate_count",
+                        "ok": paper_count >= min_paper_gate_count,
+                        "value": paper_count,
+                        "threshold": min_paper_gate_count,
+                    },
                     {
                         "name": "wf_fold_stability",
-                        "ok": wf_folds == 0 or positive_folds >= min(3, wf_folds),
+                        "ok": wf_folds == 0 or positive_folds >= min(min_wf_positive_folds, wf_folds),
                         "value": f"{positive_folds}/{wf_folds}",
+                        "threshold": min(min_wf_positive_folds, wf_folds),
                     },
                     {
                         "name": "wf_std_bps",
-                        "ok": wf_std is None or float(wf_std) <= 25.0,
+                        "ok": wf_std is None or float(wf_std) <= max_wf_std_bps,
                         "value": wf_std,
+                        "threshold": max_wf_std_bps,
                     },
                     {
                         "name": "strict_walk_forward",
@@ -2765,10 +2791,11 @@ class TradeJournal:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _MODEL_PROMOTION_ADVISORY_LOCK_ID)
                 prev = await conn.fetchrow("SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1")
                 prev_version = prev["version"] if prev else None
                 await conn.execute("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'CHAMPION'")
-                await conn.execute(
+                promoted = await conn.execute(
                     """
                     UPDATE model_versions
                     SET status = 'CHAMPION'
@@ -2776,6 +2803,8 @@ class TradeJournal:
                     """,
                     version,
                 )
+                if not str(promoted).endswith(" 1"):
+                    raise RuntimeError(f"promotion_failed: model {version!r} was not an eligible challenger")
                 await conn.execute(
                     """
                     INSERT INTO model_promotion_log
@@ -2809,15 +2838,60 @@ class TradeJournal:
         assert self._pool is not None
         import json as _json
 
+        min_paper_gate_count, _min_wf_positive_folds, _max_wf_std_bps = _champion_selection_thresholds()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _MODEL_PROMOTION_ADVISORY_LOCK_ID)
                 restore = await conn.fetchrow(
                     """
                     SELECT version FROM model_versions
                     WHERE status = 'ARCHIVED'
-                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                      AND artifact IS NOT NULL
+                      AND COALESCE(metrics->>'label_schema_version', '') = $1
+                      AND COALESCE(
+                            NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                            NULLIF(metrics->>'walk_forward_bps', ''),
+                            NULLIF(metrics->>'wf_mean_bps', ''),
+                            NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                          ) IS NOT NULL
+                      AND COALESCE(
+                            NULLIF(metrics #>> '{paper_gate,count}', ''),
+                            NULLIF(metrics->>'paper_gate_count', ''),
+                            NULLIF(metrics->>'total_pass_count', ''),
+                            '0'
+                          )::integer >= $2
+                    ORDER BY
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                NULLIF(metrics->>'walk_forward_bps', ''),
+                                NULLIF(metrics->>'wf_mean_bps', ''),
+                                NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                            )::double precision > 0 THEN 0
+                            ELSE 1
+                        END ASC,
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                NULLIF(metrics->>'walk_forward_bps', ''),
+                                NULLIF(metrics->>'wf_mean_bps', ''),
+                                NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                            )::double precision > 0 THEN COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision
+                            ELSE NULL
+                        END DESC NULLS LAST,
+                        COALESCE(
+                            NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                            NULLIF(metrics->>'walk_forward_bps', ''),
+                            NULLIF(metrics->>'wf_mean_bps', ''),
+                            NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                        )::double precision DESC,
+                        COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                        training_finished_at DESC NULLS LAST,
+                        created_at DESC
                     LIMIT 1
-                    """
+                    """,
+                    LABEL_SCHEMA_VERSION,
+                    min_paper_gate_count,
                 )
                 if restore is None:
                     log.warning(

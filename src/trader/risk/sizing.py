@@ -183,7 +183,8 @@ class PositionSizer:
         # Available balance cap
         # ----------------------------------------------------------------
         if entry_price is not None and entry_price > Decimal("0"):
-            max_qty_from_balance = available_balance / entry_price
+            leverage = max(self._limits.max_leverage, Decimal("1"))
+            max_qty_from_balance = (available_balance * leverage) / entry_price
             raw_qty = min(raw_qty, max_qty_from_balance)
 
         # ----------------------------------------------------------------
