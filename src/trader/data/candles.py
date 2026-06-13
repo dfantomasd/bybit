@@ -69,7 +69,7 @@ class CandleStore:
         buf = self._data[key]
         if buf and buf[-1].open_time == candle.open_time:
             # Update in-progress bar
-            buf[-1] = candle  # type: ignore[index]  # deque supports item assignment
+            buf[-1] = candle
         else:
             buf.append(candle)
 

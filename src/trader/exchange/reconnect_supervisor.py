@@ -35,7 +35,7 @@ def calc_backoff(
     """Return back-off wait time with ±20 % jitter."""
     wait = min(base * (2**attempt), max_wait)
     jitter = wait * 0.2 * (random.random() * 2 - 1)  # ±20 %  # noqa: S311
-    return max(0.1, wait + jitter)
+    return float(max(0.1, wait + jitter))
 
 
 # ---------------------------------------------------------------------------

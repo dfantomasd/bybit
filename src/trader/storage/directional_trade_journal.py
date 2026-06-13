@@ -475,4 +475,4 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 def install_directional_trade_journal() -> None:
     """Install the directional implementation for existing import paths."""
 
-    _base_module.TradeJournal = DirectionalTradeJournal
+    setattr(_base_module, "TradeJournal", DirectionalTradeJournal)

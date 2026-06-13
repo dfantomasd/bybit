@@ -31,7 +31,7 @@ import sys
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import uvicorn
 
@@ -66,7 +66,7 @@ _INTERVAL_MS = {
 try:
     from prometheus_client import Counter as _PromCounter
 
-    _ML_REPLACEMENT_COUNTER = _PromCounter(
+    _ML_REPLACEMENT_COUNTER: _PromCounter | None = _PromCounter(
         "trader_ml_replacement_total",
         "Signals where the ML champion replaced the rule-based decision",
     )
@@ -115,14 +115,14 @@ class TradingApplication:
         self._exposure_tracker: Any | None = None
         self._screener: Any | None = None
         self._regime_classifier: Any | None = None
-        self._background_tasks: list[asyncio.Task] = []
+        self._background_tasks: list[asyncio.Task[Any]] = []
         # Cached balance (refreshed periodically)
         self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
         self._balance_refreshed_at: datetime | None = None
         # Operator control state
         self._trading_paused: bool = False
         self._current_risk_profile_str: str = ""
-        self._signal_log: deque = deque(maxlen=20)
+        self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None
         self._performance_blocked_symbols: set[str] = set()
@@ -140,7 +140,7 @@ class TradingApplication:
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
-        self._training_task: asyncio.Task | None = None
+        self._training_task: asyncio.Task[Any] | None = None
         self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
         # Private WebSocket (order/position/balance real-time events)
@@ -163,7 +163,7 @@ class TradingApplication:
         if self._screener is not None:
             symbols = self._screener.active_symbols
             if symbols:
-                return symbols
+                return list(symbols)
         return list(_SYMBOLS)
 
     def _market_data_intervals(self) -> list[str]:
@@ -322,7 +322,7 @@ class TradingApplication:
     def _make_state_proxy(self) -> _AppStateProxy:
         return _AppStateProxy(self)
 
-    async def _start_http_server(self) -> asyncio.Task:
+    async def _start_http_server(self) -> asyncio.Task[Any]:
         from trader.api.fastapi_app import create_app
 
         assert self._settings is not None
@@ -1247,12 +1247,12 @@ class TradingApplication:
         wide = self._screener.wide_universe
         if wide:
             return [item.symbol for item in wide[:100]]
-        return self._screener.active_symbols
+        return list(self._screener.active_symbols)
 
     def _selected_symbols(self) -> list[str]:
         if self._screener is None:
             return []
-        return self._screener.manual_symbols
+        return list(self._screener.manual_symbols)
 
     async def _toggle_manual_symbol(self, symbol: str) -> str:
         if self._screener is None:
@@ -1297,11 +1297,11 @@ class TradingApplication:
                 return None
             try:
                 ctx = self._regime_classifier.classify(vec)
-                return ctx.regime.value
+                return str(ctx.regime.value)
             except Exception:
                 return None
 
-        async def _db_diagnostics_provider() -> dict:
+        async def _db_diagnostics_provider() -> dict[str, Any]:
             if self._trade_journal is None:
                 return {
                     "connected": False,
@@ -1315,9 +1315,9 @@ class TradingApplication:
             diag["paper_notional_usd"] = (
                 float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
             )
-            return diag
+            return cast(dict[str, Any], diag)
 
-        async def _healthcheck_provider() -> dict:
+        async def _healthcheck_provider() -> dict[str, Any]:
             diag = self.get_diagnostics()
             blockers = {
                 "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
@@ -1346,12 +1346,12 @@ class TradingApplication:
                 "today_avg_net_bps": today_avg_net_bps,
             }
 
-        async def _recent_trades_provider() -> list[dict]:
+        async def _recent_trades_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_recent_closed_trades(limit=10)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_recent_closed_trades(limit=10))
 
-        async def _bucket_stats_provider() -> dict:
+        async def _bucket_stats_provider() -> dict[str, Any]:
             assert self._settings is not None
             return {
                 "buckets": [
@@ -1376,40 +1376,40 @@ class TradingApplication:
                 "block_below_bps": self._settings.BUCKET_BLOCK_AVG_BPS,
             }
 
-        async def _pnl_analysis_provider() -> dict:
+        async def _pnl_analysis_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_strategy_pnl_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_strategy_pnl_analysis())
 
-        async def _compare_provider() -> dict:
+        async def _compare_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_model_compare_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_model_compare_analysis())
 
-        async def _worst_trades_provider(limit: int) -> list[dict]:
+        async def _worst_trades_provider(limit: int) -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_worst_prediction_outcomes(limit=limit)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_worst_prediction_outcomes(limit=limit))
 
-        async def _costs_detailed_provider() -> dict:
+        async def _costs_detailed_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_detailed_costs()
+            return cast(dict[str, Any], await self._trade_journal.get_detailed_costs())
 
-        async def _model_performance_provider() -> list[dict]:
+        async def _model_performance_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_model_performance_history()
+            return cast(list[dict[str, Any]], await self._trade_journal.get_model_performance_history())
 
-        async def _champion_health_provider() -> dict:
+        async def _champion_health_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_champion_health()
+            return cast(dict[str, Any], await self._trade_journal.get_champion_health())
 
-        async def _attribution_provider() -> dict:
+        async def _attribution_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_pnl_attribution(days=7)
+            return cast(dict[str, Any], await self._trade_journal.get_pnl_attribution(days=7))
 
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
@@ -1422,7 +1422,7 @@ class TradingApplication:
         async def _load_subscriptions() -> list[int]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_telegram_subscriptions()
+            return cast(list[int], await self._trade_journal.get_telegram_subscriptions())
 
         controller = TradingController(
             pause=self._pause_trading,
@@ -1443,7 +1443,7 @@ class TradingApplication:
             current_profile=lambda: self._current_risk_profile_str,
             active_symbols=lambda: self._screener.active_symbols if self._screener is not None else list(_SYMBOLS),
             regime_for=_regime_for,
-            signal_log=self._signal_log,  # type: ignore[arg-type]
+            signal_log=self._signal_log,
             diagnostics_provider=self.get_diagnostics,
             db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
@@ -2063,7 +2063,7 @@ class TradingApplication:
 
         # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
         # size the buffer so a consumer stall never drops a confirmed kline.
-        event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+        event_queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=5000)
 
         self._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",
@@ -2085,7 +2085,8 @@ class TradingApplication:
                             self._orderbook_tracker.record(event.symbol, event.bids, event.asks)
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
-                        self._candle_store.add(event.symbol, event.interval, candle)
+                        if self._candle_store is not None:
+                            self._candle_store.add(event.symbol, event.interval, candle)
 
                         if event.confirm:
                             self._last_confirmed_candle_at = datetime.now(tz=UTC)
@@ -2891,7 +2892,7 @@ class TradingApplication:
         """Provide daily net PnL for Telegram /net command."""
         if self._trade_journal is None:
             return {}
-        return await self._trade_journal.get_daily_net_results()
+        return cast(dict[str, Any], await self._trade_journal.get_daily_net_results())
 
     async def _sync_execution_positions(self) -> None:
         """Keep local execution/risk state aligned with Bybit TP/SL closures."""
@@ -3100,7 +3101,7 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS
+        return bool(count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS)
 
     async def _run_bucket_stats_refresher(self) -> None:
         """Refresh in-memory bucket expectancy stats from Postgres periodically."""
@@ -3429,7 +3430,7 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies: list = [
+        strategies: list[Any] = [
             EMAcrossoverStrategy(
                 symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
@@ -3449,7 +3450,7 @@ class TradingApplication:
                     return None
                 for scored in self._screener.wide_universe:
                     if scored.symbol == symbol:
-                        return scored.spread_bps
+                        return float(scored.spread_bps) if scored.spread_bps is not None else None
                 return None
 
             strategies.append(
@@ -3557,6 +3558,8 @@ class TradingApplication:
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
+            assert self._settings is not None
+            assert self._strategy_ensemble is not None
             if symbol in _effective_blocked_symbols:
                 log.debug("performance_filter.symbol_blocked", symbol=symbol)
                 return
@@ -3973,6 +3976,7 @@ class TradingApplication:
 
         async def strategy_loop() -> None:
             nonlocal _balance_tick, _effective_blocked_symbols
+            assert self._settings is not None
 
             while not self._shutdown_event.is_set():
                 _cycle_t0 = asyncio.get_event_loop().time()
@@ -4173,6 +4177,7 @@ class TradingApplication:
             await self._start_bybit_adapter()
             await self._start_telegram_bot()
 
+            assert self._settings is not None
             if self._settings.LLM_ENABLED:
                 from trader.llm.client import LLMClient
 

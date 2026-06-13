@@ -46,10 +46,10 @@ class EventBus:
         self._metrics = metrics
 
         # Main queues
-        self._queues: dict[str, asyncio.Queue] = {name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES}
+        self._queues: dict[str, asyncio.Queue[Any]] = {name: asyncio.Queue(maxsize=maxsize) for name in self.QUEUE_NAMES}
 
         # Dead letter queue for critical dropped events (unbounded)
-        self._dead_letter: asyncio.Queue = asyncio.Queue()
+        self._dead_letter: asyncio.Queue[Any] = asyncio.Queue()
 
         # Drop counters per queue
         self._dropped: dict[str, int] = defaultdict(int)
@@ -153,9 +153,12 @@ class EventBus:
             raise ValueError(f"Unknown queue: {queue_name!r}")
         queue = self._queues[queue_name]
         try:
+            event: BaseEvent | None
             if timeout is not None:
-                return await asyncio.wait_for(queue.get(), timeout=timeout)
-            return await queue.get()
+                event = await asyncio.wait_for(queue.get(), timeout=timeout)
+            else:
+                event = await queue.get()
+            return event
         except TimeoutError:
             return None
 

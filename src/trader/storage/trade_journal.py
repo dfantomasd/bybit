@@ -97,11 +97,15 @@ class TradeJournal:
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
             "last_read_error_at": (
-                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
+                _reat.isoformat()
+                if (_reat := getattr(self, "_last_read_error_at", None)) is not None
+                else None
             ),
             "last_read_error": getattr(self, "_last_read_error", None),
             "last_connect_error_at": (
-                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
+                _ceat.isoformat()
+                if (_ceat := getattr(self, "_last_connect_error_at", None)) is not None
+                else None
             ),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
@@ -737,7 +741,7 @@ class TradeJournal:
             datetime.now(tz=UTC),
         )
 
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+    async def record_transaction_log_entries(self, entries: list[dict[str, Any]]) -> int:
         """Persist Bybit transaction log entries. Returns count inserted."""
         if not self.is_enabled or not entries:
             return 0
@@ -1258,7 +1262,7 @@ class TradeJournal:
 
         import numpy as np
 
-        def _rows_to_matrix(rows: list) -> tuple[list[str], list[list[float]]]:
+        def _rows_to_matrix(rows: list[Any]) -> tuple[list[str], list[list[float]]]:
             names: list[str] = []
             matrix: list[list[float]] = []
             for r in rows:
@@ -3105,7 +3109,8 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return await conn.fetch(query, *args)
+                rows: list[asyncpg.Record] = await conn.fetch(query, *args)
+                return rows
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)
