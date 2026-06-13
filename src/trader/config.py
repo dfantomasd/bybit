@@ -400,6 +400,12 @@ class Settings(BaseSettings):
     MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS: int = 1000
     MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES: int = 50
     """Minimum resolved challenger returns required to run the bootstrap test."""
+    MODEL_CHAMPION_DEGRADE_MIN_SIGNALS: int = 100
+    """Minimum live champion shadow-gate observations before triggering a rollback check."""
+    MODEL_CHAMPION_MIN_LIFT_BPS: float = -5.0
+    """If the champion's live shadow-gate lift falls below this threshold, trigger rollback."""
+    MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS: int = 14400
+    """How often (seconds) the champion health monitor runs. Default: 4 hours."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
