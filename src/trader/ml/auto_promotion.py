@@ -10,6 +10,7 @@ from typing import Any, cast
 import structlog
 
 from trader.ml.challenger import ModelStatus
+from trader.ml.model_selection import model_selection_metrics
 from trader.training.bootstrap import bootstrap_pvalue
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
@@ -47,15 +48,7 @@ def _int_or_zero(value: Any) -> int:
 
 
 def _metric_score(metrics: dict[str, Any]) -> float:
-    wf = _float_or_none(metrics.get("walk_forward_expectancy_bps"))
-    if wf is None:
-        wf = _float_or_none(metrics.get("wf_mean_bps"))
-    if wf is None:
-        wf = _float_or_none(metrics.get("best_threshold_avg_net_return_bps"))
-    lift = _float_or_none(metrics.get("lift_bps")) or 0.0
-    precision = _float_or_none(metrics.get("precision")) or 0.0
-    pass_count = _int_or_zero(metrics.get("total_pass_count") or metrics.get("best_threshold_pass_count"))
-    return (wf if wf is not None else -1_000_000.0) + (lift * 0.25) + (precision * 2.0) + min(pass_count, 500) / 5000
+    return float(model_selection_metrics(metrics)["model_score"])
 
 
 def _max_drawdown_bps(returns_bps: list[float]) -> float:
@@ -281,6 +274,7 @@ class AutoPromotionEngine:
             "champion_wf_bps": champion_wf,
             "bootstrap_p_value": p_value,
             "bootstrap_mean_diff_bps": mean_diff_bps,
+            "model_score": _metric_score(metrics),
             "selection_score": _metric_score(metrics) + ((lift_bps or 0.0) * 0.5) + ((pass_expectancy or 0.0) * 0.5),
         }
         return PromotionDecision(
