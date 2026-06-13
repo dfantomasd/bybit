@@ -505,7 +505,13 @@ class ModelRegistry:
             return None
 
     async def load_latest_challenger(self) -> ChallengerModel | None:
-        """Load the latest compatible challenger for non-authoritative scoring."""
+        """Load the latest compatible challenger for non-authoritative scoring.
+
+        First tries an exact schema-version match.  Falls back to any
+        SHADOW_CHALLENGER/VALIDATED artifact so a freshly-trained model whose
+        metrics JSON predates the label_schema_version key doesn't silently
+        disappear after a restart.
+        """
 
         if self._journal is None or not self._journal.is_enabled:
             return None
@@ -522,6 +528,28 @@ class ModelRegistry:
                 """,
                 LABEL_SCHEMA_VERSION,
             )
+            if not rows:
+                # Fallback: load latest artifact regardless of schema version tag.
+                # This covers models trained before label_schema_version was stored
+                # in the metrics JSON.  We still refuse to promote them to CHAMPION.
+                rows = await self._journal._fetch(
+                    """
+                    SELECT version, status, artifact, training_samples, metrics
+                    FROM model_versions
+                    WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
+                      AND artifact IS NOT NULL
+                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """
+                )
+                if rows:
+                    row_ver = str(rows[0]["version"]) if rows else "unknown"
+                    log.warning(
+                        "model_registry.challenger_schema_mismatch_fallback "
+                        "version=%s required_schema=%s",
+                        row_ver,
+                        LABEL_SCHEMA_VERSION,
+                    )
             if not rows:
                 self._challenger = None
                 return None
