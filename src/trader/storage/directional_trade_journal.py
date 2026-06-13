@@ -9,6 +9,7 @@ receive the extended implementation without a risky full-file rewrite.
 
 from __future__ import annotations
 
+import traceback
 from contextvars import ContextVar
 from datetime import datetime, timedelta
 from typing import Any
@@ -315,6 +316,18 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         if not self.is_enabled:
             return result
 
+        try:
+            return await self._get_db_diagnostics_directional(result)
+        except Exception as exc:
+            log.warning(
+                "directional_trade_journal.diagnostics_failed",
+                error=str(exc),
+                traceback=traceback.format_exc(),
+            )
+            result["last_read_error"] = str(exc)
+            return result
+
+    async def _get_db_diagnostics_directional(self, result: dict[str, Any]) -> dict[str, Any]:
         rows = await self._fetch(
             """
             SELECT horizon_minutes, count(*) AS cnt
