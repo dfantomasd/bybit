@@ -2218,6 +2218,110 @@ class TradeJournal:
             log.warning("trade_journal.model_performance_history_failed", error=str(exc))
             return []
 
+    async def get_champion_health(self) -> dict[str, Any]:
+        """Return operator-facing champion health, candidate, and promotion audit context."""
+        if not self.is_enabled:
+            return {"connected": False}
+        try:
+            champion_rows = await self._fetch(
+                """
+                SELECT version, status, training_finished_at, created_at, training_samples, metrics
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+                  AND artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            candidate_rows = await self._fetch(
+                """
+                SELECT version, status, training_finished_at, created_at, training_samples, metrics
+                FROM model_versions
+                WHERE status IN ('SHADOW_CHALLENGER', 'VALIDATED', 'ARCHIVED')
+                  AND artifact IS NOT NULL
+                ORDER BY
+                    COALESCE(NULLIF(metrics->>'model_score', ''), '-1000000')::double precision DESC,
+                    training_finished_at DESC NULLS LAST,
+                    created_at DESC
+                LIMIT 1
+                """
+            )
+            promotion_rows = await self._fetch(
+                """
+                SELECT event_type, from_version, to_version, reasons, metrics, metrics_snapshot, created_at
+                FROM model_promotion_log
+                ORDER BY created_at DESC
+                LIMIT 5
+                """
+            )
+
+            def _model(row: Any | None) -> dict[str, Any] | None:
+                if not row:
+                    return None
+                data = dict(row)
+                metrics = self._decode_json_field(data.get("metrics")) or {}
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                normalized = model_selection_metrics(metrics)
+                return {
+                    "version": data.get("version"),
+                    "status": data.get("status"),
+                    "created_at": data.get("training_finished_at") or data.get("created_at"),
+                    "training_samples": data.get("training_samples"),
+                    "quality": metrics.get("quality", "n/a"),
+                    "model_score": metrics.get("model_score", normalized["model_score"]),
+                    "walk_forward_bps": normalized["walk_forward_bps"],
+                    "wf_positive_folds": metrics.get("wf_positive_folds"),
+                    "wf_folds": metrics.get("wf_folds"),
+                    "wf_std_bps": metrics.get("wf_std_bps"),
+                    "lift_bps": normalized["lift_bps"],
+                    "paper_gate_count": normalized["paper_gate_count"],
+                    "selection_reason": selection_reason(metrics),
+                    "walk_forward_chronology": metrics.get("walk_forward_chronology"),
+                }
+
+            champion = _model(champion_rows[0] if champion_rows else None)
+            candidate = _model(candidate_rows[0] if candidate_rows else None)
+            checks: list[dict[str, Any]] = []
+            if champion:
+                wf = champion.get("walk_forward_bps")
+                paper_count = int(champion.get("paper_gate_count") or 0)
+                positive_folds = int(champion.get("wf_positive_folds") or 0)
+                wf_folds = int(champion.get("wf_folds") or 0)
+                wf_std = champion.get("wf_std_bps")
+                checks = [
+                    {"name": "walk_forward_positive", "ok": wf is not None and float(wf) > 0, "value": wf},
+                    {"name": "paper_gate_count", "ok": paper_count >= 50, "value": paper_count},
+                    {
+                        "name": "wf_fold_stability",
+                        "ok": wf_folds == 0 or positive_folds >= min(3, wf_folds),
+                        "value": f"{positive_folds}/{wf_folds}",
+                    },
+                    {
+                        "name": "wf_std_bps",
+                        "ok": wf_std is None or float(wf_std) <= 25.0,
+                        "value": wf_std,
+                    },
+                    {
+                        "name": "strict_walk_forward",
+                        "ok": champion.get("walk_forward_chronology") in (None, "strict_after_train"),
+                        "value": champion.get("walk_forward_chronology") or "legacy",
+                    },
+                ]
+
+            return {
+                "connected": True,
+                "champion": champion,
+                "best_alternative": candidate,
+                "checks": checks,
+                "promotion_log": [dict(row) for row in promotion_rows],
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.champion_health_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
+
     async def get_dashboard_data(self, horizon_minutes: int = 15) -> dict[str, Any]:
         """Return compact Chart.js-ready diagnostics for /dashboard."""
         if not self.is_enabled:

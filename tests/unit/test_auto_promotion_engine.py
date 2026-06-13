@@ -36,6 +36,10 @@ def _model(
             "lift_bps": lift_bps,
             "precision": 0.42,
             "total_pass_count": 80,
+            "wf_folds": 5,
+            "wf_positive_folds": 5,
+            "wf_std_bps": 4.0,
+            "walk_forward_chronology": "strict_after_train",
         },
     }
 
@@ -205,7 +209,26 @@ async def test_promote_archives_champion_promotes_challenger_logs_and_reloads() 
     assert journal.models["challenger"]["status"] == ModelStatus.CHAMPION
     assert journal.promotion_logs
     assert json.loads(journal.promotion_logs[-1][2]) == ["criteria_met"]
+    snapshot = json.loads(journal.promotion_logs[-1][3])["snapshot"]
+    assert snapshot["champion"]["version"] == "champion"
+    assert snapshot["challenger"]["version"] == "challenger"
+    assert "walk_forward_bps" in snapshot["delta"]
     reload_registry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_should_promote_blocks_unstable_walk_forward_folds() -> None:
+    challenger = _model("unstable")
+    challenger["metrics"]["wf_positive_folds"] = 1
+    challenger["metrics"]["wf_std_bps"] = 40.0
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), challenger])
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+
+    decision = await engine.should_promote(None, "unstable")
+
+    assert decision.promote is False
+    assert any(reason.startswith("unstable_walk_forward_folds") for reason in decision.reasons)
+    assert any(reason.startswith("unstable_walk_forward_std") for reason in decision.reasons)
 
 
 @pytest.mark.asyncio

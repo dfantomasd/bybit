@@ -161,6 +161,7 @@ class TradingController:
     worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
+    champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -259,6 +260,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("strategy_report", self._cmd_strategy_report))
         app.add_handler(CommandHandler("report", self._cmd_strategy_report))
         app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
+        app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -577,6 +579,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                     InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance"),
                 ],
+                [InlineKeyboardButton("🏆 Champion health", callback_data="view:champion_health")],
                 [
                     InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
                     InlineKeyboardButton("🏆 Промоутить", callback_data="control:promote"),
@@ -1427,6 +1430,13 @@ class TelegramMonitorBot:
                 + (f"\n<code>  {reason}</code>" if reason else "")
             )
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_champion_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        text, markup = await self._render_champion_health()
+        await self._reply(update, text, reply_markup=markup)
 
     async def _cmd_strategy_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Build one compact strategy diagnostics report for canary decisions."""
@@ -3358,8 +3368,88 @@ class TelegramMonitorBot:
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
+                [InlineKeyboardButton("🏆 Champion health", callback_data="view:champion_health")],
                 [InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model")],
                 [InlineKeyboardButton("🔄 Обновить", callback_data="view:model")],
+                [InlineKeyboardButton("🏠 Главная", callback_data="view:home")],
+            ]
+        )
+        return "\n".join(lines), keyboard
+
+    async def _render_champion_health(self) -> tuple[str, InlineKeyboardMarkup]:
+        ctrl = self._controller
+        if ctrl is None or ctrl.champion_health_provider is None:
+            return (
+                "🏆 <b>Champion health</b>\n\nДанные недоступны.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главная", callback_data="view:home")]]),
+            )
+        try:
+            data = await ctrl.champion_health_provider()
+        except Exception as exc:
+            return (
+                f"🏆 <b>Champion health</b>\n\nОшибка: <code>{html.escape(str(exc))}</code>",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главная", callback_data="view:home")]]),
+            )
+        champion = data.get("champion") or {}
+        alt = data.get("best_alternative") or {}
+        checks = data.get("checks") or []
+        logs = data.get("promotion_log") or []
+
+        def _fmt_bps(value: Any) -> str:
+            return "n/a" if value is None else f"{float(value):+.2f} bps"
+
+        def _model_lines(title: str, row: dict[str, Any]) -> list[str]:
+            if not row:
+                return [f"<b>{title}</b>: <code>нет</code>"]
+            return [
+                f"<b>{title}</b>: <code>{html.escape(str(row.get('version') or 'unknown'))}</code>",
+                f"status=<code>{html.escape(str(row.get('status') or 'n/a'))}</code> "
+                f"quality=<code>{html.escape(str(row.get('quality') or 'n/a'))}</code>",
+                f"score=<code>{float(row.get('model_score') or 0.0):+.2f}</code> "
+                f"wf=<code>{_fmt_bps(row.get('walk_forward_bps'))}</code> "
+                f"lift=<code>{_fmt_bps(row.get('lift_bps'))}</code>",
+                f"paper=<code>{int(row.get('paper_gate_count') or 0)}</code> "
+                f"folds=<code>{row.get('wf_positive_folds') or 0}/{row.get('wf_folds') or 0}</code> "
+                f"std=<code>{_fmt_bps(row.get('wf_std_bps'))}</code>",
+                f"reason=<code>{html.escape(str(row.get('selection_reason') or 'n/a'))}</code>",
+            ]
+
+        lines = ["🏆 <b>Champion health</b>", ""]
+        lines.extend(_model_lines("Champion", champion))
+        lines.append("")
+        lines.extend(_model_lines("Best alternative", alt))
+        lines.append("\n<b>Checks</b>")
+        if checks:
+            for check in checks:
+                mark = "OK" if check.get("ok") else "FAIL"
+                lines.append(
+                    f"{mark} <code>{html.escape(str(check.get('name') or 'check'))}</code>: "
+                    f"<code>{html.escape(str(check.get('value') or 'n/a'))}</code>"
+                )
+        else:
+            lines.append("Нет проверок: champion не найден.")
+
+        if logs:
+            lines.append("\n<b>Last promotion events</b>")
+            for row in logs[:3]:
+                reasons = row.get("reasons")
+                if isinstance(reasons, str):
+                    try:
+                        reasons = json.loads(reasons)
+                    except json.JSONDecodeError:
+                        reasons = [reasons]
+                reason_text = ", ".join(str(item) for item in (reasons or [])[:2])
+                lines.append(
+                    f"<code>{html.escape(str(row.get('event_type') or 'event'))}</code> "
+                    f"{html.escape(str(row.get('from_version') or 'none'))} -> "
+                    f"{html.escape(str(row.get('to_version') or 'none'))} "
+                    f"<code>{html.escape(reason_text[:80])}</code>"
+                )
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="view:champion_health")],
+                [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
                 [InlineKeyboardButton("🏠 Главная", callback_data="view:home")],
             ]
         )
@@ -3485,6 +3575,7 @@ class TelegramMonitorBot:
             "compare": self._cmd_compare,
             "strategy_report": self._cmd_strategy_report,
             "model_performance": self._cmd_model_performance,
+            "champion_health": self._cmd_champion_health,
         }
         if action == "home":
             text, markup = await self._render_home()
@@ -3517,6 +3608,10 @@ class TelegramMonitorBot:
             return
         if action == "model":
             text, markup = await self._render_model()
+            await self._button_reply(update, text, reply_markup=markup)
+            return
+        if action == "champion_health":
+            text, markup = await self._render_champion_health()
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "diagnostics":

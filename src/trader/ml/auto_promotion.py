@@ -51,6 +51,29 @@ def _metric_score(metrics: dict[str, Any]) -> float:
     return float(model_selection_metrics(metrics)["model_score"])
 
 
+def _model_snapshot(row: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not row:
+        return None
+    metrics = _metrics(row.get("metrics"))
+    normalized = model_selection_metrics(metrics)
+    return {
+        "version": row.get("version"),
+        "status": row.get("status"),
+        "training_samples": row.get("training_samples"),
+        "training_finished_at": str(row.get("training_finished_at") or ""),
+        "quality": metrics.get("quality"),
+        "model_score": metrics.get("model_score", normalized["model_score"]),
+        "walk_forward_bps": normalized["walk_forward_bps"],
+        "wf_positive_folds": metrics.get("wf_positive_folds"),
+        "wf_folds": metrics.get("wf_folds"),
+        "wf_std_bps": metrics.get("wf_std_bps"),
+        "lift_bps": normalized["lift_bps"],
+        "paper_gate_count": normalized["paper_gate_count"],
+        "label_schema_version": metrics.get("label_schema_version"),
+        "walk_forward_chronology": metrics.get("walk_forward_chronology"),
+    }
+
+
 def _max_drawdown_bps(returns_bps: list[float]) -> float:
     equity = 0.0
     peak = 0.0
@@ -73,6 +96,8 @@ class AutoPromotionConfig:
     min_lift_bps: float = 1.0
     min_pass_expectancy_bps: float = 0.0
     min_wf_bps: float = 0.0
+    min_wf_positive_folds: int = 3
+    max_wf_std_bps: float = 25.0
     required_quality: str = "GOOD"
     pvalue_threshold: float = 0.05
     bootstrap_iterations: int = 1000
@@ -94,6 +119,8 @@ class AutoPromotionConfig:
             min_lift_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_LIFT_BPS", 1.0)),
             min_pass_expectancy_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS", 0.0)),
             min_wf_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_BPS", 0.0)),
+            min_wf_positive_folds=max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", 3))),
+            max_wf_std_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS", 25.0)),
             required_quality=str(getattr(settings, "MODEL_GATE_CANARY_MIN_QUALITY", "GOOD")).upper(),
             pvalue_threshold=float(getattr(settings, "MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD", 0.05)),
             bootstrap_iterations=max(100, int(getattr(settings, "MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS", 1000))),
@@ -198,6 +225,15 @@ class AutoPromotionEngine:
             reasons.append(f"quality_not_{self._config.required_quality}:{quality or 'missing'}")
         if wf_bps is None or wf_bps < self._config.min_wf_bps:
             reasons.append(f"weak_walk_forward:{wf_bps}")
+        wf_folds = _int_or_zero(metrics.get("wf_folds"))
+        wf_positive_folds = _int_or_zero(metrics.get("wf_positive_folds"))
+        wf_std_bps = _float_or_none(metrics.get("wf_std_bps"))
+        if wf_folds > 0 and wf_positive_folds < self._config.min_wf_positive_folds:
+            reasons.append(f"unstable_walk_forward_folds:{wf_positive_folds}<{self._config.min_wf_positive_folds}")
+        if wf_std_bps is not None and wf_std_bps > self._config.max_wf_std_bps:
+            reasons.append(f"unstable_walk_forward_std:{wf_std_bps:.4f}>{self._config.max_wf_std_bps:.4f}")
+        if metrics.get("fold_metrics") and metrics.get("walk_forward_chronology") != "strict_after_train":
+            reasons.append("walk_forward_not_strict_after_train")
 
         gate = await self._journal.get_shadow_gate_stats(
             challenger_version,
@@ -272,11 +308,22 @@ class AutoPromotionEngine:
             "pass_expectancy_bps": pass_expectancy,
             "pass_precision": pass_precision,
             "champion_wf_bps": champion_wf,
+            "wf_folds": wf_folds,
+            "wf_positive_folds": wf_positive_folds,
+            "wf_std_bps": wf_std_bps,
+            "walk_forward_chronology": metrics.get("walk_forward_chronology"),
             "bootstrap_p_value": p_value,
             "bootstrap_mean_diff_bps": mean_diff_bps,
             "model_score": _metric_score(metrics),
             "selection_score": _metric_score(metrics) + ((lift_bps or 0.0) * 0.5) + ((pass_expectancy or 0.0) * 0.5),
         }
+        decision_metrics["snapshot"] = self._promotion_snapshot(
+            champion=champion,
+            challenger=row,
+            challenger_gate=gate,
+            p_value=p_value,
+            mean_diff_bps=mean_diff_bps,
+        )
         return PromotionDecision(
             promote=not reasons,
             champion_version=champion_version_found,
@@ -323,9 +370,9 @@ class AutoPromotionEngine:
                 await conn.execute(
                     """
                     INSERT INTO model_promotion_log (
-                        event_type, from_version, to_version, reasons, metrics
+                        event_type, from_version, to_version, reasons, metrics, metrics_snapshot
                     )
-                    VALUES ('PROMOTED', $1, $2, $3::jsonb, $4::jsonb)
+                    VALUES ('PROMOTED', $1, $2, $3::jsonb, $4::jsonb, $4::jsonb)
                     """,
                     current_champion,
                     challenger_version,
@@ -503,9 +550,9 @@ class AutoPromotionEngine:
             await self._journal._execute(
                 """
                 INSERT INTO model_promotion_log (
-                    event_type, from_version, to_version, reasons, metrics
+                    event_type, from_version, to_version, reasons, metrics, metrics_snapshot
                 )
-                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb, $5::jsonb)
                 """,
                 event_type,
                 from_version,
@@ -515,6 +562,44 @@ class AutoPromotionEngine:
             )
         except Exception as exc:
             log.debug("model_auto_promotion.log_failed", error=str(exc))
+
+    def _promotion_snapshot(
+        self,
+        *,
+        champion: dict[str, Any] | None,
+        challenger: dict[str, Any] | None,
+        challenger_gate: dict[str, Any] | None = None,
+        p_value: float | None = None,
+        mean_diff_bps: float | None = None,
+    ) -> dict[str, Any]:
+        champion_snapshot = _model_snapshot(champion)
+        challenger_snapshot = _model_snapshot(challenger)
+        delta: dict[str, Any] = {}
+        if champion_snapshot and challenger_snapshot:
+            for key in ("model_score", "walk_forward_bps", "lift_bps", "paper_gate_count"):
+                champion_value = champion_snapshot.get(key)
+                challenger_value = challenger_snapshot.get(key)
+                if champion_value is not None and challenger_value is not None:
+                    delta[key] = float(challenger_value) - float(champion_value)
+        return {
+            "champion": champion_snapshot,
+            "challenger": challenger_snapshot,
+            "delta": delta,
+            "challenger_gate": challenger_gate or {},
+            "bootstrap": {
+                "p_value": p_value,
+                "mean_diff_bps": mean_diff_bps,
+            },
+            "thresholds": {
+                "min_wf_bps": self._config.min_wf_bps,
+                "min_wf_positive_folds": self._config.min_wf_positive_folds,
+                "max_wf_std_bps": self._config.max_wf_std_bps,
+                "min_shadow_signals": self._config.min_shadow_signals,
+                "min_pass_count": self._config.min_pass_count,
+                "min_lift_bps": self._config.min_lift_bps,
+                "min_pass_expectancy_bps": self._config.min_pass_expectancy_bps,
+            },
+        }
 
     async def _fetch(self, query: str, *args: Any) -> list[Any]:
         return cast(list[Any], await self._journal._fetch(query, *args))

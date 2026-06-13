@@ -73,6 +73,38 @@ def _walk_forward_splits(
     return result
 
 
+def _validate_walk_forward_chronology(
+    folds: list[tuple[np.ndarray, np.ndarray]],
+    timestamps: list[datetime],
+) -> list[dict[str, Any]]:
+    """Assert every validation fold starts strictly after its train window."""
+
+    windows: list[dict[str, Any]] = []
+    for fold_idx, (train_idx, val_idx) in enumerate(folds):
+        if len(train_idx) == 0 or len(val_idx) == 0:
+            raise RuntimeError(f"empty walk-forward fold: {fold_idx}")
+        train_end = timestamps[int(train_idx[-1])]
+        val_start = timestamps[int(val_idx[0])]
+        val_end = timestamps[int(val_idx[-1])]
+        if val_start <= train_end:
+            raise RuntimeError(
+                "walk-forward chronology violation: "
+                f"fold={fold_idx} train_end={train_end.isoformat()} val_start={val_start.isoformat()}"
+            )
+        windows.append(
+            {
+                "fold": int(fold_idx),
+                "train_start_at": timestamps[int(train_idx[0])].isoformat(),
+                "train_end_at": train_end.isoformat(),
+                "val_start_at": val_start.isoformat(),
+                "val_end_at": val_end.isoformat(),
+                "train_samples": int(len(train_idx)),
+                "validation_samples": int(len(val_idx)),
+            }
+        )
+    return windows
+
+
 def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
     families = {item.strip().upper() for item in str(enabled or "").split(",") if item.strip()}
     if not families:
@@ -468,6 +500,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         sides_list: list[str] = []
         regimes_list: list[str] = []
         hours_list: list[int] = []
+        created_at_list: list[datetime] = []
         feature_names: list[str] = []
         feature_schema_hash = ""
         expected_vector_size: int | None = None
@@ -504,7 +537,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             sides_list.append(side)
             regimes_list.append(str(row["regime"] or "unknown"))
             created_at = row["created_at"]
-            hours_list.append(int(created_at.hour if created_at is not None else 0))
+            created_dt = created_at if isinstance(created_at, datetime) else datetime.now(tz=UTC)
+            hours_list.append(int(created_dt.hour))
+            created_at_list.append(created_dt)
 
         x_arr = np.array(x_list, dtype=np.float32)
         returns_bps = np.array(returns_list, dtype=np.float32)
@@ -561,6 +596,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         )
         if not folds:
             raise RuntimeError("not enough samples for walk-forward validation")
+        wf_windows = _validate_walk_forward_chronology(folds, created_at_list)
 
         candidate_results: list[dict[str, Any]] = []
         for selected_label_threshold in label_thresholds:
@@ -606,6 +642,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                     metrics["fold"] = fold_idx
                     metrics["val_start_idx"] = int(val_idx[0])
                     metrics["val_end_idx"] = int(val_idx[-1])
+                    metrics.update(wf_windows[fold_idx])
                     fold_metrics.append(metrics)
                 if not fold_metrics:
                     continue
@@ -685,6 +722,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             "selected_label_threshold_bps": selected_label_threshold,
             "selected_model_params": model.model_params,
             "validation_samples": int(sum(len(v) for _, v in folds)),
+            "walk_forward_windows": wf_windows,
+            "walk_forward_chronology": "strict_after_train",
             **{k: v for k, v in best.items() if k != "fold_metrics"},
             "fold_metrics": best["fold_metrics"],
         }

@@ -398,6 +398,10 @@ class Settings(BaseSettings):
     """Minimum average net return (bps) among challenger GATE_PASS outcomes."""
     MODEL_AUTO_PROMOTE_MIN_WF_BPS: float = 0.0
     """Minimum walk-forward expectancy (bps) stored in challenger training metrics."""
+    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 3
+    """Minimum positive walk-forward folds required before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS: float = 25.0
+    """Maximum walk-forward fold standard deviation allowed before auto-promotion."""
     MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
     """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
     return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""
