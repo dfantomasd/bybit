@@ -16,8 +16,7 @@ from typing import Any
 import structlog
 
 from trader.data.orderbook import LocalOrderBook
-from trader.domain.enums import OrderSide
-from trader.domain.enums import MarketType
+from trader.domain.enums import MarketType, OrderSide
 from trader.domain.events import (
     BaseEvent,
     KlineEvent,

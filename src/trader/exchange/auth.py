@@ -76,8 +76,9 @@ class RSAAuthenticator:
         self._padding = padding.PKCS1v15()
         self._hash_algo = hashes.SHA256()
 
-        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
         from typing import cast as _cast
+
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
         # Load private key once at init time — Bybit RSA auth uses PKCS#1 keys
         self._private_key: RSAPrivateKey = _cast(
