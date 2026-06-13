@@ -346,6 +346,42 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
 
+            -- Model promotion audit log. Columns cover both automatic
+            -- DB-backed promotion and older manual/pure-eval audit payloads.
+            CREATE TABLE IF NOT EXISTS model_promotion_log (
+                promotion_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_type text NOT NULL,
+                decision text,
+                challenger_version text,
+                champion_version text,
+                new_champion_version text,
+                from_version text,
+                to_version text,
+                reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+                metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+                metrics_snapshot jsonb,
+                decided_at timestamptz NOT NULL DEFAULT now(),
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS decision text,
+                ADD COLUMN IF NOT EXISTS challenger_version text,
+                ADD COLUMN IF NOT EXISTS champion_version text,
+                ADD COLUMN IF NOT EXISTS new_champion_version text,
+                ADD COLUMN IF NOT EXISTS from_version text,
+                ADD COLUMN IF NOT EXISTS to_version text,
+                ADD COLUMN IF NOT EXISTS reasons jsonb DEFAULT '[]'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics jsonb DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics_snapshot jsonb,
+                ADD COLUMN IF NOT EXISTS decided_at timestamptz DEFAULT now(),
+                ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_created
+                ON model_promotion_log (created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_versions
+                ON model_promotion_log (from_version, to_version, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_decided_at
+                ON model_promotion_log (decided_at DESC);
+
             -- Training run history
             CREATE TABLE IF NOT EXISTS training_runs (
                 run_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -358,21 +394,6 @@ class TradeJournal:
                 error text,
                 metrics jsonb
             );
-
-            -- Model promotion audit log
-            CREATE TABLE IF NOT EXISTS model_promotion_log (
-                log_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                event_type text NOT NULL,
-                decision text NOT NULL,
-                challenger_version text,
-                champion_version text,
-                new_champion_version text,
-                decided_at timestamptz NOT NULL DEFAULT now(),
-                reasons jsonb,
-                metrics_snapshot jsonb
-            );
-            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_decided_at
-                ON model_promotion_log (decided_at DESC);
 
             -- P0.5: execution-level fill events (exec_id is the exchange fill ID)
             CREATE TABLE IF NOT EXISTS execution_events (
@@ -2604,13 +2625,9 @@ class TradeJournal:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                prev = await conn.fetchrow(
-                    "SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1"
-                )
+                prev = await conn.fetchrow("SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1")
                 prev_version = prev["version"] if prev else None
-                await conn.execute(
-                    "UPDATE model_versions SET status = 'ROLLED_BACK' WHERE status = 'CHAMPION'"
-                )
+                await conn.execute("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'CHAMPION'")
                 await conn.execute(
                     """
                     UPDATE model_versions
@@ -2643,7 +2660,7 @@ class TradeJournal:
         reason: str,
         event_data: dict[str, Any] | None = None,
     ) -> str | None:
-        """Find the most recent ROLLED_BACK model, restore it as CHAMPION, archive current.
+        """Find the most recent ARCHIVED model, restore it as CHAMPION, roll back current.
 
         Returns the restored version string, or None if no candidate exists.
         """
@@ -2657,7 +2674,7 @@ class TradeJournal:
                 restore = await conn.fetchrow(
                     """
                     SELECT version FROM model_versions
-                    WHERE status = 'ROLLED_BACK'
+                    WHERE status = 'ARCHIVED'
                     ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
                     LIMIT 1
                     """

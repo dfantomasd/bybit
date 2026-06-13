@@ -212,10 +212,27 @@ async def _promote(version: str, confirm: bool) -> None:
 
         async with pool.acquire() as conn:
             async with conn.transaction():
-                await conn.execute("UPDATE model_versions SET status='ROLLED_BACK' WHERE status='CHAMPION'")
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", 926_202_606)
+                champion = await conn.fetchrow(
+                    "SELECT version FROM model_versions WHERE status='CHAMPION' ORDER BY training_finished_at DESC NULLS LAST LIMIT 1"
+                )
+                from_version = str(champion["version"]) if champion else None
+                await conn.execute("UPDATE model_versions SET status='ARCHIVED' WHERE status='CHAMPION'")
                 await conn.execute(
                     "UPDATE model_versions SET status='CHAMPION' WHERE version=$1 AND status IN ('SHADOW_CHALLENGER','VALIDATED')",
                     version,
+                )
+                await conn.execute(
+                    """
+                    INSERT INTO model_promotion_log (
+                        event_type, from_version, to_version, reasons, metrics
+                    )
+                    VALUES ('PROMOTED_MANUAL', $1, $2, $3::jsonb, $4::jsonb)
+                    """,
+                    from_version,
+                    version,
+                    json.dumps(["manual_confirmed", "criteria_met"]),
+                    json.dumps({"gate": gate, "training_samples": model.training_samples}),
                 )
 
         click.echo(f"Model {version} promoted to CHAMPION")

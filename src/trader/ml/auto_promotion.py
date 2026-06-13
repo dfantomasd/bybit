@@ -1,311 +1,484 @@
-"""AutoPromotionEngine — pure evaluation layer for model promotion and champion health.
-
-No I/O.  The engine takes pre-fetched stats and returns structured decisions.
-Actual DB execution (atomic status transitions + audit log) is delegated to
-TradeJournal methods so that transactions stay in one place.
-
-Usage pattern (in the app loop):
-
-    engine = AutoPromotionEngine.from_settings(settings)
-
-    # Promotion path
-    decision = engine.evaluate_promotion(
-        challenger_version=version,
-        challenger_status=status,
-        gate_stats=gate,
-        champion_wf_bps=champion_wf,
-        bootstrap_result=boot,
-    )
-    if decision.approved:
-        await journal.promote_challenger_to_champion(version, event_data=decision.metrics_snapshot)
-        await model_registry.load_active_model()
-
-    # Degradation path (champion monitor, runs every N hours)
-    deg = engine.evaluate_degradation(
-        champion_version=version,
-        gate_stats=champion_gate,
-    )
-    if deg.should_rollback:
-        new_champ = await journal.rollback_champion(
-            current_version=version,
-            reason=deg.reason,
-            event_data=deg.metrics_snapshot,
-        )
-        await model_registry.load_active_model()
-"""
+"""Safe automatic promotion and rollback for shadow ML challengers."""
 
 from __future__ import annotations
 
+import json
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Protocol, runtime_checkable
+from typing import Any
 
 import structlog
 
-if TYPE_CHECKING:
-    from trader.config import Settings
+from trader.ml.challenger import ModelStatus
+from trader.training.bootstrap import bootstrap_pvalue
+from trader.training.labels import LABEL_SCHEMA_VERSION
 
 log = structlog.get_logger(__name__)
 
-
-# ---------------------------------------------------------------------------
-# Protocols
-# ---------------------------------------------------------------------------
+_PROMOTION_LOCK_KEY = 926_202_606
 
 
-@runtime_checkable
-class _BootstrapResult(Protocol):
-    p_value: float
-    mean_diff_bps: float
-    n_iterations: int
-    n_challenger: int
-    n_baseline: int
+def _metrics(raw: Any) -> dict[str, Any]:
+    if isinstance(raw, dict):
+        return dict(raw)
+    if isinstance(raw, str) and raw.strip():
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
 
 
-# ---------------------------------------------------------------------------
-# Decision dataclasses
-# ---------------------------------------------------------------------------
+def _float_or_none(value: Any) -> float | None:
+    if value in (None, ""):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _int_or_zero(value: Any) -> int:
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _metric_score(metrics: dict[str, Any]) -> float:
+    wf = _float_or_none(metrics.get("walk_forward_expectancy_bps"))
+    if wf is None:
+        wf = _float_or_none(metrics.get("wf_mean_bps"))
+    if wf is None:
+        wf = _float_or_none(metrics.get("best_threshold_avg_net_return_bps"))
+    lift = _float_or_none(metrics.get("lift_bps")) or 0.0
+    precision = _float_or_none(metrics.get("precision")) or 0.0
+    pass_count = _int_or_zero(metrics.get("total_pass_count") or metrics.get("best_threshold_pass_count"))
+    return (wf if wf is not None else -1_000_000.0) + (lift * 0.25) + (precision * 2.0) + min(pass_count, 500) / 5000
+
+
+def _max_drawdown_bps(returns_bps: list[float]) -> float:
+    equity = 0.0
+    peak = 0.0
+    max_dd = 0.0
+    for value in reversed(returns_bps):
+        equity += float(value)
+        peak = max(peak, equity)
+        max_dd = max(max_dd, peak - equity)
+    return max_dd
+
+
+@dataclass(frozen=True)
+class AutoPromotionConfig:
+    enabled: bool = False
+    check_seconds: int = 600
+    monitor_seconds: int = 14_400
+    min_training_samples: int = 500
+    min_shadow_signals: int = 50
+    min_pass_count: int = 20
+    min_lift_bps: float = 1.0
+    min_pass_expectancy_bps: float = 0.0
+    min_wf_bps: float = 0.0
+    required_quality: str = "GOOD"
+    pvalue_threshold: float = 0.05
+    bootstrap_iterations: int = 1000
+    min_bootstrap_samples: int = 50
+    horizon_minutes: int = 15
+    max_champion_drawdown_bps: float = 1500.0
+    min_champion_wf_bps: float = 0.0
+    returns_limit: int = 200
+
+    @classmethod
+    def from_settings(cls, settings: Any) -> AutoPromotionConfig:
+        return cls(
+            enabled=bool(getattr(settings, "MODEL_AUTO_PROMOTE_ENABLED", False)),
+            check_seconds=max(120, int(getattr(settings, "MODEL_AUTO_PROMOTE_CHECK_SECONDS", 600))),
+            monitor_seconds=max(600, int(getattr(settings, "MODEL_CHAMPION_MONITOR_SECONDS", 14_400))),
+            min_training_samples=max(1, int(getattr(settings, "MODEL_MIN_TRAINING_SAMPLES", 500))),
+            min_shadow_signals=max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_SIGNALS", 50))),
+            min_pass_count=max(1, int(getattr(settings, "MODEL_MIN_PASS_COUNT_FOR_PROMOTION", 20))),
+            min_lift_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_LIFT_BPS", 1.0)),
+            min_pass_expectancy_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS", 0.0)),
+            min_wf_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_BPS", 0.0)),
+            required_quality=str(getattr(settings, "MODEL_GATE_CANARY_MIN_QUALITY", "GOOD")).upper(),
+            pvalue_threshold=float(getattr(settings, "MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD", 0.05)),
+            bootstrap_iterations=max(100, int(getattr(settings, "MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS", 1000))),
+            min_bootstrap_samples=max(2, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES", 50))),
+            horizon_minutes=int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 15)),
+            max_champion_drawdown_bps=float(getattr(settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0)),
+            min_champion_wf_bps=float(getattr(settings, "MODEL_CHAMPION_MIN_WF_BPS", 0.0)),
+        )
 
 
 @dataclass(frozen=True)
 class PromotionDecision:
-    """Outcome of AutoPromotionEngine.evaluate_promotion()."""
-
-    version: str
-    approved: bool
-    blocking_reasons: list[str]
-    metrics_snapshot: dict[str, Any] = field(default_factory=dict)
-
-    def log_summary(self) -> str:
-        if self.approved:
-            return (
-                f"APPROVED version={self.version} "
-                f"lift={self.metrics_snapshot.get('lift_bps', '?'):+.2f}bps "
-                f"p={self.metrics_snapshot.get('bootstrap_p_value', '?')}"
-            )
-        return f"REJECTED version={self.version} reasons={self.blocking_reasons}"
+    promote: bool
+    champion_version: str | None
+    challenger_version: str | None
+    reasons: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
-class DegradationDecision:
-    """Outcome of AutoPromotionEngine.evaluate_degradation()."""
-
-    champion_version: str
-    should_rollback: bool
-    reason: str
-    metrics_snapshot: dict[str, Any] = field(default_factory=dict)
-
-
-# ---------------------------------------------------------------------------
-# Engine
-# ---------------------------------------------------------------------------
+class RollbackDecision:
+    rollback: bool
+    champion_version: str | None
+    rollback_version: str | None
+    reasons: list[str] = field(default_factory=list)
+    metrics: dict[str, Any] = field(default_factory=dict)
 
 
 class AutoPromotionEngine:
-    """Evaluation engine for challenger promotion and champion health checks.
-
-    All thresholds come from the constructor; use ``from_settings()`` to
-    populate them from the application config.
-    """
-
-    # ---- Construction -----------------------------------------------------
+    """Evaluate, promote, and roll back models using DB-backed evidence."""
 
     def __init__(
         self,
         *,
-        # --- Promotion criteria ---
-        min_signals: int = 50,
-        min_lift_bps: float = 1.0,
-        pvalue_threshold: float = 0.05,
-        # --- Champion degradation criteria ---
-        champion_degrade_min_signals: int = 100,
-        champion_min_lift_bps: float = -5.0,
-        champion_min_pass_expectancy_bps: float = -20.0,
+        trade_journal: Any,
+        config: AutoPromotionConfig,
+        reload_registry: Callable[[], Awaitable[Any]] | None = None,
     ) -> None:
-        self.min_signals = min_signals
-        self.min_lift_bps = min_lift_bps
-        self.pvalue_threshold = pvalue_threshold
-        self.champion_degrade_min_signals = champion_degrade_min_signals
-        self.champion_min_lift_bps = champion_min_lift_bps
-        self.champion_min_pass_expectancy_bps = champion_min_pass_expectancy_bps
+        self._journal = trade_journal
+        self._config = config
+        self._reload_registry = reload_registry
 
-    @classmethod
-    def from_settings(cls, settings: "Settings") -> "AutoPromotionEngine":
-        return cls(
-            min_signals=max(10, int(settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS)),
-            min_lift_bps=float(settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS),
-            pvalue_threshold=float(settings.MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD),
-            champion_degrade_min_signals=max(
-                10, int(getattr(settings, "MODEL_CHAMPION_DEGRADE_MIN_SIGNALS", 100))
-            ),
-            champion_min_lift_bps=float(
-                getattr(settings, "MODEL_CHAMPION_MIN_LIFT_BPS", -5.0)
-            ),
+    async def best_challenger(self) -> str | None:
+        rows = await self._fetch(
+            """
+            SELECT version, training_samples, metrics, training_finished_at, created_at
+            FROM model_versions
+            WHERE status IN ('SHADOW_CHALLENGER', 'VALIDATED')
+              AND artifact IS NOT NULL
+            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+            LIMIT 25
+            """
         )
+        scored: list[tuple[float, str]] = []
+        for row in rows:
+            version = str(row["version"])
+            decision = await self.should_promote(champion_version=None, challenger_version=version)
+            score = float(decision.metrics.get("selection_score", -1_000_000.0))
+            if decision.promote:
+                scored.append((score, version))
+        if not scored:
+            return None
+        return max(scored, key=lambda item: item[0])[1]
 
-    # ---- Promotion evaluation ---------------------------------------------
-
-    def evaluate_promotion(
+    async def should_promote(
         self,
-        *,
+        champion_version: str | None,
         challenger_version: str,
-        challenger_status: str,
-        gate_stats: dict[str, Any],
-        champion_wf_bps: float,
-        bootstrap_result: _BootstrapResult | None,
     ) -> PromotionDecision:
-        """Evaluate all promotion criteria (A-D) and return a decision.
+        del champion_version
+        row = await self._fetchrow(
+            """
+            SELECT version, status, training_samples, feature_schema_hash, metrics
+            FROM model_versions
+            WHERE version = $1
+            LIMIT 1
+            """,
+            challenger_version,
+        )
+        if not row:
+            return PromotionDecision(False, None, challenger_version, ["challenger_not_found"])
 
-        Criteria:
-          A. Status must be SHADOW_CHALLENGER.
-          B. Enough live shadow-gate observations (>= min_signals).
-          C. Live lift >= min_lift_bps AND quality == "GOOD".
-          D. Challenger beats champion's walk-forward expectancy.
-          E. Bootstrap p-value < pvalue_threshold (statistical significance).
-        """
-        blocking: list[str] = []
+        metrics = _metrics(row.get("metrics"))
+        reasons: list[str] = []
+        status = str(row.get("status") or "")
+        training_samples = _int_or_zero(row.get("training_samples"))
+        quality = str(metrics.get("quality") or "").upper()
+        label_schema = str(metrics.get("label_schema_version") or "")
+        wf_bps = _float_or_none(metrics.get("walk_forward_expectancy_bps"))
+        if wf_bps is None:
+            wf_bps = _float_or_none(metrics.get("wf_mean_bps"))
+        if wf_bps is None:
+            wf_bps = _float_or_none(metrics.get("best_threshold_avg_net_return_bps"))
 
-        # A — Status
-        if challenger_status != "SHADOW_CHALLENGER":
-            blocking.append(f"status_not_shadow_challenger:{challenger_status}")
+        if status not in {ModelStatus.SHADOW_CHALLENGER, ModelStatus.VALIDATED}:
+            reasons.append(f"bad_status:{status}")
+        if label_schema != LABEL_SCHEMA_VERSION:
+            reasons.append(f"incompatible_label_schema:{label_schema or 'missing'}")
+        if training_samples < self._config.min_training_samples:
+            reasons.append(f"insufficient_training_samples:{training_samples}<{self._config.min_training_samples}")
+        if quality != self._config.required_quality:
+            reasons.append(f"quality_not_{self._config.required_quality}:{quality or 'missing'}")
+        if wf_bps is None or wf_bps < self._config.min_wf_bps:
+            reasons.append(f"weak_walk_forward:{wf_bps}")
 
-        total_count = int(gate_stats.get("total_count") or 0)
-        lift_bps = float(gate_stats.get("lift_vs_all_bps") or 0.0)
-        quality = str(gate_stats.get("quality") or "").upper()
+        gate = await self._journal.get_shadow_gate_stats(
+            challenger_version,
+            self._config.horizon_minutes,
+            LABEL_SCHEMA_VERSION,
+        )
+        total_count = _int_or_zero(gate.get("total_count"))
+        pass_count = _int_or_zero(gate.get("pass_count"))
+        lift_bps = _float_or_none(gate.get("lift_vs_all_bps"))
+        pass_expectancy = _float_or_none(gate.get("pass_avg_net_return_bps"))
+        pass_precision = _float_or_none(gate.get("pass_precision"))
+        if total_count < self._config.min_shadow_signals:
+            reasons.append(f"insufficient_shadow_signals:{total_count}<{self._config.min_shadow_signals}")
+        if pass_count < self._config.min_pass_count:
+            reasons.append(f"insufficient_pass_count:{pass_count}<{self._config.min_pass_count}")
+        if lift_bps is None or lift_bps < self._config.min_lift_bps:
+            reasons.append(f"insufficient_lift:{lift_bps}")
+        if pass_expectancy is None or pass_expectancy < self._config.min_pass_expectancy_bps:
+            reasons.append(f"weak_pass_expectancy:{pass_expectancy}")
 
-        # B — Observations
-        if total_count < self.min_signals:
-            blocking.append(f"insufficient_signals:{total_count}<{self.min_signals}")
+        champion = await self._current_champion()
+        champion_version_found = str(champion["version"]) if champion else None
+        champion_metrics = _metrics(champion.get("metrics")) if champion else {}
+        champion_wf = _float_or_none(champion_metrics.get("walk_forward_expectancy_bps"))
+        if champion_wf is None:
+            champion_wf = _float_or_none(champion_metrics.get("wf_mean_bps"))
+        if champion_wf is None:
+            champion_wf = _float_or_none(champion_metrics.get("best_threshold_avg_net_return_bps"))
+        if champion_wf is not None and wf_bps is not None and wf_bps <= champion_wf:
+            reasons.append(f"not_better_than_champion:{wf_bps:.4f}<={champion_wf:.4f}")
 
-        # C — Lift and quality
-        if lift_bps < self.min_lift_bps:
-            blocking.append(f"insufficient_lift:{lift_bps:.2f}<{self.min_lift_bps:.2f}")
-        if quality != "GOOD":
-            blocking.append(f"quality_not_good:{quality or 'UNKNOWN'}")
-
-        # D — Must beat champion
-        if lift_bps <= champion_wf_bps:
-            blocking.append(
-                f"not_better_than_champion:lift={lift_bps:.2f}<=champ_wf={champion_wf_bps:.2f}"
+        challenger_returns = await self._journal.get_returns_for_model(
+            challenger_version,
+            limit=self._config.returns_limit,
+            horizon_minutes=self._config.horizon_minutes,
+        )
+        baseline_returns = await self._journal.get_returns_for_model(
+            "RULE_BASELINE_V1",
+            limit=self._config.returns_limit,
+            horizon_minutes=self._config.horizon_minutes,
+        )
+        p_value: float | None = None
+        mean_diff_bps: float | None = None
+        if (
+            len(challenger_returns) >= self._config.min_bootstrap_samples
+            and len(baseline_returns) >= self._config.min_bootstrap_samples
+        ):
+            boot = bootstrap_pvalue(
+                challenger_returns,
+                baseline_returns,
+                n_iter=self._config.bootstrap_iterations,
             )
-
-        # E — Statistical significance
-        if bootstrap_result is None:
-            blocking.append("bootstrap_not_run")
-        elif bootstrap_result.p_value >= self.pvalue_threshold:
-            blocking.append(
-                f"lift_not_significant:p={bootstrap_result.p_value:.4f}>={self.pvalue_threshold}"
-            )
-
-        approved = len(blocking) == 0
-        snap: dict[str, Any] = {
-            "total_count": total_count,
-            "lift_bps": round(lift_bps, 4),
-            "quality": quality,
-            "champion_wf_bps": round(champion_wf_bps, 4),
-            "bootstrap_p_value": (
-                round(bootstrap_result.p_value, 6) if bootstrap_result else None
-            ),
-            "bootstrap_n_challenger": (
-                bootstrap_result.n_challenger if bootstrap_result else None
-            ),
-            "bootstrap_mean_diff_bps": (
-                round(bootstrap_result.mean_diff_bps, 4) if bootstrap_result else None
-            ),
-        }
-
-        if approved:
-            log.info("auto_promotion.approved", version=challenger_version, **snap)
+            p_value = float(boot.p_value)
+            mean_diff_bps = float(boot.mean_diff_bps)
+            if p_value >= self._config.pvalue_threshold:
+                reasons.append(f"bootstrap_not_significant:{p_value:.4f}>={self._config.pvalue_threshold:.4f}")
+            if mean_diff_bps <= 0:
+                reasons.append(f"non_positive_bootstrap_diff:{mean_diff_bps:.4f}")
         else:
-            log.debug(
-                "auto_promotion.rejected",
-                version=challenger_version,
-                reasons=blocking,
+            reasons.append(
+                "insufficient_bootstrap_samples:"
+                f"{len(challenger_returns)}/{len(baseline_returns)}<{self._config.min_bootstrap_samples}"
             )
 
-        return PromotionDecision(
-            version=challenger_version,
-            approved=approved,
-            blocking_reasons=blocking,
-            metrics_snapshot=snap,
-        )
-
-    # ---- Degradation / rollback evaluation --------------------------------
-
-    def evaluate_degradation(
-        self,
-        *,
-        champion_version: str,
-        gate_stats: dict[str, Any],
-    ) -> DegradationDecision:
-        """Detect if the current champion has degraded below acceptable thresholds.
-
-        Returns should_rollback=True only after enough live observations so
-        that transient noise does not trigger unnecessary rollbacks.
-        """
-        total_count = int(gate_stats.get("total_count") or 0)
-        lift_raw = gate_stats.get("lift_vs_all_bps")
-        pass_avg_raw = gate_stats.get("pass_avg_net_return_bps")
-
-        snap: dict[str, Any] = {
+        decision_metrics = {
+            "training_samples": training_samples,
+            "quality": quality,
+            "wf_bps": wf_bps,
             "total_count": total_count,
-            "lift_bps": round(float(lift_raw), 4) if lift_raw is not None else None,
-            "pass_avg_bps": (
-                round(float(pass_avg_raw), 4) if pass_avg_raw is not None else None
-            ),
+            "pass_count": pass_count,
+            "lift_bps": lift_bps,
+            "pass_expectancy_bps": pass_expectancy,
+            "pass_precision": pass_precision,
+            "champion_wf_bps": champion_wf,
+            "bootstrap_p_value": p_value,
+            "bootstrap_mean_diff_bps": mean_diff_bps,
+            "selection_score": _metric_score(metrics) + ((lift_bps or 0.0) * 0.5) + ((pass_expectancy or 0.0) * 0.5),
         }
-
-        if total_count < self.champion_degrade_min_signals:
-            return DegradationDecision(
-                champion_version=champion_version,
-                should_rollback=False,
-                reason=(
-                    f"insufficient_observations:"
-                    f"{total_count}<{self.champion_degrade_min_signals}"
-                ),
-                metrics_snapshot=snap,
-            )
-
-        lift_bps = float(lift_raw) if lift_raw is not None else 0.0
-
-        if lift_bps < self.champion_min_lift_bps:
-            log.warning(
-                "auto_promotion.champion_degraded",
-                champion=champion_version,
-                lift_bps=lift_bps,
-                floor=self.champion_min_lift_bps,
-            )
-            return DegradationDecision(
-                champion_version=champion_version,
-                should_rollback=True,
-                reason=(
-                    f"lift_degraded:{lift_bps:.2f}bps"
-                    f"<floor:{self.champion_min_lift_bps:.2f}bps"
-                ),
-                metrics_snapshot=snap,
-            )
-
-        if pass_avg_raw is not None and float(pass_avg_raw) < self.champion_min_pass_expectancy_bps:
-            log.warning(
-                "auto_promotion.champion_negative_expectancy",
-                champion=champion_version,
-                pass_avg_bps=float(pass_avg_raw),
-            )
-            return DegradationDecision(
-                champion_version=champion_version,
-                should_rollback=True,
-                reason=f"negative_pass_expectancy:{float(pass_avg_raw):.2f}bps",
-                metrics_snapshot=snap,
-            )
-
-        log.debug(
-            "auto_promotion.champion_healthy",
-            champion=champion_version,
-            lift_bps=lift_bps,
-            total_count=total_count,
+        return PromotionDecision(
+            promote=not reasons,
+            champion_version=champion_version_found,
+            challenger_version=challenger_version,
+            reasons=reasons or ["criteria_met"],
+            metrics=decision_metrics,
         )
-        return DegradationDecision(
+
+    async def promote(self, challenger_version: str) -> PromotionDecision:
+        decision = await self.should_promote(None, challenger_version)
+        if not decision.promote:
+            await self._record_log("PROMOTION_BLOCKED", decision.champion_version, challenger_version, decision)
+            return decision
+
+        pool = getattr(self._journal, "_pool", None)
+        if pool is None:
+            return PromotionDecision(False, decision.champion_version, challenger_version, ["journal_pool_unavailable"])
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _PROMOTION_LOCK_KEY)
+                champion_row = await conn.fetchrow(
+                    "SELECT version FROM model_versions WHERE status = 'CHAMPION' ORDER BY training_finished_at DESC NULLS LAST LIMIT 1"
+                )
+                current_champion = str(champion_row["version"]) if champion_row else None
+                await conn.execute(
+                    """
+                    UPDATE model_versions
+                    SET status = 'ARCHIVED'
+                    WHERE status = 'CHAMPION'
+                    """
+                )
+                updated = await conn.execute(
+                    """
+                    UPDATE model_versions
+                    SET status = 'CHAMPION'
+                    WHERE version = $1
+                      AND status IN ('SHADOW_CHALLENGER', 'VALIDATED')
+                    """,
+                    challenger_version,
+                )
+                if not updated.endswith("1"):
+                    raise RuntimeError(f"promotion update affected unexpected rows: {updated}")
+                await conn.execute(
+                    """
+                    INSERT INTO model_promotion_log (
+                        event_type, from_version, to_version, reasons, metrics
+                    )
+                    VALUES ('PROMOTED', $1, $2, $3::jsonb, $4::jsonb)
+                    """,
+                    current_champion,
+                    challenger_version,
+                    json.dumps(decision.reasons),
+                    json.dumps(decision.metrics),
+                )
+
+        if self._reload_registry is not None:
+            await self._reload_registry()
+        log.info("model_auto_promotion.promoted", version=challenger_version, metrics=decision.metrics)
+        return decision
+
+    async def should_rollback(self) -> RollbackDecision:
+        champion = await self._current_champion()
+        if not champion:
+            return RollbackDecision(False, None, None, ["no_champion"])
+        champion_version = str(champion["version"])
+        metrics = _metrics(champion.get("metrics"))
+        wf_bps = _float_or_none(metrics.get("walk_forward_expectancy_bps"))
+        if wf_bps is None:
+            wf_bps = _float_or_none(metrics.get("wf_mean_bps"))
+        if wf_bps is None:
+            wf_bps = _float_or_none(metrics.get("best_threshold_avg_net_return_bps"))
+        returns = await self._journal.get_returns_for_model(
+            champion_version,
+            limit=self._config.returns_limit,
+            horizon_minutes=self._config.horizon_minutes,
+        )
+        drawdown_bps = _float_or_none(metrics.get("max_drawdown_bps"))
+        if drawdown_bps is None and returns:
+            drawdown_bps = _max_drawdown_bps(returns)
+
+        reasons: list[str] = []
+        if wf_bps is not None and wf_bps < self._config.min_champion_wf_bps:
+            reasons.append(f"champion_wf_degraded:{wf_bps:.4f}<{self._config.min_champion_wf_bps:.4f}")
+        if drawdown_bps is not None and drawdown_bps > self._config.max_champion_drawdown_bps:
+            reasons.append(f"champion_drawdown:{drawdown_bps:.4f}>{self._config.max_champion_drawdown_bps:.4f}")
+        rollback_row = await self._fetchrow(
+            """
+            SELECT version
+            FROM model_versions
+            WHERE status = 'ARCHIVED'
+              AND artifact IS NOT NULL
+              AND version <> $1
+            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """,
+            champion_version,
+        )
+        rollback_version = str(rollback_row["version"]) if rollback_row else None
+        if reasons and rollback_version is None:
+            reasons.append("no_archived_champion_available")
+        return RollbackDecision(
+            rollback=bool(reasons) and rollback_version is not None,
             champion_version=champion_version,
-            should_rollback=False,
-            reason="champion_healthy",
-            metrics_snapshot=snap,
+            rollback_version=rollback_version,
+            reasons=reasons or ["champion_healthy"],
+            metrics={"champion_wf_bps": wf_bps, "champion_drawdown_bps": drawdown_bps},
         )
+
+    async def rollback_if_needed(self) -> RollbackDecision:
+        decision = await self.should_rollback()
+        if not decision.rollback:
+            return decision
+        pool = getattr(self._journal, "_pool", None)
+        if pool is None:
+            return RollbackDecision(
+                False, decision.champion_version, decision.rollback_version, ["journal_pool_unavailable"]
+            )
+
+        async with pool.acquire() as conn:
+            async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _PROMOTION_LOCK_KEY)
+                await conn.execute(
+                    "UPDATE model_versions SET status = 'ROLLED_BACK' WHERE version = $1 AND status = 'CHAMPION'",
+                    decision.champion_version,
+                )
+                updated = await conn.execute(
+                    "UPDATE model_versions SET status = 'CHAMPION' WHERE version = $1 AND status = 'ARCHIVED'",
+                    decision.rollback_version,
+                )
+                if not updated.endswith("1"):
+                    raise RuntimeError(f"rollback update affected unexpected rows: {updated}")
+                await conn.execute(
+                    """
+                    INSERT INTO model_promotion_log (
+                        event_type, from_version, to_version, reasons, metrics
+                    )
+                    VALUES ('ROLLED_BACK', $1, $2, $3::jsonb, $4::jsonb)
+                    """,
+                    decision.champion_version,
+                    decision.rollback_version,
+                    json.dumps(decision.reasons),
+                    json.dumps(decision.metrics),
+                )
+
+        if self._reload_registry is not None:
+            await self._reload_registry()
+        log.warning(
+            "model_auto_promotion.rolled_back",
+            from_version=decision.champion_version,
+            to_version=decision.rollback_version,
+            reasons=decision.reasons,
+        )
+        return decision
+
+    async def _current_champion(self) -> dict[str, Any] | None:
+        return await self._fetchrow(
+            """
+            SELECT version, training_samples, metrics, training_finished_at, created_at
+            FROM model_versions
+            WHERE status = 'CHAMPION'
+              AND artifact IS NOT NULL
+            ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+            LIMIT 1
+            """
+        )
+
+    async def _record_log(
+        self,
+        event_type: str,
+        from_version: str | None,
+        to_version: str | None,
+        decision: PromotionDecision | RollbackDecision,
+    ) -> None:
+        try:
+            await self._journal._execute(
+                """
+                INSERT INTO model_promotion_log (
+                    event_type, from_version, to_version, reasons, metrics
+                )
+                VALUES ($1, $2, $3, $4::jsonb, $5::jsonb)
+                """,
+                event_type,
+                from_version,
+                to_version,
+                json.dumps(decision.reasons),
+                json.dumps(decision.metrics),
+            )
+        except Exception as exc:
+            log.debug("model_auto_promotion.log_failed", error=str(exc))
+
+    async def _fetch(self, query: str, *args: Any) -> list[Any]:
+        return await self._journal._fetch(query, *args)
+
+    async def _fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        rows = await self._fetch(query, *args)
+        if not rows:
+            return None
+        return dict(rows[0])

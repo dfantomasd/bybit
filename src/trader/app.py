@@ -812,20 +812,21 @@ class TradingApplication:
             return 0.0
 
     async def _run_auto_model_promoter(self) -> None:
-        """Promote challenger to champion automatically when it consistently beats the champion.
-
-        Delegates all criteria evaluation to AutoPromotionEngine (pure, testable).
-        On approval, performs an atomic DB promotion via TradeJournal and reloads the registry.
-        """
+        """Promote the best eligible challenger and roll back degraded champions."""
         assert self._settings is not None
         if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
             log.info("model_auto_promote.disabled")
             return
 
-        from trader.ml.auto_promotion import AutoPromotionEngine
+        from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
 
-        engine = AutoPromotionEngine.from_settings(self._settings)
-        check_seconds = max(120, int(self._settings.MODEL_AUTO_PROMOTE_CHECK_SECONDS))
+        config = AutoPromotionConfig.from_settings(self._settings)
+        check_seconds = config.check_seconds
+        last_monitor_at = datetime.now(tz=UTC) - timedelta(seconds=config.monitor_seconds)
+
+        async def _reload_registry() -> None:
+            if self._model_registry is not None:
+                await self._model_registry.load_active_model()
 
         while not self._shutdown_event.is_set():
             try:
@@ -838,183 +839,53 @@ class TradingApplication:
                 continue
 
             try:
-                diag = await self._trade_journal.get_db_diagnostics()
-                latest_model = diag.get("latest_model_version", {}) or {}
+                engine = AutoPromotionEngine(
+                    trade_journal=self._trade_journal,
+                    config=config,
+                    reload_registry=_reload_registry,
+                )
+                now = datetime.now(tz=UTC)
+                if (now - last_monitor_at).total_seconds() >= config.monitor_seconds:
+                    rollback = await engine.rollback_if_needed()
+                    last_monitor_at = now
+                    if rollback.rollback and self._telegram_bot is not None:
+                        await self._telegram_bot.notify(
+                            "↩️ <b>Авто-откат модели</b>\n"
+                            f"Было: <code>{rollback.champion_version}</code>\n"
+                            f"Стало: <code>{rollback.rollback_version}</code>\n"
+                            f"Причины: <code>{html.escape(', '.join(rollback.reasons))}</code>"
+                        )
 
-                challenger_version = str(latest_model.get("version", "") or "")
-                challenger_status = str(latest_model.get("status", "") or "")
-
+                challenger_version = await engine.best_challenger()
                 if not challenger_version:
+                    log.debug("model_auto_promote.waiting", reason="no_eligible_challenger")
                     continue
 
-                from trader.training.labels import LABEL_SCHEMA_VERSION
-
-                gate = await self._trade_journal.get_shadow_gate_stats(
-                    model_version=challenger_version,
-                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version=LABEL_SCHEMA_VERSION,
-                )
-                champion_wf_bps = await self._get_champion_walk_forward_bps()
-
-                from trader.training.bootstrap import bootstrap_pvalue
-
-                min_boot = max(50, int(self._settings.MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES))
-                n_iter = max(100, int(self._settings.MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS))
-                horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-                challenger_returns = await self._trade_journal.get_returns_for_model(
-                    challenger_version, limit=200, horizon_minutes=horizon
-                )
-                baseline_returns = await self._trade_journal.get_returns_for_model(
-                    "RULE_BASELINE_V1", limit=200, horizon_minutes=horizon
-                )
-
-                boot: Any = None
-                if len(challenger_returns) >= min_boot and len(baseline_returns) >= min_boot:
-                    boot = bootstrap_pvalue(challenger_returns, baseline_returns, n_iter=n_iter)
+                decision = await engine.promote(challenger_version)
+                if not decision.promote:
                     log.info(
-                        "model_auto_promote.bootstrap",
+                        "model_auto_promote.waiting",
                         version=challenger_version,
-                        p_value=boot.p_value,
-                        mean_diff_bps=round(boot.mean_diff_bps, 4),
-                        n_iterations=boot.n_iterations,
-                        n_challenger=boot.n_challenger,
-                        n_baseline=boot.n_baseline,
+                        reasons=decision.reasons,
+                        metrics=decision.metrics,
                     )
-
-                decision = engine.evaluate_promotion(
-                    challenger_version=challenger_version,
-                    challenger_status=challenger_status,
-                    gate_stats=gate,
-                    champion_wf_bps=champion_wf_bps,
-                    bootstrap_result=boot,
-                )
-                log.info("model_auto_promote.evaluated", summary=decision.log_summary())
-
-                if not decision.approved:
                     continue
 
-                await self._trade_journal.promote_challenger_to_champion(
-                    challenger_version,
-                    event_data=decision.metrics_snapshot,
-                )
-
-                if self._model_registry is not None:
-                    try:
-                        await self._model_registry.load_active_model()
-                    except Exception as exc:
-                        log.warning("model_auto_promote.registry_reload_failed", error=str(exc))
-
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
-                quality = str(gate.get("quality", "") or "").upper()
+                # Promotion and Canary are separate safety steps. This does not
+                # auto-enable MODEL_GATE_CANARY_ENABLED.
 
                 if self._telegram_bot is not None:
-                    boot_line = (
-                        f"Bootstrap p-value: <code>{boot.p_value:.4f}</code> ({boot.n_iterations} итераций)\n"
-                        if boot else ""
-                    )
                     await self._telegram_bot.notify(
                         f"🤖 <b>Авто-промоут</b>\n"
                         f"Версия: <code>{challenger_version}</code>\n"
-                        f"Сигналов: <code>{total_count}</code> | "
-                        f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{boot_line}"
-                        f"Качество: <code>{quality}</code>\n"
-                        f"✅ Промоутирован в CHAMPION"
+                        f"Сигналов: <code>{decision.metrics.get('total_count')}</code> | "
+                        f"Lift: <code>{float(decision.metrics.get('lift_bps') or 0.0):+.2f} bps</code>\n"
+                        f"WF: <code>{float(decision.metrics.get('wf_bps') or 0.0):+.2f} bps</code>, "
+                        f"p-value: <code>{float(decision.metrics.get('bootstrap_p_value') or 0.0):.4f}</code>\n"
+                        f"Предыдущий чемпион: <code>{decision.champion_version or 'none'}</code>"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
-
-    async def _run_champion_monitor(self) -> None:
-        """Monitor champion health and trigger automatic rollback on degradation.
-
-        Runs every MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS (default: 4 hours).
-        Only active when MODEL_AUTO_PROMOTE_ENABLED is True.
-        """
-        assert self._settings is not None
-        if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
-            log.info("champion_monitor.disabled")
-            return
-
-        from trader.ml.auto_promotion import AutoPromotionEngine
-
-        engine = AutoPromotionEngine.from_settings(self._settings)
-        interval = max(
-            3600,
-            int(getattr(self._settings, "MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS", 14400)),
-        )
-
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
-                break
-            except TimeoutError:
-                pass
-
-            if self._trade_journal is None or not self._trade_journal.is_enabled:
-                continue
-
-            try:
-                from trader.training.labels import LABEL_SCHEMA_VERSION
-
-                diag = await self._trade_journal.get_db_diagnostics()
-                champ = (
-                    diag.get("active_model_version")
-                    or diag.get("latest_model_version")
-                    or {}
-                )
-                champion_version = str(champ.get("version", "") or "")
-                champion_status = str(champ.get("status", "") or "")
-
-                if champion_status != "CHAMPION" or not champion_version:
-                    continue
-
-                gate = await self._trade_journal.get_shadow_gate_stats(
-                    model_version=champion_version,
-                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version=LABEL_SCHEMA_VERSION,
-                )
-
-                deg = engine.evaluate_degradation(
-                    champion_version=champion_version,
-                    gate_stats=gate,
-                )
-
-                if not deg.should_rollback:
-                    continue
-
-                log.warning(
-                    "champion_monitor.rollback_triggered",
-                    champion=champion_version,
-                    reason=deg.reason,
-                )
-
-                new_champ = await self._trade_journal.rollback_champion(
-                    current_version=champion_version,
-                    reason=deg.reason,
-                    event_data=deg.metrics_snapshot,
-                )
-
-                if self._model_registry is not None:
-                    try:
-                        await self._model_registry.load_active_model()
-                    except Exception as exc:
-                        log.warning("champion_monitor.registry_reload_failed", error=str(exc))
-
-                if self._telegram_bot is not None:
-                    restore_line = (
-                        f"Восстановлен: <code>{new_champ}</code>"
-                        if new_champ
-                        else "⚠️ Нет кандидата для восстановления"
-                    )
-                    await self._telegram_bot.notify(
-                        f"⚠️ <b>Авто-откат чемпиона</b>\n"
-                        f"Причина: <code>{html.escape(deg.reason)}</code>\n"
-                        f"Откатываем: <code>{champion_version}</code>\n"
-                        f"{restore_line}"
-                    )
-            except Exception as exc:
-                log.warning("champion_monitor.failed", error=str(exc))
 
     async def _run_model_progress_reporter(self) -> None:
         """Send an hourly Telegram report on model training progress and promotion readiness."""
@@ -4211,10 +4082,6 @@ class TradingApplication:
             # Auto-promotion: promotes challenger to champion when it consistently beats the champion
             auto_promoter_task = asyncio.create_task(self._run_auto_model_promoter(), name="auto-model-promoter")
             self._background_tasks.append(auto_promoter_task)
-
-            # Champion health monitor: auto-rollback if champion degrades (runs every 4h)
-            champion_monitor_task = asyncio.create_task(self._run_champion_monitor(), name="champion-monitor")
-            self._background_tasks.append(champion_monitor_task)
 
             # Hourly model progress report via Telegram
             model_reporter_task = asyncio.create_task(
