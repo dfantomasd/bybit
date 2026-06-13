@@ -439,6 +439,65 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
 
 
 @pytest.mark.asyncio
+async def test_db_diagnostics_reports_legacy_challenger_fallback() -> None:
+    """Diagnostics should mirror registry fallback for legacy challenger artifacts."""
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    journal = DirectionalTradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+    journal._pool = MagicMock()
+    journal._enabled = True
+    directional_latest_queries = 0
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        nonlocal directional_latest_queries
+        del args
+        if "FROM prediction_outcomes" in query:
+            return []
+        if "pe.model_version = 'RULE_BASELINE_V1'" in query:
+            return []
+        if "FROM training_runs" in query:
+            return []
+        if (
+            "FROM model_versions" in query
+            and "artifact IS NOT NULL" in query
+            and "COALESCE(metrics->>'label_schema_version', '')" in query
+            and "status = 'CHAMPION'" not in query
+        ):
+            directional_latest_queries += 1
+            if directional_latest_queries == 1:
+                return []
+        if (
+            "FROM model_versions" in query
+            and "artifact IS NOT NULL" in query
+            and "COALESCE(metrics->>'label_schema_version', '')" not in query
+            and "status = 'CHAMPION'" not in query
+        ):
+            return [
+                {
+                    "version": "v_legacy_no_schema",
+                    "status": "SHADOW_CHALLENGER",
+                    "training_samples": 100,
+                    "metrics": {},
+                    "feature_schema_hash": "",
+                    "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                }
+            ]
+        if "FROM model_versions" in query and "status = 'CHAMPION'" in query:
+            return []
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["latest_model_version"]["version"] == "v_legacy_no_schema"
+    assert diag["latest_model_version"]["schema_compatible"] is False
+    assert diag["latest_model_version"]["training_samples_compatible"] == 0
+    assert diag["active_model_version"]["version"] == "v_legacy_no_schema"
+
+
+@pytest.mark.asyncio
 async def test_trade_journal_keeps_reconnectable_after_connect_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """A transient Render/Postgres startup failure must not disable DB forever."""
     from trader.storage import trade_journal as trade_journal_module
