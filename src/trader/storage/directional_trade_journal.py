@@ -423,7 +423,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             LABEL_SCHEMA_VERSION,
         )
-        result["active_model_version"] = dict(rows[0]) if rows else {}
+        # When no CHAMPION exists, fall back to latest_model_version so that
+        # diagnostics and the heartbeat can still show which model is loaded.
+        result["active_model_version"] = dict(rows[0]) if rows else result.get("latest_model_version", {})
 
         return result
 
