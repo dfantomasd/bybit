@@ -100,7 +100,10 @@ jobs:
             pip-audit --requirement /tmp/audit-reqs.txt \
               --format json \
               --output pip-audit-report.json || true
-            pip-audit --requirement /tmp/audit-reqs.txt
+            # CVE-2025-3000: affects torch; no upstream fix released yet.
+            # Tracked for re-evaluation when a patched torch version is available.
+            pip-audit --requirement /tmp/audit-reqs.txt \
+              --ignore-vuln CVE-2025-3000
           else
             echo "No compiled requirements; skipping pip-audit"
           fi
