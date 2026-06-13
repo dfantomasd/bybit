@@ -106,6 +106,8 @@ class TradeJournal:
 
     def write_health(self) -> dict[str, Any]:
         """Return write-health snapshot for observability and safety gates."""
+        last_read_error_at = cast(datetime | None, getattr(self, "_last_read_error_at", None))
+        last_connect_error_at = cast(datetime | None, getattr(self, "_last_connect_error_at", None))
         return {
             "healthy": self.durable_state_healthy,
             "consecutive_write_errors": self._consecutive_write_errors,
@@ -114,13 +116,9 @@ class TradeJournal:
             ),
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
-            "last_read_error_at": (
-                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
-            ),
+            "last_read_error_at": last_read_error_at.isoformat() if last_read_error_at else None,
             "last_read_error": getattr(self, "_last_read_error", None),
-            "last_connect_error_at": (
-                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
-            ),
+            "last_connect_error_at": (last_connect_error_at.isoformat() if last_connect_error_at else None),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
 
@@ -754,7 +752,7 @@ class TradeJournal:
             datetime.now(tz=UTC),
         )
 
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+    async def record_transaction_log_entries(self, entries: list[dict[str, Any]]) -> int:
         """Persist Bybit transaction log entries. Returns count inserted."""
         if not self.is_enabled or not entries:
             return 0
@@ -2965,7 +2963,7 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return await conn.fetch(query, *args)
+                return list(await conn.fetch(query, *args))
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

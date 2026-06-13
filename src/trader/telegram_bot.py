@@ -48,7 +48,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 import structlog
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -399,9 +399,10 @@ class TelegramMonitorBot:
         update: Update,
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any | None:
         if update.effective_message is not None:
-            await self._reply_chunks(update.effective_message, text, reply_markup=reply_markup)
+            return await self._reply_chunks(update.effective_message, text, reply_markup=reply_markup)
+        return None
 
     @staticmethod
     def _split_message(text: str, limit: int = _TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -438,11 +439,11 @@ class TelegramMonitorBot:
         text: str,
         *,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any:
         from telegram.error import BadRequest
 
         try:
-            await message.reply_text(
+            return await message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
@@ -450,7 +451,7 @@ class TelegramMonitorBot:
             )
         except BadRequest as exc:
             log.debug("telegram.reply_html_failed_plaintext_fallback", error=str(exc))
-            await message.reply_text(
+            return await message.reply_text(
                 self._plain_text(text),
                 disable_web_page_preview=True,
                 reply_markup=reply_markup,
@@ -461,14 +462,16 @@ class TelegramMonitorBot:
         message: Any,
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any | None:
         chunks = self._split_message(text)
+        sent = None
         for index, chunk in enumerate(chunks):
-            await self._safe_reply_text(
+            sent = await self._safe_reply_text(
                 message,
                 chunk,
                 reply_markup=reply_markup if index == len(chunks) - 1 else None,
             )
+        return sent
 
     def _chat_id(self, update: Update) -> int | None:
         return update.effective_chat.id if update.effective_chat else None
@@ -2024,7 +2027,7 @@ class TelegramMonitorBot:
             return None
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
-        return max(0.0, (datetime.now(UTC) - value.astimezone(UTC)).total_seconds())
+        return float(max(0.0, (datetime.now(UTC) - value.astimezone(UTC)).total_seconds()))
 
     @staticmethod
     def _age_label(age_s: Any) -> str:
@@ -3105,11 +3108,12 @@ class TelegramMonitorBot:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True,
             )
-            self._dashboard_message_id = query.message.message_id
-            self._dashboard_chat_id = query.message.chat_id
+            if isinstance(query.message, Message):
+                self._dashboard_message_id = query.message.message_id
+                self._dashboard_chat_id = query.message.chat_id
         except (BadRequest, Exception) as exc:
             log.debug("telegram.edit_failed_sending_new", error=str(exc))
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     msg = await query.message.reply_text(
                         text=text,
@@ -3125,13 +3129,13 @@ class TelegramMonitorBot:
     async def _render_home(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the main dashboard text and keyboard."""
         ctrl = self._controller
-        mode = "SHADOW" if (ctrl and ctrl.is_shadow and ctrl.is_shadow()) else "ACTIVE"
-        paused = ctrl.is_paused() if (ctrl and ctrl.is_paused) else False
+        mode = "SHADOW" if (ctrl is not None and ctrl.is_shadow()) else "ACTIVE"
+        paused = ctrl.is_paused() if ctrl is not None else False
         risk = getattr(ctrl, "current_risk_profile", "—") if ctrl else "—"
         positions = 0
         if ctrl and hasattr(ctrl, "exposure") and ctrl.exposure is not None:
             positions = getattr(ctrl.exposure, "position_count", 0)
-        symbols_count = len(ctrl.active_symbols()) if (ctrl and ctrl.active_symbols) else 0
+        symbols_count = len(ctrl.active_symbols()) if ctrl is not None else 0
         entries_per_min: Any = "—"
         max_pos: Any = "—"
         if ctrl and ctrl.runtime_settings:
@@ -3469,21 +3473,19 @@ class TelegramMonitorBot:
         """Handle action: prefix callbacks from the dashboard."""
         ctrl = self._controller
         if action in ("pause", "resume"):
-            if ctrl is None or not ctrl.is_paused:
+            if ctrl is None:
                 await self._button_reply(update, "Управление недоступно.", reply_markup=self._main_menu())
                 return
             if action == "pause":
-                if ctrl.pause:
-                    await ctrl.pause()
+                await ctrl.pause()
             else:
-                if ctrl.resume:
-                    await ctrl.resume()
+                await ctrl.resume()
             text, markup = await self._render_home()
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "canary":
             fake_context = type("_Context", (), {"args": []})()
-            await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_canary_ready(update, fake_context)
             return
         await self._button_reply(update, f"Неизвестное действие: {action}", reply_markup=self._main_menu())
 
@@ -3548,7 +3550,7 @@ class TelegramMonitorBot:
             )
         except (BadRequest, Exception) as exc:
             log.debug("telegram.settings_edit_failed", error=str(exc))
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     await query.message.reply_text(
                         text=text,
@@ -3641,23 +3643,23 @@ class TelegramMonitorBot:
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "healthcheck":
-            await self._cmd_healthcheck(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_healthcheck(update, fake_context)
             return
         if action == "worst":
             fake_context.args = ["10"]
-            await self._cmd_worst(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_worst(update, fake_context)
             return
         if action == "db_model":
-            await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_db_model(update, fake_context)
             return
         if action == "canary":
-            await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_canary_ready(update, fake_context)
             return
         if action == "canary_model":
             await self._show_canary_model_metrics(update)
             return
         if action == "model_help":
-            await self._cmd_model_help(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_model_help(update, fake_context)
             return
         if action == "symbol_select":
             await self._show_symbol_select(update, page=0)
@@ -3677,7 +3679,7 @@ class TelegramMonitorBot:
         if handler is None:
             await self._button_reply(update, "Неизвестный экран.", reply_markup=self._main_menu())
             return
-        await handler(update, fake_context)  # type: ignore[arg-type]
+        await handler(update, fake_context)
 
     async def _show_symbol_select(self, update: Update, *, page: int) -> None:
         candidates = self._symbol_candidates()
@@ -3962,10 +3964,11 @@ class TelegramMonitorBot:
             )
             return
         cid = self._chat_id(update)
-        if cid:
+        controller = self._controller
+        if cid and controller is not None:
             self._pending[cid] = (
                 f"сменить риск-профиль с {old_profile} на {new_profile_str}",
-                lambda: self._controller.set_risk_profile(new_profile),
+                lambda: controller.set_risk_profile(new_profile),
                 datetime.now(tz=UTC),
             )
         await self._button_reply(

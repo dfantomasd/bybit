@@ -20,7 +20,7 @@ import inspect
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -337,7 +337,7 @@ class ExecutionEngine:
                 total_pending=self._pending_entry_count,
             )
 
-    def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
+    def restore_pending_entries_with_symbols(self, records: list[dict[str, Any]]) -> None:
         """Restore pending entries from detailed records (includes symbol mapping).
 
         Empty and duplicate IDs are silently discarded. Count is synced
@@ -379,7 +379,7 @@ class ExecutionEngine:
         )
 
         # Build merged record dict — durable_order_state takes priority over order_events
-        merged: dict[str, dict] = {}
+        merged: dict[str, dict[str, Any]] = {}
         try:
             for rec in await self._trade_journal.get_pending_order_events():
                 oid = str(rec.get("order_link_id", ""))
@@ -515,7 +515,7 @@ class ExecutionEngine:
 
     async def _fetch_positions(self) -> list[Any] | None:
         try:
-            return await self._adapter.get_positions(self._category)
+            return cast(list[Any], await self._adapter.get_positions(self._category))
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
             return None
@@ -826,7 +826,7 @@ class ExecutionEngine:
                 log.debug("execution.prediction_event_failed", error=str(_pred_exc))
 
         if not approved:
-            return decision
+            return cast(RiskDecision, decision)
         exposure_reserved = True
 
         # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
@@ -1179,9 +1179,9 @@ class ExecutionEngine:
                 symbol=symbol,
                 order_link_id=intent.order_link_id,
             )
-            return decision
+            return cast(RiskDecision, decision)
 
-        return decision
+        return cast(RiskDecision, decision)
 
     # ------------------------------------------------------------------
     # Maker-first execution
