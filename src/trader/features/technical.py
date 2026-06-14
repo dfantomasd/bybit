@@ -482,8 +482,5 @@ def vwap(
     total_vol = sum(volumes)
     if total_vol == 0:
         return None
-    total_tp_vol = sum(
-        ((h + lo + c) / 3.0) * v
-        for h, lo, c, v in zip(highs, lows, closes, volumes, strict=False)
-    )
+    total_tp_vol = sum(((h + lo + c) / 3.0) * v for h, lo, c, v in zip(highs, lows, closes, volumes, strict=False))
     return total_tp_vol / total_vol
