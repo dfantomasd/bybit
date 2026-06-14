@@ -982,7 +982,9 @@ class ExecutionEngine:
                 # penalty: 1.0 at 0% distance, 0.7 at ≥2% distance
                 penalty = max(0.7, 1.0 - abs(vwap_dist) / 20.0)
                 signal_qty_multiplier *= Decimal(str(round(penalty, 4)))
-                log.debug("vwap_gate.applied", symbol=symbol, vwap_distance_pct=round(vwap_dist, 3), penalty=round(penalty, 4))
+                log.debug(
+                    "vwap_gate.applied", symbol=symbol, vwap_distance_pct=round(vwap_dist, 3), penalty=round(penalty, 4)
+                )
 
         # 4. Risk evaluation ───────────────────────────────────────────
         # Extract spread and ATR for RiskManager sizing
