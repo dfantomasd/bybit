@@ -31,6 +31,7 @@ from trader.features.technical import (
     ema_value,
     log_return,
     macd,
+    multi_ewma_signal,
     obv,
     realized_volatility,
     returns,
@@ -365,6 +366,13 @@ class FeaturePipeline:
         if candles:
             last = candles[-1]
             features["candle_body_ratio"] = candle_body_ratio(last.open, last.high, last.low, last.close)
+
+        # --- Multi-tier EWMA directional signal ---
+        val_ewma = multi_ewma_signal(closes)
+        if val_ewma is not None:
+            features["ewma_tier_signal"] = val_ewma
+        else:
+            missing.append("ewma_tier_signal")
 
         # Quality score: fraction of features computed
         total = len(features) + len(missing)
