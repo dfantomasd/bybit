@@ -390,7 +390,7 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_ENABLED: bool = True
     """Automatically train a shadow challenger when enough new labelled examples accumulate."""
     MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 1000
-    MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 5000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
@@ -423,7 +423,7 @@ class Settings(BaseSettings):
     """Rollback CHAMPION when stored walk-forward expectancy falls below this."""
     MODEL_CHAMPION_MAX_DRAWDOWN_BPS: float = 1500.0
     """Rollback CHAMPION when recent model return drawdown exceeds this bps limit."""
-    MODEL_CHAMPION_MIN_PAPER_GATE_COUNT: int = 50
+    MODEL_CHAMPION_MIN_PAPER_GATE_COUNT: int = 20
     """Minimum paper-gate sample count required for walk-forward champion selection."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
