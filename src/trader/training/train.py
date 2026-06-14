@@ -677,7 +677,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             raw_results = Parallel(n_jobs=-1, prefer="threads")(
                 jdelayed(_run_candidate)(spec, threshold) for spec, threshold in tasks
             )
-        except Exception:
+        except (ImportError, ModuleNotFoundError):
             raw_results = [_run_candidate(spec, threshold) for spec, threshold in tasks]
 
         candidate_results: list[dict[str, Any]] = [r for r in raw_results if r is not None]

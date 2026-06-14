@@ -191,6 +191,8 @@ class ExecutionEngine:
         self._leverage_confirmed: dict[str, Decimal] = {}
         # Serialises risk evaluation + local exposure updates across symbols.
         self._submit_lock = asyncio.Lock()
+        # Keep strong references to trailing-stop tasks to prevent GC before completion.
+        self._trailing_stop_tasks: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Startup warmup / burst guards
@@ -980,7 +982,7 @@ class ExecutionEngine:
                 proposal.side == OrderSide.SELL and vwap_dist < 0
             ):
                 # penalty: 1.0 at 0% distance, 0.7 at ≥2% distance
-                penalty = max(0.7, 1.0 - abs(vwap_dist) / 20.0)
+                penalty = max(0.7, 1.0 - abs(vwap_dist) / 5.0)
                 signal_qty_multiplier *= Decimal(str(round(penalty, 4)))
                 log.debug(
                     "vwap_gate.applied", symbol=symbol, vwap_distance_pct=round(vwap_dist, 3), penalty=round(penalty, 4)
@@ -1435,8 +1437,11 @@ class ExecutionEngine:
                 symbol=symbol,
                 order_link_id=intent.order_link_id,
             )
-            # Set exchange-side trailing stop asynchronously (non-blocking)
-            asyncio.ensure_future(self._setup_trailing_stop(symbol, entry_price, atr))
+            # Set exchange-side trailing stop asynchronously (non-blocking).
+            # Store the task reference so it isn't GC'd before completion.
+            _ts_task = asyncio.create_task(self._setup_trailing_stop(symbol, entry_price, atr))
+            self._trailing_stop_tasks.add(_ts_task)
+            _ts_task.add_done_callback(self._trailing_stop_tasks.discard)
 
         return cast(RiskDecision, decision)
 
@@ -1466,7 +1471,10 @@ class ExecutionEngine:
             await self._abort_maker_entry(intent, decision, reason=f"no_quote: {exc}")
             return False
         tick = instrument_info.tick_size if instrument_info.tick_size > 0 else Decimal("0")
-        spread_bps_val = float((ask - bid) / bid * 10000) if bid > 0 else 0.0
+        if bid <= 0 or ask <= bid:
+            await self._abort_maker_entry(intent, decision, reason="locked_or_crossed_market")
+            return False
+        spread_bps_val = float((ask - bid) / bid * 10000)
         if intent.side == OrderSide.BUY:
             if spread_bps_val < 5.0:
                 # Tight spread: place at mid
