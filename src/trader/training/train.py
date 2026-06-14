@@ -32,6 +32,21 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _settings_horizon() -> int:
+    """Return MODEL_LABEL_HORIZON from settings, falling back to 15."""
+    try:
+        from trader.config import Settings
+
+        return int(getattr(Settings(), "MODEL_LABEL_HORIZON", 15))
+    except Exception:
+        import os
+
+        try:
+            return int(os.environ.get("MODEL_LABEL_HORIZON", 15))
+        except (ValueError, TypeError):
+            return 15
+
+
 def _parse_float_csv(raw: str, default: list[float]) -> list[float]:
     values: list[float] = []
     for item in str(raw or "").split(","):
@@ -147,6 +162,23 @@ def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
         )
     if "SGD" in families:
         specs.append({"model_type": "SGD"})
+    if "MLP" in families:
+        specs.extend(
+            [
+                {
+                    "model_type": "MLP",
+                    "hidden_layer_sizes": (64, 32),
+                    "learning_rate_init": 0.001,
+                    "alpha": 0.0001,
+                },
+                {
+                    "model_type": "MLP",
+                    "hidden_layer_sizes": (128, 64, 32),
+                    "learning_rate_init": 0.0005,
+                    "alpha": 0.001,
+                },
+            ]
+        )
     return specs
 
 
@@ -810,7 +842,12 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 @click.command()
 @click.option("--min-samples", default=500, type=int, help="Minimum compatible samples required")
 @click.option("--label-bps", default=5.0, type=float, help="Resolved net-return threshold in bps")
-@click.option("--horizon", default=15, type=int, help="Prediction horizon in minutes")
+@click.option(
+    "--horizon",
+    default=lambda: _settings_horizon(),
+    type=int,
+    help="Prediction horizon in minutes (default: MODEL_LABEL_HORIZON config, fallback 15)",
+)
 def main(min_samples: int, label_bps: float, horizon: int) -> None:
     """Train a challenger from directional, cost-aware historical labels."""
 
