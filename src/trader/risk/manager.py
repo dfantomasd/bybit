@@ -270,20 +270,21 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 8-9. Exposure checks
+        # 8. Exposure guard — block only when cap is already reached
+        #
+        # The full exposure validation happens AFTER sizing (step 15.7).
+        # Here we only reject if there is literally zero remaining budget,
+        # avoiding the premature rejection that occurs when requested_qty
+        # is used before PositionSizer reduces it.
         # ----------------------------------------------------------------
-        estimated_entry = proposal.entry_price or Decimal("0")
-        estimated_notional = (
-            proposal.requested_qty * estimated_entry if estimated_entry > Decimal("0") else Decimal("0")
-        )
-
-        if estimated_notional > Decimal("0"):
-            can_add, reason = self._exposure.can_add_position(
-                proposal.symbol,
-                estimated_notional,
+        if self._exposure.total_exposure_pct >= self._limits.max_total_exposure_pct:
+            return self._reject(
+                proposal,
+                f"portfolio exposure {self._exposure.total_exposure_pct:.2f}% "
+                f"already at or above cap {self._limits.max_total_exposure_pct}%",
+                ["exposure_cap_reached"],
+                capital,
             )
-            if not can_add:
-                return self._reject(proposal, reason, ["exposure_cap"], capital)
 
         # ----------------------------------------------------------------
         # 10. Leverage check (for derivatives)
@@ -451,6 +452,69 @@ class RiskManager:
                 ["post_multiplier_zero"],
                 capital,
             )
+
+        # ----------------------------------------------------------------
+        # 15.7  Final exposure validation
+        #
+        # After all sizing, multipliers, rounding and min-notional floor,
+        # verify the final notional fits within ALL risk limits (gross
+        # notional, per-position cap, margin, risk-at-stop).
+        # This is the definitive gate — no order passes if it would breach
+        # any portfolio limit.  The PositionSizer already capped by the
+        # gross-notional budget; this only triggers when the min-notional
+        # bump (step 15.5) pushed qty above the remaining budget.
+        # ----------------------------------------------------------------
+        if proposal.entry_price is not None and proposal.entry_price > Decimal("0") and approved_qty > Decimal("0"):
+            final_notional = approved_qty * proposal.entry_price
+            can_add, exp_reason = self._exposure.can_add_position(
+                proposal.symbol,
+                final_notional,
+                leverage=self._limits.max_leverage,
+                stop_distance_pct=stop_distance_pct,
+            )
+            if not can_add:
+                # One-shot resize: reduce qty to what fits in remaining budget
+                remaining_usd = self._exposure.remaining_gross_notional_usd(capital, symbol=proposal.symbol)
+                resized_qty = Decimal("0")
+                if remaining_usd > Decimal("0"):
+                    resized_qty = sizer.round_to_step(
+                        remaining_usd / proposal.entry_price,
+                        instrument_info.qty_step,
+                    )
+
+                resized_ok = (
+                    resized_qty >= instrument_info.min_order_qty
+                    and (
+                        instrument_info.min_notional is None
+                        or resized_qty * proposal.entry_price >= instrument_info.min_notional
+                    )
+                    and resized_qty * proposal.entry_price * stop_distance_pct
+                    <= capital * self._limits.risk_per_trade_hard_cap_pct / Decimal("100")
+                )
+
+                if resized_ok:
+                    self._log.info(
+                        "risk.exposure_resized_to_remaining_budget symbol=%s from_qty=%s to_qty=%s reason=%s",
+                        proposal.symbol,
+                        str(approved_qty),
+                        str(resized_qty),
+                        exp_reason,
+                    )
+                    approved_qty = resized_qty
+                    triggered_rules.append("exposure_resized_to_remaining_budget")
+                else:
+                    self._log.warning(
+                        "risk.exposure_rejected_after_final_resize symbol=%s notional=%s reason=%s",
+                        proposal.symbol,
+                        str(final_notional),
+                        exp_reason,
+                    )
+                    return self._reject(
+                        proposal,
+                        f"final exposure check: {exp_reason}",
+                        ["exposure_rejected_after_final_resize"],
+                        capital,
+                    )
 
         # ----------------------------------------------------------------
         # 16. Determine status: APPROVED or RESIZED

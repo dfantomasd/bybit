@@ -31,6 +31,17 @@ from trader.exchange.rate_limiter import RateLimiter
 logger = structlog.get_logger(__name__)
 
 
+def _default_settle_coin_for_category(category: str) -> str | None:
+    """Return settleCoin filter for a Bybit V5 category.
+
+    linear USDT perpetuals require settleCoin=USDT when querying open orders
+    without a specific symbol.  spot and inverse categories do not use it.
+    """
+    if category == "linear":
+        return "USDT"
+    return None
+
+
 class BybitAdapter:
     """High-level adapter providing domain-level methods over the Bybit V5 API.
 
@@ -157,9 +168,18 @@ class BybitAdapter:
     # Orders
     # ------------------------------------------------------------------
 
-    async def get_open_orders(self, category: str, symbol: str | None = None) -> list[dict[str, Any]]:
+    async def get_open_orders(
+        self,
+        category: str,
+        symbol: str | None = None,
+        settle_coin: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return open orders as raw dicts (mapper can be applied later)."""
-        resp = await self._rest.get_open_orders(category=category, symbol=symbol)
+        resp = await self._rest.get_open_orders(
+            category=category,
+            symbol=symbol,
+            settle_coin=settle_coin,
+        )
         return (resp.get("result") or {}).get("list", [])
 
     async def place_order(self, intent: OrderIntent) -> dict[str, Any]:
@@ -296,7 +316,11 @@ class BybitAdapter:
         local_pending = self._idempotency.pending_count()
 
         try:
-            open_orders_resp = await self._rest.get_open_orders(category=self._default_category)
+            _settle = _default_settle_coin_for_category(self._default_category)
+            open_orders_resp = await self._rest.get_open_orders(
+                category=self._default_category,
+                settle_coin=_settle,
+            )
             exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
             exchange_ids = {o.get("orderLinkId") for o in exchange_open}
 

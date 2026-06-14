@@ -122,7 +122,13 @@ class ExecutionEngine:
                         "entry_price": pos.entry_price,
                     }
                     notional = pos.size * pos.entry_price
-                    await self._exposure.update_position(pos.symbol, pos.side.value, notional)
+                    lev = self._leverage_confirmed.get(pos.symbol)
+                    await self._exposure.update_position(
+                        pos.symbol,
+                        pos.side.value,
+                        notional,
+                        leverage=lev,
+                    )
             closed_symbols = previous_symbols - exchange_symbols
             for symbol in closed_symbols:
                 await self._exposure.remove_position(symbol)
@@ -330,6 +336,14 @@ class ExecutionEngine:
             reason=decision.reason or "—",
             approved_qty=str(decision.approved_qty) if decision.approved_qty else None,
             portfolio_heat=decision.portfolio_heat,
+            gross_notional_exposure_pct=str(self._risk_manager._exposure.total_gross_notional_pct),
+            margin_usage_pct=str(self._risk_manager._exposure.total_margin_usage_pct),
+            risk_at_stop_pct=str(self._risk_manager._exposure.total_risk_at_stop_pct),
+            remaining_budget_pct=str(
+                self._risk_manager._limits.max_total_exposure_pct
+                - self._risk_manager._exposure.total_gross_notional_pct
+            ),
+            position_count=self._risk_manager._exposure.position_count,
         )
         if self._trade_journal is not None:
             await self._trade_journal.record_risk_decision(symbol, decision)
@@ -439,6 +453,8 @@ class ExecutionEngine:
 
         entry_price = proposal.entry_price or Decimal("0")
         notional = decision.approved_qty * entry_price
+        sl = proposal.stop_loss
+        stop_dist = abs(entry_price - sl) / entry_price if sl is not None and entry_price > Decimal("0") else None
         self._open_positions[symbol] = {
             "side": proposal.side,
             "size": decision.approved_qty,
@@ -449,7 +465,14 @@ class ExecutionEngine:
         }
 
         if notional > Decimal("0"):
-            await self._exposure.update_position(symbol, proposal.side.value, notional)
+            lev = self._leverage_confirmed.get(symbol)
+            await self._exposure.update_position(
+                symbol,
+                proposal.side.value,
+                notional,
+                leverage=lev,
+                stop_distance_pct=stop_dist,
+            )
 
         return decision
 

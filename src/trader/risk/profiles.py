@@ -86,6 +86,15 @@ class RiskLimits:
     allowed_market_types: list[MarketType] = field(default_factory=list)
     """Exhaustive list of market types permitted for this profile."""
 
+    max_total_margin_usage_pct: Decimal = Decimal("0")
+    """Total margin used across all positions as % of capital. 0 = not enforced."""
+
+    max_total_risk_at_stop_pct: Decimal = Decimal("0")
+    """Total portfolio risk-at-stop as % of capital. 0 = not enforced."""
+
+    max_margin_usage_per_position_pct: Decimal = Decimal("0")
+    """Per-position margin usage as % of capital. 0 = not enforced."""
+
     def __post_init__(self) -> None:
         # CRITICAL INVARIANT: auto_resume_after_hard_stop is ALWAYS False.
         # Enforce it here regardless of what was passed.
@@ -130,6 +139,9 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         auto_resume_after_hard_stop=False,
         # Market types
         allowed_market_types=[MarketType.LINEAR],
+        max_total_margin_usage_pct=Decimal("30"),
+        max_total_risk_at_stop_pct=Decimal("5"),
+        max_margin_usage_per_position_pct=Decimal("15"),
     ),
     RiskProfile.MODERATE: RiskLimits(
         # Position sizing
@@ -154,6 +166,9 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         auto_resume_after_hard_stop=False,
         # Market types
         allowed_market_types=[MarketType.SPOT, MarketType.LINEAR],
+        max_total_margin_usage_pct=Decimal("30"),
+        max_total_risk_at_stop_pct=Decimal("5"),
+        max_margin_usage_per_position_pct=Decimal("12"),
     ),
     RiskProfile.AGGRESSIVE: RiskLimits(
         # Position sizing
@@ -178,6 +193,9 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         auto_resume_after_hard_stop=False,
         # Market types
         allowed_market_types=[MarketType.SPOT, MarketType.LINEAR, MarketType.INVERSE],
+        max_total_margin_usage_pct=Decimal("20"),
+        max_total_risk_at_stop_pct=Decimal("12"),
+        max_margin_usage_per_position_pct=Decimal("10"),
     ),
     RiskProfile.SCALP: RiskLimits(
         # Position sizing — more frequent entries, but small risk per idea.
@@ -202,6 +220,9 @@ RISK_PROFILES: dict[RiskProfile, RiskLimits] = {
         auto_resume_after_hard_stop=False,
         # Market types
         allowed_market_types=[MarketType.LINEAR],
+        max_total_margin_usage_pct=Decimal("25"),
+        max_total_risk_at_stop_pct=Decimal("8"),
+        max_margin_usage_per_position_pct=Decimal("10"),
     ),
 }
 

@@ -399,10 +399,15 @@ class BybitRestClient:
             body["orderLinkId"] = order_link_id
         return await self._post("/v5/order/cancel", body=body)
 
-    async def get_open_orders(self, category: str, symbol: str | None = None) -> dict[str, Any]:
+    async def get_open_orders(
+        self,
+        category: str,
+        symbol: str | None = None,
+        settle_coin: str | None = None,
+    ) -> dict[str, Any]:
         return await self._get(
             "/v5/order/realtime",
-            params={"category": category, "symbol": symbol},
+            params={"category": category, "symbol": symbol, "settleCoin": settle_coin},
         )
 
     async def get_order_history(
