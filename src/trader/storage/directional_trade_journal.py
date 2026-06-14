@@ -383,9 +383,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["labelled_samples_15m_by_schema"] = {
             str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows
         }
-        # The auto-trainer gate reads training_eligible_15m; keep it in sync
-        # with the per-schema maximum, not the base class's cross-schema union.
-        result["training_eligible_15m"] = result["labelled_samples_15m"]
+        # Keep training_eligible_15m alias in sync with the directional 5m count
+        # so legacy readers get the filtered SHADOW_BASELINE value, not the
+        # base-class 15m cross-schema union.
+        result["training_eligible_15m"] = result["labelled_samples_5m"]
 
         rows = await self._fetch(
             """
