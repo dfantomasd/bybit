@@ -455,3 +455,35 @@ def multi_ewma_signal(
     # Clamp to [-1, 1]: scale by 100 to turn sub-percent differences into
     # meaningful magnitudes, then clamp.
     return max(-1.0, min(1.0, raw * 100))
+
+
+def vwap(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    period: int | None = None,
+) -> float | None:
+    """Volume-Weighted Average Price over the last ``period`` bars.
+
+    Uses typical price: (high + low + close) / 3.
+    Returns ``None`` when there is insufficient data or zero total volume.
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n == 0:
+        return None
+    if period is not None:
+        if n < period:
+            return None
+        highs = highs[-period:]
+        lows = lows[-period:]
+        closes = closes[-period:]
+        volumes = volumes[-period:]
+    total_vol = sum(volumes)
+    if total_vol == 0:
+        return None
+    total_tp_vol = sum(
+        ((h + lo + c) / 3.0) * v
+        for h, lo, c, v in zip(highs, lows, closes, volumes, strict=False)
+    )
+    return total_tp_vol / total_vol
