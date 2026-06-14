@@ -294,8 +294,7 @@ class ChallengerModel:
             lr_init = float(fit_params.get("learning_rate_init", 0.001))
             alpha = float(fit_params.get("alpha", 0.0001))
             self._scaler = StandardScaler()
-            self._scaler.fit(x)
-            x_scaled = self._scaler.transform(x)
+            x_scaled = self._scaler.fit_transform(x)
             self._clf = MLPClassifier(
                 hidden_layer_sizes=hidden,
                 activation="relu",
