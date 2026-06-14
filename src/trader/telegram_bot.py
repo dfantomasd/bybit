@@ -1705,7 +1705,7 @@ class TelegramMonitorBot:
             except (TypeError, ValueError):
                 return None
 
-        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
+        trainable_15m = int(db_diag.get("labelled_samples_5m", db_diag.get("training_eligible_5m", db_diag.get("labelled_samples_15m", db_diag.get("training_eligible_15m")))) or 0)
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)
@@ -2163,7 +2163,7 @@ class TelegramMonitorBot:
             latest_1m = db_diag.get("latest_candle_1m")
             latest_str = self._fmt_timestamp(latest_1m)
             outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
-            labelled_15m = db_diag.get("labelled_samples_15m", 0)
+            labelled_15m = db_diag.get("labelled_samples_5m", db_diag.get("labelled_samples_15m", 0))
             outcome_parts = [
                 f"{horizon}m={count}"
                 for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
@@ -3342,7 +3342,7 @@ class TelegramMonitorBot:
                 info = await ctrl.db_diagnostics_provider()
                 latest = info.get("latest_model_version") or {}
                 gate = info.get("shadow_gate_15m") or {}
-                eligible = int(info.get("training_eligible_15m") or 0)
+                eligible = int(info.get("labelled_samples_5m") or info.get("training_eligible_5m") or info.get("labelled_samples_15m") or info.get("training_eligible_15m") or 0)
 
                 metrics: dict[str, Any] = latest.get("metrics") or {}
                 if isinstance(metrics, str):
@@ -3377,11 +3377,11 @@ class TelegramMonitorBot:
                     f"Обучено: <code>{samples}</code> образцов",
                     f"Схема совместима: <code>{'да' if schema_ok else 'нет'}</code>",
                     "",
-                    "<b>Shadow gate (15m):</b>",
+                    "<b>Shadow gate (5m):</b>",
                     f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
                     f"Gate lift: <code>{gate_lift_str}</code>",
                     "",
-                    f"Данных для обучения (15m): <code>{eligible}</code>",
+                    f"Данных для обучения (5m): <code>{eligible}</code>",
                 ]
             except Exception as exc:
                 lines.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
