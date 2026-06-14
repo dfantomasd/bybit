@@ -3514,6 +3514,7 @@ class TradingApplication:
                 log.info(
                     "shadow.position_closed",
                     symbol=symbol,
+                    side=side,
                     reason=hit,
                     entry=pos["entry"],
                     exit=current_price,
