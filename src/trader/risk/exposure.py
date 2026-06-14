@@ -78,12 +78,24 @@ class ExposureTracker:
         symbol: str,
         side: str,
         notional_value: Decimal,
+        leverage: Decimal | None = None,
+        stop_distance_pct: Decimal | None = None,
     ) -> None:
-        """Add or update a position's notional value."""
+        """Add or update a position's notional and derived risk metrics."""
+        lev = leverage if leverage is not None and leverage > Decimal("0") else Decimal("1")
+        margin_used = notional_value / lev
+        sdp = (
+            stop_distance_pct if stop_distance_pct is not None and stop_distance_pct > Decimal("0") else Decimal("0.02")
+        )
+        risk_at_stop = notional_value * sdp
         with self._lock:
             self._positions[symbol] = {
                 "side": side,
                 "notional": notional_value,
+                "leverage": lev,
+                "margin_used": margin_used,
+                "stop_distance_pct": sdp,
+                "risk_at_stop": risk_at_stop,
             }
             self._release_pending_for_symbol_unlocked(symbol)
 
@@ -132,6 +144,31 @@ class ExposureTracker:
             return Decimal(str(total)) / self._capital * Decimal("100")
 
     @property
+    def total_gross_notional_pct(self) -> Decimal:
+        """Alias for total_exposure_pct (three-metric model)."""
+        return self.total_exposure_pct
+
+    @property
+    def total_margin_usage_pct(self) -> Decimal:
+        """Total margin used across all positions as % of capital."""
+        with self._lock:
+            if self._capital <= Decimal("0"):
+                return Decimal("0")
+            total = sum(Decimal(str(p.get("margin_used", p["notional"]))) for p in self._positions.values())
+            return Decimal(str(total)) / self._capital * Decimal("100")
+
+    @property
+    def total_risk_at_stop_pct(self) -> Decimal:
+        """Total portfolio risk-at-stop as % of capital."""
+        with self._lock:
+            if self._capital <= Decimal("0"):
+                return Decimal("0")
+            total = sum(
+                Decimal(str(p.get("risk_at_stop", p["notional"] * Decimal("0.02")))) for p in self._positions.values()
+            )
+            return Decimal(str(total)) / self._capital * Decimal("100")
+
+    @property
     def position_count(self) -> int:
         """Number of open positions."""
         with self._lock:
@@ -177,6 +214,19 @@ class ExposureTracker:
             max_per_position = self._capital * self._limits.max_capital_per_position_pct / Decimal("100")
             return max(Decimal("0"), max_per_position - existing)
 
+    def remaining_gross_notional_usd(self, capital: Decimal, symbol: str | None = None) -> Decimal:
+        """Remaining gross notional budget in USD before portfolio cap is hit.
+
+        When *symbol* is given, the caller's current position for that symbol
+        is excluded so re-entry scenarios compute the correct remaining budget.
+        """
+        with self._lock:
+            current_total = sum(Decimal(str(p["notional"])) for p in self._positions.values())
+            if symbol is not None and symbol in self._positions:
+                current_total -= Decimal(str(self._positions[symbol]["notional"]))
+            max_total = capital * self._limits.max_total_exposure_pct / Decimal("100")
+            return max(Decimal("0"), max_total - current_total)
+
     # ------------------------------------------------------------------
     # Decision helpers
     # ------------------------------------------------------------------
@@ -186,6 +236,8 @@ class ExposureTracker:
         symbol: str,
         additional_notional: Decimal,
         order_id: str | None = None,
+        leverage: Decimal | None = None,
+        stop_distance_pct: Decimal | None = None,
     ) -> tuple[bool, str]:
         """Check whether a new/increased position is within risk limits.
 
@@ -224,6 +276,55 @@ class ExposureTracker:
                     False,
                     f"total exposure {new_total_pct:.2f}% would exceed cap {self._limits.max_total_exposure_pct}%",
                 )
+
+            # Optional: per-position margin cap
+            lev = leverage if leverage is not None and leverage > Decimal("0") else None
+            if lev is not None and self._limits.max_margin_usage_per_position_pct > Decimal("0"):
+                new_margin_pct = new_notional / lev / self._capital * Decimal("100")
+                if new_margin_pct > self._limits.max_margin_usage_per_position_pct:
+                    return (
+                        False,
+                        f"position margin {new_margin_pct:.2f}% exceeds per-position margin cap "
+                        f"{self._limits.max_margin_usage_per_position_pct}%",
+                    )
+
+            # Optional: total margin cap
+            if lev is not None and self._limits.max_total_margin_usage_pct > Decimal("0"):
+                existing_margin = (
+                    Decimal(str(self._positions[symbol]["margin_used"])) if symbol in self._positions else Decimal("0")
+                )
+                current_margin = (
+                    sum(Decimal(str(p.get("margin_used", p["notional"]))) for p in self._positions.values())
+                    - existing_margin
+                )
+                new_total_margin_pct = (current_margin + new_notional / lev) / self._capital * Decimal("100")
+                if new_total_margin_pct > self._limits.max_total_margin_usage_pct:
+                    return (
+                        False,
+                        f"total margin usage {new_total_margin_pct:.2f}% would exceed cap "
+                        f"{self._limits.max_total_margin_usage_pct}%",
+                    )
+
+            # Optional: total risk-at-stop cap
+            sdp = stop_distance_pct if stop_distance_pct is not None and stop_distance_pct > Decimal("0") else None
+            if sdp is not None and self._limits.max_total_risk_at_stop_pct > Decimal("0"):
+                existing_risk = (
+                    Decimal(str(self._positions[symbol]["risk_at_stop"])) if symbol in self._positions else Decimal("0")
+                )
+                current_risk = (
+                    sum(
+                        Decimal(str(p.get("risk_at_stop", p["notional"] * Decimal("0.02"))))
+                        for p in self._positions.values()
+                    )
+                    - existing_risk
+                )
+                new_total_risk_pct = (current_risk + new_notional * sdp) / self._capital * Decimal("100")
+                if new_total_risk_pct > self._limits.max_total_risk_at_stop_pct:
+                    return (
+                        False,
+                        f"total risk-at-stop {new_total_risk_pct:.2f}% would exceed cap "
+                        f"{self._limits.max_total_risk_at_stop_pct}%",
+                    )
 
             if order_id:
                 self._pending_exposure[order_id] = {
@@ -272,11 +373,18 @@ class ExposureTracker:
             return {
                 "total_capital": str(self._capital),
                 "position_count": len(self._symbols_with_exposure()),
+                "gross_notional_exposure_pct": str(self.total_gross_notional_pct),
                 "total_exposure_pct": str(self.total_exposure_pct),
+                "margin_usage_pct": str(self.total_margin_usage_pct),
+                "risk_at_stop_pct": str(self.total_risk_at_stop_pct),
                 "positions": {
                     sym: {
                         "side": pos["side"],
                         "notional": str(pos["notional"]),
+                        "leverage": str(pos.get("leverage", "1")),
+                        "margin_used": str(pos.get("margin_used", pos["notional"])),
+                        "stop_distance_pct": str(pos.get("stop_distance_pct", "0.02")),
+                        "risk_at_stop": str(pos.get("risk_at_stop", Decimal(str(pos["notional"])) * Decimal("0.02"))),
                         "exposure_pct": str(self.get_position_exposure_pct(sym)),
                     }
                     for sym, pos in self._positions.items()
