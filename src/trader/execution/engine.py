@@ -111,6 +111,7 @@ class ExecutionEngine:
         maker_allow_escalation: bool = True,
         imbalance_provider: Any | None = None,
         safety_ladder: SafetyModeLadder | None = None,
+        max_open_positions: int = 10,
         trailing_stop_atr_multiple: float = 1.5,
         trailing_stop_min_pct: float = 0.01,
         profit_gate_pct: float = 3.0,
@@ -140,6 +141,7 @@ class ExecutionEngine:
         # the maker escalation guard. Missing data fails open (escalation allowed).
         self._imbalance_provider = imbalance_provider
         self._safety_ladder: SafetyModeLadder | None = safety_ladder
+        self._max_open_positions: int = max(1, int(max_open_positions))
         self._trailing_stop_atr_multiple = max(0.5, float(trailing_stop_atr_multiple))
         self._trailing_stop_min_pct = max(0.001, float(trailing_stop_min_pct))
         self._profit_gate_pct = max(0.0, float(profit_gate_pct))
@@ -807,6 +809,16 @@ class ExecutionEngine:
         # 1. Deduplication ─────────────────────────────────────────────
         if self.has_open_position(symbol):
             log.debug("execution.skipped_open_position", symbol=symbol)
+            return None
+
+        # Global position cap (enforced in both live and shadow mode)
+        if len(self._open_positions) >= self._max_open_positions:
+            log.debug(
+                "execution.skipped_max_positions",
+                symbol=symbol,
+                open=len(self._open_positions),
+                cap=self._max_open_positions,
+            )
             return None
 
         # P0.2/P0.3: Block new entries while pending ones await resolution
