@@ -335,8 +335,14 @@ class RiskManager:
         data_quality_score = 1.0
         event_risk_score = 0.0
 
+        realized_vol: Decimal | None = None
         if feature_vector is not None:
             data_quality_score = feature_vector.quality_score
+            try:
+                idx = feature_vector.feature_names.index("realized_vol_20")
+                realized_vol = Decimal(str(feature_vector.values[idx]))
+            except (ValueError, IndexError):
+                pass
 
         if regime_context is not None:
             if regime_context.regime == MarketRegime.HIGH_VOLATILITY:
@@ -359,6 +365,7 @@ class RiskManager:
             available_balance=available_balance,
             entry_price=proposal.entry_price,
             remaining_position_budget_usd=remaining_position_budget_usd,
+            realized_vol=realized_vol,
         )
 
         if approved_qty <= Decimal("0"):

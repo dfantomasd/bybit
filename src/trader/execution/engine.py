@@ -611,6 +611,144 @@ class ExecutionEngine:
             raise
 
     # ------------------------------------------------------------------
+    # Signal quality guards (STDEV, pDiv, SOP)
+    # ------------------------------------------------------------------
+
+    def _stdev_trend_guard(
+        self,
+        proposal: TradeProposal,
+        feature_vector: FeatureVector | None,
+    ) -> str | None:
+        """Block or skip if volatility is extreme and entry is contra-trend.
+
+        Returns a non-empty rejection reason string when the guard fires,
+        or None when the proposal is allowed through.
+        """
+        if feature_vector is None:
+            return None
+        try:
+            vol_idx = feature_vector.feature_names.index("realized_vol_20")
+            dist_idx = feature_vector.feature_names.index("sma20_dist")
+        except ValueError:
+            return None
+
+        realized_vol = float(feature_vector.values[vol_idx])
+        sma20_dist = float(feature_vector.values[dist_idx])
+        if realized_vol <= 0:
+            return None
+
+        # Target vol proxy: profile's max_drawdown_pct converted to daily fraction
+        target_vol = float(self._risk_manager._limits.max_drawdown_pct) / 100.0
+        if realized_vol <= 3.0 * target_vol:
+            return None  # Normal vol regime — pass
+
+        # Extreme vol: only allow trend-confirming entries
+        # sma20_dist > 0 → price above SMA (bullish); < 0 → below (bearish)
+        if proposal.side.value == "Buy" and sma20_dist < 0:
+            return "stdev_guard: extreme vol with contra-trend BUY suppressed"
+        if proposal.side.value == "Sell" and sma20_dist > 0:
+            return "stdev_guard: extreme vol with contra-trend SELL suppressed"
+        return None
+
+    def _pdiv_size_multiplier(
+        self,
+        proposal: TradeProposal,
+        feature_vector: FeatureVector | None,
+    ) -> Decimal:
+        """Price-divergence guard: reduce size for stale signals.
+
+        Estimates how far the market may have drifted since the signal was
+        generated using elapsed time × realized volatility as a proxy.
+        Returns a multiplier in [0.5, 1.0].
+        """
+        if feature_vector is None or proposal.entry_price is None:
+            return Decimal("1")
+
+        elapsed_s = (datetime.now(UTC) - proposal.timestamp).total_seconds()
+        if elapsed_s <= 0:
+            return Decimal("1")
+
+        try:
+            vol_idx = feature_vector.feature_names.index("realized_vol_20")
+            realized_vol = float(feature_vector.values[vol_idx])
+        except (ValueError, IndexError):
+            return Decimal("1")
+
+        if realized_vol <= 0:
+            return Decimal("1")
+
+        # Estimate expected price drift: vol is daily annualised; scale to elapsed
+        seconds_per_day = 86_400.0
+        drift_estimate = realized_vol * (elapsed_s / seconds_per_day) ** 0.5
+        if drift_estimate <= 0.005:  # < 0.5% expected drift → no penalty
+            return Decimal("1")
+        if drift_estimate >= 0.02:  # >= 2% → max penalty (50%)
+            log.info(
+                "execution.pdiv_size_reduced",
+                symbol=proposal.symbol,
+                elapsed_s=round(elapsed_s),
+                drift_pct=round(drift_estimate * 100, 2),
+                multiplier="0.5",
+            )
+            return Decimal("0.5")
+        # Linear ramp between 0.5% and 2%: multiplier from 1.0 down to 0.5
+        scale = (drift_estimate - 0.005) / (0.02 - 0.005)
+        multiplier = 1.0 - scale * 0.5
+        log.info(
+            "execution.pdiv_size_reduced",
+            symbol=proposal.symbol,
+            elapsed_s=round(elapsed_s),
+            drift_pct=round(drift_estimate * 100, 2),
+            multiplier=round(multiplier, 3),
+        )
+        return Decimal(str(round(multiplier, 4)))
+
+    def _sop_size_multiplier(
+        self,
+        proposal: TradeProposal,
+        feature_vector: FeatureVector | None,
+        regime_context: RegimeContext | None,
+    ) -> Decimal:
+        """Super-Opportunity boost: scale up size when orderbook strongly
+        favours the trade direction and spread is not excessive.
+
+        Returns a multiplier in [1.0, 1.2]. Only boosts — never penalises.
+        """
+        if feature_vector is None:
+            return Decimal("1")
+
+        try:
+            ob_idx = feature_vector.feature_names.index("ob_imbalance_l5")
+            ob_imbalance = float(feature_vector.values[ob_idx])
+        except (ValueError, IndexError):
+            return Decimal("1")
+
+        spread_bps = (
+            regime_context.spread_bps if regime_context is not None and regime_context.spread_bps is not None else None
+        )
+        # Only boost when spread is normal (< 20 bps = 0.20%)
+        if spread_bps is not None and spread_bps > 20:
+            return Decimal("1")
+
+        # ob_imbalance > 0 = bid-side pressure (bullish); < 0 = ask-side (bearish)
+        aligned = (proposal.side.value == "Buy" and ob_imbalance > 0.5) or (
+            proposal.side.value == "Sell" and ob_imbalance < -0.5
+        )
+        if not aligned:
+            return Decimal("1")
+
+        # Scale boost from 1.0 to 1.2 proportionally to imbalance strength
+        strength = min(abs(ob_imbalance), 1.0)
+        boost = 1.0 + 0.2 * (strength - 0.5) / 0.5  # 0 at 0.5, 0.20 at 1.0
+        log.info(
+            "execution.sop_size_boost",
+            symbol=proposal.symbol,
+            ob_imbalance=round(ob_imbalance, 3),
+            boost=round(boost, 3),
+        )
+        return Decimal(str(round(boost, 4)))
+
+    # ------------------------------------------------------------------
     # Main entry point
     # ------------------------------------------------------------------
 
@@ -761,6 +899,21 @@ class ExecutionEngine:
             except Exception as exc:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
                 return None
+
+        # 3d. STDEV + Trend Guard ─────────────────────────────────────
+        stdev_block = self._stdev_trend_guard(proposal, feature_vector)
+        if stdev_block:
+            log.info("execution.stdev_guard_blocked", symbol=symbol, reason=stdev_block)
+            return None
+
+        # 3e. pDiv size multiplier — stale-signal penalty ─────────────
+        pdiv_multiplier = self._pdiv_size_multiplier(proposal, feature_vector)
+
+        # 3f. SOP size boost — strong orderbook alignment ─────────────
+        sop_multiplier = self._sop_size_multiplier(proposal, feature_vector, regime_context)
+
+        # Combine signal-quality multipliers into a single factor [0.5, 1.2]
+        signal_qty_multiplier = pdiv_multiplier * sop_multiplier
 
         # 4. Risk evaluation ───────────────────────────────────────────
         # Extract spread and ATR for RiskManager sizing
@@ -928,6 +1081,26 @@ class ExecutionEngine:
                 self._release_exposure_reservation(proposal)
                 exposure_reserved = False
                 return None
+
+        # 4b. Apply signal-quality multipliers (pDiv penalty / SOP boost) ──
+        assert decision.approved_qty is not None
+        if signal_qty_multiplier != Decimal("1"):
+            adjusted_qty = decision.approved_qty * signal_qty_multiplier
+            # Round down to qty_step; reject if below min_order_qty
+            from decimal import ROUND_DOWN as _RD
+
+            qty_step = instrument_info.qty_step
+            adjusted_qty = (adjusted_qty / qty_step).to_integral_value(rounding=_RD) * qty_step
+            if adjusted_qty >= instrument_info.min_order_qty:
+                decision = decision.model_copy(
+                    update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED}
+                )
+                log.info(
+                    "execution.signal_qty_adjusted",
+                    symbol=symbol,
+                    multiplier=str(signal_qty_multiplier),
+                    adjusted_qty=str(adjusted_qty),
+                )
 
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
