@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from trader.features.technical import vwap
-
 
 # ---------------------------------------------------------------------------
 # VWAP tests
@@ -72,9 +70,6 @@ class TestVwap:
 
 def _make_engine_maker(bid: str, ask: str):
     """Build a minimal ExecutionEngine mock for maker pricing tests."""
-    from trader.domain.enums import MarketType, OrderSide, OrderType
-    from trader.domain.models import InstrumentInfo, OrderIntent
-    import uuid
 
     from trader.execution.engine import ExecutionEngine
 
@@ -98,7 +93,6 @@ def _make_engine_maker(bid: str, ask: str):
 class TestSpreadBasedPricing:
     def _compute_maker_price(self, bid: str, ask: str, tick: str, side: str) -> Decimal:
         """Replicate the spread-based pricing logic from engine._execute_maker_first."""
-        from trader.domain.enums import OrderSide
 
         bid_d = Decimal(bid)
         ask_d = Decimal(ask)
@@ -227,7 +221,6 @@ class TestTrailingStop:
 
 class TestProfitGate:
     def _make_engine(self, positions: dict, shadow_mode: bool = False):
-        from trader.domain.enums import OrderSide
         from trader.execution.engine import ExecutionEngine
 
         engine = MagicMock(spec=ExecutionEngine)
