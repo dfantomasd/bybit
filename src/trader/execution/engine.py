@@ -111,6 +111,10 @@ class ExecutionEngine:
         maker_allow_escalation: bool = True,
         imbalance_provider: Any | None = None,
         safety_ladder: SafetyModeLadder | None = None,
+        trailing_stop_atr_multiple: float = 1.5,
+        trailing_stop_min_pct: float = 0.01,
+        profit_gate_pct: float = 3.0,
+        profit_lock_pct: float = 5.0,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -136,6 +140,10 @@ class ExecutionEngine:
         # the maker escalation guard. Missing data fails open (escalation allowed).
         self._imbalance_provider = imbalance_provider
         self._safety_ladder: SafetyModeLadder | None = safety_ladder
+        self._trailing_stop_atr_multiple = max(0.5, float(trailing_stop_atr_multiple))
+        self._trailing_stop_min_pct = max(0.001, float(trailing_stop_min_pct))
+        self._profit_gate_pct = max(0.0, float(profit_gate_pct))
+        self._profit_lock_pct = max(self._profit_gate_pct, float(profit_lock_pct))
 
         # P0: Hard block unsupported entry modes. MARKET is the default;
         # MAKER_FIRST is the supervised maker-with-escalation flow below.
@@ -947,6 +955,23 @@ class ExecutionEngine:
         # Combine signal-quality + ladder multipliers [0.0, 1.2]
         signal_qty_multiplier = pdiv_multiplier * sop_multiplier * ladder_multiplier
 
+        # VWAP distance gate: penalise contra-VWAP entries
+        vwap_dist = None
+        if feature_vector is not None:
+            try:
+                vwap_dist = feature_vector.values[feature_vector.feature_names.index("vwap_distance_pct")]
+            except (ValueError, AttributeError, IndexError):
+                pass
+        if vwap_dist is not None:
+            # BUY above VWAP or SELL below VWAP is contra-trend — apply penalty
+            if (proposal.side == OrderSide.BUY and vwap_dist > 0) or (
+                proposal.side == OrderSide.SELL and vwap_dist < 0
+            ):
+                # penalty: 1.0 at 0% distance, 0.7 at ≥2% distance
+                penalty = max(0.7, 1.0 - abs(vwap_dist) / 20.0)
+                signal_qty_multiplier *= Decimal(str(round(penalty, 4)))
+                log.debug("vwap_gate.applied", symbol=symbol, vwap_distance_pct=round(vwap_dist, 3), penalty=round(penalty, 4))
+
         # 4. Risk evaluation ───────────────────────────────────────────
         # Extract spread and ATR for RiskManager sizing
         spread: Decimal | None = None
@@ -1396,7 +1421,8 @@ class ExecutionEngine:
                 symbol=symbol,
                 order_link_id=intent.order_link_id,
             )
-            return cast(RiskDecision, decision)
+            # Set exchange-side trailing stop asynchronously (non-blocking)
+            asyncio.ensure_future(self._setup_trailing_stop(symbol, entry_price, atr))
 
         return cast(RiskDecision, decision)
 
@@ -1426,11 +1452,28 @@ class ExecutionEngine:
             await self._abort_maker_entry(intent, decision, reason=f"no_quote: {exc}")
             return False
         tick = instrument_info.tick_size if instrument_info.tick_size > 0 else Decimal("0")
+        spread_bps_val = float((ask - bid) / bid * 10000) if bid > 0 else 0.0
         if intent.side == OrderSide.BUY:
-            # Improve the bid by one tick when it doesn't cross the ask
-            price = bid + tick if tick > 0 and bid + tick < ask else bid
+            if spread_bps_val < 5.0:
+                # Tight spread: place at mid
+                price = (bid + ask) / Decimal("2")
+                if tick > 0:
+                    price = (price // tick) * tick  # floor to tick
+            elif spread_bps_val < 30.0:
+                # Normal spread: bid + one tick
+                price = bid + tick if tick > 0 and bid + tick < ask else bid
+            else:
+                # Wide spread: aggressive maker at bid
+                price = bid
         else:
-            price = ask - tick if tick > 0 and ask - tick > bid else ask
+            if spread_bps_val < 5.0:
+                price = (bid + ask) / Decimal("2")
+                if tick > 0:
+                    price = ((price // tick) + 1) * tick  # ceil to tick
+            elif spread_bps_val < 30.0:
+                price = ask - tick if tick > 0 and ask - tick > bid else ask
+            else:
+                price = ask
 
         maker_intent = intent.model_copy(
             update={"order_type": OrderType.LIMIT, "price": price, "time_in_force": "PostOnly"}
@@ -1597,6 +1640,97 @@ class ExecutionEngine:
         )
         await self._journal_order_event(market_intent, decision, status="PLACED", exchange_order_id=exchange_order_id)
         return True
+
+    async def _setup_trailing_stop(
+        self,
+        symbol: str,
+        entry_price: Decimal,
+        atr: Decimal | None,
+    ) -> None:
+        """Set an exchange-side trailing stop after a live entry.
+
+        Only called in live mode. The trailing distance is ``atr * atr_multiple``
+        floored to ``trailing_stop_min_pct`` of entry price.
+        """
+        if self._shadow_mode:
+            return
+        try:
+            if atr is not None and atr > 0:
+                distance = atr * Decimal(str(self._trailing_stop_atr_multiple))
+            else:
+                distance = entry_price * Decimal(str(self._trailing_stop_min_pct))
+            min_distance = entry_price * Decimal(str(self._trailing_stop_min_pct))
+            distance = max(distance, min_distance)
+            await self._adapter.set_trading_stop(
+                category=self._category,
+                symbol=symbol,
+                trailing_stop=str(distance),
+            )
+            log.info(
+                "trailing_stop.set",
+                symbol=symbol,
+                trailing_stop=str(distance),
+                atr=str(atr) if atr else None,
+            )
+        except Exception as exc:
+            log.warning("trailing_stop.set_failed", symbol=symbol, error=str(exc))
+
+    async def check_profit_gates(self) -> None:
+        """Tighten TP/SL for positions that have exceeded profit thresholds.
+
+        Live mode only. Designed to be called periodically (e.g. every 10s)
+        by the strategy loop.
+        """
+        if self._shadow_mode:
+            return
+        for symbol, pos in list(self._open_positions.items()):
+            try:
+                bid, ask = await self._adapter.get_best_bid_ask(self._category, symbol)
+                mid = (bid + ask) / Decimal("2")
+                entry = pos.get("entry_price", Decimal("0"))
+                side = pos.get("side")
+                if not entry or entry <= 0:
+                    continue
+                if side == OrderSide.BUY:
+                    pnl_pct = float((mid - entry) / entry * 100)
+                else:
+                    pnl_pct = float((entry - mid) / entry * 100)
+                if pnl_pct >= self._profit_lock_pct:
+                    # Lock in profits: move SL to break-even + small buffer
+                    if side == OrderSide.BUY:
+                        new_sl = entry * Decimal("1.005")
+                    else:
+                        new_sl = entry * Decimal("0.995")
+                    await self._adapter.set_trading_stop(
+                        category=self._category,
+                        symbol=symbol,
+                        stop_loss=str(new_sl),
+                    )
+                    log.info(
+                        "profit_gate.sl_locked",
+                        symbol=symbol,
+                        pnl_pct=round(pnl_pct, 2),
+                        new_sl=str(new_sl),
+                    )
+                elif pnl_pct >= self._profit_gate_pct:
+                    # Tighten TP by reducing to 60% of remaining move
+                    if side == OrderSide.BUY:
+                        new_tp = mid + (mid - entry) * Decimal("0.6")
+                    else:
+                        new_tp = mid - (entry - mid) * Decimal("0.6")
+                    await self._adapter.set_trading_stop(
+                        category=self._category,
+                        symbol=symbol,
+                        take_profit=str(new_tp),
+                    )
+                    log.info(
+                        "profit_gate.tp_tightened",
+                        symbol=symbol,
+                        pnl_pct=round(pnl_pct, 2),
+                        new_tp=str(new_tp),
+                    )
+            except Exception as exc:
+                log.warning("profit_gate.check_failed", symbol=symbol, error=str(exc))
 
     async def _wait_maker_fill(self, symbol: str, order_link_id: str, wait_s: float) -> str:
         """Poll the open-orders list until fill, disappearance or timeout.

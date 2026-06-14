@@ -134,8 +134,8 @@ class TestMakerFirstExecution:
         first_intent = engine._adapter.place_order.await_args_list[0].args[0]
         assert first_intent.order_type == OrderType.LIMIT
         assert first_intent.time_in_force == "PostOnly"
-        # bid 50000 + tick 0.5 < ask 50010 → improved bid
-        assert first_intent.price == Decimal("50000.5")
+        # spread is ~2 bps (tight) → place at mid (50000+50010)/2 = 50005 floored to tick
+        assert first_intent.price == Decimal("50005.0")
         assert engine.get_diag_counts()["maker_filled"] == 1
 
     @pytest.mark.asyncio
@@ -148,7 +148,7 @@ class TestMakerFirstExecution:
         assert decision is not None
         first_intent = engine._adapter.place_order.await_args_list[0].args[0]
         assert first_intent.side == OrderSide.SELL
-        assert first_intent.price == Decimal("50009.5")  # ask 50010 - tick 0.5
+        assert first_intent.price == Decimal("50005.5")  # spread ~2 bps (tight) → mid price ceiled to tick
 
     @pytest.mark.asyncio
     async def test_timeout_escalates_to_market(self) -> None:
