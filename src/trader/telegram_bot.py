@@ -1180,7 +1180,7 @@ class TelegramMonitorBot:
         total = data.get("all_time") or {}
         lines = [
             "🧾 <b>Издержки детально</b>",
-            "База: <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "База: <code>RULE_BASELINE_V1</code>, horizon 5m",
             "",
             _period_line("Сегодня UTC", today),
             "",
@@ -1228,7 +1228,7 @@ class TelegramMonitorBot:
         hours = {int(row.get("hour") or 0): row for row in data.get("hours") or []}
         lines = [
             "🔬 <b>PnL-анализ baseline</b>",
-            "Фильтр: <code>directional_net_v1</code>, <code>RULE_BASELINE_V1</code>, horizon 15m",
+            "Фильтр: <code>directional_net_v1</code>, <code>RULE_BASELINE_V1</code>, horizon 5m",
             "",
             "<b>Топ-5 прибыльных символов</b>",
         ]

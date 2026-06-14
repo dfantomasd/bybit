@@ -404,6 +404,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.decision = 'SHADOW_BASELINE'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
             ),
             schema_counts AS (
@@ -468,6 +469,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.decision = 'SHADOW_BASELINE'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
                 GROUP BY fs.feature_schema_hash
                 ORDER BY cnt DESC

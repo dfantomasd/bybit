@@ -356,13 +356,14 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = 15
+                WHERE po.horizon_minutes = 5
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $1
                   AND po.label_threshold_bps = 5.0
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.decision = 'SHADOW_BASELINE'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
             ) deduped
             GROUP BY feature_schema_hash
@@ -370,9 +371,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             LABEL_SCHEMA_VERSION,
         )
-        result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+        result["labelled_samples_5m"] = int(rows[0]["cnt"]) if rows else 0
         current_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
-        result["training_eligible_schema_15m"] = {
+        result["training_eligible_schema_5m"] = {
             "feature_schema_hash": current_feature_schema_hash,
             "sample_count": result["labelled_samples_15m"],
             "horizon_minutes": 15,
