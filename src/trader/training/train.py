@@ -298,19 +298,8 @@ def _evaluate_model(
             "validation_by_side": {},
         }
 
-    scores: list[float] = []
-    preds: list[int] = []
-    for features in x_val:
-        pred = model.predict(features.tolist())
-        if pred is None:
-            scores.append(0.0)
-            preds.append(0)
-            continue
-        scores.append(float(pred.score))
-        preds.append(int(pred.label))
-
-    pred_arr = np.array(preds, dtype=np.int32)
-    score_arr = np.array(scores, dtype=np.float32)
+    # Batch prediction — single sklearn call instead of a Python loop per sample
+    score_arr, pred_arr = model.predict_batch(x_val)
     positives = y_val == 1
     predicted_positive = pred_arr == 1
     true_positive = predicted_positive & positives
@@ -630,65 +619,68 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             raise RuntimeError("not enough samples for walk-forward validation")
         wf_windows = _validate_walk_forward_chronology(folds, created_at_list)
 
-        candidate_results: list[dict[str, Any]] = []
-        for selected_label_threshold in label_thresholds:
+        def _run_candidate(spec: dict[str, Any], selected_label_threshold: float) -> dict[str, Any] | None:
             y = (returns_bps > float(selected_label_threshold)).astype(np.int32)
             if len(np.unique(y)) < 2:
-                log.info("Skipping label threshold %.2f bps: one-class labels", selected_label_threshold)
-                continue
-            for spec in candidates:
-                fold_metrics: list[dict[str, Any]] = []
-                for fold_idx, (train_idx, val_idx) in enumerate(folds):
-                    y_train = y[train_idx]
-                    y_val = y[val_idx]
-                    if len(np.unique(y_train)) < 2 or len(np.unique(y_val)) < 2:
-                        log.info(
-                            "Skipping fold with one-class labels",
-                            extra={
-                                "fold": fold_idx,
-                                "model_type": spec.get("model_type"),
-                                "label_threshold_bps": selected_label_threshold,
-                            },
-                        )
-                        continue
-                    fold_model = ChallengerModel(
-                        version=f"{run_id}_fold{fold_idx}",
-                        feature_names=feature_names,
-                        model_type=str(spec["model_type"]),
-                        model_params={k: v for k, v in spec.items() if k != "model_type"},
-                    )
-                    try:
-                        fold_model.fit_batch(x_arr[train_idx], y_train, params=fold_model.model_params)
-                        metrics = _evaluate_model(
-                            fold_model, x_arr[val_idx], y_val, returns_bps[val_idx], sides[val_idx]
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "Candidate fold failed: model_type=%s label_threshold=%s fold=%s error=%s",
-                            spec.get("model_type"),
-                            selected_label_threshold,
-                            fold_idx,
-                            exc,
-                        )
-                        continue
-                    metrics["fold"] = fold_idx
-                    metrics["val_start_idx"] = int(val_idx[0])
-                    metrics["val_end_idx"] = int(val_idx[-1])
-                    metrics.update(wf_windows[fold_idx])
-                    fold_metrics.append(metrics)
-                if not fold_metrics:
+                return None
+            fold_metrics: list[dict[str, Any]] = []
+            for fold_idx, (train_idx, val_idx) in enumerate(folds):
+                y_train = y[train_idx]
+                y_val_fold = y[val_idx]
+                if len(np.unique(y_train)) < 2 or len(np.unique(y_val_fold)) < 2:
                     continue
-                summary = _summarise_walk_forward(fold_metrics)
-                summary.update(
-                    {
-                        "candidate": spec,
-                        "model_type": spec["model_type"],
-                        "model_params": {k: v for k, v in spec.items() if k != "model_type"},
-                        "selected_label_threshold_bps": float(selected_label_threshold),
-                        "fold_metrics": fold_metrics,
-                    }
+                fold_model = ChallengerModel(
+                    version=f"{run_id}_fold{fold_idx}",
+                    feature_names=feature_names,
+                    model_type=str(spec["model_type"]),
+                    model_params={k: v for k, v in spec.items() if k != "model_type"},
                 )
-                candidate_results.append(summary)
+                try:
+                    fold_model.fit_batch(x_arr[train_idx], y_train, params=fold_model.model_params)
+                    metrics = _evaluate_model(
+                        fold_model, x_arr[val_idx], y_val_fold, returns_bps[val_idx], sides[val_idx]
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Candidate fold failed: model_type=%s label_threshold=%s fold=%s error=%s",
+                        spec.get("model_type"),
+                        selected_label_threshold,
+                        fold_idx,
+                        exc,
+                    )
+                    continue
+                metrics["fold"] = fold_idx
+                metrics["val_start_idx"] = int(val_idx[0])
+                metrics["val_end_idx"] = int(val_idx[-1])
+                metrics.update(wf_windows[fold_idx])
+                fold_metrics.append(metrics)
+            if not fold_metrics:
+                return None
+            summary = _summarise_walk_forward(fold_metrics)
+            summary.update(
+                {
+                    "candidate": spec,
+                    "model_type": spec["model_type"],
+                    "model_params": {k: v for k, v in spec.items() if k != "model_type"},
+                    "selected_label_threshold_bps": float(selected_label_threshold),
+                    "fold_metrics": fold_metrics,
+                }
+            )
+            return summary
+
+        tasks = [(spec, threshold) for threshold in label_thresholds for spec in candidates]
+
+        try:
+            from joblib import Parallel
+            from joblib import delayed as jdelayed
+
+            raw_results = Parallel(n_jobs=-1, prefer="threads")(
+                jdelayed(_run_candidate)(spec, threshold) for spec, threshold in tasks
+            )
+        except Exception:
+            raw_results = [_run_candidate(spec, threshold) for spec, threshold in tasks]
+
+        candidate_results: list[dict[str, Any]] = [r for r in raw_results if r is not None]
 
         if not candidate_results:
             raise RuntimeError("no trainable model candidate survived walk-forward validation")

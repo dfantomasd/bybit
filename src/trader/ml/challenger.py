@@ -302,10 +302,10 @@ class ChallengerModel:
                 solver="adam",
                 learning_rate_init=lr_init,
                 alpha=alpha,
-                max_iter=500,
+                max_iter=300,
                 early_stopping=True,
                 validation_fraction=0.15,
-                n_iter_no_change=20,
+                n_iter_no_change=15,
                 random_state=42,
             )
             self._clf.fit(x_scaled, y)
@@ -332,6 +332,28 @@ class ChallengerModel:
                 sample_weight=sample_weight[order],
             )
         self.training_samples = int(len(x_scaled))
+
+    def predict_batch(self, x: Any) -> tuple[Any, Any]:
+        """Batch predict on a 2-D feature array.
+
+        Returns (scores, labels) as float32/int32 numpy arrays.
+        Avoids the Python-loop overhead of calling predict() per sample.
+        """
+        x_arr = np.asarray(x, dtype=np.float32)
+        n = len(x_arr)
+        zero_scores = np.zeros(n, dtype=np.float32)
+        zero_labels = np.zeros(n, dtype=np.int32)
+        if not _SKLEARN_AVAILABLE or self._clf is None or n == 0:
+            return zero_scores, zero_labels
+        try:
+            x_scaled = self._scaler.transform(x_arr) if self.training_samples > 0 else x_arr
+            proba = self._clf.predict_proba(x_scaled)
+            scores = proba[:, 1].astype(np.float32)
+            labels = np.argmax(proba, axis=1).astype(np.int32)
+            return scores, labels
+        except Exception as exc:
+            log.debug("challenger.predict_batch_failed", exc_info=exc)
+            return zero_scores, zero_labels
 
     def partial_fit(self, features: list[float], label: int) -> None:
         """Online update with a single labelled sample."""
