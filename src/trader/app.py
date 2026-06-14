@@ -4040,10 +4040,16 @@ class TradingApplication:
             if status["open_positions"] and self._telegram_bot is not None:
                 try:
                     pos_list = ", ".join(status["open_positions"].keys())
-                    await self._telegram_bot.notify(
-                        f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
-                        "Open positions remain on exchange. Verify SL manually."
-                    )
+                    if status["shadow_mode"]:
+                        await self._telegram_bot.notify(
+                            f"ℹ️ <b>Shutdown</b>: shadow positions in memory: <code>{pos_list}</code>\n"
+                            "SHADOW mode — no real orders on exchange."
+                        )
+                    else:
+                        await self._telegram_bot.notify(
+                            f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
+                            "Open positions remain on exchange. Verify SL manually."
+                        )
                 except Exception as exc:
                     log.debug("graceful_shutdown.telegram_failed", error=str(exc))
 
