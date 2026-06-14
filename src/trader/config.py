@@ -389,7 +389,7 @@ class Settings(BaseSettings):
     """Always run shadow scoring even when live decisions disabled."""
     MODEL_AUTO_TRAIN_ENABLED: bool = True
     """Automatically train a shadow challenger when enough new labelled examples accumulate."""
-    MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 200
     MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 5000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5

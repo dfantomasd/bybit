@@ -749,7 +749,7 @@ class TradingApplication:
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
-                trainable = int(diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)) or 0)
+                trainable = int(diag.get("labelled_samples_5m", diag.get("labelled_samples_15m", 0)) or 0)
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
@@ -768,7 +768,7 @@ class TradingApplication:
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
                         "🤖 <b>Auto-training triggered</b>\n"
-                        f"trainable_15m=<code>{trainable}</code>, "
+                        f"trainable_5m=<code>{trainable}</code>, "
                         f"latest_model_samples=<code>{latest_samples}</code>\n"
                         f"{msg}"
                     )
@@ -910,7 +910,7 @@ class TradingApplication:
                 total_count = int(gate.get("total_count", 0) or 0)
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
-                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+                labelled = int(diag.get("labelled_samples_5m", diag.get("labelled_samples_15m", 0)) or 0)
 
                 min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
                 min_lift = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)

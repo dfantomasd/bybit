@@ -375,8 +375,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         current_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
         result["training_eligible_schema_5m"] = {
             "feature_schema_hash": current_feature_schema_hash,
-            "sample_count": result["labelled_samples_15m"],
-            "horizon_minutes": 15,
+            "sample_count": result["labelled_samples_5m"],
+            "horizon_minutes": 5,
             "label_schema_version": LABEL_SCHEMA_VERSION,
             "label_threshold_bps": 5.0,
         }
