@@ -125,7 +125,7 @@ class AutoPromotionConfig:
             pvalue_threshold=float(getattr(settings, "MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD", 0.05)),
             bootstrap_iterations=max(100, int(getattr(settings, "MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS", 1000))),
             min_bootstrap_samples=max(2, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES", 50))),
-            horizon_minutes=int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 15)),
+            horizon_minutes=int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 5)),
             max_champion_drawdown_bps=float(getattr(settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0)),
             min_champion_wf_bps=float(getattr(settings, "MODEL_CHAMPION_MIN_WF_BPS", 0.0)),
         )
