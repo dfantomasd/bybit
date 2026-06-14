@@ -1088,6 +1088,27 @@ class TradingApplication:
             ),
             "model_gate_threshold": self._settings.MODEL_SHADOW_GATE_THRESHOLD if self._settings is not None else None,
             "model_gate_quality": self._model_gate_quality,
+            # Risk filter settings
+            "allow_entries_in_sideways": (
+                self._risk_manager._allow_entries_in_sideways
+                if self._risk_manager is not None
+                else self._settings.ALLOW_ENTRIES_IN_SIDEWAYS if self._settings is not None else False
+            ),
+            "max_position_value_usd": (
+                float(self._risk_manager._max_position_value_usd)
+                if self._risk_manager is not None and self._risk_manager._max_position_value_usd is not None
+                else self._settings.MAX_POSITION_VALUE_USD if self._settings is not None else None
+            ),
+            # Trailing stop settings
+            "trailing_stop_enabled": (
+                self._settings.TRAILING_STOP_ENABLED if self._settings is not None else False
+            ),
+            "trailing_activation_pct": (
+                self._settings.TRAILING_ACTIVATION_PCT if self._settings is not None else None
+            ),
+            "trailing_distance_pct": (
+                self._settings.TRAILING_DISTANCE_PCT if self._settings is not None else None
+            ),
         }
 
     async def _set_runtime_setting(self, key: str, value: Any) -> str:
@@ -1167,6 +1188,42 @@ class TradingApplication:
                 raise ValueError("model_gate_threshold must be 0.50..0.80")
             self._settings.MODEL_SHADOW_GATE_THRESHOLD = fvalue
             return f"Model gate threshold set to {fvalue:.2f}"
+        if key == "allow_sideways":
+            sval = str(value).strip().lower()
+            if sval not in {"on", "off", "true", "false", "1", "0"}:
+                raise ValueError("allow_sideways must be on/off/true/false")
+            new_val = sval in {"on", "true", "1"}
+            self._settings.ALLOW_ENTRIES_IN_SIDEWAYS = new_val
+            if self._risk_manager is not None:
+                self._risk_manager._allow_entries_in_sideways = new_val
+            state = "разрешен" if new_val else "заблокирован"
+            log.info("runtime.allow_sideways_changed", new_value=new_val)
+            return f"Вход в боковик (SIDEWAYS): {state}"
+        if key == "max_position_value_usd":
+            fvalue = float(value)
+            if not 1.0 <= fvalue <= 100_000.0:
+                raise ValueError("max_position_value_usd must be 1..100000")
+            from decimal import Decimal as _D
+
+            self._settings.MAX_POSITION_VALUE_USD = fvalue
+            if self._risk_manager is not None:
+                self._risk_manager._max_position_value_usd = _D(str(fvalue))
+            log.info("runtime.max_position_value_usd_changed", new_value=fvalue)
+            return f"Макс. размер позиции: {fvalue:g} USDT"
+        if key == "trailing_activation_pct":
+            fvalue = float(value)
+            if not 0.1 <= fvalue <= 10.0:
+                raise ValueError("trailing_activation_pct must be 0.1..10.0")
+            self._settings.TRAILING_ACTIVATION_PCT = fvalue
+            log.info("runtime.trailing_activation_pct_changed", new_value=fvalue)
+            return f"Трейлинг-стоп активируется при прибыли {fvalue:g}%"
+        if key == "trailing_distance_pct":
+            fvalue = float(value)
+            if not 0.05 <= fvalue <= 5.0:
+                raise ValueError("trailing_distance_pct must be 0.05..5.0")
+            self._settings.TRAILING_DISTANCE_PCT = fvalue
+            log.info("runtime.trailing_distance_pct_changed", new_value=fvalue)
+            return f"Дистанция трейлинг-стопа: {fvalue:g}%"
         raise ValueError("unknown setting")
 
     def _symbol_candidates(self) -> list[str]:
@@ -1433,6 +1490,12 @@ class TradingApplication:
             exposure_tracker=self._exposure_tracker,
             circuit_breaker_manager=breakers,
             kill_switch=kill_switch,
+            allow_entries_in_sideways=self._settings.ALLOW_ENTRIES_IN_SIDEWAYS,
+            max_position_value_usd=(
+                self._settings.MAX_POSITION_VALUE_USD
+                if self._settings.MAX_POSITION_VALUE_USD > 0
+                else None
+            ),
         )
         self._kill_switch = kill_switch
         log.info(

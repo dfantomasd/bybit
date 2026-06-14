@@ -119,6 +119,8 @@ class RiskManager:
         event_bus: Any = None,
         log: logging.Logger | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
+        allow_entries_in_sideways: bool = False,
+        max_position_value_usd: float | None = None,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -130,6 +132,10 @@ class RiskManager:
         self._event_bus = event_bus
         self._log = log or logger
         self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
+        self._allow_entries_in_sideways: bool = allow_entries_in_sideways
+        self._max_position_value_usd: Decimal | None = (
+            Decimal(str(max_position_value_usd)) if max_position_value_usd is not None else None
+        )
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -213,6 +219,20 @@ class RiskManager:
                 proposal,
                 f"regime {regime.value} blocks new entries",
                 ["regime_block"],
+                capital,
+            )
+
+        # SIDEWAYS filter — off by default, controlled via allow_entries_in_sideways
+        if regime == MarketRegime.SIDEWAYS and not self._allow_entries_in_sideways:
+            self._log.info(
+                "risk.sideways_blocked symbol=%s regime=%s",
+                proposal.symbol,
+                regime.value,
+            )
+            return self._reject(
+                proposal,
+                f"regime {regime.value} blocked (allow_entries_in_sideways=False)",
+                ["regime_sideways"],
                 capital,
             )
 
@@ -390,6 +410,27 @@ class RiskManager:
             hard_cap_risk = capital * self._limits.risk_per_trade_hard_cap_pct / Decimal("100")
             max_qty_hard_cap = hard_cap_risk / (stop_distance_pct * proposal.entry_price)
             approved_qty = min(approved_qty, max_qty_hard_cap)
+
+        # ----------------------------------------------------------------
+        # 15b. Max position value (USD) hard cap
+        # Applied after all multipliers but before re-rounding, so the
+        # final qty is always <= max_position_value_usd / entry_price.
+        # ----------------------------------------------------------------
+        if (
+            self._max_position_value_usd is not None
+            and proposal.entry_price is not None
+            and proposal.entry_price > Decimal("0")
+        ):
+            max_qty_by_usd = self._max_position_value_usd / proposal.entry_price
+            if approved_qty > max_qty_by_usd:
+                approved_qty = max_qty_by_usd
+                triggered_rules.append("max_position_value_usd_cap")
+                self._log.info(
+                    "risk.max_position_value_usd_cap symbol=%s max_usd=%s capped_qty=%s",
+                    proposal.symbol,
+                    str(self._max_position_value_usd),
+                    str(approved_qty),
+                )
 
         # Re-round after multipliers (always ROUND_DOWN)
         approved_qty = sizer.round_to_step(approved_qty, instrument_info.qty_step)
@@ -588,6 +629,10 @@ class RiskManager:
             "circuit_breakers": self._breakers.to_dict(),
             # CRITICAL INVARIANT: always report False
             "auto_resume_after_hard_stop": self._AUTO_RESUME_AFTER_HARD_STOP,
+            "allow_entries_in_sideways": self._allow_entries_in_sideways,
+            "max_position_value_usd": (
+                float(self._max_position_value_usd) if self._max_position_value_usd is not None else None
+            ),
         }
 
     # ------------------------------------------------------------------

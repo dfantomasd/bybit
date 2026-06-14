@@ -224,6 +224,15 @@ class Settings(BaseSettings):
     MAX_WEEKLY_DRAWDOWN_PCT: float = 8.0
     """Trigger kill-switch if weekly drawdown exceeds this."""
 
+    MAX_POSITION_VALUE_USD: float = 10.0
+    """Hard cap on the notional value (USD) of a single position.
+    Applies after all risk multipliers; overrides profile sizing if lower.
+    Useful for CANARY_LIVE where you want an absolute dollar guard."""
+
+    ALLOW_ENTRIES_IN_SIDEWAYS: bool = False
+    """When False (default), new entries are blocked in SIDEWAYS market regime.
+    Set True to allow trading in sideways/ranging markets (increases false signals)."""
+
     # ------------------------------------------------------------------
     # Monitoring / observability
     # ------------------------------------------------------------------

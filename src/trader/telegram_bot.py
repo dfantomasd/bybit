@@ -2723,15 +2723,25 @@ class TelegramMonitorBot:
             await self._reply(
                 update,
                 "Формат: /limits entries|pending|same_side|max_positions|price_cap|feature_symbols|exec_candidates N\n"
+                "Риски: /limits allow_sideways on|off, /limits max_position_value_usd 10\n"
+                "Трейлинг: /limits trailing_activation_pct 0.7, /limits trailing_distance_pct 0.25\n"
                 "Фильтр модели: /limits model_gate on|off, /limits model_gate_threshold 0.60",
             )
             return
         key = args[0].lower()
         raw_value = args[1]
+        _FLOAT_KEYS = {
+            "price_cap",
+            "model_gate_threshold",
+            "max_position_value_usd",
+            "trailing_activation_pct",
+            "trailing_distance_pct",
+        }
+        _STR_KEYS = {"model_gate", "allow_sideways"}
         try:
-            if key in {"price_cap", "model_gate_threshold"}:
+            if key in _FLOAT_KEYS:
                 value: Any = float(raw_value)
-            elif key == "model_gate":
+            elif key in _STR_KEYS:
                 value = raw_value
             else:
                 value = int(raw_value)
@@ -3029,10 +3039,18 @@ class TelegramMonitorBot:
                 )
                 return
             key, raw_value = expected_key, parts[0]
+        _FLOAT_KEYS_TXT = {
+            "price_cap",
+            "model_gate_threshold",
+            "max_position_value_usd",
+            "trailing_activation_pct",
+            "trailing_distance_pct",
+        }
+        _STR_KEYS_TXT = {"model_gate", "allow_sideways"}
         try:
-            if key in {"price_cap", "model_gate_threshold"}:
+            if key in _FLOAT_KEYS_TXT:
                 value: Any = float(raw_value)
-            elif key == "model_gate":
+            elif key in _STR_KEYS_TXT:
                 value = raw_value
             else:
                 value = int(raw_value)
@@ -4040,6 +4058,9 @@ class TelegramMonitorBot:
             return "<b>Лимиты</b>\nПока недоступны."
         s = self._controller.runtime_settings()
         gate_quality = s.get("model_gate_quality", {}) or {}
+        sideways_allowed = s.get("allow_entries_in_sideways", False)
+        max_pos_usd = s.get("max_position_value_usd")
+        trailing_enabled = s.get("trailing_stop_enabled", False)
         return (
             "<b>Лимиты риска и нагрузки</b>\n"
             f"Пауза: <code>{'да' if s.get('paused', False) else 'нет'}</code>\n"
@@ -4052,14 +4073,24 @@ class TelegramMonitorBot:
             f"Потолок цены монеты: <code>{s.get('screener_max_price_usd', 'n/a')}</code> — отсеивает дорогие монеты\n"
             f"Изучаемых монет: <code>{s.get('feature_max_symbols', 'n/a')}</code> — топ монет, где считаются признаки\n"
             f"Кандидатов на вход: <code>{s.get('execution_candidates', 'n/a')}</code> — сколько монет смотрит стратегия\n"
-            f"Фильтр модели в CANARY: <code>{'да' if s.get('model_gate_canary_enabled', False) else 'нет'}</code>\n"
-            f"Порог фильтра модели: <code>{s.get('model_gate_threshold', 'n/a')}</code>\n\n"
-            f"Качество фильтра модели: <code>{self._ru(gate_quality.get('quality', 'n/a'))}</code>, "
+            f"\n<b>Риск-фильтры:</b>\n"
+            f"Вход в боковик (SIDEWAYS): <code>{'разрешен' if sideways_allowed else 'заблокирован'}</code>\n"
+            f"Макс. позиция (USD): <code>{f'{max_pos_usd:g}' if max_pos_usd is not None else 'без лимита'}</code>\n"
+            f"\n<b>Трейлинг-стоп:</b>\n"
+            f"Включен: <code>{'да' if trailing_enabled else 'нет'}</code>\n"
+            f"Активация при: <code>{s.get('trailing_activation_pct', 'n/a')}%</code> прибыли\n"
+            f"Дистанция: <code>{s.get('trailing_distance_pct', 'n/a')}%</code> от текущей цены\n"
+            f"\n<b>Фильтр модели:</b>\n"
+            f"Фильтр в CANARY: <code>{'да' if s.get('model_gate_canary_enabled', False) else 'нет'}</code>\n"
+            f"Порог фильтра: <code>{s.get('model_gate_threshold', 'n/a')}</code>\n"
+            f"Качество: <code>{self._ru(gate_quality.get('quality', 'n/a'))}</code>, "
             f"лучший порог=<code>{gate_quality.get('best_threshold', 'n/a')}</code>, "
             f"наблюдений=<code>{gate_quality.get('gate_total_count', 0)}</code>, "
             f"lift=<code>{gate_quality.get('gate_lift_vs_all_bps', 'n/a')}</code>\n\n"
             "Изменить: <code>/limits entries 1</code>, <code>/limits pending 1</code>, "
             "<code>/limits same_side 1</code>, <code>/limits price_cap 25</code>\n"
+            "Риски: <code>/limits allow_sideways on</code>, <code>/limits max_position_value_usd 10</code>\n"
+            "Трейлинг: <code>/limits trailing_activation_pct 0.7</code>, <code>/limits trailing_distance_pct 0.25</code>\n"
             "Фильтр модели: <code>/limits model_gate on</code>, <code>/limits model_gate_threshold 0.60</code>"
         )
 
