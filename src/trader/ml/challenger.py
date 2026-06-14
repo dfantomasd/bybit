@@ -187,8 +187,8 @@ class ChallengerModel:
     label_schema_version: str = LABEL_SCHEMA_VERSION
     model_type: str = "SGD"
     """"SGD" (linear, supports online partial_fit), "GBDT" (gradient-boosted
-    trees via HistGradientBoostingClassifier), or "LOGREG" (regularized linear
-    baseline)."""
+    trees via HistGradientBoostingClassifier), "LOGREG" (regularized linear
+    baseline), or "MLP" (multi-layer perceptron neural network)."""
     model_params: dict[str, Any] = field(default_factory=dict)
 
     _clf: Any = field(default=None, repr=False)
@@ -287,6 +287,31 @@ class ChallengerModel:
             self.training_samples = int(len(x_scaled))
             return
 
+        if self.model_type.upper() == "MLP":
+            from sklearn.neural_network import MLPClassifier
+
+            hidden = fit_params.get("hidden_layer_sizes", (64, 32))
+            lr_init = float(fit_params.get("learning_rate_init", 0.001))
+            alpha = float(fit_params.get("alpha", 0.0001))
+            self._scaler = StandardScaler()
+            self._scaler.fit(x)
+            x_scaled = self._scaler.transform(x)
+            self._clf = MLPClassifier(
+                hidden_layer_sizes=hidden,
+                activation="relu",
+                solver="adam",
+                learning_rate_init=lr_init,
+                alpha=alpha,
+                max_iter=500,
+                early_stopping=True,
+                validation_fraction=0.15,
+                n_iter_no_change=20,
+                random_state=42,
+            )
+            self._clf.fit(x_scaled, y)
+            self.training_samples = int(len(x_scaled))
+            return
+
         self._clf = SGDClassifier(
             loss="log_loss",
             max_iter=1,
@@ -313,9 +338,9 @@ class ChallengerModel:
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return
-        if self.model_type.upper() == "GBDT":
-            # Gradient-boosted trees cannot be updated online; the periodic
-            # batch retrain covers new data instead.
+        if self.model_type.upper() in ("GBDT", "MLP"):
+            # Gradient-boosted trees and MLPs cannot be updated online; the
+            # periodic batch retrain covers new data instead.
             return
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
