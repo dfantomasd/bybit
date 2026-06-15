@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     SCALP_STRATEGY_ENABLED: bool = True
     """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
-    MAX_SPREAD_BPS_SCALP: float = 2.5
+    MAX_SPREAD_BPS_SCALP: float = 5.0
     """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
     MIN_NET_SCALP_RETURN_PCT: float = 0.08
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""

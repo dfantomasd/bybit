@@ -362,7 +362,7 @@ class TelegramMonitorBot:
             f"{icon} <b>Сигнал [{mode}]</b>\n"
             f"{entry.symbol} {entry.side} | уверенность: <code>{entry.confidence:.2f}</code>\n"
             f"Режим рынка: <code>{entry.regime}</code>\n"
-            f"{entry.rationale}"
+            f"{html.escape(str(entry.rationale))}"
         )
         await self.notify(text)
 
