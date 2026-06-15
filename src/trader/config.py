@@ -141,9 +141,9 @@ class Settings(BaseSettings):
     BUCKET_BLOCK_ENABLED: bool = True
     """Skip strategy evaluation in (regime, volatility, UTC hour) buckets whose
     own historical signals show persistent negative expectancy."""
-    BUCKET_MIN_SAMPLES: int = 30
+    BUCKET_MIN_SAMPLES: int = 200
     """Minimum resolved outcomes in a bucket before it can be blocked."""
-    BUCKET_BLOCK_AVG_BPS: float = -2.0
+    BUCKET_BLOCK_AVG_BPS: float = -10.0
     """Block a bucket when its average net return is below this (bps)."""
     BUCKET_STATS_REFRESH_SECONDS: int = 3600
     """How often the in-memory bucket statistics are refreshed from Postgres."""
