@@ -766,9 +766,35 @@ class TradingApplication:
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
                 enough_increment = latest_samples > 0 and (trainable - latest_samples) >= increment_samples
-                if not (enough_initial or enough_increment):
+
+                # Schema-mismatch trigger: if current model uses an outdated feature schema,
+                # fire as soon as the new schema has min_samples — don't wait for increment_samples.
+                # This eliminates the silent multi-hour window where predict() always returns None.
+                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
+                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                current_schema_hash = ""
+                if self._model_registry is not None:
+                    _active = self._model_registry.challenger or self._model_registry.champion
+                    if _active is not None:
+                        current_schema_hash = _active.feature_schema_hash
+                schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                enough_schema_change = schema_mismatch and newest_schema_samples >= min_samples
+
+                if not (enough_initial or enough_increment or enough_schema_change):
+                    if schema_mismatch and newest_schema_samples > 0:
+                        log.warning(
+                            "model_auto_training.schema_mismatch_accumulating",
+                            current_schema=current_schema_hash,
+                            newest_schema=newest_schema_hash,
+                            newest_schema_samples=newest_schema_samples,
+                            min_samples_needed=min_samples,
+                        )
                     continue
 
+                trigger_reason = (
+                    "schema_change" if enough_schema_change
+                    else ("initial" if enough_initial else "increment")
+                )
                 msg = await self._start_model_training(min_samples, horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
@@ -776,6 +802,8 @@ class TradingApplication:
                     latest_samples=latest_samples,
                     min_samples=min_samples,
                     increment_samples=increment_samples,
+                    trigger_reason=trigger_reason,
+                    schema_mismatch=schema_mismatch,
                 )
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
@@ -937,6 +965,15 @@ class TradingApplication:
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
 
+                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
+                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                current_schema_hash = ""
+                if self._model_registry is not None:
+                    _rep_model = self._model_registry.challenger or self._model_registry.champion
+                    if _rep_model is not None:
+                        current_schema_hash = _rep_model.feature_schema_hash
+                schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+
                 log.info(
                     "model_progress_reporter.stats",
                     challenger_version=version,
@@ -949,6 +986,10 @@ class TradingApplication:
                     lift_bps=round(float(lift_bps), 3) if lift_bps is not None else None,
                     pass_precision=round(float(pass_precision), 3) if pass_precision is not None else None,
                     gate_schema_hash=gate.get("feature_schema_hash"),
+                    model_schema=current_schema_hash[:8] if current_schema_hash else None,
+                    newest_schema=newest_schema_hash[:8] if newest_schema_hash else None,
+                    newest_schema_samples=newest_schema_samples,
+                    schema_drift=schema_drift,
                     candle_sampler_total=self._candle_sampler_total,
                     candle_sampler_scored=self._candle_sampler_scored,
                     candle_sampler_no_model=self._candle_sampler_no_model,
@@ -973,6 +1014,17 @@ class TradingApplication:
                     "📊 <b>Прогресс модели</b>",
                     f"Версия: <code>{version}</code> [{status}]",
                     f"Обучено на: <code>{training_samples}</code> примерах | Доступно: <code>{labelled}</code>",
+                ]
+
+                if schema_drift:
+                    min_samples_needed = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
+                    lines.append(
+                        f"⚠️ <b>Смена схемы фичей!</b> Модель: <code>{current_schema_hash[:8]}</code> → "
+                        f"Новая: <code>{newest_schema_hash[:8]}</code> "
+                        f"({newest_schema_samples}/{min_samples_needed} примеров)"
+                    )
+
+                lines += [
                     "",
                     "<b>Условия для авто-промоута:</b>",
                     check(is_challenger, f"Статус SHADOW_CHALLENGER → {status}"),
@@ -991,6 +1043,11 @@ class TradingApplication:
                     lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")
                 elif not is_challenger and status == "CHAMPION":
                     lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
+                elif schema_drift:
+                    lines.append(
+                        f"\n⏳ Модель не обучена под текущую схему фичей. "
+                        f"Авто-обучение запустится при {newest_schema_samples}/{min_samples_needed} примерах."
+                    )
                 else:
                     missing = []
                     if not has_signals:
