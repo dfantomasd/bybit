@@ -3515,6 +3515,12 @@ class TradingApplication:
                 log.debug("strategy_loop.bucket_blocked", symbol=symbol)
                 return
 
+            # Skip symbols with an existing open position — the engine would
+            # reject them anyway, but avoiding the ensemble call prevents
+            # no_decision entries from polluting the training dataset.
+            if self._execution_engine is not None and self._execution_engine.has_open_position(symbol):
+                return
+
             # Strategy ensemble
             settings = self._settings
             if settings is None or self._strategy_ensemble is None:
