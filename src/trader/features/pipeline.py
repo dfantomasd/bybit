@@ -183,6 +183,13 @@ class FeaturePipeline:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def invalidate_symbol(self, symbol: str) -> None:
+        """Remove cached feature vectors for a symbol after its candles are reseeded."""
+        keys = [k for k in self._latest if k[0] == symbol]
+        for k in keys:
+            del self._latest[k]
+            self._last_computed_at.pop(k, None)
+
     def latest(self, symbol: str, interval: str) -> FeatureVector | None:
         return self._latest.get((symbol, interval))
 

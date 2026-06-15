@@ -1694,6 +1694,19 @@ class TradingApplication:
                 topics.append(f"tickers.{symbol}")
                 await self._ws_public.subscribe(topics)
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
+            # Pre-warm turnover_24h so position_sizer never sees liquidity_data_missing
+            # on the very first signal for this symbol.
+            if self._execution_engine is not None and self._bybit_adapter is not None:
+                try:
+                    resp = await self._bybit_adapter._rest.get_tickers(category="linear", symbol=symbol)
+                    items = resp.get("result", {}).get("list", [])
+                    if items:
+                        raw_t24h = items[0].get("turnover24h")
+                        if raw_t24h:
+                            from decimal import Decimal as _D
+                            self._execution_engine.update_ticker_turnover(symbol, _D(str(raw_t24h)))
+                except Exception as exc:
+                    log.debug("screener.ticker_prefetch_failed", symbol=symbol, error=str(exc))
 
     async def _on_screener_symbols_removed(self, symbols: list[str]) -> None:
         log.info("screener.symbols_removed", symbols=symbols)
@@ -1833,6 +1846,10 @@ class TradingApplication:
                         error=str(exc),
                         has_api_key=has_api_key,
                     )
+            # After all intervals are seeded, drop any stale cached feature vectors
+            # so the next compute() produces a fresh vector bound to the new candles.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
 
     async def _reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
