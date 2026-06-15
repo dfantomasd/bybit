@@ -36,15 +36,15 @@ log = structlog.get_logger(__name__)
 _STRATEGY_ID = "ema_crossover_v1"
 
 # Signal thresholds
-_EMA_SLOPE_MIN = 0.0001  # EMA9 must be rising at least this fast (normalised)
-_RSI_LONG_MIN = 0.45  # RSI14 in [0,1] scale
+_EMA_SLOPE_MIN = 0.0002  # EMA9 must be rising — raised to filter weak drift
+_RSI_LONG_MIN = 0.50   # require momentum confirmation for longs
 _RSI_LONG_MAX = 0.70
 _RSI_SHORT_MIN = 0.30
-_RSI_SHORT_MAX = 0.55
+_RSI_SHORT_MAX = 0.50   # tighter ceiling — avoid buying dips in bear moves
 _VOLUME_ZSCORE_MIN = -0.5  # reject low-volume entries
 
-_ATR_STOP_MULTIPLIER = 1.5
-_ATR_TP_MULTIPLIER = 3.0
+_ATR_STOP_MULTIPLIER = 2.0  # widened: 1.5→2.0 to survive normal intrabar noise
+_ATR_TP_MULTIPLIER = 4.0   # keep 2:1 R/R at the new stop distance
 _MIN_ATR_PCT = 0.001  # skip if ATR is basically zero
 _MAX_ATR_PCT = 0.05  # skip if market is too volatile
 
@@ -68,7 +68,7 @@ class EMAcrossoverStrategy(BaseStrategy):
         allow_short: bool = True,
         min_qty_usd: float = 5.0,
         max_risk_pct: float = 0.01,  # 1% of balance per trade
-        min_adx: float = 0.25,
+        min_adx: float = 0.30,
         block_negative_funding_oi: bool = True,
     ) -> None:
         self._symbol = symbol.upper() if symbol else None
@@ -152,9 +152,9 @@ class EMAcrossoverStrategy(BaseStrategy):
             if _RSI_LONG_MIN <= rsi14 <= _RSI_LONG_MAX and macd_hist > 0:
                 bonus_conditions = sum(
                     [
-                        ema9_slope > _EMA_SLOPE_MIN * 3,
-                        rsi14 > 0.50,
-                        (volume_z or 0) > 0.5,
+                        ema9_slope > _EMA_SLOPE_MIN * 3,  # strong slope momentum
+                        rsi14 > 0.55,                     # clearer upside bias
+                        (volume_z or 0) > 0.5,            # above-average volume
                     ]
                 )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION
@@ -200,9 +200,9 @@ class EMAcrossoverStrategy(BaseStrategy):
             if _RSI_SHORT_MIN <= rsi14 <= _RSI_SHORT_MAX and macd_hist < 0:
                 bonus_conditions = sum(
                     [
-                        ema9_slope < -_EMA_SLOPE_MIN * 3,
-                        rsi14 < 0.45,
-                        (volume_z or 0) > 0.5,
+                        ema9_slope < -_EMA_SLOPE_MIN * 3,  # strong downward momentum
+                        rsi14 < 0.40,                      # clearly oversold territory
+                        (volume_z or 0) > 0.5,             # above-average volume
                     ]
                 )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION

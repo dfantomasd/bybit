@@ -900,17 +900,30 @@ class TradingApplication:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
 
-                gate = diag.get("shadow_gate_15m", {}) or {}
                 latest_model = diag.get("latest_model_version", {}) or {}
                 champion_wf_bps = await self._get_champion_walk_forward_bps()
 
                 version = str(latest_model.get("version", "—") or "—")
                 status = str(latest_model.get("status", "—") or "—")
                 training_samples = int(latest_model.get("training_samples", 0) or 0)
+                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+
+                # Fetch gate stats for the latest model (challenger), not the active champion.
+                # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
+                # be a different version — producing a misleading "0 signals" for the challenger.
+                gate: dict = {}
+                if version and version != "—" and self._trade_journal is not None:
+                    gate = await self._trade_journal.get_shadow_gate_stats(
+                        version,
+                        15,
+                        "directional_net_v1",
+                    )
+                else:
+                    gate = diag.get("shadow_gate_15m", {}) or {}
+
                 total_count = int(gate.get("total_count", 0) or 0)
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
-                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
 
                 min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
                 min_lift = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
