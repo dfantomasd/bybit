@@ -110,6 +110,12 @@ class TradingApplication:
         self._bucket_stats_refreshed_at: datetime | None = None
         # Per-candle training sampler: last sampled candle open_time per symbol
         self._last_candle_sample_at: dict[str, datetime] = {}
+        # Candle sampler health counters — reset every log cycle
+        self._candle_sampler_total: int = 0
+        self._candle_sampler_scored: int = 0
+        self._candle_sampler_no_model: int = 0
+        self._candle_sampler_gate_pass: int = 0
+        self._candle_sampler_gate_block: int = 0
         self._strategy_ensemble: Any | None = None
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
@@ -924,6 +930,23 @@ class TradingApplication:
                 total_count = int(gate.get("total_count", 0) or 0)
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
+
+                log.info(
+                    "model_progress_reporter.stats",
+                    challenger_version=version,
+                    challenger_status=status,
+                    training_samples=training_samples,
+                    labelled_15m=labelled,
+                    gate_total=total_count,
+                    gate_pass=gate.get("pass_count"),
+                    gate_block=gate.get("block_count"),
+                    lift_bps=round(float(lift_bps), 3) if lift_bps is not None else None,
+                    pass_precision=round(float(pass_precision), 3) if pass_precision is not None else None,
+                    gate_schema_hash=gate.get("feature_schema_hash"),
+                    candle_sampler_total=self._candle_sampler_total,
+                    candle_sampler_scored=self._candle_sampler_scored,
+                    candle_sampler_no_model=self._candle_sampler_no_model,
+                )
 
                 min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
                 min_lift = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
@@ -2980,6 +3003,8 @@ class TradingApplication:
                 metadata={"source": "candle_sampler"},
             )
 
+            self._candle_sampler_total += 1
+
             # Challenger shadow gate on every sampled candle. Signal-only shadow
             # scoring accumulates GATE_PASS/GATE_BLOCK observations slower than
             # the auto-trainer rotates model versions, so per-version gate stats
@@ -2987,6 +3012,7 @@ class TradingApplication:
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
                 shadow_prediction = self._model_registry.score_shadow(vec.values)
                 if shadow_prediction is not None:
+                    self._candle_sampler_scored += 1
                     threshold = self._model_gate_threshold(None)
                     gate_decision = None
                     gate_reason = "shadow_gate_disabled"
@@ -2995,6 +3021,10 @@ class TradingApplication:
                         gate_reason = (
                             "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
                         )
+                        if gate_decision == "GATE_PASS":
+                            self._candle_sampler_gate_pass += 1
+                        else:
+                            self._candle_sampler_gate_block += 1
                     await self._trade_journal.record_prediction_event(
                         symbol=symbol,
                         interval=interval,
@@ -3010,8 +3040,43 @@ class TradingApplication:
                             "threshold": threshold,
                         },
                     )
+                else:
+                    self._candle_sampler_no_model += 1
+                    # Only warn once per 50 misses to avoid log spam
+                    if self._candle_sampler_no_model % 50 == 1:
+                        challenger = (
+                            self._model_registry.challenger if self._model_registry is not None else None
+                        )
+                        log.warning(
+                            "candle_sampler.shadow_score_unavailable",
+                            symbol=symbol,
+                            feature_count=len(vec.feature_names),
+                            challenger_version=(challenger.version if challenger is not None else None),
+                            challenger_feature_count=(
+                                len(challenger.feature_names) if challenger is not None else None
+                            ),
+                            no_model_count=self._candle_sampler_no_model,
+                        )
+
+            # Periodic health summary — emitted every 200 candles (~30 min at 7 symbols)
+            if self._candle_sampler_total % 200 == 0:
+                score_rate = (
+                    round(self._candle_sampler_scored / self._candle_sampler_total, 3)
+                    if self._candle_sampler_total
+                    else 0.0
+                )
+                log.info(
+                    "candle_sampler.health",
+                    total=self._candle_sampler_total,
+                    scored=self._candle_sampler_scored,
+                    no_model=self._candle_sampler_no_model,
+                    gate_pass=self._candle_sampler_gate_pass,
+                    gate_block=self._candle_sampler_gate_block,
+                    score_rate=score_rate,
+                )
+
         except Exception as exc:
-            log.debug("candle_sampler.failed", symbol=symbol, error=str(exc))
+            log.warning("candle_sampler.failed", symbol=symbol, error=str(exc))
 
     def _bucket_blocked(self, regime_ctx: Any) -> bool:
         """True when the current (regime, volatility, UTC hour) bucket is toxic.
