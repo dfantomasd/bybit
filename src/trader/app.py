@@ -2098,7 +2098,7 @@ class TradingApplication:
         async def consume_events() -> None:
 
             from trader.data.candles import candle_from_kline_event
-            from trader.domain.events import KlineEvent, OrderBookEvent
+            from trader.domain.events import KlineEvent, OrderBookEvent, TickerEvent
 
             while not self._shutdown_event.is_set():
                 try:
@@ -2106,6 +2106,13 @@ class TradingApplication:
                     if isinstance(event, OrderBookEvent):
                         if self._orderbook_tracker is not None:
                             self._orderbook_tracker.record(event.symbol, event.bids, event.asks)
+                    elif isinstance(event, TickerEvent):
+                        if (
+                            event.turnover_24h is not None
+                            and event.turnover_24h > 0
+                            and self._execution_engine is not None
+                        ):
+                            self._execution_engine.update_ticker_turnover(event.symbol, event.turnover_24h)
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         if self._candle_store is None:
