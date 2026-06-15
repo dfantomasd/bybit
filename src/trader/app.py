@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import sys
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
@@ -156,6 +157,7 @@ class TradingApplication:
         self._training_task: asyncio.Task[Any] | None = None
         self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
+        self._training_failed_at: float | None = None  # monotonic time of last failed training
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
         # ML shadow scoring
@@ -687,6 +689,7 @@ class TradingApplication:
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:
                 self._last_training_message = stderr or stdout or "training timeout"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training timed out</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             elif proc.returncode == 0 and "Checkpoint saved" in stdout:
                 self._last_training_message = stdout.splitlines()[-2] if len(stdout.splitlines()) >= 2 else stdout
@@ -705,6 +708,7 @@ class TradingApplication:
                 )
             else:
                 self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training failed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             log.info(
                 "model_training.finished",
@@ -713,6 +717,7 @@ class TradingApplication:
             )
         except Exception as exc:
             self._last_training_message = str(exc)
+            self._training_failed_at = time.monotonic()
             text = f"❌ <b>Training crashed</b>\n<code>{code_text(str(exc))}</code>"
             log.warning("model_training.crashed", error=str(exc))
         if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -754,6 +759,20 @@ class TradingApplication:
 
             if self._training_task is not None and not self._training_task.done():
                 continue
+
+            # Back off for 30 minutes after a training failure to avoid an infinite
+            # retry loop (e.g. OOM kill causes returncode -9, then latest_samples=0
+            # looks like a fresh trigger on the very next check cycle).
+            _training_failure_cooldown = 1800.0
+            if self._training_failed_at is not None:
+                elapsed_since_failure = time.monotonic() - self._training_failed_at
+                if elapsed_since_failure < _training_failure_cooldown:
+                    remaining = int(_training_failure_cooldown - elapsed_since_failure)
+                    log.info(
+                        "model_auto_training.failure_cooldown",
+                        cooldown_remaining_s=remaining,
+                    )
+                    continue
 
             if self._trade_journal is None:
                 log.info("model_auto_training.waiting", reason="trade_journal_not_started")
