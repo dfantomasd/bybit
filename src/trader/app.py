@@ -1846,22 +1846,24 @@ class TradingApplication:
             if self._feature_pipeline is not None:
                 self._feature_pipeline.invalidate_symbol(symbol)
                 await self._feature_pipeline.on_confirmed_candle(symbol, _WS_INTERVAL)
-            # Pre-warm InstrumentInfo.turnover_24h so position_sizer never hits
-            # liquidity_data_missing on the first signal for this symbol.
-            if self._execution_engine is not None and self._bybit_adapter is not None:
-                try:
-                    resp = await self._bybit_adapter._rest.get_tickers(
-                        category="linear", symbol=symbol
-                    )
-                    items = resp.get("result", {}).get("list", [])
-                    if items:
-                        raw_t24h = items[0].get("turnover24h")
-                        if raw_t24h:
-                            self._execution_engine.update_ticker_turnover(
-                                symbol, Decimal(str(raw_t24h))
-                            )
-                except Exception as exc:
-                    log.debug("seed.ticker_prefetch_failed", symbol=symbol, error=str(exc))
+
+        # Pre-warm InstrumentInfo.turnover_24h for all seeded symbols in ONE batch call
+        # so position_sizer never hits liquidity_data_missing on the first signal.
+        # A single batch GET avoids per-symbol rate-limit pressure during startup.
+        if self._execution_engine is not None and self._bybit_adapter is not None:
+            try:
+                resp = await self._bybit_adapter._rest.get_tickers(category="linear")
+                items = resp.get("result", {}).get("list", [])
+                seed_set = set(seed_symbols)
+                for item in items:
+                    sym = item.get("symbol", "")
+                    if sym not in seed_set:
+                        continue
+                    raw_t24h = item.get("turnover24h")
+                    if raw_t24h:
+                        self._execution_engine.update_ticker_turnover(sym, Decimal(str(raw_t24h)))
+            except Exception as exc:
+                log.debug("seed.ticker_prefetch_failed", symbols=seed_symbols, error=str(exc))
 
     async def _reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
