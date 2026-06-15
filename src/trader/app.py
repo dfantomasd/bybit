@@ -116,6 +116,12 @@ class TradingApplication:
         self._candle_sampler_no_model: int = 0
         self._candle_sampler_gate_pass: int = 0
         self._candle_sampler_gate_block: int = 0
+        # Per-symbol signal cooldown: suppress duplicate proposals within one candle period.
+        # The strategy loop runs every ~10s but features refresh ~60s (one 1m candle), so
+        # without a cooldown the same signal fires 5-6 times and floods training data with
+        # correlated duplicates before execution can block them.
+        self._last_signal_at: dict[str, datetime] = {}
+        self._signal_cooldown_s: float = 60.0
         self._strategy_ensemble: Any | None = None
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
@@ -1606,6 +1612,7 @@ class TradingApplication:
         log.info("screener.symbols_removed", symbols=symbols)
         for symbol in symbols:
             self._last_candle_sample_at.pop(symbol, None)
+            self._last_signal_at.pop(symbol, None)
 
     async def _start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
@@ -3616,6 +3623,16 @@ class TradingApplication:
 
             if proposal is None:
                 return
+
+            # Cooldown: suppress duplicate proposals for the same symbol within one candle
+            # period. The strategy loop runs every ~10s but features update every ~60s, so
+            # without this the same signal fires 5-6× per candle, flooding training data with
+            # correlated duplicates and spamming execution with skipped proposals.
+            now_ts = datetime.now(tz=UTC)
+            last_sig = self._last_signal_at.get(symbol)
+            if last_sig is not None and (now_ts - last_sig).total_seconds() < self._signal_cooldown_s:
+                return
+            self._last_signal_at[symbol] = now_ts
 
             self._record_diag("signals_emitted")
 
