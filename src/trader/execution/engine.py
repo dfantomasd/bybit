@@ -925,8 +925,6 @@ class ExecutionEngine:
                 return None
             # Verify SL is on the correct side of entry
             if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
-                from trader.domain.enums import OrderSide
-
                 sl_valid = (proposal.side == OrderSide.BUY and proposal.stop_loss < proposal.entry_price) or (
                     proposal.side == OrderSide.SELL and proposal.stop_loss > proposal.entry_price
                 )
