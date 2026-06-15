@@ -1686,7 +1686,8 @@ class TradingApplication:
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
         for symbol in symbols:
-            # Seed historical candles
+            # Seed historical candles (also invalidates cache, triggers recompute,
+            # and pre-warms turnover_24h — see _seed_candle_store).
             await self._seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._ws_public is not None:
@@ -1694,19 +1695,6 @@ class TradingApplication:
                 topics.append(f"tickers.{symbol}")
                 await self._ws_public.subscribe(topics)
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
-            # Pre-warm turnover_24h so position_sizer never sees liquidity_data_missing
-            # on the very first signal for this symbol.
-            if self._execution_engine is not None and self._bybit_adapter is not None:
-                try:
-                    resp = await self._bybit_adapter._rest.get_tickers(category="linear", symbol=symbol)
-                    items = resp.get("result", {}).get("list", [])
-                    if items:
-                        raw_t24h = items[0].get("turnover24h")
-                        if raw_t24h:
-                            from decimal import Decimal as _D
-                            self._execution_engine.update_ticker_turnover(symbol, _D(str(raw_t24h)))
-                except Exception as exc:
-                    log.debug("screener.ticker_prefetch_failed", symbol=symbol, error=str(exc))
 
     async def _on_screener_symbols_removed(self, symbols: list[str]) -> None:
         log.info("screener.symbols_removed", symbols=symbols)
@@ -1777,6 +1765,11 @@ class TradingApplication:
         seed_symbols = symbols or _SYMBOLS
 
         for symbol in seed_symbols:
+            # Clear any pre-existing cached vector before touching the candle store.
+            # This prevents the watchdog from reading a stale vector during the seeding
+            # window and then re-caching it, which would persist until the next WS kline.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
             for interval in self._market_data_intervals():
                 try:
                     resp = await self._bybit_adapter._rest.get_kline(
@@ -1846,10 +1839,29 @@ class TradingApplication:
                         error=str(exc),
                         has_api_key=has_api_key,
                     )
-            # After all intervals are seeded, drop any stale cached feature vectors
-            # so the next compute() produces a fresh vector bound to the new candles.
+            # After all intervals seeded: invalidate again (watchdog may have run during
+            # the seeding window and re-cached a stale vector), then trigger an immediate
+            # recompute so the next strategy call gets a valid vector without waiting for
+            # the next WS kline or the 60-second watchdog cycle.
             if self._feature_pipeline is not None:
                 self._feature_pipeline.invalidate_symbol(symbol)
+                await self._feature_pipeline.on_confirmed_candle(symbol, _WS_INTERVAL)
+            # Pre-warm InstrumentInfo.turnover_24h so position_sizer never hits
+            # liquidity_data_missing on the first signal for this symbol.
+            if self._execution_engine is not None and self._bybit_adapter is not None:
+                try:
+                    resp = await self._bybit_adapter._rest.get_tickers(
+                        category="linear", symbol=symbol
+                    )
+                    items = resp.get("result", {}).get("list", [])
+                    if items:
+                        raw_t24h = items[0].get("turnover24h")
+                        if raw_t24h:
+                            self._execution_engine.update_ticker_turnover(
+                                symbol, Decimal(str(raw_t24h))
+                            )
+                except Exception as exc:
+                    log.debug("seed.ticker_prefetch_failed", symbol=symbol, error=str(exc))
 
     async def _reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
