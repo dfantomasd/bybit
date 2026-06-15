@@ -732,6 +732,7 @@ class TradingApplication:
 
         check_seconds = max(60, int(self._settings.MODEL_AUTO_TRAIN_CHECK_SECONDS))
         min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
+        schema_change_min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
         increment_samples = max(1, int(self._settings.MODEL_AUTO_TRAIN_INCREMENT_SAMPLES))
         horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
         label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
@@ -786,7 +787,7 @@ class TradingApplication:
                     if _active is not None:
                         current_schema_hash = _active.feature_schema_hash
                 schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
-                enough_schema_change = schema_mismatch and newest_schema_samples >= min_samples
+                enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
 
                 if not (enough_initial or enough_increment or enough_schema_change):
                     if schema_mismatch and newest_schema_samples > 0:
@@ -795,7 +796,8 @@ class TradingApplication:
                             current_schema=current_schema_hash,
                             newest_schema=newest_schema_hash,
                             newest_schema_samples=newest_schema_samples,
-                            min_samples_needed=min_samples,
+                            schema_change_min_samples=schema_change_min_samples,
+                            min_samples_needed=schema_change_min_samples,
                         )
                     continue
 
@@ -803,12 +805,13 @@ class TradingApplication:
                     "schema_change" if enough_schema_change
                     else ("initial" if enough_initial else "increment")
                 )
-                msg = await self._start_model_training(min_samples, horizon, label_bps)
+                effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
+                msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
                     trainable=trainable,
                     latest_samples=latest_samples,
-                    min_samples=min_samples,
+                    min_samples=effective_min_samples,
                     increment_samples=increment_samples,
                     trigger_reason=trigger_reason,
                     schema_mismatch=schema_mismatch,
@@ -981,6 +984,7 @@ class TradingApplication:
                     if _rep_model is not None:
                         current_schema_hash = _rep_model.feature_schema_hash
                 schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                _sc_min = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
 
                 log.info(
                     "model_progress_reporter.stats",
@@ -1025,11 +1029,10 @@ class TradingApplication:
                 ]
 
                 if schema_drift:
-                    min_samples_needed = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
                     lines.append(
                         f"⚠️ <b>Смена схемы фичей!</b> Модель: <code>{current_schema_hash[:8]}</code> → "
                         f"Новая: <code>{newest_schema_hash[:8]}</code> "
-                        f"({newest_schema_samples}/{min_samples_needed} примеров)"
+                        f"({newest_schema_samples}/{_sc_min} примеров)"
                     )
 
                 lines += [
@@ -1054,7 +1057,7 @@ class TradingApplication:
                 elif schema_drift:
                     lines.append(
                         f"\n⏳ Модель не обучена под текущую схему фичей. "
-                        f"Авто-обучение запустится при {newest_schema_samples}/{min_samples_needed} примерах."
+                        f"Авто-обучение запустится при {newest_schema_samples}/{_sc_min} примерах."
                     )
                 else:
                     missing = []
