@@ -214,6 +214,14 @@ class ChallengerModel:
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
+        if self.feature_names and len(features) != len(self.feature_names):
+            log.warning(
+                "challenger.predict_feature_mismatch",
+                expected=len(self.feature_names),
+                got=len(features),
+                version=self.version,
+            )
+            return None
         try:
             x = np.array(features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
@@ -229,7 +237,7 @@ class ChallengerModel:
                 is_live_decision=self.allow_live_decisions and self.status == ModelStatus.CHAMPION,
             )
         except Exception as exc:
-            log.debug("challenger.predict_failed", exc_info=exc)
+            log.warning("challenger.predict_failed", error=str(exc), version=self.version)
             return None
 
     def fit_batch(self, features: Any, labels: Any, *, epochs: int = 5, params: dict[str, Any] | None = None) -> None:
