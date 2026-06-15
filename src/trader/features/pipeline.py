@@ -13,6 +13,8 @@ Fallback: ``run()`` acts as a staleness watchdog that re-fires computation for a
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from datetime import UTC, datetime
 from typing import Any
@@ -46,6 +48,10 @@ log = structlog.get_logger(__name__)
 
 # Minimum confirmed candles needed before features can be computed
 _MIN_BARS = 30
+
+
+def _schema_hash(names: list[str]) -> str:
+    return hashlib.sha256(json.dumps(names).encode()).hexdigest()[:16]
 
 
 class FeaturePipeline:
@@ -176,6 +182,13 @@ class FeaturePipeline:
 
     def stop(self) -> None:
         self._stop_event.set()
+
+    def invalidate_symbol(self, symbol: str) -> None:
+        """Remove cached feature vectors for a symbol after its candles are reseeded."""
+        keys = [k for k in self._latest if k[0] == symbol]
+        for k in keys:
+            del self._latest[k]
+            self._last_computed_at.pop(k, None)
 
     def latest(self, symbol: str, interval: str) -> FeatureVector | None:
         return self._latest.get((symbol, interval))
@@ -363,26 +376,31 @@ class FeaturePipeline:
             features["oi_change_pct_60m_clipped"] = max(-5.0, min(5.0, features["oi_change_pct_60m"]))
 
         # --- Candle pattern (last bar) ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
         candles = self._store.confirmed(symbol, interval)
         if candles:
             last = candles[-1]
             features["candle_body_ratio"] = candle_body_ratio(last.open, last.high, last.low, last.close)
+        else:
+            features["candle_body_ratio"] = 0.0
+            missing.append("candle_body_ratio")
 
         # --- Multi-tier EWMA directional signal ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
         val_ewma = multi_ewma_signal(closes)
-        if val_ewma is not None:
-            features["ewma_tier_signal"] = val_ewma
-        else:
+        features["ewma_tier_signal"] = val_ewma if val_ewma is not None else 0.0
+        if val_ewma is None:
             missing.append("ewma_tier_signal")
 
         # --- VWAP distance ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
+        val_vwap: float | None = None
         if len(highs) >= 14 and len(lows) >= 14 and len(volumes) >= 14:
-            val_vwap = vwap(highs, lows, closes, volumes, period=14)
-            if val_vwap is not None and val_vwap > 0 and closes:
-                features["vwap_distance_pct"] = (closes[-1] - val_vwap) / val_vwap * 100.0
-            else:
-                missing.append("vwap_distance_pct")
-        else:
+            _vwap = vwap(highs, lows, closes, volumes, period=14)
+            if _vwap is not None and _vwap > 0 and closes:
+                val_vwap = (closes[-1] - _vwap) / _vwap * 100.0
+        features["vwap_distance_pct"] = val_vwap if val_vwap is not None else 0.0
+        if val_vwap is None:
             missing.append("vwap_distance_pct")
 
         # Quality score: fraction of features computed
@@ -394,6 +412,26 @@ class FeaturePipeline:
 
         names = sorted(features.keys())
         values = [features[k] for k in names]
+
+        schema_hash = _schema_hash(names)
+
+        if missing:
+            log.warning(
+                "feature_pipeline.missing_features",
+                symbol=symbol,
+                interval=interval,
+                missing=missing,
+                feature_count=len(names),
+                schema_hash=schema_hash,
+            )
+        else:
+            log.debug(
+                "feature_pipeline.computed",
+                symbol=symbol,
+                interval=interval,
+                feature_count=len(names),
+                schema_hash=schema_hash,
+            )
 
         return FeatureVector(
             symbol=symbol,

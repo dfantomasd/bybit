@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import sys
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
@@ -43,7 +44,7 @@ log = get_logger(__name__)
 # Fallback symbols (used only if screener fails); prefer cheap coins for small balance
 _SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 _WS_INTERVAL = "1"  # 1-minute klines over WS
-_MIN_SEED_BARS = 60  # bars to fetch from REST at startup
+_MIN_SEED_BARS = 250  # bars to fetch from REST at startup (multi_ewma_signal needs 201)
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
 _TRAINING_HEARTBEAT_SECONDS = 30.0
@@ -156,6 +157,7 @@ class TradingApplication:
         self._training_task: asyncio.Task[Any] | None = None
         self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
+        self._training_failed_at: float | None = None  # monotonic time of last failed training
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
         # ML shadow scoring
@@ -687,6 +689,7 @@ class TradingApplication:
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:
                 self._last_training_message = stderr or stdout or "training timeout"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training timed out</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             elif proc.returncode == 0 and "Checkpoint saved" in stdout:
                 self._last_training_message = stdout.splitlines()[-2] if len(stdout.splitlines()) >= 2 else stdout
@@ -705,6 +708,7 @@ class TradingApplication:
                 )
             else:
                 self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training failed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             log.info(
                 "model_training.finished",
@@ -713,6 +717,7 @@ class TradingApplication:
             )
         except Exception as exc:
             self._last_training_message = str(exc)
+            self._training_failed_at = time.monotonic()
             text = f"❌ <b>Training crashed</b>\n<code>{code_text(str(exc))}</code>"
             log.warning("model_training.crashed", error=str(exc))
         if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -754,6 +759,20 @@ class TradingApplication:
 
             if self._training_task is not None and not self._training_task.done():
                 continue
+
+            # Back off for 30 minutes after a training failure to avoid an infinite
+            # retry loop (e.g. OOM kill causes returncode -9, then latest_samples=0
+            # looks like a fresh trigger on the very next check cycle).
+            _training_failure_cooldown = 1800.0
+            if self._training_failed_at is not None:
+                elapsed_since_failure = time.monotonic() - self._training_failed_at
+                if elapsed_since_failure < _training_failure_cooldown:
+                    remaining = int(_training_failure_cooldown - elapsed_since_failure)
+                    log.info(
+                        "model_auto_training.failure_cooldown",
+                        cooldown_remaining_s=remaining,
+                    )
+                    continue
 
             if self._trade_journal is None:
                 log.info("model_auto_training.waiting", reason="trade_journal_not_started")
@@ -1667,7 +1686,8 @@ class TradingApplication:
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
         for symbol in symbols:
-            # Seed historical candles
+            # Seed historical candles (also invalidates cache, triggers recompute,
+            # and pre-warms turnover_24h — see _seed_candle_store).
             await self._seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._ws_public is not None:
@@ -1745,6 +1765,11 @@ class TradingApplication:
         seed_symbols = symbols or _SYMBOLS
 
         for symbol in seed_symbols:
+            # Clear any pre-existing cached vector before touching the candle store.
+            # This prevents the watchdog from reading a stale vector during the seeding
+            # window and then re-caching it, which would persist until the next WS kline.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
             for interval in self._market_data_intervals():
                 try:
                     resp = await self._bybit_adapter._rest.get_kline(
@@ -1814,6 +1839,31 @@ class TradingApplication:
                         error=str(exc),
                         has_api_key=has_api_key,
                     )
+            # After all intervals seeded: invalidate again (watchdog may have run during
+            # the seeding window and re-cached a stale vector), then trigger an immediate
+            # recompute so the next strategy call gets a valid vector without waiting for
+            # the next WS kline or the 60-second watchdog cycle.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
+                await self._feature_pipeline.on_confirmed_candle(symbol, _WS_INTERVAL)
+
+        # Pre-warm InstrumentInfo.turnover_24h for all seeded symbols in ONE batch call
+        # so position_sizer never hits liquidity_data_missing on the first signal.
+        # A single batch GET avoids per-symbol rate-limit pressure during startup.
+        if self._execution_engine is not None and self._bybit_adapter is not None:
+            try:
+                resp = await self._bybit_adapter._rest.get_tickers(category="linear")
+                items = resp.get("result", {}).get("list", [])
+                seed_set = set(seed_symbols)
+                for item in items:
+                    sym = item.get("symbol", "")
+                    if sym not in seed_set:
+                        continue
+                    raw_t24h = item.get("turnover24h")
+                    if raw_t24h:
+                        self._execution_engine.update_ticker_turnover(sym, Decimal(str(raw_t24h)))
+            except Exception as exc:
+                log.debug("seed.ticker_prefetch_failed", symbols=seed_symbols, error=str(exc))
 
     async def _reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
@@ -1825,7 +1875,7 @@ class TradingApplication:
         """
         assert self._settings is not None
         reconcile_interval = 300  # 5 minutes
-        bars_to_check = 10
+        bars_to_check = 30
 
         while not self._shutdown_event.is_set():
             try:
@@ -2098,7 +2148,7 @@ class TradingApplication:
         async def consume_events() -> None:
 
             from trader.data.candles import candle_from_kline_event
-            from trader.domain.events import KlineEvent, OrderBookEvent
+            from trader.domain.events import KlineEvent, OrderBookEvent, TickerEvent
 
             while not self._shutdown_event.is_set():
                 try:
@@ -2106,6 +2156,13 @@ class TradingApplication:
                     if isinstance(event, OrderBookEvent):
                         if self._orderbook_tracker is not None:
                             self._orderbook_tracker.record(event.symbol, event.bids, event.asks)
+                    elif isinstance(event, TickerEvent):
+                        if (
+                            event.turnover_24h is not None
+                            and event.turnover_24h > 0
+                            and self._execution_engine is not None
+                        ):
+                            self._execution_engine.update_ticker_turnover(event.symbol, event.turnover_24h)
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         if self._candle_store is None:
@@ -2539,7 +2596,7 @@ class TradingApplication:
                                 count=resolved,
                             )
                     except Exception as exc:
-                        log.debug("outcome_resolver.error", horizon=horizon, error=str(exc))
+                        log.warning("outcome_resolver.error", horizon=horizon, error=str(exc))
 
             try:
                 await asyncio.wait_for(

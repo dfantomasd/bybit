@@ -290,7 +290,11 @@ class BybitPublicWebSocket:
         if op == "pong" or (op == "subscribe" and msg.get("success")):
             pass  # expected responses
         elif op == "subscribe" and not msg.get("success"):
-            self._log.warning("ws_public.subscribe_failed", msg=msg)
+            ret_msg = str(msg.get("ret_msg", ""))
+            if "already subscribed" in ret_msg:
+                self._log.debug("ws_public.already_subscribed", msg=msg)
+            else:
+                self._log.warning("ws_public.subscribe_failed", msg=msg)
 
     async def _handle_orderbook(
         self,

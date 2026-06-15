@@ -593,6 +593,16 @@ class ExecutionEngine:
     # Instrument info
     # ------------------------------------------------------------------
 
+    def update_ticker_turnover(self, symbol: str, turnover_24h: "Decimal") -> None:
+        """Patch cached InstrumentInfo with fresh 24h turnover from a WS ticker event."""
+        cached = self._instrument_cache.get(symbol)
+        if cached is None:
+            return
+        info, cached_at = cached
+        if info.turnover_24h == turnover_24h:
+            return
+        self._instrument_cache[symbol] = (info.model_copy(update={"turnover_24h": turnover_24h}), cached_at)
+
     async def get_instrument_info(self, symbol: str) -> InstrumentInfo:
         cached = self._instrument_cache.get(symbol)
         if cached is not None:

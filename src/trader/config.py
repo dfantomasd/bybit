@@ -385,13 +385,13 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_ENABLED: bool = True
     """Automatically train a shadow challenger when enough new labelled examples accumulate."""
     MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 1000
-    MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES: int = 200
+    MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES: int = 50
     """Minimum samples required to fire auto-training when the loaded model uses a stale feature
     schema (predict() returns None for every candle). Lower than MIN_SAMPLES because any working
     model is better than no model — we can retrain again once more samples accumulate."""
     MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
-    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
+    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
