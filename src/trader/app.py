@@ -736,9 +736,17 @@ class TradingApplication:
         horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
         label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
 
+        # First check fires after a short grace period so the trade journal has time to
+        # connect. Subsequent checks use the full check_seconds interval. Without this,
+        # a 300s initial wait means the trainer never runs when deployments restart the
+        # bot more frequently than check_seconds.
+        first_run = True
+
         while not self._shutdown_event.is_set():
+            wait_seconds = min(60, check_seconds) if first_run else check_seconds
+            first_run = False
             try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=check_seconds)
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
                 break
             except TimeoutError:
                 pass
