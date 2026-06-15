@@ -13,6 +13,8 @@ Fallback: ``run()`` acts as a staleness watchdog that re-fires computation for a
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import math
 from datetime import UTC, datetime
 from typing import Any
@@ -46,6 +48,10 @@ log = structlog.get_logger(__name__)
 
 # Minimum confirmed candles needed before features can be computed
 _MIN_BARS = 30
+
+
+def _schema_hash(names: list[str]) -> str:
+    return hashlib.sha256(json.dumps(names).encode()).hexdigest()[:16]
 
 
 class FeaturePipeline:
@@ -363,10 +369,14 @@ class FeaturePipeline:
             features["oi_change_pct_60m_clipped"] = max(-5.0, min(5.0, features["oi_change_pct_60m"]))
 
         # --- Candle pattern (last bar) ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
         candles = self._store.confirmed(symbol, interval)
         if candles:
             last = candles[-1]
             features["candle_body_ratio"] = candle_body_ratio(last.open, last.high, last.low, last.close)
+        else:
+            features["candle_body_ratio"] = 0.0
+            missing.append("candle_body_ratio")
 
         # --- Multi-tier EWMA directional signal ---
         # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
@@ -395,6 +405,26 @@ class FeaturePipeline:
 
         names = sorted(features.keys())
         values = [features[k] for k in names]
+
+        schema_hash = _schema_hash(names)
+
+        if missing:
+            log.warning(
+                "feature_pipeline.missing_features",
+                symbol=symbol,
+                interval=interval,
+                missing=missing,
+                feature_count=len(names),
+                schema_hash=schema_hash,
+            )
+        else:
+            log.debug(
+                "feature_pipeline.computed",
+                symbol=symbol,
+                interval=interval,
+                feature_count=len(names),
+                schema_hash=schema_hash,
+            )
 
         return FeatureVector(
             symbol=symbol,
