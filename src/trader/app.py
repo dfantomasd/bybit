@@ -43,7 +43,7 @@ log = get_logger(__name__)
 # Fallback symbols (used only if screener fails); prefer cheap coins for small balance
 _SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 _WS_INTERVAL = "1"  # 1-minute klines over WS
-_MIN_SEED_BARS = 60  # bars to fetch from REST at startup
+_MIN_SEED_BARS = 250  # bars to fetch from REST at startup (multi_ewma_signal needs 201)
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
 _TRAINING_HEARTBEAT_SECONDS = 30.0
