@@ -207,7 +207,7 @@ class ChallengerModel:
 
     @property
     def feature_schema_hash(self) -> str:
-        return hashlib.sha256(json.dumps(self.feature_names).encode()).hexdigest()[:16]
+        return hashlib.sha256(json.dumps(sorted(self.feature_names)).encode()).hexdigest()[:16]
 
     def predict(self, features: list[float]) -> ModelPrediction | None:
         """Score a feature vector. Returns None if model not fitted."""
