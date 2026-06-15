@@ -369,20 +369,21 @@ class FeaturePipeline:
             features["candle_body_ratio"] = candle_body_ratio(last.open, last.high, last.low, last.close)
 
         # --- Multi-tier EWMA directional signal ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
         val_ewma = multi_ewma_signal(closes)
-        if val_ewma is not None:
-            features["ewma_tier_signal"] = val_ewma
-        else:
+        features["ewma_tier_signal"] = val_ewma if val_ewma is not None else 0.0
+        if val_ewma is None:
             missing.append("ewma_tier_signal")
 
         # --- VWAP distance ---
+        # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
+        val_vwap: float | None = None
         if len(highs) >= 14 and len(lows) >= 14 and len(volumes) >= 14:
-            val_vwap = vwap(highs, lows, closes, volumes, period=14)
-            if val_vwap is not None and val_vwap > 0 and closes:
-                features["vwap_distance_pct"] = (closes[-1] - val_vwap) / val_vwap * 100.0
-            else:
-                missing.append("vwap_distance_pct")
-        else:
+            _vwap = vwap(highs, lows, closes, volumes, period=14)
+            if _vwap is not None and _vwap > 0 and closes:
+                val_vwap = (closes[-1] - _vwap) / _vwap * 100.0
+        features["vwap_distance_pct"] = val_vwap if val_vwap is not None else 0.0
+        if val_vwap is None:
             missing.append("vwap_distance_pct")
 
         # Quality score: fraction of features computed
