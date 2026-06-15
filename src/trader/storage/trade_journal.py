@@ -2534,40 +2534,46 @@ class TradeJournal:
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
 
-            # Per-schema breakdown: newest schema first. Used by auto-trainer to detect
-            # schema changes and trigger retraining promptly instead of waiting for
-            # the full increment_samples threshold.
-            schema_rows = await self._fetch(
-                """
-                SELECT
-                    fs.feature_schema_hash,
-                    count(DISTINCT (fs.symbol, fs.interval, fs.candle_open_time)) AS cnt,
-                    max(fs.created_at) AS latest_at
-                FROM feature_snapshots fs
-                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = 15
-                  AND po.label IS NOT NULL
-                  AND fs.feature_values IS NOT NULL
-                  AND fs.training_eligible = true
-                  AND pe.model_version = 'RULE_BASELINE_V1'
-                  AND pe.strategy_signal IN ('Buy', 'Sell')
-                GROUP BY fs.feature_schema_hash
-                ORDER BY latest_at DESC
-                LIMIT 5
-                """
-            )
-            if schema_rows:
-                result["training_schema_distribution"] = [
-                    {
-                        "schema_hash": str(row["feature_schema_hash"]),
-                        "sample_count": int(row["cnt"]),
-                        "latest_at": row["latest_at"].isoformat() if row["latest_at"] else None,
-                    }
-                    for row in schema_rows
-                ]
-                result["newest_training_schema_hash"] = str(schema_rows[0]["feature_schema_hash"])
-                result["newest_training_schema_samples"] = int(schema_rows[0]["cnt"])
+            # Per-schema breakdown: newest schema first. Wrapped in its own try/except so
+            # a query failure here cannot break the rest of get_db_diagnostics().
+            try:
+                schema_rows = await self._fetch(
+                    """
+                    SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
+                    FROM (
+                        SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
+                               fs.feature_schema_hash,
+                               fs.created_at AS latest_at
+                        FROM feature_snapshots fs
+                        JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                        JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                        WHERE po.horizon_minutes = 15
+                          AND po.label IS NOT NULL
+                          AND fs.feature_values IS NOT NULL
+                          AND fs.training_eligible = true
+                          AND pe.model_version = 'RULE_BASELINE_V1'
+                          AND pe.strategy_signal IN ('Buy', 'Sell')
+                        ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
+                                 fs.feature_schema_hash, fs.created_at DESC
+                    ) deduped
+                    GROUP BY feature_schema_hash
+                    ORDER BY latest_at DESC
+                    LIMIT 5
+                    """
+                )
+                if schema_rows:
+                    result["training_schema_distribution"] = [
+                        {
+                            "schema_hash": str(row["feature_schema_hash"]),
+                            "sample_count": int(row["cnt"]),
+                            "latest_at": row["latest_at"].isoformat() if row["latest_at"] else None,
+                        }
+                        for row in schema_rows
+                    ]
+                    result["newest_training_schema_hash"] = str(schema_rows[0]["feature_schema_hash"])
+                    result["newest_training_schema_samples"] = int(schema_rows[0]["cnt"])
+            except Exception as _schema_exc:
+                log.debug("trade_journal.schema_distribution_failed", error=str(_schema_exc))
 
             rows = await self._fetch(
                 """
