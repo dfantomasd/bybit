@@ -1825,7 +1825,7 @@ class TradingApplication:
         """
         assert self._settings is not None
         reconcile_interval = 300  # 5 minutes
-        bars_to_check = 10
+        bars_to_check = 30
 
         while not self._shutdown_event.is_set():
             try:
@@ -2539,7 +2539,7 @@ class TradingApplication:
                                 count=resolved,
                             )
                     except Exception as exc:
-                        log.debug("outcome_resolver.error", horizon=horizon, error=str(exc))
+                        log.warning("outcome_resolver.error", horizon=horizon, error=str(exc))
 
             try:
                 await asyncio.wait_for(

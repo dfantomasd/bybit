@@ -348,6 +348,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # becomes current_feature_schema_hash and the mismatch is detected immediately.
         # Summing across schemas would overstate progress and fire the auto-trainer
         # prematurely on stale data.
+        # Check horizons 5 and 15 so that the schema-change trigger fires even when
+        # the 15-min resolver hasn't yet produced labels (e.g. after a feature pipeline
+        # change) but the 5-min resolver already has labeled data for the new schema.
         rows = await self._fetch(
             """
             SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
@@ -357,7 +360,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = 15
+                WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $1
                   AND po.label_threshold_bps = 5.0
@@ -386,7 +389,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["training_eligible_schema_15m"] = {
             "feature_schema_hash": newest_feature_schema_hash,
             "sample_count": newest_feature_schema_samples,
-            "horizon_minutes": 15,
+            "horizon_minutes": "5_or_15",
             "label_schema_version": LABEL_SCHEMA_VERSION,
             "label_threshold_bps": 5.0,
         }
