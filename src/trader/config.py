@@ -364,11 +364,11 @@ class Settings(BaseSettings):
     """Challenger architecture: "GBDT" (gradient-boosted trees, stronger on
     non-linear feature interactions), "LOGREG" (regularized linear baseline),
     or "SGD" (linear, online-updateable)."""
-    MODEL_CANDIDATES: str = "GBDT,LOGREG,MLP"
+    MODEL_CANDIDATES: str = "GBDT,LOGREG"
     """CSV list of model families considered by offline walk-forward selection."""
     MODEL_WF_FOLDS: int = 5
     MODEL_WF_MIN_TRAIN_SAMPLES: int = 500
-    MODEL_THRESHOLD_GRID: str = "0,2,5,8,12"
+    MODEL_THRESHOLD_GRID: str = "0,2,5"
     """CSV label thresholds in bps evaluated during offline selection.
     0 bps = break-even after costs (net-cost-aware label already deducts fees).
     20 bps removed: too demanding for 5-min bars, leaves almost no positive labels."""
