@@ -672,6 +672,7 @@ class TradingApplication:
             )
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False
+            _notified_running = False
             while True:
                 try:
                     stdout_b, stderr_b = await asyncio.wait_for(
@@ -692,12 +693,11 @@ class TradingApplication:
                             stdout_b = b""
                             stderr_b = f"training timeout after {elapsed:.0f}s".encode()
                         break
-                    if self._telegram_bot is not None:
+                    if self._telegram_bot is not None and not _notified_running:
                         await self._telegram_bot.notify(
-                            "⏳ <b>Training still running</b>\n"
-                            f"elapsed=<code>{int(elapsed)}s</code>, "
-                            f"min_samples=<code>{min_samples}</code>, horizon=<code>{horizon}m</code>"
+                            f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)"
                         )
+                        _notified_running = True
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:
