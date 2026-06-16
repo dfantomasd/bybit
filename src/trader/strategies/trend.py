@@ -110,8 +110,7 @@ class EMAcrossoverStrategy(BaseStrategy):
         ema9_slope = f.get("ema_slope_9")
         rsi14 = f.get("rsi_14")  # [0, 1]
         macd_hist = f.get("macd_hist")
-        return_3 = f.get("return_3")
-        return_5 = f.get("return_5")
+        log_return_1 = f.get("log_return_1")
         volume_z = f.get("volume_zscore")
         atr_pct = f.get("atr_14_pct")
         adx14 = f.get("adx_14")
@@ -160,9 +159,7 @@ class EMAcrossoverStrategy(BaseStrategy):
             # weak pullbacks that only look bullish because EMAs lag.
             if ema9_dist >= 0:
                 return None
-            if return_3 is not None and return_3 <= 0:
-                return None
-            if return_5 is not None and return_5 <= 0:
+            if log_return_1 is not None and log_return_1 <= 0:
                 return None
             if self._block_negative_funding_oi and funding_bps < -2.0 and oi_change_pct < -0.5:
                 return None
@@ -218,9 +215,7 @@ class EMAcrossoverStrategy(BaseStrategy):
             # (ema_9 > 0), and short-term returns should already point down.
             if ema9_dist <= 0:
                 return None
-            if return_3 is not None and return_3 >= 0:
-                return None
-            if return_5 is not None and return_5 >= 0:
+            if log_return_1 is not None and log_return_1 >= 0:
                 return None
             if _RSI_SHORT_MIN <= rsi14 <= _RSI_SHORT_MAX and macd_hist < -_MACD_HIST_MIN_ABS:
                 bonus_conditions = sum(
