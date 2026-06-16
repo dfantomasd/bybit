@@ -4066,7 +4066,7 @@ class TradingApplication:
                         blocked_reason=blocked,
                     )
 
-            if not self._trend_mtf_confirmed(proposal.symbol, proposal.side.value):
+            if not self._initial_shadow_mode() and not self._trend_mtf_confirmed(proposal.symbol, proposal.side.value):
                 self._record_diag("trend_confirmation_blocked")
                 log.info(
                     "strategy_loop.trend_confirmation_blocked",
