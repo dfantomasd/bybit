@@ -806,7 +806,16 @@ class TradingApplication:
                     if _active is not None:
                         current_schema_hash = _active.feature_schema_hash
                 schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
-                enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
+                # Suppress schema-change training when the DB already holds a model
+                # with the correct schema — the loaded model just hasn't refreshed yet.
+                # Without this guard, training fires repeatedly every 5 minutes because
+                # the loaded model (in-memory) stays stale for ~30-60s after a new model
+                # is stored, each time triggering another unnecessary training run.
+                latest_model_schema_in_db = str(latest_model.get("feature_schema_hash", "") or "")
+                db_still_mismatched = bool(
+                    not latest_model_schema_in_db or newest_schema_hash != latest_model_schema_in_db
+                )
+                enough_schema_change = schema_mismatch and db_still_mismatched and newest_schema_samples >= schema_change_min_samples
 
                 if not (enough_initial or enough_increment or enough_schema_change):
                     if schema_mismatch and newest_schema_samples > 0:
@@ -817,6 +826,8 @@ class TradingApplication:
                             newest_schema_samples=newest_schema_samples,
                             schema_change_min_samples=schema_change_min_samples,
                             min_samples_needed=schema_change_min_samples,
+                            db_model_schema=latest_model_schema_in_db,
+                            db_still_mismatched=db_still_mismatched,
                         )
                     continue
 
@@ -834,6 +845,7 @@ class TradingApplication:
                     increment_samples=increment_samples,
                     trigger_reason=trigger_reason,
                     schema_mismatch=schema_mismatch,
+                    db_still_mismatched=db_still_mismatched,
                 )
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
