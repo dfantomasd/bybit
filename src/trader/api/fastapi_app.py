@@ -21,13 +21,14 @@ All endpoints are READ-ONLY. No trading actions can be triggered via this API.
 
 from __future__ import annotations
 
+import json
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Any
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from trader.domain.enums import SystemStatus, TradingMode
@@ -49,6 +50,9 @@ def create_app(
     # These would be injected from the trading system at runtime
     health_checker: Any | None = None,
     state_store: Any | None = None,
+    trade_journal: Any | None = None,
+    runtime_settings: Callable[[], dict[str, Any]] | None = None,
+    set_runtime_setting: Callable[[str, Any], Awaitable[str]] | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -57,6 +61,7 @@ def create_app(
         allowed_origins:  CORS allowed origins (default: none).
         health_checker:   HealthChecker instance.
         state_store:      Object exposing current positions, regime, model info.
+        trade_journal:    TradeJournal-like object for read-only dashboards.
     """
     app = FastAPI(
         title="Bybit AI Trader — Observability API",
@@ -76,8 +81,8 @@ def create_app(
         CORSMiddleware,
         allow_origins=allowed_origins or [],
         allow_credentials=False,
-        allow_methods=["GET"],
-        allow_headers=["X-API-Key"],
+        allow_methods=["GET", "POST"],
+        allow_headers=["Content-Type", "X-API-Key"],
     )
 
     # Security headers middleware
@@ -257,6 +262,142 @@ def create_app(
                 "trading_allowed": getattr(ctx, "trading_allowed", False),
             }
         return result
+
+    @app.get(
+        "/dashboard",
+        summary="Strategy diagnostics dashboard",
+        tags=["observability"],
+        response_class=HTMLResponse,
+    )
+    async def get_dashboard(_auth: None = auth_dep) -> HTMLResponse:
+        """Return a small protected HTML dashboard backed by TradeJournal aggregates."""
+        if trade_journal is None or not getattr(trade_journal, "is_enabled", False):
+            return HTMLResponse(
+                status_code=503,
+                content="<html><body><h1>Dashboard unavailable</h1><p>Trade journal is not connected.</p></body></html>",
+            )
+        data = await trade_journal.get_dashboard_data()
+        if data.get("error"):
+            return HTMLResponse(
+                status_code=500,
+                content=f"<html><body><h1>Dashboard error</h1><pre>{data['error']}</pre></body></html>",
+            )
+        payload = json.dumps(data, default=str).replace("</", "<\\/")
+        html = f"""
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Bybit AI Trader Dashboard</title>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+  <style>
+    body {{ margin: 0; font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; background: #101418; color: #e7edf3; }}
+    main {{ max-width: 1180px; margin: 0 auto; padding: 24px; }}
+    h1, h2 {{ margin: 0 0 12px; }}
+    .grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); gap: 18px; }}
+    section {{ background: #171d24; border: 1px solid #2c3642; border-radius: 8px; padding: 16px; }}
+    canvas {{ width: 100%; max-height: 360px; }}
+    table {{ width: 100%; border-collapse: collapse; font-size: 12px; }}
+    th, td {{ border: 1px solid #2c3642; padding: 4px; text-align: center; }}
+    th {{ background: #202833; }}
+    .meta {{ color: #9fb0c0; margin-bottom: 18px; }}
+  </style>
+</head>
+<body>
+<main>
+  <h1>Bybit AI Trader Dashboard</h1>
+  <div class="meta" id="meta"></div>
+  <div class="grid">
+    <section><h2>Equity curve, net bps</h2><canvas id="equity"></canvas></section>
+    <section><h2>Baseline return histogram</h2><canvas id="histogram"></canvas></section>
+  </div>
+  <section style="margin-top:18px"><h2>Baseline PnL heatmap, UTC</h2><div id="heatmap"></div></section>
+</main>
+<script>
+const DATA = {payload};
+document.getElementById('meta').textContent = `horizon=${{DATA.horizon_minutes}}m, model=${{DATA.model_version || 'none'}}`;
+const base = DATA.equity_baseline || [];
+const gate = DATA.equity_gate_pass || [];
+const labels = base.map((p, i) => p.x ? p.x.slice(0, 16).replace('T', ' ') : String(i + 1));
+new Chart(document.getElementById('equity'), {{
+  type: 'line',
+  data: {{ labels, datasets: [
+    {{ label: 'baseline', data: base.map(p => p.y), borderColor: '#5cc8ff', pointRadius: 0, tension: 0.1 }},
+    {{ label: 'gate pass', data: gate.map(p => p.y), borderColor: '#ffd166', pointRadius: 0, tension: 0.1 }}
+  ] }},
+  options: {{ responsive: true, interaction: {{ mode: 'index', intersect: false }}, scales: {{ x: {{ ticks: {{ maxTicksLimit: 8 }} }} }} }}
+}});
+new Chart(document.getElementById('histogram'), {{
+  type: 'bar',
+  data: {{ labels: (DATA.histogram || []).map(b => b.bucket), datasets: [{{ label: 'count', data: (DATA.histogram || []).map(b => b.count), backgroundColor: '#7bd88f' }}] }},
+  options: {{ responsive: true, scales: {{ x: {{ ticks: {{ maxTicksLimit: 12 }} }} }} }}
+}});
+const weekdays = ['Mon','Tue','Wed','Thu','Fri','Sat','Sun'];
+const heat = new Map((DATA.heatmap || []).map(r => [`${{r.weekday}}:${{r.hour}}`, r]));
+const values = (DATA.heatmap || []).map(r => r.total_bps);
+const maxAbs = Math.max(1, ...values.map(v => Math.abs(v)));
+let table = '<table><thead><tr><th>day/hour</th>';
+for (let h = 0; h < 24; h++) table += `<th>${{String(h).padStart(2,'0')}}</th>`;
+table += '</tr></thead><tbody>';
+for (let d = 1; d <= 7; d++) {{
+  table += `<tr><th>${{weekdays[d-1]}}</th>`;
+  for (let h = 0; h < 24; h++) {{
+    const r = heat.get(`${{d}}:${{h}}`);
+    const v = r ? r.total_bps : 0;
+    const alpha = Math.min(0.95, Math.abs(v) / maxAbs);
+    const color = v >= 0 ? `rgba(70, 170, 100, ${{alpha}})` : `rgba(210, 80, 80, ${{alpha}})`;
+    table += `<td title="n=${{r ? r.count : 0}}" style="background:${{color}}">${{v.toFixed(0)}}</td>`;
+  }}
+  table += '</tr>';
+}}
+table += '</tbody></table>';
+document.getElementById('heatmap').innerHTML = table;
+</script>
+</body>
+</html>
+"""
+        return HTMLResponse(content=html)
+
+    @app.get(
+        "/api/settings",
+        summary="Runtime settings",
+        tags=["observability"],
+    )
+    async def get_settings(_auth: None = auth_dep) -> dict[str, Any]:
+        """Return safe runtime settings for operator UI controls."""
+        if runtime_settings is None:
+            raise HTTPException(status_code=503, detail="Runtime settings are unavailable")
+        return {"settings": runtime_settings()}
+
+    @app.post(
+        "/api/settings",
+        summary="Update runtime setting",
+        tags=["observability"],
+    )
+    async def post_settings(request: Request, _auth: None = auth_dep) -> dict[str, Any]:
+        """Update one whitelisted runtime setting through the application controller."""
+        if runtime_settings is None or set_runtime_setting is None:
+            raise HTTPException(status_code=503, detail="Runtime settings are unavailable")
+        try:
+            payload = await request.json()
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(status_code=400, detail="JSON object body is required")
+        key = str(payload.get("key") or "").strip()
+        if not key:
+            raise HTTPException(status_code=400, detail="Missing setting key")
+        if "value" not in payload:
+            raise HTTPException(status_code=400, detail="Missing setting value")
+        try:
+            message = await set_runtime_setting(key, payload["value"])
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except Exception as exc:
+            log.warning("api_settings_update_failed", key=key, error=str(exc))
+            raise HTTPException(status_code=500, detail="Setting update failed") from exc
+        return {"message": message, "settings": runtime_settings()}
 
     @app.get(
         "/model",

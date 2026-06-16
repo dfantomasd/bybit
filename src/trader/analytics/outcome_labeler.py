@@ -11,6 +11,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Any
 
+from trader.training.labels import CostModelBps, build_directional_outcome
+
 
 def _env_bps(key: str, default: str) -> Decimal:
     return Decimal(os.environ.get(key, default))
@@ -55,32 +57,33 @@ def label_outcome(
     slip = slippage_bps if slippage_bps is not None else MODEL_FALLBACK_SLIPPAGE_BPS
     sprd = spread_bps if spread_bps is not None else MODEL_FALLBACK_SPREAD_BPS
 
-    total_cost_bps = e_fee + x_fee + slip + sprd + funding_bps
+    highs = [float(Decimal(str(candle.get("high", entry_price)))) for candle in horizon_candles]
+    lows = [float(Decimal(str(candle.get("low", entry_price)))) for candle in horizon_candles]
+    if not highs or not lows:
+        highs = [float(entry_price)]
+        lows = [float(entry_price)]
 
-    is_long = side.lower() in ("buy", "long")
-
-    if is_long:
-        gross_bps = (exit_price - entry_price) / entry_price * Decimal("10000")
-    else:
-        gross_bps = (entry_price - exit_price) / entry_price * Decimal("10000")
-
-    net_return_bps = gross_bps - total_cost_bps
-
-    mfe_bps = Decimal("0")
-    mae_bps = Decimal("0")
-    for candle in horizon_candles:
-        high = Decimal(str(candle.get("high", entry_price)))
-        low = Decimal(str(candle.get("low", entry_price)))
-        if is_long:
-            fav = (high - entry_price) / entry_price * Decimal("10000")
-            adv = (entry_price - low) / entry_price * Decimal("10000")
-        else:
-            fav = (entry_price - low) / entry_price * Decimal("10000")
-            adv = (high - entry_price) / entry_price * Decimal("10000")
-        if fav > mfe_bps:
-            mfe_bps = fav
-        if adv > mae_bps:
-            mae_bps = adv
+    cost_model = CostModelBps(
+        entry_fee_bps=float(e_fee),
+        exit_fee_bps=float(x_fee),
+        spread_bps=float(sprd),
+        entry_slippage_bps=float(slip),
+        funding_bps=float(funding_bps),
+    )
+    outcome = build_directional_outcome(
+        side=side,
+        entry_price=float(entry_price),
+        exit_price=float(exit_price),
+        highs=highs,
+        lows=lows,
+        cost_model=cost_model,
+        label_threshold_bps=0.0,
+    )
+    gross_bps = Decimal(str(outcome.gross_return_bps))
+    net_return_bps = Decimal(str(outcome.net_return_bps))
+    mfe_bps = Decimal(str(outcome.max_favorable_excursion_bps))
+    mae_bps = Decimal(str(outcome.max_adverse_excursion_bps))
+    total_cost_bps = Decimal(str(cost_model.total_bps))
 
     return OutcomeLabel(
         gross_return_bps=gross_bps,

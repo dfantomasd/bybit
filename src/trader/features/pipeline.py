@@ -13,6 +13,7 @@ Fallback: ``run()`` acts as a staleness watchdog that re-fires computation for a
 from __future__ import annotations
 
 import asyncio
+import math
 from datetime import UTC, datetime
 from typing import Any
 
@@ -30,10 +31,12 @@ from trader.features.technical import (
     ema_value,
     log_return,
     macd,
+    obv,
     realized_volatility,
     returns,
     rsi,
     sma,
+    volume_sma_ratio,
     volume_zscore,
 )
 
@@ -61,9 +64,13 @@ class FeaturePipeline:
         interval_s: float = 5.0,
         stale_threshold_s: float = 90.0,
         watchdog_interval_s: float = 60.0,
+        orderbook_tracker: Any | None = None,
+        market_stats_source: Any | None = None,
     ) -> None:
         self._store = candle_store
         self._health = health_checker
+        self._orderbook_tracker = orderbook_tracker
+        self._market_stats_source = market_stats_source
         self._stale_threshold_s = stale_threshold_s
         self._watchdog_interval_s = watchdog_interval_s
         self._stop_event = asyncio.Event()
@@ -124,15 +131,26 @@ class FeaturePipeline:
 
         log.info(
             "feature_pipeline.watchdog_started",
-            symbols=symbols,
+            symbols=list(symbols),
             intervals=intervals,
             stale_threshold_s=self._stale_threshold_s,
             watchdog_interval_s=self._watchdog_interval_s,
         )
 
+        _prev_active: list[str] = list(symbols)
+
         while not self._stop_event.is_set():
             active = symbol_source.active_symbols if symbol_source is not None else symbols
             now = datetime.now(tz=UTC)
+
+            # Log only when the active symbol list actually changes
+            if sorted(active) != sorted(_prev_active):
+                log.info(
+                    "feature_pipeline.symbols_updated",
+                    old_symbols=_prev_active,
+                    new_symbols=list(active),
+                )
+                _prev_active = list(active)
 
             stale_pairs: list[tuple[str, str]] = []
             for symbol in active:
@@ -148,7 +166,7 @@ class FeaturePipeline:
 
             try:
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=self._watchdog_interval_s,
                 )
             except TimeoutError:
@@ -289,6 +307,59 @@ class FeaturePipeline:
         else:
             missing.append("volume_zscore")
 
+        # --- OBV (On-Balance Volume) ---
+        val_obv = obv(closes, volumes)
+        if val_obv is not None:
+            features["obv_normalized"] = val_obv
+        else:
+            missing.append("obv_normalized")
+
+        # --- Volume to SMA(20) ratio ---
+        val_vol_ratio = volume_sma_ratio(volumes, 20)
+        if val_vol_ratio is not None:
+            features["volume_ratio_sma20"] = val_vol_ratio
+        else:
+            missing.append("volume_ratio_sma20")
+
+        now = datetime.now(tz=UTC)
+        hour = now.hour
+        dow = now.weekday()
+        features["hour_sin"] = math.sin(2 * math.pi * hour / 24)
+        features["hour_cos"] = math.cos(2 * math.pi * hour / 24)
+        features["dow_sin"] = math.sin(2 * math.pi * dow / 7)
+        features["dow_cos"] = math.cos(2 * math.pi * dow / 7)
+
+        # --- Orderbook microstructure ---
+        # Always emitted with a presence flag so every symbol shares ONE feature
+        # schema (training requires min_samples within a single schema bucket;
+        # conditional features fragment it). 0.0 + ob_data_present=0 lets the
+        # model distinguish "no book data" from a genuinely neutral book.
+        if self._orderbook_tracker is not None:
+            ob_imb = self._orderbook_tracker.latest_imbalance(symbol)
+            micro_dev = self._orderbook_tracker.microprice_deviation_bps(symbol)
+            imb_trend = self._orderbook_tracker.imbalance_trend_10s(symbol)
+            present = ob_imb is not None and micro_dev is not None
+            features["ob_data_present"] = 1.0 if present else 0.0
+            features["ob_imbalance_l5"] = ob_imb if ob_imb is not None else 0.0
+            features["microprice_deviation_bps"] = micro_dev if micro_dev is not None else 0.0
+            features["microprice_deviation_bps_clipped"] = max(-20.0, min(20.0, features["microprice_deviation_bps"]))
+            features["ob_imbalance_trend_10s"] = imb_trend if imb_trend is not None else 0.0
+
+        # --- Funding rate / open interest (positioning data) ---
+        # Same presence-flag pattern as orderbook features: always emitted so
+        # every symbol shares ONE feature schema.
+        if self._market_stats_source is not None:
+            stats = None
+            try:
+                stats = self._market_stats_source.market_stats(symbol)
+            except Exception:  # noqa: BLE001 - cache read must never kill compute
+                stats = None
+            features["mkt_data_present"] = 1.0 if stats else 0.0
+            features["funding_rate_bps"] = stats["funding_rate_bps"] if stats else 0.0
+            features["oi_change_pct_60m"] = stats["oi_change_pct_60m"] if stats else 0.0
+            features["funding_rate_bps_clipped"] = max(-10.0, min(10.0, features["funding_rate_bps"]))
+            features["oi_change_pct_60m_clipped"] = max(-5.0, min(5.0, features["oi_change_pct_60m"]))
+
         # --- Candle pattern (last bar) ---
         candles = self._store.confirmed(symbol, interval)
         if candles:
@@ -307,7 +378,7 @@ class FeaturePipeline:
 
         return FeatureVector(
             symbol=symbol,
-            timestamp=datetime.now(tz=UTC),
+            timestamp=now,
             values=values,
             feature_names=names,
             quality_score=quality,

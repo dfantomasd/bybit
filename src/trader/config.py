@@ -89,19 +89,154 @@ class Settings(BaseSettings):
     DEFAULT_LINEAR_TAKER_FEE_RATE: float = 0.00055
     """Fallback fee rates when API is unavailable (SHADOW only)."""
 
-    MIN_EXPECTED_NET_EDGE_PCT: float = 0.15
+    MIN_EXPECTED_NET_EDGE_PCT: float = 0.25
     """Minimum expected net edge (after all costs) required to enter a trade."""
+    NET_EDGE_SAFETY_MARGIN_PCT: float = 0.05
+    """Extra safety margin subtracted from net edge before comparing to MIN_EXPECTED_NET_EDGE_PCT."""
     FUNDING_BUFFER_PCT: float = 0.01
     """Estimated funding cost buffer per position."""
 
-    ENTRY_ORDER_MODE: str = "MARKET"
-    """MARKET or POST_ONLY_LIMIT. POST_ONLY_LIMIT uses maker orders with TTL."""
-    ENTRY_LIMIT_TTL_SECONDS: int = 5
-    """Seconds to wait for a limit entry fill before cancelling."""
-    ENTRY_REPRICE_ATTEMPTS: int = 1
-    """Max repricing attempts before abandoning a limit entry."""
-    ALLOW_TAKER_ENTRY: bool = False
-    """Allow market fallback if limit entry fails. False = skip trade."""
+    # ------------------------------------------------------------------
+    # Scalping (ScalpMicroStrategy)
+    # ------------------------------------------------------------------
+    SCALP_STRATEGY_ENABLED: bool = True
+    """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
+    MAX_SPREAD_BPS_SCALP: float = 2.5
+    """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
+    MIN_NET_SCALP_RETURN_PCT: float = 0.08
+    """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
+    SCALP_COOLDOWN_SECONDS: int = 60
+    """Minimum seconds between scalp signals per symbol."""
+    SCALP_MAX_TRADES_PER_MINUTE: int = 10
+    """Global cap on scalp signals per minute across the whole portfolio."""
+    SCALP_MAX_POSITION_NOTIONAL_USD: float = 100.0
+    """Hard notional cap per scalp position."""
+    SCALP_MIN_OB_IMBALANCE: float = 0.15
+    """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
+    >= +value, SELL needs <= -value). Missing/stale book data fails OPEN."""
+    TREND_MIN_ADX: float = 0.25
+    """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
+    TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
+    """Block fragile trend entries when funding and open interest context disagrees."""
+    TREND_MTF_CONFIRMATION_ENABLED: bool = True
+    """Require higher-timeframe trend confirmation before accepting 1m EMA signals."""
+    TREND_CONFIRMATION_INTERVALS: str = "5,15"
+    """Comma-separated intervals used to confirm trend entries."""
+
+    # ------------------------------------------------------------------
+    # Orderbook microstructure feed
+    # ------------------------------------------------------------------
+    ORDERBOOK_FEED_ENABLED: bool = True
+    """Subscribe to orderbook.50 for execution candidates and derive imbalance/
+    microprice features. Adds ~5-10 KB/s WS traffic per tracked symbol."""
+    TRADE_FLOW_FEED_ENABLED: bool = True
+    """Subscribe to publicTrade for execution candidates and derive order-flow pressure."""
+    LIQUIDATION_FEED_ENABLED: bool = True
+    """Subscribe to liquidation prints for execution candidates."""
+    FLOW_TRACKER_WINDOW_SECONDS: float = 60.0
+    """Rolling window for trade-flow and liquidation-pressure strategies."""
+    FLOW_LARGE_TRADE_NOTIONAL_USD: float = 10_000.0
+    """Trade notional threshold considered a large tape print."""
+
+    # ------------------------------------------------------------------
+    # Advanced alpha strategies
+    # ------------------------------------------------------------------
+    ORDER_FLOW_STRATEGY_ENABLED: bool = True
+    """Enable order-flow strategy using tape pressure + orderbook confirmation."""
+    ORDER_FLOW_MIN_IMBALANCE: float = 0.35
+    ORDER_FLOW_MIN_BOOK_IMBALANCE: float = 0.18
+    FUNDING_ARB_STRATEGY_ENABLED: bool = True
+    """Enable funding-rate mean-reversion entries."""
+    FUNDING_ARB_MIN_ABS_BPS: float = 5.0
+    LIQUIDATION_HUNTING_STRATEGY_ENABLED: bool = True
+    """Enable liquidation-exhaustion fade entries."""
+    LIQUIDATION_HUNTING_MIN_NOTIONAL_USD: float = 20_000.0
+    LIQUIDATION_HUNTING_MIN_IMBALANCE: float = 0.65
+    MARKET_MAKING_STRATEGY_ENABLED: bool = True
+    """Enable maker-first mean-reversion proxy for the current single-order engine."""
+    MARKET_MAKING_MIN_SPREAD_BPS: float = 1.2
+    MARKET_MAKING_MAX_SPREAD_BPS: float = 4.0
+    STAT_ARB_STRATEGY_ENABLED: bool = True
+    """Enable single-symbol statistical mean-reversion entries."""
+    STAT_ARB_MIN_ZSCORE: float = 2.0
+    STRATEGY_PRIORITY_ORDER: str = (
+        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+    )
+    """Higher-priority strategies win ensemble conflicts when directions disagree."""
+
+    # ------------------------------------------------------------------
+    # Per-candle training sampler
+    # ------------------------------------------------------------------
+    CANDLE_SAMPLING_ENABLED: bool = True
+    """Record a feature snapshot + rule-direction baseline event on EVERY
+    confirmed 1m candle (decision=SHADOW_CANDLE), not only on trade signals.
+    Multiplies training-sample accumulation ~100x. Sampler events are excluded
+    from signal statistics (buckets, healthcheck, bootstrap baseline)."""
+
+    # ------------------------------------------------------------------
+    # Regime-bucket performance gating
+    # ------------------------------------------------------------------
+    BUCKET_BLOCK_ENABLED: bool = True
+    """Skip strategy evaluation in (regime, volatility, UTC hour) buckets whose
+    own historical signals show persistent negative expectancy."""
+    BUCKET_MIN_SAMPLES: int = 30
+    """Minimum resolved outcomes in a bucket before it can be blocked."""
+    BUCKET_BLOCK_AVG_BPS: float = -2.0
+    """Block a bucket when its average net return is below this (bps)."""
+    BUCKET_STATS_REFRESH_SECONDS: int = 3600
+    """How often the in-memory bucket statistics are refreshed from Postgres."""
+    SYMBOL_SIDE_BLOCK_ENABLED: bool = True
+    """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
+    SYMBOL_SIDE_MIN_SAMPLES: int = 20
+    """Minimum resolved outcomes for a symbol+side pair before it can be blocked."""
+    SYMBOL_SIDE_BLOCK_AVG_BPS: float = -2.0
+    """Block a symbol+side pair when its average net return is below this (bps)."""
+
+    # ------------------------------------------------------------------
+    # Startup candle backfill
+    # ------------------------------------------------------------------
+    STARTUP_BACKFILL_ENABLED: bool = True
+    """Backfill missing market_candles history via REST once at startup so the
+    canary history requirements and model training don't wait days for WS data."""
+    STARTUP_BACKFILL_DAYS: int = 2
+    """How many days of history to backfill per symbol/interval."""
+    STARTUP_BACKFILL_MAX_REQUESTS: int = 200
+    """Hard cap on REST kline requests per startup (rate-limit protection)."""
+    CANDLE_SEED_RETRY_ATTEMPTS: int = 3
+    """Retries for startup CandleStore seed requests that hit Bybit rate limits."""
+    CANDLE_SEED_RETRY_BASE_DELAY_SECONDS: float = 1.0
+    """Base exponential backoff delay after a rate-limited startup seed request."""
+
+    # ------------------------------------------------------------------
+    # Anti zero-trading guards
+    # ------------------------------------------------------------------
+    MIN_SIGNALS_PER_HOUR: int = 1
+    """Expected minimum signals/hour; below this with zero fills a warning is logged."""
+    AUTO_SOFTEN_FILTERS_ENABLED: bool = False
+    """Reserved: when true, filters may be relaxed automatically on zero trading. Off by default."""
+    FALLBACK_TO_RULE_WHEN_MODEL_UNSURE: bool = True
+    """When the model exists but its score is below the gate threshold, keep the
+    rule-based proposal instead of dropping it (hybrid mode fallback)."""
+
+    ENTRY_ORDER_MODE: str = "MAKER_FIRST"
+    """MARKET or MAKER_FIRST. MAKER_FIRST places a POST_ONLY limit at the best
+    bid/ask first (maker fee/rebate), then escalates to a market order or aborts
+    after MAKER_TIMEOUT_SECONDS — see MAKER_* settings."""
+
+    # ------------------------------------------------------------------
+    # Maker-first execution (ENTRY_ORDER_MODE = "MAKER_FIRST")
+    # ------------------------------------------------------------------
+    MAKER_TIMEOUT_SECONDS: float = 3.0
+    """How long to wait for the POST_ONLY limit to fill before deciding to
+    escalate (when MAKER_ALLOW_ESCALATION) or keep resting until TTL."""
+    MAKER_TTL_SECONDS: float = 5.0
+    """Absolute lifetime of the maker order. With escalation disabled the order
+    rests until TTL, then the remainder is cancelled and the entry aborted."""
+    MAKER_ALLOW_ESCALATION: bool = True
+    """Escalate the unfilled remainder to a market (taker) order after the
+    timeout — only when price has not drifted and the orderbook imbalance does
+    not contradict the direction; otherwise the entry is aborted."""
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""
@@ -197,7 +332,7 @@ class Settings(BaseSettings):
     """How often to refresh the screener universe (seconds)."""
 
     SCREENER_SUBSCRIBE_TIMEOUT_SECONDS: int = 10
-    """Timeout for WS subscribe acknowledgement per symbol (seconds)."""
+    """Reserved: WS subscribe acknowledgement timeout per symbol (not yet enforced in screener)."""
 
     SCREENER_DENYLIST: list[str] = []
     """Symbols explicitly excluded (pre-market, innovation zone, etc.)."""
@@ -218,9 +353,21 @@ class Settings(BaseSettings):
     MAX_SAME_SIDE_POSITIONS: int = 2
     """Maximum open positions on the same side (Buy or Sell)."""
     MAX_CORRELATED_POSITIONS: int = 2
-    """Maximum correlated (same-quote) open positions."""
+    """Reserved: correlation-based position limiting (not yet wired into execution)."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
+    SHADOW_LOSS_GUARD_ENABLED: bool = True
+    """Temporarily block new entries after a poor run of shadow TP/SL outcomes."""
+    SHADOW_LOSS_GUARD_MIN_CLOSED: int = 3
+    """Minimum recent shadow closes before the loss guard can activate."""
+    SHADOW_LOSS_GUARD_WINDOW: int = 5
+    """How many recent shadow closes are evaluated for the loss guard."""
+    SHADOW_LOSS_GUARD_MAX_LOSS_RATE: float = 0.6
+    """Activate when recent loss rate is at or above this fraction."""
+    SHADOW_LOSS_GUARD_MIN_AVG_PNL_PCT: float = -0.05
+    """Activate when recent average shadow PnL percent is at or below this value."""
+    SHADOW_LOSS_GUARD_COOLDOWN_SECONDS: int = 900
+    """How long new entries stay blocked after the shadow loss guard activates."""
 
     # ------------------------------------------------------------------
     # Database safety gates
@@ -235,7 +382,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MULTITIMEFRAME_ENABLED: bool = True
     MULTITIMEFRAME_INTERVALS: Annotated[list[str], NoDecode] = ["1", "5", "15", "60"]
-    CANDLE_STORE_MAX_BARS_1M: int = 250
+    CANDLE_STORE_MAX_BARS_1M: int = 250  # reserved: per-interval candle store capacity (not yet read by CandleStore)
     CANDLE_STORE_MAX_BARS_5M: int = 250
     CANDLE_STORE_MAX_BARS_15M: int = 200
     CANDLE_STORE_MAX_BARS_1H: int = 120
@@ -245,29 +392,56 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ORDERBOOK_MODE: str = "ON_DEMAND"
     """ON_DEMAND = fetch only for top candidates; STREAMING = subscribe for all."""
-    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5
+    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5  # reserved: STREAMING mode symbol cap (not yet enforced)
 
     # ------------------------------------------------------------------
     # Adaptive load governor
     # ------------------------------------------------------------------
     ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
     LOAD_GOVERNOR_CHECK_SECONDS: int = 30
-    MAX_FEATURE_CYCLE_MS: int = 8000
+    MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
-    MAX_QUEUE_UTILIZATION_PCT: int = 70
+    MAX_QUEUE_UTILIZATION_PCT: int = 70  # reserved: queue-utilization gate (not yet enforced)
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 5
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3  # reserved: load governor floor (not yet enforced)
 
     # ------------------------------------------------------------------
     # ML / model
     # ------------------------------------------------------------------
-    MODEL_ENABLED: bool = False
+    MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
     MODEL_ALLOW_LIVE_DECISIONS: bool = False
-    """When False, model only scores in shadow; rule-based strategy remains authoritative."""
+    """When False, model only scores in shadow; rule-based strategy remains authoritative.
+    When True, a compatible CHAMPION model may replace rule-based decisions (hybrid mode).
+    Real orders are still gated by TRADING_MODE/LIVE_MODE/LIVE_ARMED."""
     MODEL_MIN_TRAINING_SAMPLES: int = 500
     MODEL_MIN_CLOSED_TRADES_FOR_PROMOTION: int = 50
+    MODEL_ENCRYPT_KEY: SecretStr = SecretStr("")
+    """Fernet key (or arbitrary passphrase) for encrypting model artifacts at
+    rest in Postgres. Artifacts are pickle — without encryption a compromised
+    database means code execution in the trader. Empty = legacy plaintext."""
+    MODEL_TYPE: str = "GBDT"
+    """Challenger architecture: "GBDT" (gradient-boosted trees, stronger on
+    non-linear feature interactions), "LOGREG" (regularized linear baseline),
+    or "SGD" (linear, online-updateable)."""
+    MODEL_CANDIDATES: str = "GBDT,LOGREG"
+    """CSV list of model families considered by offline walk-forward selection."""
+    MODEL_WF_FOLDS: int = 5
+    MODEL_WF_MIN_TRAIN_SAMPLES: int = 500
+    MODEL_THRESHOLD_GRID: str = "0,2,5,8,12"
+    """CSV label thresholds in bps evaluated during offline selection."""
+    MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
+    """Minimum model-pass observations expected before trusting promotion metrics."""
+    TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
+    TRAIN_STRATEGY_ALLOWLIST: str = (
+        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+    )
+    """CSV strategy ids eligible for model training from prediction metadata."""
+    TRAIN_MIN_BUCKET_SAMPLES: int = 50
+    TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
+    """Optional training filter: remove regime/hour buckets with stable negative expectancy."""
     MODEL_SHADOW_SCORING_ENABLED: bool = True
     """Always run shadow scoring even when live decisions disabled."""
     MODEL_AUTO_TRAIN_ENABLED: bool = True
@@ -277,11 +451,33 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
+    MODEL_AUTO_PROMOTE_ENABLED: bool = False
+    """Auto-promote challenger to champion when it beats the current champion
+    AND the lift is statistically significant (bootstrap p-value).
+    Disabled by default: let the model train and accumulate shadow evidence first,
+    then enable explicitly via env."""
+    MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
+    MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
+    MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
+    """Minimum live lift (bps) the challenger must show before auto-promotion."""
+    MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
+    """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
+    return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""
+    MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS: int = 1000
+    MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES: int = 50
+    """Minimum resolved challenger returns required to run the bootstrap test."""
+    MODEL_CHAMPION_DEGRADE_MIN_SIGNALS: int = 100
+    """Minimum live champion shadow-gate observations before triggering a rollback check."""
+    MODEL_CHAMPION_MIN_LIFT_BPS: float = -5.0
+    """If the champion's live shadow-gate lift falls below this threshold, trigger rollback."""
+    MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS: int = 14400
+    """How often (seconds) the champion health monitor runs. Default: 4 hours."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
     MODEL_GATE_CANARY_ENABLED: bool = False
-    """When enabled, allow the model gate to block entries only with conservative safeguards."""
+    """When enabled, allow the model gate to block entries only with conservative safeguards.
+    Disabled by default until a promoted CHAMPION shows positive shadow-gate lift."""
     MODEL_GATE_CANARY_MIN_QUALITY: str = "GOOD"
     MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT: float = 60.0
     MODEL_GATE_CANARY_MIN_OBSERVATIONS: int = 50
@@ -372,6 +568,28 @@ class Settings(BaseSettings):
                 raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_MODE=true to be explicitly set.")
             if not self.LIVE_ARMED:
                 raise ValueError("TRADING_MODE=CANARY_LIVE requires LIVE_ARMED=true to be explicitly set.")
+            # SHADOW_MODE defaults to True but must be False in CANARY_LIVE so orders are
+            # actually submitted. Auto-clear it here so operators don't need a separate env var.
+            self.SHADOW_MODE = False
+
+        if self.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+            if self.BYBIT_USE_TESTNET:
+                raise ValueError(
+                    f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
+                    "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
+                )
+
+        # Hybrid ML mode sanity check: live model decisions without the canary
+        # gate means the model can replace signals but nothing blocks weak ones.
+        if self.MODEL_ALLOW_LIVE_DECISIONS and not self.MODEL_GATE_CANARY_ENABLED:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "MODEL_ALLOW_LIVE_DECISIONS=true with MODEL_GATE_CANARY_ENABLED=false: "
+                "the model can replace rule-based decisions but the canary gate will not "
+                "block low-score signals. Consider enabling MODEL_GATE_CANARY_ENABLED.",
+                stacklevel=2,
+            )
 
 
 # ---------------------------------------------------------------------------

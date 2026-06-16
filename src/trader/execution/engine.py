@@ -16,6 +16,7 @@ Live execution requires LIVE_MODE=true AND TRADING_MODE=LIVE.
 from __future__ import annotations
 
 import asyncio
+import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any
@@ -34,16 +35,31 @@ from trader.domain.models import (
 
 log = structlog.get_logger(__name__)
 
+# A position absent from an exchange snapshot is removed from the registry
+# only when its entry is older than this. Covers the window between placing
+# an order and the exchange reflecting the position (partial fills, REST lag).
+# Keep small: an over-long grace would mask genuinely closed positions and
+# could double-enter after a real TP/SL closure.
+_SYNC_REMOVAL_GRACE_SECONDS = 3.0
+
 # Default cooldown between successful entries on the same symbol
 _DEFAULT_COOLDOWN_S = 300  # 5 minutes
 # Separate shorter cooldown after an API-level order failure
 _DEFAULT_FAILURE_COOLDOWN_S = 60  # 1 minute
 # Instrument info TTL: re-fetch after this many seconds (tick_size can change)
 _INSTRUMENT_CACHE_TTL_S = 3600  # 1 hour
+# Pending entries older than this (seconds) with no exchange order are considered stale
+_STALE_PENDING_THRESHOLD_S = 600  # 10 minutes
 
 # P0.6: Canary mode hard caps — cannot be overridden by any profile
 CANARY_MAX_OPEN_POSITIONS: int = 2
 CANARY_MAX_TOTAL_EXPOSURE_PCT: Decimal = Decimal("45")
+
+# Maker-first execution
+_MAKER_POLL_INTERVAL_S = 0.5
+# Escalation guard: abort instead of taker when price moved further than this
+# from the maker limit price (percent of price)
+_MAKER_MAX_ESCALATION_DRIFT_PCT = 0.1
 
 
 class ExecutionEngine:
@@ -80,7 +96,12 @@ class ExecutionEngine:
         expected_slippage_pct: float = 0.03,
         funding_buffer_pct: float = 0.01,
         min_net_edge_pct: float = 0.15,
+        net_edge_safety_margin_pct: float = 0.05,
         entry_order_mode: str = "MARKET",
+        maker_timeout_s: float = 3.0,
+        maker_ttl_s: float = 5.0,
+        maker_allow_escalation: bool = True,
+        imbalance_provider: Any | None = None,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -97,7 +118,19 @@ class ExecutionEngine:
         self._expected_slippage_pct = expected_slippage_pct
         self._funding_buffer_pct = funding_buffer_pct
         self._min_net_edge_pct = min_net_edge_pct
-        self._entry_order_mode = entry_order_mode
+        self._net_edge_safety_margin_pct = net_edge_safety_margin_pct
+        self._entry_order_mode = str(entry_order_mode).strip().upper()
+        self._maker_timeout_s = max(0.5, float(maker_timeout_s))
+        self._maker_ttl_s = max(self._maker_timeout_s, float(maker_ttl_s))
+        self._maker_allow_escalation = maker_allow_escalation
+        # Callable(symbol) -> L5 orderbook imbalance in [-1, 1] or None; used by
+        # the maker escalation guard. Missing data fails open (escalation allowed).
+        self._imbalance_provider = imbalance_provider
+
+        # P0: Hard block unsupported entry modes. MARKET is the default;
+        # MAKER_FIRST is the supervised maker-with-escalation flow below.
+        if self._entry_order_mode not in ("MARKET", "MAKER_FIRST"):
+            raise ValueError("Only MARKET and MAKER_FIRST entry modes are supported")
 
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
@@ -109,8 +142,22 @@ class ExecutionEngine:
         self._recent_entries: list[datetime] = []
         # P0.3: Pending entry limiter keyed by order_link_id (not integer).
         self._pending_entry_order_link_ids: set[str] = set()
+        # order_link_id → symbol mapping for screener has_pending_order support
+        self._pending_entry_symbols: dict[str, str] = {}
+        self._pending_entry_created_at: dict[str, datetime] = {}
         # Legacy count — kept for compatibility with rate-limit check
         self._pending_entry_count: int = 0
+        # Per-session diagnostic counters (cumulative, not windowed)
+        self._diag_skip_pending: int = 0
+        self._diag_order_placed: int = 0
+        self._diag_shadow_order_would_be_placed: int = 0
+        self._diag_order_failed: int = 0
+        self._diag_net_edge_rejected: int = 0
+        self._diag_no_tp_rejected: int = 0
+        self._diag_fee_unavailable_rejected: int = 0
+        self._diag_maker_filled: int = 0
+        self._diag_maker_escalated: int = 0
+        self._diag_maker_aborted: int = 0
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -167,36 +214,269 @@ class ExecutionEngine:
 
         return None
 
-    def mark_entry_submitted(self, order_link_id: str = "") -> None:
-        """Register order_link_id as pending and bump rate-limit counters."""
-        if order_link_id:
-            self._pending_entry_order_link_ids.add(order_link_id)
-        if not self._shadow_mode:
-            self._pending_entry_count += 1
-            self._recent_entries.append(datetime.now(tz=UTC))
+    def mark_entry_submitted(self, order_link_id: str = "", symbol: str = "") -> None:
+        """Register order_link_id as pending and bump rate-limit counters.
 
-    def mark_entry_resolved(self, order_link_id: str = "") -> None:
-        """Remove order_link_id from pending set (idempotent).
-
-        Only removes the exact ID — never releases an unrelated slot.
+        Idempotent: duplicate IDs are silently ignored without double-counting.
+        Empty ID in live mode is rejected with a warning.
         """
         if order_link_id:
-            self._pending_entry_order_link_ids.discard(order_link_id)
-        self._pending_entry_count = max(0, self._pending_entry_count - 1)
+            already_pending = order_link_id in self._pending_entry_order_link_ids
+            if already_pending:
+                log.warning(
+                    "execution.submit_duplicate_id",
+                    order_link_id=order_link_id,
+                    pending_count=len(self._pending_entry_order_link_ids),
+                )
+                # Do not increment — idempotent, count stays the same
+                return
+            self._pending_entry_order_link_ids.add(order_link_id)
+            if symbol:
+                self._pending_entry_symbols[order_link_id] = symbol
+            self._pending_entry_created_at[order_link_id] = datetime.now(tz=UTC)
+        elif not self._shadow_mode:
+            log.warning(
+                "execution.submit_empty_id_live_mode",
+                pending_count=len(self._pending_entry_order_link_ids),
+            )
+            # Refuse to track an un-identified live order — would corrupt count
+            return
+        if not self._shadow_mode:
+            self._recent_entries.append(datetime.now(tz=UTC))
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+
+    def mark_entry_resolved(self, order_link_id: str = "") -> None:
+        """Remove order_link_id from pending set (idempotent, fail-closed).
+
+        Rules:
+        - Known ID → remove and sync count. Safe to call multiple times.
+        - Unknown ID → warn, do NOT change count (fail-closed).
+        - Empty ID, 0 pending → no-op.
+        - Empty ID, 1 pending → safe backwards-compat fallback, warns.
+        - Empty ID, ≥2 pending → ambiguous, log and stay fail-closed.
+        """
+        if order_link_id:
+            was_pending = order_link_id in self._pending_entry_order_link_ids
+            if was_pending:
+                self._pending_entry_order_link_ids.discard(order_link_id)
+                self._pending_entry_symbols.pop(order_link_id, None)
+                self._pending_entry_created_at.pop(order_link_id, None)
+            else:
+                log.warning(
+                    "execution.resolve_unknown_id",
+                    order_link_id=order_link_id,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+                # Do not change count — the ID was never registered
+        else:
+            n = len(self._pending_entry_order_link_ids)
+            if n == 0:
+                log.debug("execution.resolve_empty_id_no_pending")
+            elif n == 1:
+                # Backwards-compat fallback: release the single known pending slot
+                lone_id = next(iter(self._pending_entry_order_link_ids))
+                log.warning(
+                    "execution.resolve_empty_id_fallback",
+                    lone_id=lone_id,
+                )
+                self._pending_entry_order_link_ids.discard(lone_id)
+                self._pending_entry_symbols.pop(lone_id, None)
+                self._pending_entry_created_at.pop(lone_id, None)
+            else:
+                # Multiple pending — ambiguous which slot to release; stay fail-closed
+                log.warning(
+                    "execution.resolve_empty_id_ambiguous",
+                    pending_count=n,
+                    pending_ids=sorted(self._pending_entry_order_link_ids),
+                )
+        # Always sync count from the authoritative set
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+
+    async def resolve_pending_durable(self, order_link_id: str, symbol: str = "") -> None:
+        """Release a pending slot and persist the resolution to order_pending_state."""
+        self.mark_entry_resolved(order_link_id)
+        if self._trade_journal is not None and self._trade_journal.is_enabled:
+            try:
+                await self._trade_journal.mark_order_resolved(order_link_id, symbol)
+            except Exception as _res_exc:
+                log.debug(
+                    "execution.mark_order_resolved_failed",
+                    order_link_id=order_link_id,
+                    error=str(_res_exc),
+                )
+
+    def _release_exposure_reservation(self, proposal: TradeProposal) -> None:
+        """Release the RiskManager's pre-submit exposure reservation."""
+        release = getattr(self._exposure, "release_reservation", None)
+        if callable(release):
+            release(str(proposal.proposal_id))
+
+    def has_pending_order_for_symbol(self, symbol: str) -> bool:
+        """Return True if there is a pending (unresolved) entry for this symbol."""
+        return symbol in self._pending_entry_symbols.values()
 
     def restore_pending_entries(self, order_link_ids: list[str]) -> None:
-        """Restore pending entry IDs from durable storage at startup."""
-        for oid in order_link_ids:
+        """Restore pending entry IDs from durable storage at startup.
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        IDs starting with 'unknown:' are excluded to prevent phantom recovery.
+        """
+        valid_ids = [oid for oid in order_link_ids if oid and not str(oid).startswith("unknown:")]
+        unique_ids = sorted(set(valid_ids))
+        for oid in unique_ids:
             self._pending_entry_order_link_ids.add(oid)
-        if order_link_ids:
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+        if unique_ids:
             log.info(
                 "execution.pending_entries_restored",
-                count=len(order_link_ids),
-                ids=order_link_ids,
+                count=len(unique_ids),
+                ids=unique_ids,
+                total_pending=self._pending_entry_count,
             )
+
+    def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
+        """Restore pending entries from detailed records (includes symbol mapping).
+
+        Empty and duplicate IDs are silently discarded. Count is synced
+        from the set after restoration.
+        IDs starting with 'unknown:' are excluded to prevent phantom recovery.
+        """
+        seen: set[str] = set()
+        for rec in records:
+            oid = str(rec.get("order_link_id", "")).strip()
+            if not oid or oid in seen or oid.startswith("unknown:"):
+                continue
+            seen.add(oid)
+            symbol = str(rec.get("symbol", ""))
+            self._pending_entry_order_link_ids.add(oid)
+            if symbol:
+                self._pending_entry_symbols[oid] = symbol
+            created_at = rec.get("created_at")
+            if isinstance(created_at, datetime):
+                self._pending_entry_created_at[oid] = created_at
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
 
     def has_pending_entries(self) -> bool:
         return bool(self._pending_entry_order_link_ids)
+
+    async def reconcile_restored_pending_entries(self) -> None:
+        """Check restored pending entries against exchange state; clear stale ones.
+
+        Fail-safe: if Bybit API is unavailable, all pending entries are preserved.
+        Age threshold: entries younger than _STALE_PENDING_THRESHOLD_S are always kept.
+        Uses durable_order_state as authoritative source; falls back to order_events.
+        """
+        if self._trade_journal is None or not self._pending_entry_order_link_ids:
+            return
+
+        log.info(
+            "execution.pending_reconcile_started",
+            pending_count=len(self._pending_entry_order_link_ids),
+            pending_ids=sorted(self._pending_entry_order_link_ids),
+        )
+
+        # Build merged record dict — durable_order_state takes priority over order_events
+        merged: dict[str, dict] = {}
+        try:
+            for rec in await self._trade_journal.get_pending_order_events():
+                oid = str(rec.get("order_link_id", ""))
+                if oid:
+                    merged[oid] = dict(rec)
+        except Exception as exc:
+            log.warning("execution.pending_reconcile_failed", reason="order_events_read_error", error=str(exc))
+
+        try:
+            for rec in await self._trade_journal.get_pending_durable_orders():
+                oid = str(rec.get("order_link_id", ""))
+                if oid:
+                    merged[oid] = dict(rec)  # durable overrides
+        except Exception as exc:
+            log.warning("execution.pending_reconcile_failed", reason="durable_read_error", error=str(exc))
+            return  # fail-safe: keep all if we can't read durable state
+
+        # Fail-safe: keep all pending if exchange API is unavailable
+        try:
+            open_orders = await self._adapter.get_open_orders(self._category)
+            exchange_link_ids = {str(o.get("orderLinkId")) for o in open_orders if o.get("orderLinkId")}
+        except Exception as exc:
+            log.warning(
+                "execution.pending_reconcile_failed",
+                reason="exchange_api_unavailable",
+                error=str(exc),
+            )
+            return
+
+        now = datetime.now(tz=UTC)
+        threshold_s = _STALE_PENDING_THRESHOLD_S
+
+        for order_link_id in list(self._pending_entry_order_link_ids):
+            record = merged.get(order_link_id, {})
+            symbol = str(record.get("symbol", ""))
+            created_at = record.get("created_at")
+            age_s = (now - created_at).total_seconds() if isinstance(created_at, datetime) else 0.0
+
+            if order_link_id in exchange_link_ids:
+                log.info(
+                    "execution.pending_kept_exchange_order",
+                    order_link_id=order_link_id,
+                    symbol=symbol,
+                    age_s=int(age_s),
+                )
+                continue
+
+            if symbol and self.has_open_position(symbol):
+                log.info(
+                    "execution.pending_kept_position_exists",
+                    order_link_id=order_link_id,
+                    symbol=symbol,
+                    age_s=int(age_s),
+                )
+                continue
+
+            if age_s < threshold_s:
+                log.info(
+                    "execution.pending_kept_recent",
+                    order_link_id=order_link_id,
+                    symbol=symbol,
+                    age_s=int(age_s),
+                    threshold_s=threshold_s,
+                )
+                continue
+
+            # Old entry, no exchange order, no position → mark stale (non-destructive)
+            stale_reason = f"no_exchange_order_no_position_age_{int(age_s)}s"
+            try:
+                await self._trade_journal.mark_order_event_stale(order_link_id, stale_reason)
+                await self._trade_journal.mark_durable_order_stale(order_link_id, stale_reason)
+            except Exception as exc:
+                log.warning(
+                    "execution.pending_reconcile_failed",
+                    reason="db_mark_stale_error",
+                    order_link_id=order_link_id,
+                    error=str(exc),
+                )
+                continue
+
+            self._pending_entry_order_link_ids.discard(order_link_id)
+            self._pending_entry_symbols.pop(order_link_id, None)
+            self._pending_entry_created_at.pop(order_link_id, None)
+            log.info(
+                "execution.pending_cleared_stale",
+                order_link_id=order_link_id,
+                symbol=symbol,
+                age_s=int(age_s),
+            )
+
+        # Sync count with actual set size after cleanup
+        self._pending_entry_count = len(self._pending_entry_order_link_ids)
+
+        log.info(
+            "execution.pending_reconcile_complete",
+            remaining=len(self._pending_entry_order_link_ids),
+            remaining_ids=sorted(self._pending_entry_order_link_ids),
+        )
 
     # ------------------------------------------------------------------
     # Position awareness
@@ -209,41 +489,77 @@ class ExecutionEngine:
         return len(self._open_positions)
 
     async def sync_positions(self) -> list[Any] | None:
-        """Sync open positions from the exchange into the local registry.
+        """Reconcile the local position registry with the exchange.
 
-        Call once at startup (after seeding candles) so the engine doesn't
-        open duplicate positions on restart.
+        Runs at startup, periodically, and on private-WS fills. The registry
+        mutation is serialised with ``submit`` under ``_submit_lock`` so a
+        concurrent snapshot cannot wipe an optimistically registered entry;
+        the REST fetch itself stays outside the lock to avoid blocking
+        trading on network latency.
         """
+        positions = await self._fetch_positions()
+        if positions is None:
+            return None
+        async with self._submit_lock:
+            await self._apply_position_snapshot(positions)
+        return positions
+
+    async def _sync_positions_locked(self) -> list[Any] | None:
+        """``sync_positions`` for callers already holding ``_submit_lock``."""
+        positions = await self._fetch_positions()
+        if positions is None:
+            return None
+        await self._apply_position_snapshot(positions)
+        return positions
+
+    async def _fetch_positions(self) -> list[Any] | None:
         try:
-            positions = await self._adapter.get_positions(self._category)
-            previous_symbols = set(self._open_positions)
-            exchange_symbols: set[str] = set()
-            refreshed_positions: dict[str, dict[str, Any]] = {}
-            for pos in positions:
-                if pos.size > Decimal("0"):
-                    exchange_symbols.add(pos.symbol)
-                    refreshed_positions[pos.symbol] = {
-                        "side": pos.side,
-                        "size": pos.size,
-                        "entry_price": pos.entry_price,
-                    }
-                    notional = pos.size * pos.entry_price
-                    await self._exposure.update_position(pos.symbol, pos.side.value, notional)
-            closed_symbols = previous_symbols - exchange_symbols
-            for symbol in closed_symbols:
-                await self._exposure.remove_position(symbol)
-                self._last_entry_at.pop(symbol, None)
-            self._open_positions = refreshed_positions
-            log.info(
-                "execution.positions_synced",
-                count=len(self._open_positions),
-                symbols=list(self._open_positions.keys()),
-                closed_symbols=sorted(closed_symbols),
-            )
-            return positions
+            return await self._adapter.get_positions(self._category)
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
             return None
+
+    async def _apply_position_snapshot(self, positions: list[Any]) -> None:
+        """Merge an exchange snapshot into the registry (never wholesale-replace).
+
+        A symbol disappears from the registry only when the exchange snapshot
+        does not list it AND its entry is older than the grace period — a
+        snapshot fetched milliseconds before a fill lands must not erase the
+        freshly opened position (that would release its exposure and allow a
+        duplicate entry on the next signal).
+        """
+        now = datetime.now(tz=UTC)
+        exchange_symbols: set[str] = set()
+        for pos in positions:
+            if pos.size > Decimal("0"):
+                exchange_symbols.add(pos.symbol)
+                self._open_positions[pos.symbol] = {
+                    "side": pos.side,
+                    "size": pos.size,
+                    "entry_price": pos.entry_price,
+                }
+                notional = pos.size * pos.entry_price
+                await self._exposure.update_position(pos.symbol, pos.side.value, notional)
+        closed_symbols: list[str] = []
+        kept_recent: list[str] = []
+        for symbol in list(self._open_positions):
+            if symbol in exchange_symbols:
+                continue
+            entered_at = self._last_entry_at.get(symbol)
+            if entered_at is not None and (now - entered_at).total_seconds() < _SYNC_REMOVAL_GRACE_SECONDS:
+                kept_recent.append(symbol)
+                continue
+            self._open_positions.pop(symbol, None)
+            self._last_entry_at.pop(symbol, None)
+            await self._exposure.remove_position(symbol)
+            closed_symbols.append(symbol)
+        log.info(
+            "execution.positions_synced",
+            count=len(self._open_positions),
+            symbols=list(self._open_positions.keys()),
+            closed_symbols=sorted(closed_symbols),
+            kept_recent=sorted(kept_recent),
+        )
 
     async def record_position_closed(self, symbol: str) -> None:
         """Call when a position is closed (e.g. TP/SL hit)."""
@@ -335,6 +651,7 @@ class ExecutionEngine:
 
         # P0.2/P0.3: Block new entries while pending ones await resolution
         if self.has_pending_entries():
+            self._diag_skip_pending += 1
             log.debug(
                 "execution.skipped_pending_entries",
                 symbol=symbol,
@@ -441,6 +758,19 @@ class ExecutionEngine:
                 log.warning("execution.leverage_check_failed", symbol=symbol, error=str(exc))
 
         # 4. Risk evaluation ───────────────────────────────────────────
+        # Extract spread and ATR for RiskManager sizing
+        spread: Decimal | None = None
+        atr: Decimal | None = None
+        if regime_context is not None and regime_context.spread_bps is not None:
+            # PositionSizer expects percent units: 50 bps => 0.5%, not 0.005 fraction.
+            spread = Decimal(str(regime_context.spread_bps)) / Decimal("100")
+        if feature_vector is not None:
+            # ATR is computed as atr_14_pct in feature pipeline (ATR / price as fraction)
+            try:
+                idx = feature_vector.feature_names.index("atr_14_pct")
+                atr = Decimal(str(feature_vector.values[idx]))
+            except (ValueError, IndexError):
+                pass
         try:
             decision = await self._risk_manager.evaluate(
                 proposal=proposal,
@@ -449,6 +779,8 @@ class ExecutionEngine:
                 instrument_info=instrument_info,
                 feature_vector=feature_vector,
                 regime_context=regime_context,
+                spread=spread,
+                atr=atr,
             )
         except Exception as exc:
             log.error(
@@ -490,55 +822,115 @@ class ExecutionEngine:
 
         if not approved:
             return decision
+        exposure_reserved = True
+
+        # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
+        if not self._shadow_mode:
+            # Fail-closed: TP required for LIVE entries
+            if proposal.take_profit is None:
+                self._diag_no_tp_rejected += 1
+                log.warning(
+                    "execution.rejected_no_take_profit",
+                    symbol=symbol,
+                    side=proposal.side.value,
+                )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
+                return None
+            if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
+                log.warning(
+                    "execution.rejected_no_entry_price_for_net_edge",
+                    symbol=symbol,
+                    side=proposal.side.value,
+                )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
+                return None
+
+            # Fetch fee rates; fall back to conservative default if unavailable
+            taker_default = Decimal("0.00055")  # 0.055% Bybit taker standard
+            if self._fee_provider is not None:
+                try:
+                    fee_rates_obj = await self._fee_provider.get(symbol)
+                    if fee_rates_obj is not None:
+                        taker_default = Decimal(str(fee_rates_obj.taker_fee_rate))
+                    else:
+                        self._diag_fee_unavailable_rejected += 1
+                        log.warning("execution.fee_rate_unavailable_using_default", symbol=symbol)
+                except Exception as _fee_exc:
+                    self._diag_fee_unavailable_rejected += 1
+                    log.warning("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
+            else:
+                log.warning("execution.fee_provider_none_using_default", symbol=symbol)
+            taker = taker_default
+
+            entry_price_d = proposal.entry_price
+            tp_d = proposal.take_profit
+            if proposal.side == OrderSide.BUY:
+                gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
+            else:
+                gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
+            entry_fee_pct = taker * Decimal("100")
+            exit_fee_pct = taker * Decimal("100")
+            round_trip_fee_pct = entry_fee_pct + exit_fee_pct
+            spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
+            # P1: Round-trip slippage = entry slippage + exit slippage = 2 * EXPECTED_SLIPPAGE_PCT
+            entry_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            exit_slippage_pct = Decimal(str(self._expected_slippage_pct))
+            round_trip_slippage_pct = entry_slippage_pct + exit_slippage_pct
+            funding_pct = Decimal(str(self._funding_buffer_pct))
+            safety_margin_pct = Decimal(str(self._net_edge_safety_margin_pct))
+            net_edge_pct = (
+                gross_edge_pct
+                - round_trip_fee_pct
+                - spread_pct
+                - round_trip_slippage_pct
+                - funding_pct
+                - safety_margin_pct
+            )
+            min_edge = Decimal(str(self._min_net_edge_pct))
+
+            log.info(
+                "execution.net_edge_check",
+                symbol=symbol,
+                side=proposal.side.value,
+                entry_price=float(entry_price_d),
+                take_profit=float(tp_d),
+                gross_edge_pct=float(round(gross_edge_pct, 4)),
+                entry_fee_pct=float(round(entry_fee_pct, 4)),
+                exit_fee_pct=float(round(exit_fee_pct, 4)),
+                round_trip_fee_pct=float(round(round_trip_fee_pct, 4)),
+                spread_bps=float(self._max_spread_bps),
+                spread_cost_pct=float(round(spread_pct, 4)),
+                entry_slippage_cost_pct=float(round(entry_slippage_pct, 4)),
+                exit_slippage_cost_pct=float(round(exit_slippage_pct, 4)),
+                round_trip_slippage_cost_pct=float(round(round_trip_slippage_pct, 4)),
+                funding_buffer_pct=float(round(funding_pct, 4)),
+                safety_margin_pct=float(round(safety_margin_pct, 4)),
+                net_edge_pct=float(round(net_edge_pct, 4)),
+                required_min_net_edge_pct=float(min_edge),
+                decision="allow" if net_edge_pct >= min_edge else "reject",
+            )
+
+            if net_edge_pct < min_edge:
+                self._diag_net_edge_rejected += 1
+                log.warning(
+                    "execution.net_edge_too_low",
+                    symbol=symbol,
+                    net_edge_pct=float(round(net_edge_pct, 4)),
+                    required_min_net_edge_pct=float(min_edge),
+                )
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
+                return None
 
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
 
-        # 5b. Fee-aware entry filter: reject if net edge after all costs is below threshold
-        if not self._shadow_mode and self._fee_provider is not None and proposal.take_profit is not None:
-            fee_rates = None
-            try:
-                fee_rates = await self._fee_provider.get(symbol)
-            except Exception as _fee_exc:
-                log.debug("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
-            if fee_rates is not None:
-                entry_price_d = proposal.entry_price
-                tp_d = proposal.take_profit
-                taker = Decimal(str(fee_rates.taker_fee_rate))
-                # gross edge as % of entry
-                if proposal.side == OrderSide.BUY:
-                    gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
-                else:
-                    gross_edge_pct = (entry_price_d - tp_d) / entry_price_d * Decimal("100")
-                fee_pct = taker * Decimal("200")  # entry + exit
-                spread_pct = Decimal(str(self._max_spread_bps)) / Decimal("100")
-                slippage_pct = Decimal(str(self._expected_slippage_pct))
-                funding_pct = Decimal(str(self._funding_buffer_pct))
-                net_edge_pct = gross_edge_pct - fee_pct - spread_pct - slippage_pct - funding_pct
-                min_edge = Decimal(str(self._min_net_edge_pct))
-                log.info(
-                    "execution.net_edge_check",
-                    symbol=symbol,
-                    gross_edge_pct=float(round(gross_edge_pct, 4)),
-                    fee_pct=float(round(fee_pct, 4)),
-                    spread_pct=float(round(spread_pct, 4)),
-                    slippage_pct=float(round(slippage_pct, 4)),
-                    funding_pct=float(round(funding_pct, 4)),
-                    net_edge_pct=float(round(net_edge_pct, 4)),
-                    decision="allow" if net_edge_pct >= min_edge else "reject",
-                )
-                if net_edge_pct < min_edge:
-                    log.warning(
-                        "execution.net_edge_too_low",
-                        symbol=symbol,
-                        net_edge_pct=float(round(net_edge_pct, 4)),
-                        min_edge_pct=float(min_edge),
-                    )
-                    return None
-
         # 6. Execute or shadow ─────────────────────────────────────────
         if self._shadow_mode:
+            self._diag_shadow_order_would_be_placed += 1
             log.info(
                 "shadow.order_would_be_placed",
                 symbol=symbol,
@@ -586,6 +978,8 @@ class ExecutionEngine:
                             executable_notional=str(executable_notional),
                             exchange_min=str(exchange_min),
                         )
+                        self._release_exposure_reservation(proposal)
+                        exposure_reserved = False
                         return None
 
                     if executable_notional < sizing_target:
@@ -618,6 +1012,8 @@ class ExecutionEngine:
                             )
                         except Exception as _journal_exc:  # noqa: BLE001
                             log.debug("execution.price_check_journal_failed", error=str(_journal_exc))
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
             # P0.1: Durable write CREATED_LOCAL before any REST call.
             if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -638,19 +1034,35 @@ class ExecutionEngine:
                         order_link_id=intent.order_link_id,
                         error=str(_durable_exc),
                     )
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
 
-            # P0.3: Register pending entry slot
-            self.mark_entry_submitted(intent.order_link_id)
+            # P0.3: Register pending entry slot (with symbol for screener protection)
+            self.mark_entry_submitted(intent.order_link_id, symbol=symbol)
+            # Persist pending registration so resolution state survives restarts
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    await self._trade_journal.record_order_pending(intent.order_link_id, symbol)
+                except Exception as _pend_exc:
+                    log.debug(
+                        "execution.record_order_pending_failed",
+                        order_link_id=intent.order_link_id,
+                        error=str(_pend_exc),
+                    )
 
             # P0.6: Second canary gate immediately before REST
             if self._is_canary:
                 if len(self._open_positions) >= CANARY_MAX_OPEN_POSITIONS:
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     log.warning("canary.blocked_max_positions_pre_rest", symbol=symbol)
                     return None
                 if self._exposure.total_exposure_pct >= CANARY_MAX_TOTAL_EXPOSURE_PCT:
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     log.warning("canary.blocked_max_exposure_pre_rest", symbol=symbol)
                     return None
 
@@ -673,68 +1085,75 @@ class ExecutionEngine:
                         order_link_id=intent.order_link_id,
                         error=str(_durable_exc),
                     )
-                    self.mark_entry_resolved(intent.order_link_id)
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
                     return None
 
-            try:
-                resp = await self._adapter.place_order(intent)
-                exchange_order_id = resp.get("result", {}).get("orderId", "?")
-                log.info(
-                    "execution.order_placed",
-                    symbol=symbol,
-                    side=proposal.side.value,
-                    qty=str(decision.approved_qty),
-                    exchange_order_id=exchange_order_id,
-                    order_link_id=intent.order_link_id,
-                )
-                if self._trade_journal is not None:
-                    await self._trade_journal.record_order_event(
-                        order_link_id=intent.order_link_id,
-                        proposal_id=intent.proposal_id,
-                        decision_id=intent.decision_id,
+            if self._entry_order_mode == "MAKER_FIRST":
+                entered = await self._execute_maker_first(intent, proposal, decision, instrument_info)
+                if not entered:
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
+                    return None
+            else:
+                try:
+                    resp = await self._adapter.place_order(intent)
+                    exchange_order_id = resp.get("result", {}).get("orderId", "?")
+                    self._diag_order_placed += 1
+                    log.info(
+                        "execution.order_placed",
                         symbol=symbol,
                         side=proposal.side.value,
-                        qty=decision.approved_qty,
-                        status="PLACED",
+                        qty=str(decision.approved_qty),
                         exchange_order_id=exchange_order_id,
-                    )
-            except Exception as exc:
-                self.mark_entry_resolved(intent.order_link_id)
-                # Record failure timestamp (NOT an entry cooldown — separate state)
-                self._last_failure_at[symbol] = datetime.now(tz=UTC)
-                log.error(
-                    "execution.order_failed",
-                    symbol=symbol,
-                    error=str(exc),
-                )
-                if self._trade_journal is not None:
-                    await self._trade_journal.record_order_event(
                         order_link_id=intent.order_link_id,
-                        proposal_id=intent.proposal_id,
-                        decision_id=intent.decision_id,
+                    )
+                    if self._trade_journal is not None:
+                        await self._trade_journal.record_order_event(
+                            order_link_id=intent.order_link_id,
+                            proposal_id=intent.proposal_id,
+                            decision_id=intent.decision_id,
+                            symbol=symbol,
+                            side=proposal.side.value,
+                            qty=decision.approved_qty,
+                            status="PLACED",
+                            exchange_order_id=exchange_order_id,
+                        )
+                except Exception as exc:
+                    self._diag_order_failed += 1
+                    await self.resolve_pending_durable(intent.order_link_id, symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
+                    # Record failure timestamp (NOT an entry cooldown — separate state)
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.error(
+                        "execution.order_failed",
                         symbol=symbol,
-                        side=proposal.side.value,
-                        qty=decision.approved_qty,
-                        status="FAILED",
                         error=str(exc),
                     )
-                return None
+                    if self._trade_journal is not None:
+                        await self._trade_journal.record_order_event(
+                            order_link_id=intent.order_link_id,
+                            proposal_id=intent.proposal_id,
+                            decision_id=intent.decision_id,
+                            symbol=symbol,
+                            side=proposal.side.value,
+                            qty=decision.approved_qty,
+                            status="FAILED",
+                            error=str(exc),
+                        )
+                    return None
 
         # 7. Update local state ────────────────────────────────────────
         self._last_entry_at[symbol] = datetime.now(tz=UTC)
 
-        if not self._shadow_mode:
-            await self.sync_positions()
-            if not self.has_open_position(symbol):
-                log.warning(
-                    "execution.order_accepted_position_not_confirmed",
-                    symbol=symbol,
-                    order_link_id=intent.order_link_id,
-                )
-            return decision
-
         entry_price = proposal.entry_price or Decimal("0")
         notional = decision.approved_qty * entry_price
+        # Set the position registry entry optimistically for BOTH live and shadow
+        # paths so the strategy loop cannot open a duplicate entry while a fill
+        # confirmation is still in-flight. For live orders the WS position event
+        # (or the next startup sync) will replace this with real exchange data.
         self._open_positions[symbol] = {
             "side": proposal.side,
             "size": decision.approved_qty,
@@ -746,8 +1165,303 @@ class ExecutionEngine:
 
         if notional > Decimal("0"):
             await self._exposure.update_position(symbol, proposal.side.value, notional)
+        if exposure_reserved:
+            self._release_exposure_reservation(proposal)
+
+        if not self._shadow_mode:
+            log.info(
+                "execution.live_order_placed_optimistic_position_set",
+                symbol=symbol,
+                order_link_id=intent.order_link_id,
+            )
+            return decision
 
         return decision
+
+    # ------------------------------------------------------------------
+    # Maker-first execution
+    # ------------------------------------------------------------------
+
+    async def _execute_maker_first(
+        self,
+        intent: OrderIntent,
+        proposal: TradeProposal,
+        decision: RiskDecision,
+        instrument_info: InstrumentInfo,
+    ) -> bool:
+        """POST_ONLY limit at the touch, then escalate to taker or abort.
+
+        Returns True when a position entry was achieved (full or partial fill,
+        or successful escalation) — the caller then runs the shared post-entry
+        path. Pending/durable state mechanics mirror the market path exactly.
+        """
+        symbol = intent.symbol
+
+        # 1. Price the maker order off the live touch. No quote → no entry.
+        try:
+            bid, ask = await self._adapter.get_best_bid_ask(self._category, symbol)
+        except Exception as exc:
+            await self._abort_maker_entry(intent, decision, reason=f"no_quote: {exc}")
+            return False
+        tick = instrument_info.tick_size if instrument_info.tick_size > 0 else Decimal("0")
+        if intent.side == OrderSide.BUY:
+            # Improve the bid by one tick when it doesn't cross the ask
+            price = bid + tick if tick > 0 and bid + tick < ask else bid
+        else:
+            price = ask - tick if tick > 0 and ask - tick > bid else ask
+
+        maker_intent = intent.model_copy(
+            update={"order_type": OrderType.LIMIT, "price": price, "time_in_force": "PostOnly"}
+        )
+
+        # 2. Submit POST_ONLY limit
+        try:
+            resp = await self._adapter.place_order(maker_intent)
+        except Exception as exc:
+            self._diag_order_failed += 1
+            await self.resolve_pending_durable(intent.order_link_id, symbol)
+            self._last_failure_at[symbol] = datetime.now(tz=UTC)
+            log.error("execution.order_failed", symbol=symbol, error=str(exc), mode="maker_first")
+            await self._journal_order_event(maker_intent, decision, status="FAILED", error=str(exc))
+            return False
+
+        exchange_order_id = resp.get("result", {}).get("orderId", "?")
+        self._diag_order_placed += 1
+        log.info(
+            "maker.order_placed",
+            symbol=symbol,
+            side=intent.side.value,
+            qty=str(intent.qty),
+            price=str(price),
+            order_link_id=intent.order_link_id,
+            exchange_order_id=exchange_order_id,
+            timeout_s=self._maker_timeout_s,
+            ttl_s=self._maker_ttl_s,
+        )
+        await self._journal_order_event(maker_intent, decision, status="PLACED", exchange_order_id=exchange_order_id)
+
+        # 3. Wait for the fill. With escalation we decide at the timeout;
+        #    without it the order may rest until its full TTL.
+        wait_s = self._maker_timeout_s if self._maker_allow_escalation else self._maker_ttl_s
+        state = await self._wait_maker_fill(symbol, intent.order_link_id, wait_s)
+
+        if state == "filled":
+            self._diag_maker_filled += 1
+            log.info("maker.filled", symbol=symbol, order_link_id=intent.order_link_id)
+            return True
+
+        if state == "open":
+            # 4. Cancel the resting remainder. A cancel error can mean either a
+            #    racing fill OR a live order we failed to cancel — verify which.
+            cancel_failed = False
+            try:
+                await self._adapter.cancel_order(self._category, symbol, intent.order_link_id)
+            except Exception as exc:
+                cancel_failed = True
+                log.info(
+                    "maker.cancel_failed_checking_fill",
+                    symbol=symbol,
+                    order_link_id=intent.order_link_id,
+                    error=str(exc),
+                )
+            if cancel_failed:
+                # Fail closed: if the order may still be live on the exchange we
+                # must NOT escalate (a taker on top of a live limit doubles the
+                # entry) and must NOT release the pending slot — the private WS
+                # fill/cancel event or stale-pending reconciliation resolves it.
+                try:
+                    open_orders = await self._adapter.get_open_orders(self._category, symbol)
+                    still_live = any(str(o.get("orderLinkId")) == intent.order_link_id for o in open_orders)
+                except Exception as verify_exc:
+                    log.warning(
+                        "maker.cancel_state_unknown_fail_closed",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                        error=str(verify_exc),
+                    )
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    return False
+                if still_live:
+                    self._diag_maker_aborted += 1
+                    self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    log.warning(
+                        "maker.cancel_failed_order_live",
+                        symbol=symbol,
+                        order_link_id=intent.order_link_id,
+                    )
+                    return False
+            try:
+                await self._sync_positions_locked()
+            except Exception as exc:
+                log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+            if self.has_open_position(symbol):
+                # Partial (or racing full) fill — TP/SL are attached to the
+                # position via tpslMode=Full, the position manager takes over.
+                self._diag_maker_filled += 1
+                log.info(
+                    "maker.filled",
+                    symbol=symbol,
+                    order_link_id=intent.order_link_id,
+                    partial=True,
+                )
+                return True
+
+        # 5. No fill at all ("gone" = PostOnly rejected/cancelled by exchange).
+        allowed, reason = await self._maker_escalation_allowed(intent, price)
+        if not allowed:
+            self._diag_maker_aborted += 1
+            log.info(
+                "maker.aborted",
+                symbol=symbol,
+                order_link_id=intent.order_link_id,
+                reason=reason,
+            )
+            await self.resolve_pending_durable(intent.order_link_id, symbol)
+            await self._journal_order_event(maker_intent, decision, status="MAKER_ABORTED", error=reason)
+            return False
+
+        # 5b. Last fill re-check: the escalation gate above took a REST round
+        # trip — a fill landing in that window would otherwise be doubled by
+        # the taker order.
+        try:
+            await self._sync_positions_locked()
+        except Exception as exc:
+            log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+        if self.has_open_position(symbol):
+            self._diag_maker_filled += 1
+            log.info("maker.filled", symbol=symbol, order_link_id=intent.order_link_id, late=True)
+            return True
+
+        # 6. Escalate the entry to a market (taker) order under a fresh link id.
+        escalation_link_id = (intent.order_link_id[:35] + "E")[:36]
+        market_intent = intent.model_copy(
+            update={
+                "intent_id": uuid.uuid4(),
+                "order_link_id": escalation_link_id,
+                "order_type": OrderType.MARKET,
+                "price": None,
+                "time_in_force": "GTC",
+            }
+        )
+        self.mark_entry_submitted(escalation_link_id, symbol=symbol)
+        if self._trade_journal is not None and self._trade_journal.is_enabled:
+            try:
+                await self._trade_journal.record_order_pending(escalation_link_id, symbol)
+            except Exception as exc:
+                log.debug("maker.record_pending_failed", order_link_id=escalation_link_id, error=str(exc))
+        # The original maker order is terminally cancelled — release its slot.
+        await self.resolve_pending_durable(intent.order_link_id, symbol)
+
+        try:
+            resp = await self._adapter.place_order(market_intent)
+        except Exception as exc:
+            self._diag_order_failed += 1
+            await self.resolve_pending_durable(escalation_link_id, symbol)
+            self._last_failure_at[symbol] = datetime.now(tz=UTC)
+            log.error("execution.order_failed", symbol=symbol, error=str(exc), mode="maker_escalation")
+            await self._journal_order_event(market_intent, decision, status="FAILED", error=str(exc))
+            return False
+
+        exchange_order_id = resp.get("result", {}).get("orderId", "?")
+        self._diag_order_placed += 1
+        self._diag_maker_escalated += 1
+        log.info(
+            "maker.escalated",
+            symbol=symbol,
+            side=intent.side.value,
+            qty=str(intent.qty),
+            order_link_id=escalation_link_id,
+            exchange_order_id=exchange_order_id,
+        )
+        await self._journal_order_event(market_intent, decision, status="PLACED", exchange_order_id=exchange_order_id)
+        return True
+
+    async def _wait_maker_fill(self, symbol: str, order_link_id: str, wait_s: float) -> str:
+        """Poll the open-orders list until fill, disappearance or timeout.
+
+        Returns "filled" (position confirmed), "gone" (order vanished without a
+        position — e.g. PostOnly rejected) or "open" (still resting at timeout).
+        """
+        deadline = asyncio.get_event_loop().time() + wait_s
+        while True:
+            try:
+                open_orders = await self._adapter.get_open_orders(self._category, symbol)
+                still_open = any(str(o.get("orderLinkId")) == order_link_id for o in open_orders)
+                if not still_open:
+                    try:
+                        await self._sync_positions_locked()
+                    except Exception as exc:
+                        log.warning("maker.position_sync_failed", symbol=symbol, error=str(exc))
+                    return "filled" if self.has_open_position(symbol) else "gone"
+            except Exception as exc:
+                # Transient API error — keep waiting, the order state is unknown
+                log.debug("maker.fill_poll_failed", symbol=symbol, error=str(exc))
+            if asyncio.get_event_loop().time() >= deadline:
+                return "open"
+            await asyncio.sleep(_MAKER_POLL_INTERVAL_S)
+
+    async def _maker_escalation_allowed(self, intent: OrderIntent, maker_price: Decimal) -> tuple[bool, str]:
+        """Safety gate before paying taker: config, book pressure, price drift."""
+        if not self._maker_allow_escalation:
+            return False, "escalation_disabled"
+
+        # Imbalance must not contradict the direction (fail open when unknown)
+        if self._imbalance_provider is not None:
+            try:
+                imbalance = self._imbalance_provider(intent.symbol)
+            except Exception:
+                imbalance = None
+            if imbalance is not None:
+                against = imbalance < 0 if intent.side == OrderSide.BUY else imbalance > 0
+                if against:
+                    return False, f"imbalance_against:{round(imbalance, 3)}"
+
+        # Price must not have run away from where the maker order was resting
+        try:
+            current = await self._adapter.get_conservative_market_price(
+                self._category, intent.symbol, intent.side.value
+            )
+        except Exception as exc:
+            return False, f"no_price:{exc}"
+        if maker_price <= 0:
+            return False, "bad_maker_price"
+        drift_pct = abs(float((current - maker_price) / maker_price)) * 100.0
+        if drift_pct > _MAKER_MAX_ESCALATION_DRIFT_PCT:
+            return False, f"price_drifted:{round(drift_pct, 4)}pct"
+        return True, "ok"
+
+    async def _abort_maker_entry(self, intent: OrderIntent, decision: RiskDecision, reason: str) -> None:
+        """Release pending state and journal an aborted maker entry."""
+        self._diag_maker_aborted += 1
+        log.info("maker.aborted", symbol=intent.symbol, order_link_id=intent.order_link_id, reason=reason)
+        await self.resolve_pending_durable(intent.order_link_id, intent.symbol)
+        await self._journal_order_event(intent, decision, status="MAKER_ABORTED", error=reason)
+
+    async def _journal_order_event(
+        self,
+        intent: OrderIntent,
+        decision: RiskDecision,
+        *,
+        status: str,
+        exchange_order_id: str | None = None,
+        error: str | None = None,
+    ) -> None:
+        if self._trade_journal is None:
+            return
+        try:
+            await self._trade_journal.record_order_event(
+                order_link_id=intent.order_link_id,
+                proposal_id=intent.proposal_id,
+                decision_id=intent.decision_id,
+                symbol=intent.symbol,
+                side=intent.side.value,
+                qty=intent.qty,
+                status=status,
+                exchange_order_id=exchange_order_id,
+                error=error,
+            )
+        except Exception as exc:
+            log.debug("execution.journal_event_failed", status=status, error=str(exc))
 
     # ------------------------------------------------------------------
     # Helpers
@@ -827,4 +1541,40 @@ class ExecutionEngine:
             "failure_cooldown_s": int(self._failure_cooldown.total_seconds()),
             "last_entries": {sym: ts.isoformat() for sym, ts in self._last_entry_at.items()},
             "last_failures": {sym: ts.isoformat() for sym, ts in self._last_failure_at.items()},
+        }
+
+    def get_diag_counts(self) -> dict[str, int]:
+        """Return cumulative diagnostic counters since startup."""
+        return {
+            "skipped_pending_entries": self._diag_skip_pending,
+            "order_placed": self._diag_order_placed,
+            "shadow_order_would_be_placed": self._diag_shadow_order_would_be_placed,
+            "order_failed": self._diag_order_failed,
+            "pending_entry_count": len(self._pending_entry_order_link_ids),
+            "net_edge_rejected": self._diag_net_edge_rejected,
+            "no_tp_rejected": self._diag_no_tp_rejected,
+            "fee_unavailable_rejected": self._diag_fee_unavailable_rejected,
+            "maker_filled": self._diag_maker_filled,
+            "maker_escalated": self._diag_maker_escalated,
+            "maker_aborted": self._diag_maker_aborted,
+        }
+
+    def pending_entry_diagnostics(self) -> dict[str, Any]:
+        """Return pending entry details for diagnostics/heartbeat."""
+        now = datetime.now(tz=UTC)
+        ids = sorted(self._pending_entry_order_link_ids)
+        symbols = [self._pending_entry_symbols.get(oid, "?") for oid in ids]
+        oldest_age_s: float | None = None
+        if ids and self._pending_entry_created_at:
+            oldest_ts = min(
+                (self._pending_entry_created_at[oid] for oid in ids if oid in self._pending_entry_created_at),
+                default=None,
+            )
+            if oldest_ts is not None:
+                oldest_age_s = (now - oldest_ts).total_seconds()
+        return {
+            "pending_entry_count": len(ids),
+            "pending_entry_ids": ids[:10],
+            "pending_entry_symbols": symbols[:10],
+            "oldest_pending_age_s": oldest_age_s,
         }

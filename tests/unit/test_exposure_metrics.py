@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
@@ -67,6 +68,53 @@ async def test_total_portfolio_cap_still_applies():
     can_add, reason = t.can_add_position("XRPUSDT", Decimal("1"))
     assert not can_add, "Should reject when total portfolio cap is full"
     assert "total exposure" in reason.lower() or "cap" in reason.lower()
+
+
+@pytest.mark.asyncio
+async def test_pending_reservation_counts_towards_position_limit():
+    """Pending exposure must close the race between risk approval and order registration."""
+    t = _tracker(capital=Decimal("10000"))
+    limits = get_risk_limits(RiskProfile.CONSERVATIVE)
+
+    for idx in range(limits.max_simultaneous_positions):
+        can_add, reason = t.can_add_position(f"COIN{idx}USDT", Decimal("10"), order_id=f"order-{idx}")
+        assert can_add, reason
+
+    can_add, reason = t.can_add_position("EXTRAUSDT", Decimal("10"), order_id="order-extra")
+    assert not can_add
+    assert "max simultaneous positions" in reason
+
+    t.release_reservation("order-0")
+    can_add, reason = t.can_add_position("EXTRAUSDT", Decimal("10"), order_id="order-extra")
+    assert can_add, reason
+
+
+@pytest.mark.asyncio
+async def test_capital_update_and_reservation_release_are_consistent():
+    """Sync exposure mutations should be protected by the same lock as async updates."""
+    t = _tracker(capital=Decimal("10000"))
+
+    can_add, reason = t.can_add_position("BTCUSDT", Decimal("1000"), order_id="order-1")
+    assert can_add, reason
+    assert t.total_exposure_pct == Decimal("10")
+
+    t.update_capital(Decimal("20000"))
+    assert t.total_exposure_pct == Decimal("5")
+
+    t.release_reservation("order-1")
+    assert t.total_exposure_pct == Decimal("0")
+    assert t.position_count == 0
+
+
+def test_capital_update_ignores_stale_timestamp():
+    t = _tracker(capital=Decimal("10000"))
+    fresh = datetime.now(tz=UTC)
+
+    t.update_capital(Decimal("20000"), updated_at=fresh)
+    assert t.to_dict()["total_capital"] == "20000"
+
+    t.update_capital(Decimal("5000"), updated_at=fresh - timedelta(seconds=1))
+    assert t.to_dict()["total_capital"] == "20000"
 
 
 @pytest.mark.asyncio

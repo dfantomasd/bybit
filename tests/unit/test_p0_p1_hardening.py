@@ -708,8 +708,8 @@ def test_mfe_mae_uses_full_horizon_range() -> None:
     )
     # MFE: (51000 - 50000) / 50000 * 10000 = 200 bps
     assert result.mfe_bps == Decimal("200")
-    # MAE: (50000 - 49000) / 50000 * 10000 = 200 bps
-    assert result.mae_bps == Decimal("200")
+    # MAE follows the canonical convention: adverse excursion is negative.
+    assert result.mae_bps == Decimal("-200.0")
 
 
 # ===========================================================================

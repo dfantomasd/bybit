@@ -24,14 +24,19 @@ opportunities → stricter selection — not more simultaneous positions.
 from __future__ import annotations
 
 import math
+from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import structlog
 
 log = structlog.get_logger(__name__)
+
+# Open-interest history per symbol: one point per screener refresh (default
+# 900 s) — 8 points cover ~2 hours, enough for the 60-minute change feature.
+_OI_HISTORY_POINTS = 8
 
 # Quote coins we accept (USDT perpetual futures only)
 _ACCEPTED_QUOTE = "USDT"
@@ -230,6 +235,7 @@ class MarketScreener:
         self._max_price_usd = max_price_usd
         self._interval = interval_s
         self._denylist: set[str] = set(denylist or [])
+        self._manual_symbols: set[str] = set()
         self._on_symbols_added = on_symbols_added
         self._on_symbols_removed = on_symbols_removed
         self._has_open_position = has_open_position
@@ -237,6 +243,11 @@ class MarketScreener:
 
         self._stop_event = asyncio.Event()
         self._initialized = asyncio.Event()
+
+        # Funding/open-interest cache fed from the same tickers response the
+        # screener already fetches; consumed by FeaturePipeline as features.
+        self._funding_rates: dict[str, float] = {}
+        self._oi_history: dict[str, deque[tuple[datetime, float]]] = {}
 
         # Published state
         self._wide_universe: list[ScoredSymbol] = []
@@ -272,6 +283,14 @@ class MarketScreener:
     def metrics(self) -> ScreenerMetrics:
         return self._metrics
 
+    @property
+    def manual_symbols(self) -> list[str]:
+        """Operator-selected symbols that should stay in the trading universe when eligible."""
+        return sorted(self._manual_symbols)
+
+    def set_manual_symbols(self, symbols: list[str]) -> None:
+        self._manual_symbols = {symbol.upper() for symbol in symbols if symbol}
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -292,7 +311,7 @@ class MarketScreener:
                 import asyncio
 
                 await asyncio.wait_for(
-                    asyncio.shield(self._stop_event.wait()),
+                    self._stop_event.wait(),
                     timeout=self._interval,
                 )
             except TimeoutError:
@@ -371,11 +390,54 @@ class MarketScreener:
 
             if added and self._on_symbols_added is not None:
                 await self._on_symbols_added(added)
-            if removed and self._on_symbols_removed is not None:
-                await self._on_symbols_removed(removed)
+            if removed:
+                for sym in removed:
+                    self._funding_rates.pop(sym, None)
+                    self._oi_history.pop(sym, None)
+                if self._on_symbols_removed is not None:
+                    await self._on_symbols_removed(removed)
 
         except Exception as exc:
             log.warning("screener.refresh_failed", error=str(exc))
+
+    def market_stats(self, symbol: str) -> dict[str, float] | None:
+        """Return cached funding/open-interest stats for one symbol.
+
+        ``oi_change_pct_60m`` compares the latest open-interest value with the
+        oldest cached point at most ~2 hours back (screener refresh cadence).
+        Returns None until the first tickers refresh covered the symbol.
+        """
+        funding = self._funding_rates.get(symbol)
+        history = self._oi_history.get(symbol)
+        if funding is None or not history:
+            return None
+        now = datetime.now(tz=UTC)
+        latest_ts, latest_oi = history[-1]
+        if (now - latest_ts) > timedelta(hours=2):
+            return None  # stale cache (e.g. symbol dropped from tickers)
+        oi_change_pct = 0.0
+        if latest_oi > 0:
+            cutoff = latest_ts - timedelta(minutes=60)
+            past_oi = next((oi for ts, oi in history if ts >= cutoff and oi > 0), None)
+            if past_oi is not None and past_oi > 0:
+                oi_change_pct = (latest_oi - past_oi) / past_oi
+        return {
+            "funding_rate_bps": funding * 10_000.0,
+            "oi_change_pct_60m": oi_change_pct,
+        }
+
+    def _update_market_stats(self, tickers: list[dict[str, Any]]) -> None:
+        now = datetime.now(tz=UTC)
+        for t in tickers:
+            symbol = str(t.get("symbol", ""))
+            if not symbol.endswith(_ACCEPTED_QUOTE):
+                continue
+            self._funding_rates[symbol] = _safe_float(t.get("fundingRate"))
+            oi_value = _safe_float(t.get("openInterestValue"))
+            if oi_value <= 0:
+                oi_value = _safe_float(t.get("openInterest")) * _safe_float(t.get("lastPrice"))
+            history = self._oi_history.setdefault(symbol, deque(maxlen=_OI_HISTORY_POINTS))
+            history.append((now, oi_value))
 
     async def _screen(
         self,
@@ -383,6 +445,8 @@ class MarketScreener:
         """Fetch tickers, filter, score, and return three-tier result."""
         resp = await self._rest.get_tickers(category="linear")
         tickers: list[dict[str, Any]] = resp.get("result", {}).get("list", [])
+
+        self._update_market_stats(tickers)
 
         rejection_counts: dict[str, int] = {}
 
@@ -465,11 +529,17 @@ class MarketScreener:
         # Tier 1: wide universe
         wide = scored[: self._wide_max]
 
-        # Tier 2: feature universe (top-N of wide)
-        feature_symbols = [s.symbol for s in wide[: self._feature_max]]
+        ranked_symbols = [s.symbol for s in wide]
+
+        # Tier 2: feature universe. Manual symbols are only honored after they
+        # pass the same liquidity/spread/price filters and appear in the wide universe.
+        manual_ranked = [symbol for symbol in ranked_symbols if symbol in self._manual_symbols]
+        feature_symbols = list(dict.fromkeys([*manual_ranked, *ranked_symbols[: self._feature_max]]))[
+            : self._feature_max
+        ]
 
         # Tier 3: execution candidates (top-M of feature)
-        exec_symbols = feature_symbols[: self._exec_candidates]
+        exec_symbols = list(dict.fromkeys([*manual_ranked, *feature_symbols]))[: self._exec_candidates]
 
         self._metrics.rejection_reasons = rejection_counts
 

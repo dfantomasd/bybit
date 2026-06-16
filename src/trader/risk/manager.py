@@ -499,6 +499,21 @@ class RiskManager:
                 capital,
             )
 
+        if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
+            reserved_notional = approved_qty * proposal.entry_price
+            reserved, reserve_reason = self._exposure.can_add_position(
+                proposal.symbol,
+                reserved_notional,
+                order_id=str(proposal.proposal_id),
+            )
+            if not reserved:
+                return self._reject(
+                    proposal,
+                    reserve_reason,
+                    ["exposure_reservation"],
+                    capital,
+                )
+
         # ----------------------------------------------------------------
         # 17. Determine status: APPROVED or RESIZED
         # ----------------------------------------------------------------

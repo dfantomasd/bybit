@@ -144,13 +144,11 @@ class KillSwitch:
                 reason = content or "kill flag file present"
             except OSError:
                 reason = "kill flag file present"
-
-            if not self._active:
-                await self.activate(
-                    KillSwitchMode.FULL_STOP,
-                    reason=reason,
-                    operator="file_flag",
-                )
+            await self.activate(
+                KillSwitchMode.FULL_STOP,
+                reason=reason,
+                operator="file_flag",
+            )
 
     # ------------------------------------------------------------------
     # Properties

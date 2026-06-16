@@ -8,6 +8,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from trader.app import TradingApplication
+from trader.domain.errors import RateLimitError
 
 
 class _Secret:
@@ -30,7 +31,7 @@ async def test_seed_candle_store_fetches_and_persists_configured_intervals() -> 
                 "result": {
                     "list": [
                         [
-                            "1798761600000",
+                            "1700000000000",
                             "1.0",
                             "1.1",
                             "0.9",
@@ -53,6 +54,48 @@ async def test_seed_candle_store_fetches_and_persists_configured_intervals() -> 
 
     assert fetched_intervals == ["1", "5", "15", "60"]
     assert persisted_intervals == ["1", "5", "15", "60"]
+
+
+@pytest.mark.asyncio
+async def test_seed_candle_store_retries_rate_limited_kline_request() -> None:
+    app = TradingApplication()
+    app._settings = SimpleNamespace(
+        MULTITIMEFRAME_ENABLED=True,
+        MULTITIMEFRAME_INTERVALS=["1"],
+        BYBIT_API_KEY=_Secret(),
+        CANDLE_SEED_RETRY_ATTEMPTS=2,
+        CANDLE_SEED_RETRY_BASE_DELAY_SECONDS=0.0,
+    )
+
+    rest = SimpleNamespace(
+        get_kline=AsyncMock(
+            side_effect=[
+                RateLimitError("Too many visits. Exceeded the API Rate Limit. (code=10006)"),
+                {
+                    "result": {
+                        "list": [
+                            [
+                                "1700000000000",
+                                "1.0",
+                                "1.1",
+                                "0.9",
+                                "1.05",
+                                "1000",
+                                "1050",
+                            ]
+                        ]
+                    }
+                },
+            ]
+        )
+    )
+    app._bybit_adapter = SimpleNamespace(_rest=rest)
+    app._trade_journal = SimpleNamespace(is_enabled=True, upsert_market_candle=AsyncMock())
+
+    await app._seed_candle_store(symbols=["DOGEUSDT"])
+
+    assert rest.get_kline.await_count == 2
+    app._trade_journal.upsert_market_candle.assert_awaited_once()
 
 
 def test_market_data_intervals_keep_1m_first_and_deduplicate() -> None:

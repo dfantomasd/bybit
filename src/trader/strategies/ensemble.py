@@ -3,7 +3,8 @@
 Aggregation rules
 -----------------
 1. If multiple strategies agree on direction → increase confidence.
-2. If strategies disagree → reduce confidence or skip.
+2. If strategies disagree → higher-priority strategy family wins; equal
+   priority conflicts are skipped and logged.
 3. Always return at most one proposal per symbol (highest confidence).
 4. The Risk Manager has final authority.
 """
@@ -37,11 +38,16 @@ class StrategyEnsemble:
         health_checker: Any | None = None,
         min_confidence: float = 0.50,
         agree_bonus: float = 0.05,
+        strategy_priorities: dict[str, int] | None = None,
     ) -> None:
         self._strategies = strategies
         self._health = health_checker
         self._min_confidence = min_confidence
         self._agree_bonus = agree_bonus
+        self._strategy_priorities = strategy_priorities or {}
+
+    def _priority(self, proposal: TradeProposal) -> int:
+        return self._strategy_priorities.get(proposal.strategy_id, 0)
 
     def evaluate_all(
         self,
@@ -57,6 +63,12 @@ class StrategyEnsemble:
                 proposal = strategy.evaluate(feature_vector, current_price, available_balance_usd)
                 if proposal is not None:
                     proposals.append(proposal)
+                else:
+                    log.debug(
+                        "ensemble.strategy_no_signal",
+                        strategy_id=strategy.strategy_id,
+                        symbol=feature_vector.symbol,
+                    )
             except Exception as exc:
                 log.warning(
                     "ensemble.strategy_error",
@@ -78,24 +90,45 @@ class StrategyEnsemble:
         buys = [p for p in proposals if p.side == OrderSide.BUY]
         sells = [p for p in proposals if p.side == OrderSide.SELL]
 
-        # Disagreement → skip
         if buys and sells:
-            log.debug(
-                "ensemble.conflicting_signals",
+            buy_priority = max(self._priority(p) for p in buys)
+            sell_priority = max(self._priority(p) for p in sells)
+            if buy_priority == sell_priority:
+                log.info(
+                    "ensemble.conflict_blocked_equal_priority",
+                    symbol=feature_vector.symbol,
+                    buy_strategies=[p.strategy_id for p in buys],
+                    sell_strategies=[p.strategy_id for p in sells],
+                    priority=buy_priority,
+                )
+                return None
+            agreed = buys if buy_priority > sell_priority else sells
+            suppressed = sells if buy_priority > sell_priority else buys
+            log.info(
+                "ensemble.conflict_resolved_by_priority",
                 symbol=feature_vector.symbol,
-                buys=len(buys),
-                sells=len(sells),
+                selected_side=agreed[0].side.value,
+                selected_priority=max(self._priority(p) for p in agreed),
+                selected_strategies=[p.strategy_id for p in agreed],
+                suppressed_strategies=[p.strategy_id for p in suppressed],
             )
-            return None
+        else:
+            agreed = buys if buys else sells
 
-        agreed = buys if buys else sells
         # Pick highest-confidence proposal and boost by agreement
-        best = max(agreed, key=lambda p: p.confidence)
+        best = max(agreed, key=lambda p: (self._priority(p), p.confidence))
         agreement_bonus = self._agree_bonus * (len(agreed) - 1)
 
         # Rebuild with updated confidence (frozen model, need model_copy)
         new_conf = min(best.confidence + agreement_bonus, 0.95)
         if new_conf < self._min_confidence:
+            log.info(
+                "ensemble.proposal_below_min_confidence",
+                symbol=best.symbol,
+                strategy_id=best.strategy_id,
+                confidence=round(new_conf, 3),
+                min_confidence=self._min_confidence,
+            )
             return None
 
         if new_conf != best.confidence:
@@ -107,5 +140,7 @@ class StrategyEnsemble:
             side=best.side,
             confidence=round(new_conf, 3),
             strategy_count=len(agreed),
+            strategy_id=best.strategy_id,
+            priority=self._priority(best),
         )
         return best

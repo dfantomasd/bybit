@@ -16,8 +16,11 @@ def _features(symbol: str, values: list[float]) -> FeatureVector:
             "ema_slope_9",
             "rsi_14",
             "macd_hist",
+            "return_3",
+            "return_5",
             "volume_zscore",
             "atr_14_pct",
+            "adx_14",
         ],
         values=values,
         quality_score=0.95,
@@ -30,7 +33,7 @@ def test_cheap_long_keeps_stop_below_entry() -> None:
     proposal = strategy.evaluate(
         _features(
             "DOGEUSDT",
-            [0.002, 0.001, 0.000414, 0.599, 0.000122, 0.1, 0.002],
+            [-0.001, -0.002, 0.000414, 0.599, 0.000122, 0.002, 0.003, 0.1, 0.002, 0.30],
         ),
         current_price=0.14235,
         available_balance_usd=23.52,
@@ -48,7 +51,7 @@ def test_cheap_short_keeps_stop_above_entry() -> None:
     proposal = strategy.evaluate(
         _features(
             "WLDUSDT",
-            [-0.002, -0.001, -0.000414, 0.36, -0.0017, 0.1, 0.002],
+            [0.001, 0.002, -0.000414, 0.36, -0.0017, -0.002, -0.003, 0.1, 0.002, 0.30],
         ),
         current_price=1.2345,
         available_balance_usd=23.52,
@@ -59,3 +62,59 @@ def test_cheap_short_keeps_stop_above_entry() -> None:
     assert proposal.stop_loss is not None
     assert proposal.entry_price is not None
     assert proposal.stop_loss > proposal.entry_price
+
+
+def test_low_adx_rejected() -> None:
+    strategy = EMAcrossoverStrategy()
+    proposal = strategy.evaluate(
+        _features(
+            "DOGEUSDT",
+            [-0.001, -0.002, 0.000414, 0.599, 0.000122, 0.002, 0.003, 0.1, 0.002, 0.15],
+        ),
+        current_price=0.14235,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None
+
+
+def test_long_rejects_price_below_fast_ema() -> None:
+    strategy = EMAcrossoverStrategy()
+    proposal = strategy.evaluate(
+        _features(
+            "XRPUSDT",
+            [0.002, 0.001, 0.000414, 0.59, 0.0002, 0.002, 0.003, 0.1, 0.002, 0.30],
+        ),
+        current_price=1.23,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None
+
+
+def test_weak_macd_hist_rejected_as_noise() -> None:
+    strategy = EMAcrossoverStrategy()
+    proposal = strategy.evaluate(
+        _features(
+            "XRPUSDT",
+            [-0.001, -0.002, 0.000414, 0.59, 0.000081, 0.002, 0.003, 0.1, 0.002, 0.30],
+        ),
+        current_price=1.23,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None
+
+
+def test_short_rejects_price_above_fast_ema() -> None:
+    strategy = EMAcrossoverStrategy()
+    proposal = strategy.evaluate(
+        _features(
+            "XRPUSDT",
+            [-0.002, -0.001, -0.000414, 0.40, -0.0002, -0.002, -0.003, 0.1, 0.002, 0.30],
+        ),
+        current_price=1.23,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None

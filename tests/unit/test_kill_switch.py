@@ -18,6 +18,19 @@ class TestKillSwitchFileFlag:
         assert kill_switch.current_mode == KillSwitchMode.FULL_STOP
         assert kill_switch.reason == "operator stop"
 
+    async def test_file_flag_escalates_existing_pause_to_full_stop(self, tmp_path) -> None:
+        flag_file = tmp_path / "kill.flag"
+        flag_file.write_text("operator stop", encoding="utf-8")
+        kill_switch = KillSwitch(flag_file=flag_file)
+        await kill_switch.activate(KillSwitchMode.PAUSE_NEW_ENTRIES, reason="soft stop")
+
+        await kill_switch.check_file_flag()
+
+        assert kill_switch.is_active is True
+        assert kill_switch.current_mode == KillSwitchMode.FULL_STOP
+        assert kill_switch.reason == "operator stop"
+        assert kill_switch.activated_by == "file_flag"
+
     async def test_missing_file_flag_does_not_activate(self, tmp_path) -> None:
         kill_switch = KillSwitch(flag_file=tmp_path / "missing.flag")
 

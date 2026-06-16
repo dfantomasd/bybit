@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import math
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 from trader.data.candles import Candle, CandleStore
 from trader.features.pipeline import _MIN_BARS, FeaturePipeline
+from trader.features.source_candle_guard import SourceCandleFeaturePipeline, source_candle_for_feature
 
 
 def _make_store(n: int = 60, symbol: str = "BTCUSDT", interval: str = "1") -> CandleStore:
@@ -114,3 +115,87 @@ class TestFeaturePipeline:
         store = _make_store(60)
         pipeline = FeaturePipeline(store)
         assert pipeline.latest("BTCUSDT", "1") is None
+
+    def test_source_guard_registers_last_confirmed_candle(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+
+        vec = pipeline.compute("BTCUSDT", "1")
+
+        assert vec is not None
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
+        assert source_candle_for_feature(vec.feature_id) == ("BTCUSDT", "1", latest.open_time)
+
+    async def test_source_guard_rejects_cached_vector_after_new_candle(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+        vec = await pipeline.on_confirmed_candle("BTCUSDT", "1")
+        assert vec is not None
+        assert pipeline.latest("BTCUSDT", "1") is vec
+
+        latest = store.latest("BTCUSDT", "1", 1)[-1]
+        store.add(
+            "BTCUSDT",
+            "1",
+            Candle(
+                open_time=latest.open_time + timedelta(minutes=1),
+                open=50000.0,
+                high=50010.0,
+                low=49990.0,
+                close=50005.0,
+                volume=1000.0,
+                confirm=True,
+            ),
+        )
+
+        assert pipeline.latest("BTCUSDT", "1") is None
+
+
+class _FakeMarketStats:
+    def __init__(self, stats):
+        self._stats = stats
+
+    def market_stats(self, symbol):
+        return self._stats
+
+
+class TestMarketStatsFeatures:
+    def test_features_present_with_stats(self):
+        store = _make_store(60)
+        source = _FakeMarketStats({"funding_rate_bps": 1.25, "oi_change_pct_60m": 0.04})
+        pipeline = FeaturePipeline(store, market_stats_source=source)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 1.0
+        assert f["funding_rate_bps"] == 1.25
+        assert f["oi_change_pct_60m"] == 0.04
+
+    def test_features_zero_with_presence_flag_when_no_stats(self):
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store, market_stats_source=_FakeMarketStats(None))
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 0.0
+        assert f["funding_rate_bps"] == 0.0
+        assert f["oi_change_pct_60m"] == 0.0
+
+    def test_schema_unchanged_without_source(self):
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        assert "mkt_data_present" not in vec.feature_names
+
+    def test_source_error_does_not_kill_compute(self):
+        class Exploding:
+            def market_stats(self, symbol):
+                raise RuntimeError("cache corrupted")
+
+        store = _make_store(60)
+        pipeline = FeaturePipeline(store, market_stats_source=Exploding())
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        f = dict(zip(vec.feature_names, vec.values, strict=True))
+        assert f["mkt_data_present"] == 0.0

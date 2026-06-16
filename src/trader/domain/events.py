@@ -93,6 +93,18 @@ class TradeEvent(BaseEvent):
     executed_at: datetime = Field(default_factory=_now_utc)
 
 
+class LiquidationEvent(BaseEvent):
+    """Public liquidation print from the exchange."""
+
+    topic: str = "market.liquidation"
+    symbol: str
+    market_type: MarketType
+
+    side: OrderSide
+    price: Decimal
+    qty: Decimal
+
+
 class TickerEvent(BaseEvent):
     """24-hour ticker snapshot."""
 

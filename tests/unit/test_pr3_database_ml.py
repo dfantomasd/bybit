@@ -137,7 +137,8 @@ def test_can_promote_success() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_score_uses_champion() -> None:
-    """Registry should use champion over challenger for predictions."""
+    """score() is the legacy alias for score_live() — must return champion, not challenger.
+    app.py now calls score_shadow() directly for Challenger observational scoring."""
     registry = ModelRegistry()
 
     champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
@@ -153,7 +154,13 @@ async def test_registry_score_uses_champion() -> None:
 
     pred = registry.score([5.0])
     if pred is not None:
+        # score() = score_live() → champion only
         assert pred.model_version == "champion_v1"
+
+    # score_shadow() should prefer challenger over champion
+    shadow_pred = registry.score_shadow([5.0])
+    if shadow_pred is not None:
+        assert shadow_pred.model_version == "challenger_v2"
 
 
 @pytest.mark.asyncio
@@ -173,20 +180,25 @@ async def test_registry_score_falls_back_to_challenger() -> None:
 
 @pytest.mark.asyncio
 async def test_registry_load_active_prefers_champion() -> None:
-    """load_active_model should load CHAMPION before any shadow challenger."""
+    """load_active_model loads both champion and challenger; champion returned as primary."""
     champion = ChallengerModel(version="champion_v1", feature_names=["f1"])
     for i in range(10):
         champion.partial_fit([float(i)], label=i % 2)
 
     journal = MagicMock()
     journal.is_enabled = True
+    # First call: champion query returns champion; second call: challenger query returns nothing
     journal._fetch = AsyncMock(
-        return_value=[
-            {
-                "version": "champion_v1",
-                "artifact": champion.to_bytes(),
-                "training_samples": champion.training_samples,
-            }
+        side_effect=[
+            [
+                {
+                    "version": "champion_v1",
+                    "artifact": champion.to_bytes(),
+                    "training_samples": champion.training_samples,
+                }
+            ],
+            [],  # challenger primary (schema-filtered) → empty
+            [],  # challenger fallback (no schema filter) → empty
         ]
     )
 
@@ -198,7 +210,7 @@ async def test_registry_load_active_prefers_champion() -> None:
     assert loaded.status == ModelStatus.CHAMPION
     assert registry.champion is loaded
     assert registry.challenger is None
-    assert journal._fetch.await_count == 1
+    assert journal._fetch.await_count == 3
 
 
 @pytest.mark.asyncio
@@ -319,6 +331,8 @@ async def test_feature_snapshot_written() -> None:
     assert len(fetched) == 1
     query, args = fetched[0]
     assert "feature_snapshots" in query
+    assert "ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)" in query
+    assert "WHERE training_eligible = true" in query
     assert "DOGEUSDT" in args
 
 
@@ -338,7 +352,7 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
         if "MAX(open_time)" in query:
             return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
         if "FROM feature_snapshots fs" in query:
-            return [{"cnt": 777}]
+            return [{"feature_schema_hash": "abc1234567890def", "cnt": 777}]
         if "FROM feature_snapshots" in query:
             return [{"cnt": 1200}]
         if "GROUP BY horizon_minutes" in query:
@@ -347,12 +361,15 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"cnt": 900}]
         if "metadata->>'gate_reason'" in query:
             return [{"reason": "score_below_regime_threshold", "cnt": 8}]
-        if "pe.model_version = 'RULE_BASELINE_V1'" in query and "GATE_PASS" in query:
+        if "pe.model_version = 'RULE_BASELINE_V1'" in query:
             return [
-                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": 1.0},
-                {"model_version": "RULE_BASELINE_V1", "decision": "SHADOW_BASELINE", "net_return_bps": -2.0},
-                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 4.5},
-                {"model_version": "v20260607_1000", "decision": "GATE_PASS", "net_return_bps": 3.5},
+                {"net_return_bps": 1.0},
+                {"net_return_bps": -2.0},
+            ]
+        if "pe.decision = 'GATE_PASS'" in query:
+            return [
+                {"net_return_bps": 4.5},
+                {"net_return_bps": 3.5},
             ]
         if "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in query:
             return [
@@ -419,6 +436,65 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["shadow_gate_15m"]["top_block_reasons"] == {"score_below_regime_threshold": 8}
     assert diag["paper_pnl_15m"]["baseline"]["total_bps"] == -1.0
     assert diag["paper_pnl_15m"]["model_gate"]["total_bps"] == 8.0
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_reports_legacy_challenger_fallback() -> None:
+    """Diagnostics should mirror registry fallback for legacy challenger artifacts."""
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    journal = DirectionalTradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+    journal._pool = MagicMock()
+    journal._enabled = True
+    directional_latest_queries = 0
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        nonlocal directional_latest_queries
+        del args
+        if "FROM prediction_outcomes" in query:
+            return []
+        if "pe.model_version = 'RULE_BASELINE_V1'" in query:
+            return []
+        if "FROM training_runs" in query:
+            return []
+        if (
+            "FROM model_versions" in query
+            and "artifact IS NOT NULL" in query
+            and "COALESCE(metrics->>'label_schema_version', '')" in query
+            and "status = 'CHAMPION'" not in query
+        ):
+            directional_latest_queries += 1
+            if directional_latest_queries == 1:
+                return []
+        if (
+            "FROM model_versions" in query
+            and "artifact IS NOT NULL" in query
+            and "COALESCE(metrics->>'label_schema_version', '')" not in query
+            and "status = 'CHAMPION'" not in query
+        ):
+            return [
+                {
+                    "version": "v_legacy_no_schema",
+                    "status": "SHADOW_CHALLENGER",
+                    "training_samples": 100,
+                    "metrics": {},
+                    "feature_schema_hash": "",
+                    "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                }
+            ]
+        if "FROM model_versions" in query and "status = 'CHAMPION'" in query:
+            return []
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["latest_model_version"]["version"] == "v_legacy_no_schema"
+    assert diag["latest_model_version"]["schema_compatible"] is False
+    assert diag["latest_model_version"]["training_samples_compatible"] == 0
+    assert diag["active_model_version"]["version"] == "v_legacy_no_schema"
 
 
 @pytest.mark.asyncio
@@ -591,13 +667,83 @@ async def test_database_model_telegram_screen() -> None:
     # The method calls self._reply which calls message.reply_text with HTML parse mode.
     await bot._cmd_db_model(fake_update, fake_context)  # type: ignore[arg-type]
     text = fake_message.reply_text.await_args.args[0]
-    assert "Trainable 15m" in text
+    assert "Готово для обучения (горизонт 15м)" in text
     assert "v20260607_1000" in text
-    assert "Quality" in text
-    assert "GOOD" in text
+    assert "Качество" in text
+    assert "ХОРОШО" in text
     assert "+2.70 bps" in text
-    assert "Shadow gate 15m" in text
-    assert "12/20 pass" in text
+    assert "Фильтр модели 15m" in text
+    assert "12/20 пропущено" in text
     assert "Paper baseline" in text
     assert "Paper model gate" in text
     assert "score_below_regime_threshold" in text
+
+
+# ---------------------------------------------------------------------------
+# Challenger fallback: load model even when label_schema_version not in metrics
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_load_latest_challenger_falls_back_when_schema_missing() -> None:
+    """Registry loads a SHADOW_CHALLENGER even if metrics->label_schema_version is absent."""
+    import io
+
+    import joblib
+    from sklearn.linear_model import SGDClassifier
+    from sklearn.preprocessing import StandardScaler
+
+    # Build a minimal artifact without label_schema_version in metrics
+    buf = io.BytesIO()
+    clf = SGDClassifier(loss="log_loss", max_iter=1, warm_start=True, random_state=42)
+    scaler = StandardScaler()
+    joblib.dump(
+        {
+            "clf": clf,
+            "scaler": scaler,
+            "meta": {
+                "version": "v_legacy_no_schema",
+                "feature_names": ["ema_9", "rsi_14"],
+                "training_samples": 100,
+                # intentionally missing label_schema_version
+                "model_type": "SGD",
+                "model_params": {},
+            },
+        },
+        buf,
+    )
+    artifact_bytes = buf.getvalue()
+
+    # Primary query (schema filter) returns nothing; fallback returns the row
+    journal = MagicMock()
+    journal.is_enabled = True
+
+    primary_call = AsyncMock(return_value=[])
+    fallback_row: dict[str, Any] = {
+        "version": "v_legacy_no_schema",
+        "status": "SHADOW_CHALLENGER",
+        "artifact": artifact_bytes,
+        "training_samples": 100,
+        "metrics": {},
+    }
+    fallback_call = AsyncMock(return_value=[fallback_row])
+
+    call_count = 0
+
+    async def _fetch(sql: str, *args: Any) -> list[Any]:
+        nonlocal call_count
+        call_count += 1
+        if call_count == 1:
+            return await primary_call(sql, *args)
+        return await fallback_call(sql, *args)
+
+    journal._fetch = _fetch
+
+    registry = ModelRegistry(trade_journal=journal)
+    model = await registry.load_latest_challenger()
+
+    assert model is not None
+    assert model.version == "v_legacy_no_schema"
+    assert model.training_samples == 100
+    assert model.allow_live_decisions is False
+    assert call_count == 2  # primary failed, fallback used

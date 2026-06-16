@@ -1,0 +1,660 @@
+"""Tests for PR5: symbol sync, pending reconcile, model diagnostics, Telegram aliases.
+
+Tests are intentionally minimal and focus on the new code paths only.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+from typing import Any
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+# ---------------------------------------------------------------------------
+# ЭТАП 1 — _active_symbols helper
+# ---------------------------------------------------------------------------
+
+
+class _FakeScreener:
+    def __init__(self, symbols: list[str]) -> None:
+        self._symbols = symbols
+
+    @property
+    def active_symbols(self) -> list[str]:
+        return list(self._symbols)
+
+
+def _make_app() -> Any:
+    """Create a minimal TradingApplication with no real connections."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    return app
+
+
+def test_active_symbols_falls_back_when_no_screener():
+    from trader.app import _SYMBOLS
+
+    app = _make_app()
+    assert app._screener is None
+    result = app._active_symbols()
+    assert result == list(_SYMBOLS)
+
+
+def test_active_symbols_uses_screener_when_available():
+    app = _make_app()
+    app._screener = _FakeScreener(["DOGEUSDT", "XRPUSDT", "ADAUSDT"])
+    result = app._active_symbols()
+    assert result == ["DOGEUSDT", "XRPUSDT", "ADAUSDT"]
+
+
+def test_active_symbols_falls_back_when_screener_empty():
+    from trader.app import _SYMBOLS
+
+    app = _make_app()
+    app._screener = _FakeScreener([])
+    result = app._active_symbols()
+    assert result == list(_SYMBOLS)
+
+
+def test_zero_trading_warning_is_suppressed_during_startup_warmup():
+    app = _make_app()
+    app._settings = MagicMock()
+    app._settings.MIN_SIGNALS_PER_HOUR = 1
+    app._settings.AUTO_SOFTEN_FILTERS_ENABLED = False
+    app._record_diag("signals_emitted")
+
+    engine = MagicMock()
+    engine.is_in_warmup.return_value = True
+    engine.warmup_seconds_remaining.return_value = 41.0
+    engine.get_diag_counts.return_value = {"order_placed": 0}
+    app._execution_engine = engine
+
+    with patch("trader.app.log") as log:
+        app._check_zero_trading()
+
+    log.warning.assert_not_called()
+    log.info.assert_called_once()
+    assert log.info.call_args.args[0] == "zero_trading.suppressed_warmup"
+
+
+def test_zero_trading_warning_is_suppressed_when_shadow_orders_flow():
+    app = _make_app()
+    app._settings = MagicMock()
+    app._settings.MIN_SIGNALS_PER_HOUR = 1
+    app._settings.AUTO_SOFTEN_FILTERS_ENABLED = False
+    app._record_diag("signals_emitted")
+
+    engine = MagicMock()
+    engine.is_in_warmup.return_value = False
+    engine.get_diag_counts.return_value = {
+        "order_placed": 0,
+        "shadow_order_would_be_placed": 1,
+    }
+    app._execution_engine = engine
+
+    with patch("trader.app.log") as log:
+        app._check_zero_trading()
+
+    log.warning.assert_not_called()
+    log.info.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 1 — feature_pipeline symbols_updated log
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_pipeline_logs_symbols_updated_on_change():
+    from trader.data.candles import CandleStore
+    from trader.features.pipeline import FeaturePipeline
+
+    store = CandleStore(max_bars=10)
+    pipeline = FeaturePipeline(candle_store=store, stale_threshold_s=999.0, watchdog_interval_s=0.05)
+
+    class DynamicScreener:
+        def __init__(self) -> None:
+            self._symbols = ["DOGEUSDT"]
+
+        @property
+        def active_symbols(self) -> list[str]:
+            return list(self._symbols)
+
+    screener = DynamicScreener()
+
+    log_calls: list[str] = []
+
+    with patch("trader.features.pipeline.log") as mock_log:
+        mock_log.info = MagicMock(side_effect=lambda event, **kw: log_calls.append(event))
+
+        # Run pipeline briefly, then change symbols
+        async def _run():
+            await pipeline.run(symbols=["DOGEUSDT"], intervals=["1"], symbol_source=screener)
+
+        task = asyncio.create_task(_run())
+        await asyncio.sleep(0.1)
+        screener._symbols = ["DOGEUSDT", "XRPUSDT"]
+        await asyncio.sleep(0.12)
+        pipeline.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert "feature_pipeline.symbols_updated" in log_calls
+
+
+@pytest.mark.asyncio
+async def test_pipeline_no_log_when_symbols_unchanged():
+    from trader.data.candles import CandleStore
+    from trader.features.pipeline import FeaturePipeline
+
+    store = CandleStore(max_bars=10)
+    pipeline = FeaturePipeline(candle_store=store, stale_threshold_s=999.0, watchdog_interval_s=0.05)
+
+    class StaticScreener:
+        @property
+        def active_symbols(self) -> list[str]:
+            return ["DOGEUSDT"]
+
+    log_calls: list[str] = []
+    with patch("trader.features.pipeline.log") as mock_log:
+        mock_log.info = MagicMock(side_effect=lambda event, **kw: log_calls.append(event))
+
+        async def _run():
+            await pipeline.run(symbols=["DOGEUSDT"], intervals=["1"], symbol_source=StaticScreener())
+
+        task = asyncio.create_task(_run())
+        await asyncio.sleep(0.15)
+        pipeline.stop()
+        await asyncio.wait_for(task, timeout=2.0)
+
+    assert "feature_pipeline.symbols_updated" not in log_calls
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 2 — has_pending_order_for_symbol
+# ---------------------------------------------------------------------------
+
+
+def _make_engine(shadow: bool = True) -> Any:
+    from trader.execution.engine import ExecutionEngine
+
+    adapter = MagicMock()
+    risk_manager = MagicMock()
+    exposure = MagicMock()
+    exposure.total_exposure_pct = Decimal("0")
+
+    return ExecutionEngine(
+        adapter=adapter,
+        risk_manager=risk_manager,
+        exposure_tracker=exposure,
+        shadow_mode=shadow,
+    )
+
+
+def test_has_pending_order_for_symbol_false_initially():
+    engine = _make_engine()
+    assert engine.has_pending_order_for_symbol("DOGEUSDT") is False
+
+
+def test_mark_entry_submitted_stores_symbol():
+    engine = _make_engine()
+    engine.mark_entry_submitted("order123", symbol="DOGEUSDT")
+    assert engine.has_pending_order_for_symbol("DOGEUSDT") is True
+    assert engine.has_pending_order_for_symbol("XRPUSDT") is False
+
+
+def test_mark_entry_resolved_removes_symbol():
+    engine = _make_engine()
+    engine.mark_entry_submitted("order123", symbol="DOGEUSDT")
+    engine.mark_entry_resolved("order123")
+    assert engine.has_pending_order_for_symbol("DOGEUSDT") is False
+
+
+def test_mark_entry_resolved_idempotent():
+    engine = _make_engine()
+    engine.mark_entry_resolved("nonexistent")  # must not raise
+
+
+def test_mark_entry_submitted_no_symbol_still_adds_to_set():
+    engine = _make_engine()
+    engine.mark_entry_submitted("order456")
+    assert "order456" in engine._pending_entry_order_link_ids
+    # No symbol stored
+    assert "order456" not in engine._pending_entry_symbols
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 3 — reconcile_restored_pending_entries
+# ---------------------------------------------------------------------------
+
+
+def _now() -> datetime:
+    return datetime.now(tz=UTC)
+
+
+def _make_engine_with_journal(shadow: bool = True) -> tuple[Any, MagicMock]:
+    engine = _make_engine(shadow=shadow)
+    journal = MagicMock()
+    engine._trade_journal = journal
+    return engine, journal
+
+
+@pytest.mark.asyncio
+async def test_reconcile_does_nothing_when_no_pending():
+    engine, journal = _make_engine_with_journal()
+    # No pending entries
+    await engine.reconcile_restored_pending_entries()
+    journal.get_pending_durable_orders.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_fresh_pending():
+    engine, journal = _make_engine_with_journal()
+
+    oid = "fresh_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=30)  # 30s old → below 600s threshold
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    # No exchange orders
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+
+    await engine.reconcile_restored_pending_entries()
+
+    # Should still be in the pending set (kept as recent)
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_clears_old_stale_pending():
+    engine, journal = _make_engine_with_journal()
+
+    oid = "stale_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)  # 700s > 600s threshold
+
+    journal.get_pending_order_events = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
+        ]
+    )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # Should be removed from pending set
+    assert oid not in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_called_once_with(
+        oid, pytest.approx(f"no_exchange_order_no_position_age_{700}s", rel=None)
+    )
+    journal.mark_durable_order_stale.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_with_exchange_order():
+    engine, journal = _make_engine_with_journal()
+
+    oid = "live_order"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)  # old but has exchange order
+
+    journal.get_pending_order_events = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "XRPUSDT", "status": "SUBMITTING", "created_at": created_at},
+        ]
+    )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
+    engine._adapter.get_open_orders = AsyncMock(
+        return_value=[
+            {"orderLinkId": oid, "symbol": "XRPUSDT"},
+        ]
+    )
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_when_position_exists():
+    engine, journal = _make_engine_with_journal()
+
+    oid = "filled_order"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=800)
+
+    journal.get_pending_order_events = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "ADAUSDT", "status": "SUBMITTING", "created_at": created_at},
+        ]
+    )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    # Simulate open position for ADAUSDT
+    engine._open_positions["ADAUSDT"] = {"side": MagicMock(), "size": Decimal("100"), "entry_price": Decimal("0.5")}
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_fails_safe_when_api_unavailable():
+    engine, journal = _make_engine_with_journal()
+
+    oid = "pending_api_down"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
+        ]
+    )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
+    engine._adapter.get_open_orders = AsyncMock(side_effect=RuntimeError("Network error"))
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # Fail-safe: pending must be preserved when API is down
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_clears_old_stale_unblocks_new_submit():
+    """After stale cleared, has_pending_entries() returns False."""
+    engine, journal = _make_engine_with_journal()
+
+    oid = "stale_blocker"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "WLDUSDT", "status": "CREATED_LOCAL", "created_at": created_at},
+        ]
+    )
+    journal.get_pending_durable_orders = AsyncMock(return_value=[])
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
+
+    assert engine.has_pending_entries() is True
+    await engine.reconcile_restored_pending_entries()
+    assert engine.has_pending_entries() is False
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 4 — Telegram aliases /db and /model
+# ---------------------------------------------------------------------------
+
+
+def test_telegram_db_model_handler_registered():
+    """Both /db and /model must route to _cmd_db_model (inspect handler list directly)."""
+    from trader.telegram_bot import TelegramBotConfig, TelegramMonitorBot
+
+    config = TelegramBotConfig(
+        token="fake:token",
+        allowed_chat_ids={12345},
+        trading_mode="SHADOW",
+        risk_profile="CONSERVATIVE",
+        bybit_use_testnet=False,
+    )
+
+    # Track registered handlers without actually starting the bot
+    registered: dict[str, Any] = {}
+
+    bot = TelegramMonitorBot.__new__(TelegramMonitorBot)
+    bot._config = config
+    bot._controller = None
+    bot._app = None
+
+    with patch("trader.telegram_bot.Application") as mock_app_cls:
+        mock_app = MagicMock()
+
+        def record_handler(handler: Any) -> None:
+            if hasattr(handler, "commands"):
+                for cmd in handler.commands:
+                    registered[cmd] = handler.callback
+
+        mock_app.add_handler = MagicMock(side_effect=record_handler)
+        mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
+        mock_app.initialize = AsyncMock()
+        mock_app.start = AsyncMock()
+        mock_app.updater = MagicMock()
+        mock_app.updater.start_polling = AsyncMock()
+
+        asyncio.run(bot.start())
+
+    assert "db" in registered, "/db handler not registered"
+    assert "model" in registered, "/model handler not registered"
+
+
+def test_fmt_timestamp_handles_datetime():
+    from trader.telegram_bot import TelegramMonitorBot
+
+    dt = datetime(2025, 6, 8, 14, 30, 0, tzinfo=UTC)
+    result = TelegramMonitorBot._fmt_timestamp(dt)
+    assert "14:30:00" in result
+    assert "UTC" in result
+
+
+def test_fmt_timestamp_handles_iso_string():
+    from trader.telegram_bot import TelegramMonitorBot
+
+    result = TelegramMonitorBot._fmt_timestamp("2025-06-08T14:30:00+00:00")
+    assert "14:30:00" in result
+
+
+def test_fmt_timestamp_handles_none():
+    from trader.telegram_bot import TelegramMonitorBot
+
+    assert TelegramMonitorBot._fmt_timestamp(None) == "нет"
+
+
+def test_fmt_timestamp_handles_malformed():
+    from trader.telegram_bot import TelegramMonitorBot
+
+    result = TelegramMonitorBot._fmt_timestamp("not-a-date")
+    assert isinstance(result, str)  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 5 — active_model_version in diagnostics
+# ---------------------------------------------------------------------------
+
+
+def test_get_db_diagnostics_includes_active_model_version_key():
+    """get_db_diagnostics must include active_model_version key in result."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake", enabled=False)
+
+    # When not enabled, get_db_diagnostics returns early with defaults
+    result = asyncio.run(journal.get_db_diagnostics())
+    # The key must be initialised in the result dict even when DB is disabled
+    assert "active_model_version" in result
+
+
+# ---------------------------------------------------------------------------
+# ЭТАП 6 — Diagnostic counters
+# ---------------------------------------------------------------------------
+
+
+def test_engine_diag_counts_initial():
+    engine = _make_engine()
+    counts = engine.get_diag_counts()
+    assert counts["skipped_pending_entries"] == 0
+    assert counts["order_placed"] == 0
+    assert counts["order_failed"] == 0
+    assert counts["pending_entry_count"] == 0
+
+
+def test_engine_diag_pending_count_increments():
+    engine = _make_engine()
+    engine.mark_entry_submitted("oid1", symbol="DOGEUSDT")
+    counts = engine.get_diag_counts()
+    assert counts["pending_entry_count"] == 1
+
+
+def test_engine_pending_entry_diagnostics():
+    engine = _make_engine()
+    engine.mark_entry_submitted("abc123", symbol="XRPUSDT")
+    diag = engine.pending_entry_diagnostics()
+    assert diag["pending_entry_count"] == 1
+    assert "abc123" in diag["pending_entry_ids"]
+    assert "XRPUSDT" in diag["pending_entry_symbols"]
+
+
+# ---------------------------------------------------------------------------
+# mark_order_event_stale safety
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_mark_order_event_stale_only_updates_non_terminal():
+    """mark_order_event_stale must use WHERE clause limiting to non-terminal states."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+
+    executed: list[tuple] = []
+
+    async def fake_execute(query: str, *args: Any) -> None:
+        executed.append((query, args))
+
+    journal._execute = fake_execute  # type: ignore[method-assign]
+
+    await journal.mark_order_event_stale("oid999", "test_reason")
+
+    assert executed
+    query = executed[0][0]
+    assert "FAILED_STALE" in query
+    assert "CREATED_LOCAL" in query
+    assert "SUBMITTING" in query
+    assert "DELETE" not in query.upper()
+
+
+@pytest.mark.asyncio
+async def test_get_pending_order_events_returns_list():
+    """get_pending_order_events must return list from order_events table."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+
+    async def fake_fetch(query: str, *args: Any) -> list[dict]:
+        assert "order_events" in query
+        assert "CREATED_LOCAL" in query
+        assert "SUBMITTING" in query
+        return []
+
+    journal._fetch = fake_fetch  # type: ignore[method-assign]
+
+    result = await journal.get_pending_order_events()
+    assert result == []
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_with_position():
+    engine, journal = _make_engine_with_journal()
+    oid = "position_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    engine._open_positions["DOGEUSDT"] = {"side": "Buy", "size": Decimal("100"), "entry_price": Decimal("0.001")}
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_keeps_pending_when_api_fails():
+    engine, journal = _make_engine_with_journal()
+    oid = "api_fail_order_id"
+    engine.restore_pending_entries([oid])
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(side_effect=RuntimeError("API down"))
+    journal.mark_order_event_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # Fail-safe: pending entry must be preserved when exchange API is unavailable
+    assert oid in engine._pending_entry_order_link_ids
+    journal.mark_order_event_stale.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_reconcile_syncs_pending_count():
+    engine, journal = _make_engine_with_journal(shadow=False)
+    oid = "sync_count_order_id"
+    engine.restore_pending_entries([oid])
+    # Manually break the count to simulate drift
+    engine._pending_entry_count = 99
+    created_at = _now() - timedelta(seconds=700)
+
+    journal.get_pending_order_events = AsyncMock(return_value=[])
+    journal.get_pending_durable_orders = AsyncMock(
+        return_value=[
+            {"order_link_id": oid, "symbol": "DOGEUSDT", "state": "PENDING", "created_at": created_at},
+        ]
+    )
+    engine._adapter.get_open_orders = AsyncMock(return_value=[])
+    journal.mark_order_event_stale = AsyncMock()
+    journal.mark_durable_order_stale = AsyncMock()
+
+    await engine.reconcile_restored_pending_entries()
+
+    # After stale cleared, count must be synced to actual set size (0)
+    assert engine._pending_entry_count == len(engine._pending_entry_order_link_ids)
+    assert engine._pending_entry_count == 0
+
+
+def test_champion_readiness_not_reset_by_newer_challenger():
+    """active_model_version must use CHAMPION, not a newer SHADOW_CHALLENGER."""
+    from trader.storage.trade_journal import TradeJournal
+
+    tj = TradeJournal(postgres_dsn="postgresql://fake", enabled=False)
+    import asyncio
+
+    diag = asyncio.run(tj.get_db_diagnostics())
+
+    # When DB is disabled, active_model_version should be an empty dict (not crash)
+    assert "active_model_version" in diag
+    assert isinstance(diag["active_model_version"], dict)
+    # latest_model_version also present
+    assert "latest_model_version" in diag

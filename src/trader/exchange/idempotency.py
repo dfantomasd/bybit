@@ -10,6 +10,7 @@ Max 36 chars (Bybit limit).
 from __future__ import annotations
 
 import secrets
+from collections.abc import Iterable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -56,6 +57,7 @@ _TERMINAL_STATES = {
     OrderStatus.REJECTED,
     OrderStatus.EXPIRED,
 }
+_DEFAULT_MAX_TERMINAL_RETAINED = 5_000
 
 # Env-short labels for order link ID generation
 _ENV_SHORT: dict[str, str] = {
@@ -78,9 +80,10 @@ class IdempotencyManager:
     Redis (Phase 3).
     """
 
-    def __init__(self) -> None:
+    def __init__(self, max_terminal_retained: int = _DEFAULT_MAX_TERMINAL_RETAINED) -> None:
         # order_link_id → {"status": OrderStatus, "exchange_id": str | None, ...}
         self._store: dict[str, dict[str, Any]] = {}
+        self._max_terminal_retained = max(0, int(max_terminal_retained))
 
     # ------------------------------------------------------------------
     # ID generation
@@ -162,6 +165,8 @@ class IdempotencyManager:
             "status": OrderStatus.CREATED_LOCAL,
             "exchange_order_id": None,
             "intent": intent,
+            "created_at": datetime.now(tz=UTC),
+            "terminal_at": None,
         }
         logger.info(
             "idempotency.intent_registered",
@@ -181,6 +186,9 @@ class IdempotencyManager:
                 order_link_id=order_link_id,
             )
         self._store[order_link_id]["status"] = new_status
+        if new_status in _TERMINAL_STATES:
+            self._store[order_link_id]["terminal_at"] = datetime.now(tz=UTC)
+            self._prune_terminal_orders()
         logger.debug(
             "idempotency.state_transition",
             order_link_id=order_link_id,
@@ -237,3 +245,24 @@ class IdempotencyManager:
     def pending_count(self) -> int:
         """Count orders not yet in a terminal state."""
         return sum(1 for v in self._store.values() if v["status"] not in _TERMINAL_STATES)
+
+    def _terminal_order_ids_oldest_first(self) -> Iterable[str]:
+        terminal_items = [
+            (order_link_id, entry.get("terminal_at") or entry.get("created_at") or datetime.min.replace(tzinfo=UTC))
+            for order_link_id, entry in self._store.items()
+            if entry.get("status") in _TERMINAL_STATES
+        ]
+        return (order_link_id for order_link_id, _ in sorted(terminal_items, key=lambda item: item[1]))
+
+    def _prune_terminal_orders(self) -> None:
+        """Bound memory use by retaining only the newest terminal orders."""
+        if self._max_terminal_retained <= 0:
+            terminal_ids = list(self._terminal_order_ids_oldest_first())
+        else:
+            terminal_ids = list(self._terminal_order_ids_oldest_first())
+            overflow = len(terminal_ids) - self._max_terminal_retained
+            if overflow <= 0:
+                return
+            terminal_ids = terminal_ids[:overflow]
+        for order_link_id in terminal_ids:
+            self._store.pop(order_link_id, None)

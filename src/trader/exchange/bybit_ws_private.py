@@ -11,6 +11,8 @@ import hashlib
 import hmac
 import json
 import time
+from collections import OrderedDict
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
 
@@ -29,6 +31,8 @@ logger = structlog.get_logger(__name__)
 
 _HEARTBEAT_INTERVAL = 20.0
 _WATCHDOG_TIMEOUT = 30.0
+_AUTH_EXPIRES_SECONDS = 10
+_MAX_SEEN_EVENTS = 20_000
 _PRIVATE_TOPICS = ["order", "execution", "position", "wallet"]
 
 
@@ -37,6 +41,21 @@ def _d(value: Any) -> Decimal:
         return Decimal(str(value))
     except Exception:
         return Decimal("0")
+
+
+def _event_time(data: dict[str, Any], fallback: dict[str, Any] | None = None) -> datetime:
+    raw = data.get("updatedTime") or data.get("creationTime") or data.get("createdTime")
+    if raw is None and fallback is not None:
+        raw = fallback.get("updatedTime") or fallback.get("creationTime") or fallback.get("createdTime")
+    if raw is None:
+        return datetime.now(tz=UTC)
+    try:
+        millis = int(raw)
+        if millis > 0:
+            return datetime.fromtimestamp(millis / 1000, tz=UTC)
+    except (TypeError, ValueError, OSError):
+        return datetime.now(tz=UTC)
+    return datetime.now(tz=UTC)
 
 
 class BybitPrivateWebSocket:
@@ -76,8 +95,9 @@ class BybitPrivateWebSocket:
         self._stop_event = asyncio.Event()
         self._last_message_ts: float = 0.0
 
-        # Deduplication: {orderId_updateTime} → True
-        self._seen_events: set[str] = set()
+        # Deduplication keys are retained as a bounded LRU so long-running
+        # private streams cannot grow memory without limit.
+        self._seen_events: OrderedDict[str, None] = OrderedDict()
 
         self._reconnect_count: int = 0
 
@@ -162,11 +182,23 @@ class BybitPrivateWebSocket:
                 wd_task = asyncio.create_task(self._watchdog_loop(ws))
 
                 try:
+                    _err_backoff = 0.0
                     async for raw in ws:
                         if self._stop_event.is_set():
                             break
                         self._last_message_ts = time.monotonic()
-                        await self._handle_message(raw)
+                        try:
+                            await self._handle_message(raw)
+                            _err_backoff = 0.0
+                        except Exception as exc:
+                            # Per-message error: back off then continue; don't kill the connection.
+                            _err_backoff = min(_err_backoff * 2 + 0.1, 5.0)
+                            self._log.warning(
+                                "ws_private.handle_error",
+                                error=str(exc),
+                                backoff=round(_err_backoff, 2),
+                            )
+                            await asyncio.sleep(_err_backoff)
                 except Exception as exc:
                     self._log.warning("ws_private.recv_error", error=str(exc))
                 finally:
@@ -188,7 +220,7 @@ class BybitPrivateWebSocket:
 
     def _build_auth_msg(self) -> dict:
         """Build Bybit V5 WebSocket auth message using HMAC-SHA256."""
-        expires = int((time.time() + 1) * 1000)  # 1 second in future
+        expires = int((time.time() + _AUTH_EXPIRES_SECONDS) * 1000)
         sign_str = f"GET/realtime{expires}"
         signature = hmac.new(
             self._api_secret.encode("utf-8"),
@@ -287,9 +319,8 @@ class BybitPrivateWebSocket:
             order_id = item.get("orderId", "")
             update_time = item.get("updatedTime", "")
             dedup_key = f"{order_id}_{update_time}"
-            if dedup_key in self._seen_events:
+            if self._mark_seen(dedup_key):
                 continue
-            self._seen_events.add(dedup_key)
 
             # Map exchange status to OrderStatus
             exchange_status = item.get("orderStatus", "")
@@ -338,9 +369,8 @@ class BybitPrivateWebSocket:
             exec_id = item.get("execId", "")
             order_id = item.get("orderId", "")
             dedup_key = f"exec_{exec_id}_{order_id}"
-            if dedup_key in self._seen_events:
+            if self._mark_seen(dedup_key):
                 continue
-            self._seen_events.add(dedup_key)
 
             try:
                 side = OrderSide(item.get("side", "Buy"))
@@ -422,6 +452,7 @@ class BybitPrivateWebSocket:
                     wallet_balance=_d(coin.get("walletBalance", "0")),
                     available_balance=_d(coin.get("availableToWithdraw", coin.get("availableBalance", "0"))),
                     unrealised_pnl=_d(coin.get("unrealisedPnl", "0")),
+                    timestamp=_event_time(coin, item),
                 )
                 await self._emit(event)
 
@@ -440,6 +471,16 @@ class BybitPrivateWebSocket:
             "PendingCancel": OrderStatus.CANCEL_REQUESTED,
         }
         return mapping.get(exchange_status, OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED)
+
+    def _mark_seen(self, key: str) -> bool:
+        """Return True when ``key`` is a duplicate; otherwise remember it."""
+        if key in self._seen_events:
+            self._seen_events.move_to_end(key)
+            return True
+        self._seen_events[key] = None
+        while len(self._seen_events) > _MAX_SEEN_EVENTS:
+            self._seen_events.popitem(last=False)
+        return False
 
     async def _emit(self, event: BaseEvent) -> None:
         """Put event onto queue non-blocking."""
