@@ -30,10 +30,8 @@ def _vector(**overrides: float) -> FeatureVector:
     features = {
         "atr_14_pct": 0.004,
         "rsi_14": 0.5,
-        "return_1": 0.0,
-        "return_3": 0.0,
-        "return_5": 0.0,
-        "realized_volatility": 0.001,
+        "log_return_1": 0.0,
+        "realized_vol_20": 0.001,
         "adx_14": 0.2,
         "funding_rate_bps_clipped": 0.0,
         "oi_change_pct_60m_clipped": 0.0,
@@ -100,7 +98,7 @@ def test_liquidation_hunting_fades_sell_liquidation_cluster() -> None:
 
 def test_market_making_proxy_fades_oversold_move_when_spread_is_worth_it() -> None:
     proposal = MarketMakingStrategy(lambda _s: 2.0).evaluate(
-        _vector(rsi_14=0.25, return_3=-0.002),
+        _vector(rsi_14=0.25, log_return_1=-0.002),
         10.0,
         1000.0,
     )
@@ -111,7 +109,7 @@ def test_market_making_proxy_fades_oversold_move_when_spread_is_worth_it() -> No
 
 def test_stat_arb_fades_positive_return_zscore() -> None:
     proposal = StatisticalArbitrageStrategy(min_zscore=2.0).evaluate(
-        _vector(return_1=0.004, return_5=0.0, realized_volatility=0.001, adx_14=0.2),
+        _vector(log_return_1=0.004, realized_vol_20=0.001, adx_14=0.2),
         10.0,
         1000.0,
     )
