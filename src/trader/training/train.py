@@ -44,6 +44,10 @@ def _parse_float_csv(raw: str, default: list[float]) -> list[float]:
     return values or default
 
 
+def _parse_str_csv(raw: str) -> list[str]:
+    return [item.strip() for item in str(raw or "").split(",") if item.strip()]
+
+
 def _walk_forward_splits(
     x: np.ndarray,
     min_train_samples: int = 500,
@@ -331,6 +335,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
     from trader.ml.challenger import ChallengerModel, ModelStatus
 
     settings = Settings()
+    strategy_allowlist = _parse_str_csv(settings.TRAIN_STRATEGY_ALLOWLIST)
+    log.info("Training strategy allowlist: %s", strategy_allowlist or "ALL")
     dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
 
@@ -356,6 +362,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                     po.net_return_bps,
                     po.label,
                     pe.strategy_signal,
+                    pe.metadata->>'strategy_id' AS strategy_id,
                     COALESCE(pe.metadata->>'regime', 'unknown') AS regime,
                     fs.created_at,
                     ROW_NUMBER() OVER (
@@ -372,6 +379,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
+                  AND ($4::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($4::text[]))
             ),
             schema_counts AS (
                 SELECT
@@ -396,6 +404,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                        es.net_return_bps,
                        es.label,
                        es.strategy_signal,
+                       es.strategy_id,
                        es.regime,
                        es.created_at
                 FROM eligible_samples es
@@ -409,13 +418,14 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 LIMIT 10000
             )
             SELECT feature_names, feature_values, feature_schema_hash,
-                   net_return_bps, label, strategy_signal, regime, created_at
+                   net_return_bps, label, strategy_signal, strategy_id, regime, created_at
             FROM latest_window
             ORDER BY created_at ASC
             """,
             horizon_minutes,
             LABEL_SCHEMA_VERSION,
             min_samples,
+            strategy_allowlist or None,
         )
 
         if len(rows) < min_samples:
@@ -436,11 +446,13 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
+                  AND ($3::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($3::text[]))
                 GROUP BY fs.feature_schema_hash
                 ORDER BY cnt DESC
                 """,
                 horizon_minutes,
                 LABEL_SCHEMA_VERSION,
+                strategy_allowlist or None,
             )
             total_labelled = sum(int(r["cnt"]) for r in schema_rows)
             top = ", ".join(f"{str(r['feature_schema_hash'])[:8]}:{r['cnt']}" for r in schema_rows[:4])
@@ -448,7 +460,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 f"Insufficient compatible samples: no feature schema has {min_samples} yet "
                 f"(unique labelled candles={total_labelled}, per-schema=[{top or 'none'}]); "
                 f"schema={LABEL_SCHEMA_VERSION}, "
-                f"horizon={horizon_minutes}m"
+                f"horizon={horizon_minutes}m, "
+                f"strategy_allowlist={strategy_allowlist or 'ALL'}"
             )
             click.echo(msg, err=True)
             await pool.execute(

@@ -28,8 +28,8 @@ class _Stub:
     status: str
     score_value: float
 
-    def predict(self, features: list[float]) -> ModelPrediction:
-        del features
+    def predict(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction:
+        del features, feature_names
         return ModelPrediction(
             score=self.score_value,
             label=1 if self.score_value >= 0.5 else 0,

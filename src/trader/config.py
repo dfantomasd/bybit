@@ -118,6 +118,10 @@ class Settings(BaseSettings):
     """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
     TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
     """Block fragile trend entries when funding and open interest context disagrees."""
+    TREND_MTF_CONFIRMATION_ENABLED: bool = True
+    """Require higher-timeframe trend confirmation before accepting 1m EMA signals."""
+    TREND_CONFIRMATION_INTERVALS: str = "5,15"
+    """Comma-separated intervals used to confirm trend entries."""
 
     # ------------------------------------------------------------------
     # Orderbook microstructure feed
@@ -125,6 +129,41 @@ class Settings(BaseSettings):
     ORDERBOOK_FEED_ENABLED: bool = True
     """Subscribe to orderbook.50 for execution candidates and derive imbalance/
     microprice features. Adds ~5-10 KB/s WS traffic per tracked symbol."""
+    TRADE_FLOW_FEED_ENABLED: bool = True
+    """Subscribe to publicTrade for execution candidates and derive order-flow pressure."""
+    LIQUIDATION_FEED_ENABLED: bool = True
+    """Subscribe to liquidation prints for execution candidates."""
+    FLOW_TRACKER_WINDOW_SECONDS: float = 60.0
+    """Rolling window for trade-flow and liquidation-pressure strategies."""
+    FLOW_LARGE_TRADE_NOTIONAL_USD: float = 10_000.0
+    """Trade notional threshold considered a large tape print."""
+
+    # ------------------------------------------------------------------
+    # Advanced alpha strategies
+    # ------------------------------------------------------------------
+    ORDER_FLOW_STRATEGY_ENABLED: bool = True
+    """Enable order-flow strategy using tape pressure + orderbook confirmation."""
+    ORDER_FLOW_MIN_IMBALANCE: float = 0.35
+    ORDER_FLOW_MIN_BOOK_IMBALANCE: float = 0.18
+    FUNDING_ARB_STRATEGY_ENABLED: bool = True
+    """Enable funding-rate mean-reversion entries."""
+    FUNDING_ARB_MIN_ABS_BPS: float = 5.0
+    LIQUIDATION_HUNTING_STRATEGY_ENABLED: bool = True
+    """Enable liquidation-exhaustion fade entries."""
+    LIQUIDATION_HUNTING_MIN_NOTIONAL_USD: float = 20_000.0
+    LIQUIDATION_HUNTING_MIN_IMBALANCE: float = 0.65
+    MARKET_MAKING_STRATEGY_ENABLED: bool = True
+    """Enable maker-first mean-reversion proxy for the current single-order engine."""
+    MARKET_MAKING_MIN_SPREAD_BPS: float = 1.2
+    MARKET_MAKING_MAX_SPREAD_BPS: float = 4.0
+    STAT_ARB_STRATEGY_ENABLED: bool = True
+    """Enable single-symbol statistical mean-reversion entries."""
+    STAT_ARB_MIN_ZSCORE: float = 2.0
+    STRATEGY_PRIORITY_ORDER: str = (
+        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+    )
+    """Higher-priority strategies win ensemble conflicts when directions disagree."""
 
     # ------------------------------------------------------------------
     # Per-candle training sampler
@@ -147,6 +186,12 @@ class Settings(BaseSettings):
     """Block a bucket when its average net return is below this (bps)."""
     BUCKET_STATS_REFRESH_SECONDS: int = 3600
     """How often the in-memory bucket statistics are refreshed from Postgres."""
+    SYMBOL_SIDE_BLOCK_ENABLED: bool = True
+    """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
+    SYMBOL_SIDE_MIN_SAMPLES: int = 20
+    """Minimum resolved outcomes for a symbol+side pair before it can be blocked."""
+    SYMBOL_SIDE_BLOCK_AVG_BPS: float = -2.0
+    """Block a symbol+side pair when its average net return is below this (bps)."""
 
     # ------------------------------------------------------------------
     # Startup candle backfill
@@ -158,6 +203,10 @@ class Settings(BaseSettings):
     """How many days of history to backfill per symbol/interval."""
     STARTUP_BACKFILL_MAX_REQUESTS: int = 200
     """Hard cap on REST kline requests per startup (rate-limit protection)."""
+    CANDLE_SEED_RETRY_ATTEMPTS: int = 3
+    """Retries for startup CandleStore seed requests that hit Bybit rate limits."""
+    CANDLE_SEED_RETRY_BASE_DELAY_SECONDS: float = 1.0
+    """Base exponential backoff delay after a rate-limited startup seed request."""
 
     # ------------------------------------------------------------------
     # Anti zero-trading guards
@@ -307,6 +356,18 @@ class Settings(BaseSettings):
     """Reserved: correlation-based position limiting (not yet wired into execution)."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
+    SHADOW_LOSS_GUARD_ENABLED: bool = True
+    """Temporarily block new entries after a poor run of shadow TP/SL outcomes."""
+    SHADOW_LOSS_GUARD_MIN_CLOSED: int = 3
+    """Minimum recent shadow closes before the loss guard can activate."""
+    SHADOW_LOSS_GUARD_WINDOW: int = 5
+    """How many recent shadow closes are evaluated for the loss guard."""
+    SHADOW_LOSS_GUARD_MAX_LOSS_RATE: float = 0.6
+    """Activate when recent loss rate is at or above this fraction."""
+    SHADOW_LOSS_GUARD_MIN_AVG_PNL_PCT: float = -0.05
+    """Activate when recent average shadow PnL percent is at or below this value."""
+    SHADOW_LOSS_GUARD_COOLDOWN_SECONDS: int = 900
+    """How long new entries stay blocked after the shadow loss guard activates."""
 
     # ------------------------------------------------------------------
     # Database safety gates
@@ -373,6 +434,11 @@ class Settings(BaseSettings):
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
+    TRAIN_STRATEGY_ALLOWLIST: str = (
+        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+    )
+    """CSV strategy ids eligible for model training from prediction metadata."""
     TRAIN_MIN_BUCKET_SAMPLES: int = 50
     TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
     """Optional training filter: remove regime/hour buckets with stable negative expectancy."""

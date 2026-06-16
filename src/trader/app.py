@@ -36,6 +36,7 @@ from typing import Any
 import uvicorn
 
 from trader.domain.enums import SystemStatus, TradingMode
+from trader.domain.errors import RateLimitError
 from trader.monitoring.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -103,9 +104,12 @@ class TradingApplication:
         self._ws_public: Any | None = None
         self._candle_store: Any | None = None
         self._orderbook_tracker: Any | None = None
+        self._flow_tracker: Any | None = None
         self._feature_pipeline: Any | None = None
         # Regime-bucket expectancy stats: {(regime, volatility, hour): (avg_bps, count)}
         self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
+        # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
+        self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         self._bucket_stats_refreshed_at: datetime | None = None
         # Per-candle training sampler: last sampled candle open_time per symbol
         self._last_candle_sample_at: dict[str, datetime] = {}
@@ -135,6 +139,8 @@ class TradingApplication:
         self._fee_provider: Any | None = None
         self._last_tx_log_sync_at: datetime | None = None
         self._last_zero_trading_warn_at: datetime | None = None
+        self._shadow_closed_results: deque[tuple[datetime, str, float]] = deque(maxlen=50)
+        self._shadow_loss_guard_until: datetime | None = None
         # Set on every confirmed WS kline; drives the canary "fresh confirmed candles" check
         self._last_confirmed_candle_at: datetime | None = None
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
@@ -640,6 +646,7 @@ class TradingApplication:
             min_samples=min_samples,
             horizon=horizon,
             label_bps=label_bps,
+            strategy_allowlist=self._settings.TRAIN_STRATEGY_ALLOWLIST if self._settings is not None else "",
         )
         started_at = datetime.now(tz=UTC)
 
@@ -651,6 +658,12 @@ class TradingApplication:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                env={
+                    **os.environ,
+                    "TRAIN_STRATEGY_ALLOWLIST": (
+                        self._settings.TRAIN_STRATEGY_ALLOWLIST if self._settings is not None else ""
+                    ),
+                },
             )
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False
@@ -1393,6 +1406,9 @@ class TradingApplication:
                 "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
                 "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
                 "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
+                "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
+                "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
+                "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
                 "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
             }
             top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "нет блокировок"
@@ -1688,6 +1704,12 @@ class TradingApplication:
             if self._ws_public is not None:
                 topics = [f"kline.{interval}.{symbol}" for interval in self._market_data_intervals()]
                 topics.append(f"tickers.{symbol}")
+                if self._settings is not None and self._settings.ORDERBOOK_FEED_ENABLED:
+                    topics.append(f"orderbook.50.{symbol}")
+                if self._settings is not None and self._settings.TRADE_FLOW_FEED_ENABLED:
+                    topics.append(f"publicTrade.{symbol}")
+                if self._settings is not None and self._settings.LIQUIDATION_FEED_ENABLED:
+                    topics.append(f"allLiquidation.{symbol}")
                 await self._ws_public.subscribe(topics)
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
 
@@ -1757,16 +1779,34 @@ class TradingApplication:
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
+        retry_attempts = max(1, int(getattr(self._settings, "CANDLE_SEED_RETRY_ATTEMPTS", 3)))
+        retry_base_delay_s = max(0.0, float(getattr(self._settings, "CANDLE_SEED_RETRY_BASE_DELAY_SECONDS", 1.0)))
 
         for symbol in seed_symbols:
             for interval in self._market_data_intervals():
                 try:
-                    resp = await self._bybit_adapter._rest.get_kline(
-                        category="linear",
-                        symbol=symbol,
-                        interval=interval,
-                        limit=_MIN_SEED_BARS,
-                    )
+                    for attempt in range(1, retry_attempts + 1):
+                        try:
+                            resp = await self._bybit_adapter._rest.get_kline(
+                                category="linear",
+                                symbol=symbol,
+                                interval=interval,
+                                limit=_MIN_SEED_BARS,
+                            )
+                            break
+                        except RateLimitError:
+                            if attempt >= retry_attempts:
+                                raise
+                            wait_s = retry_base_delay_s * (2 ** (attempt - 1))
+                            log.warning(
+                                "candle_store.seed_rate_limited_retrying",
+                                symbol=symbol,
+                                interval=interval,
+                                attempt=attempt,
+                                max_attempts=retry_attempts,
+                                wait_seconds=round(wait_s, 3),
+                            )
+                            await asyncio.sleep(wait_s)
                     items = resp.get("result", {}).get("list", [])
                     # Bybit returns newest-first; reverse to oldest-first
                     items = list(reversed(items))
@@ -2096,6 +2136,23 @@ class TradingApplication:
                 if symbol in symbols:
                     subs.append(f"orderbook.50.{symbol}")
 
+        flow_symbols: list[str] = []
+        if self._settings.TRADE_FLOW_FEED_ENABLED or self._settings.LIQUIDATION_FEED_ENABLED:
+            from trader.data.flow_tracker import FlowTracker
+
+            self._flow_tracker = FlowTracker(
+                window_s=self._settings.FLOW_TRACKER_WINDOW_SECONDS,
+                large_trade_notional_usd=self._settings.FLOW_LARGE_TRADE_NOTIONAL_USD,
+            )
+            flow_symbols = self._screener.execution_candidates if self._screener is not None else symbols[:5]
+            for symbol in flow_symbols:
+                if symbol not in symbols:
+                    continue
+                if self._settings.TRADE_FLOW_FEED_ENABLED:
+                    subs.append(f"publicTrade.{symbol}")
+                if self._settings.LIQUIDATION_FEED_ENABLED:
+                    subs.append(f"allLiquidation.{symbol}")
+
         # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
         # size the buffer so a consumer stall never drops a confirmed kline.
         event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
@@ -2110,7 +2167,7 @@ class TradingApplication:
         async def consume_events() -> None:
 
             from trader.data.candles import candle_from_kline_event
-            from trader.domain.events import KlineEvent, OrderBookEvent
+            from trader.domain.events import KlineEvent, LiquidationEvent, OrderBookEvent, TradeEvent
 
             while not self._shutdown_event.is_set():
                 try:
@@ -2118,6 +2175,24 @@ class TradingApplication:
                     if isinstance(event, OrderBookEvent):
                         if self._orderbook_tracker is not None:
                             self._orderbook_tracker.record(event.symbol, event.bids, event.asks)
+                    elif isinstance(event, TradeEvent):
+                        if self._flow_tracker is not None:
+                            self._flow_tracker.record_trade(
+                                event.symbol,
+                                event.side,
+                                event.price,
+                                event.qty,
+                                event.executed_at,
+                            )
+                    elif isinstance(event, LiquidationEvent):
+                        if self._flow_tracker is not None:
+                            self._flow_tracker.record_liquidation(
+                                event.symbol,
+                                event.side,
+                                event.price,
+                                event.qty,
+                                event.timestamp,
+                            )
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
                         self._candle_store.add(event.symbol, event.interval, candle)
@@ -3073,7 +3148,7 @@ class TradingApplication:
             # the auto-trainer rotates model versions, so per-version gate stats
             # (lift, paper gate) would otherwise stay at zero forever.
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
-                shadow_prediction = self._model_registry.score_shadow(vec.values)
+                shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
                 if shadow_prediction is not None:
                     threshold = self._model_gate_threshold(None)
                     gate_decision = None
@@ -3127,8 +3202,122 @@ class TradingApplication:
         avg_bps, count = stats
         return count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS
 
+    def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
+        """True when a symbol+side pair has proven negative expectancy."""
+
+        assert self._settings is not None
+        if not self._settings.SYMBOL_SIDE_BLOCK_ENABLED or not self._symbol_side_stats:
+            return False
+        stats = self._symbol_side_stats.get((symbol, side))
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return (
+            count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES
+            and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
+        )
+
+    def _record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
+        """Track shadow TP/SL results and arm a cooldown after poor recent outcomes."""
+
+        assert self._settings is not None
+        if not self._settings.SHADOW_LOSS_GUARD_ENABLED:
+            return
+        now = datetime.now(tz=UTC)
+        self._shadow_closed_results.append((now, reason, float(pnl_pct)))
+        window_size = max(1, int(self._settings.SHADOW_LOSS_GUARD_WINDOW))
+        recent = list(self._shadow_closed_results)[-window_size:]
+        min_closed = max(1, int(self._settings.SHADOW_LOSS_GUARD_MIN_CLOSED))
+        if len(recent) < min_closed:
+            return
+        losses = [value for _, _, value in recent if value < 0]
+        loss_rate = len(losses) / len(recent)
+        avg_pnl = sum(value for _, _, value in recent) / len(recent)
+        if (
+            loss_rate >= float(self._settings.SHADOW_LOSS_GUARD_MAX_LOSS_RATE)
+            and avg_pnl <= float(self._settings.SHADOW_LOSS_GUARD_MIN_AVG_PNL_PCT)
+        ):
+            cooldown_s = max(0, int(self._settings.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS))
+            self._shadow_loss_guard_until = now + timedelta(seconds=cooldown_s)
+            log.warning(
+                "shadow_loss_guard.activated",
+                symbol=symbol,
+                reason=reason,
+                recent_count=len(recent),
+                loss_rate=round(loss_rate, 3),
+                avg_pnl_pct=round(avg_pnl, 4),
+                cooldown_seconds=cooldown_s,
+            )
+
+    def _shadow_loss_guard_blocks(self) -> bool:
+        """Return true while recent shadow losses should suppress new entries."""
+
+        assert self._settings is not None
+        if not self._settings.SHADOW_LOSS_GUARD_ENABLED or self._shadow_loss_guard_until is None:
+            return False
+        now = datetime.now(tz=UTC)
+        if now >= self._shadow_loss_guard_until:
+            self._shadow_loss_guard_until = None
+            return False
+        return True
+
+    def _trend_confirmation_intervals(self) -> list[str]:
+        assert self._settings is not None
+        raw = str(getattr(self._settings, "TREND_CONFIRMATION_INTERVALS", "") or "")
+        return [part.strip() for part in raw.split(",") if part.strip() and part.strip() != _WS_INTERVAL]
+
+    def _trend_mtf_confirmed(self, symbol: str, side: str) -> bool:
+        """Confirm a 1m trend signal with higher-timeframe features."""
+
+        assert self._settings is not None
+        if not self._settings.TREND_MTF_CONFIRMATION_ENABLED:
+            return True
+        if self._feature_pipeline is None:
+            return False
+        intervals = self._trend_confirmation_intervals()
+        if not intervals:
+            return True
+        confirmations = 0
+        for interval in intervals:
+            vec = self._feature_pipeline.latest(symbol, interval)
+            if vec is None:
+                return False
+            f = dict(zip(vec.feature_names, vec.values, strict=True))
+            ema9 = f.get("ema_9")
+            ema21 = f.get("ema_21")
+            slope9 = f.get("ema_slope_9")
+            macd_hist = f.get("macd_hist")
+            ret3 = f.get("return_3")
+            ret5 = f.get("return_5")
+            if any(value is None for value in (ema9, ema21, slope9, macd_hist)):
+                return False
+            assert ema9 is not None
+            assert ema21 is not None
+            assert slope9 is not None
+            assert macd_hist is not None
+            if side == "Buy":
+                confirmed = (
+                    ema9 > ema21
+                    and slope9 > 0
+                    and macd_hist > 0
+                    and (ret3 is None or ret3 > 0)
+                    and (ret5 is None or ret5 > 0)
+                )
+            else:
+                confirmed = (
+                    ema9 < ema21
+                    and slope9 < 0
+                    and macd_hist < 0
+                    and (ret3 is None or ret3 < 0)
+                    and (ret5 is None or ret5 < 0)
+                )
+            if not confirmed:
+                return False
+            confirmations += 1
+        return confirmations == len(intervals)
+
     async def _run_bucket_stats_refresher(self) -> None:
-        """Refresh in-memory bucket expectancy stats from Postgres periodically."""
+        """Refresh in-memory expectancy gates from Postgres periodically."""
         assert self._settings is not None
         interval = float(self._settings.BUCKET_STATS_REFRESH_SECONDS)
 
@@ -3136,18 +3325,28 @@ class TradingApplication:
             if self._trade_journal is not None and self._trade_journal.is_enabled:
                 try:
                     stats = await self._trade_journal.get_bucket_stats()
+                    symbol_side_stats = await self._trade_journal.get_symbol_side_stats()
                     self._bucket_stats = stats
+                    self._symbol_side_stats = symbol_side_stats
                     self._bucket_stats_refreshed_at = datetime.now(tz=UTC)
                     blocked = [
                         key
                         for key, (avg, cnt) in stats.items()
                         if cnt >= self._settings.BUCKET_MIN_SAMPLES and avg < self._settings.BUCKET_BLOCK_AVG_BPS
                     ]
+                    blocked_symbol_sides = [
+                        key
+                        for key, (avg, cnt) in symbol_side_stats.items()
+                        if cnt >= self._settings.SYMBOL_SIDE_MIN_SAMPLES
+                        and avg < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
+                    ]
                     log.info(
                         "bucket_stats.refreshed",
                         buckets=len(stats),
                         blocked=len(blocked),
                         blocked_keys=blocked[:10],
+                        symbol_sides=len(symbol_side_stats),
+                        blocked_symbol_sides=blocked_symbol_sides[:10],
                     )
                 except Exception as exc:
                     log.warning("bucket_stats.refresh_failed", error=str(exc))
@@ -3193,6 +3392,9 @@ class TradingApplication:
                 "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
                 "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
                 "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
+                "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
+                "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
+                "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
                 "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
             }
             top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "unknown"
@@ -3248,6 +3450,9 @@ class TradingApplication:
             "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
             "hour_imbalance_rejected": hour_counts.get("imbalance_rejected", 0),
             "hour_bucket_blocked": hour_counts.get("bucket_blocked", 0),
+            "hour_symbol_side_blocked": hour_counts.get("symbol_side_blocked", 0),
+            "hour_trend_confirmation_blocked": hour_counts.get("trend_confirmation_blocked", 0),
+            "hour_shadow_loss_guard_blocked": hour_counts.get("shadow_loss_guard_blocked", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
@@ -3465,17 +3670,27 @@ class TradingApplication:
             )
         ]
 
+        def _spread_for(symbol: str) -> float | None:
+            """Latest screener spread for the symbol; None when unknown."""
+            if self._screener is None:
+                return None
+            for scored in self._screener.wide_universe:
+                if scored.symbol == symbol:
+                    return scored.spread_bps
+            return None
+
+        priority_order = [
+            sid.strip()
+            for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",")
+            if sid.strip()
+        ]
+        strategy_priorities = {
+            strategy_id: len(priority_order) - index
+            for index, strategy_id in enumerate(priority_order)
+        }
+
         if self._settings.SCALP_STRATEGY_ENABLED and self._candle_store is not None:
             from trader.strategies.scalp_micro import ScalpMicroStrategy
-
-            def _spread_for(symbol: str) -> float | None:
-                """Latest screener spread for the symbol; None when unknown (fail closed)."""
-                if self._screener is None:
-                    return None
-                for scored in self._screener.wide_universe:
-                    if scored.symbol == symbol:
-                        return scored.spread_bps
-                return None
 
             strategies.append(
                 ScalpMicroStrategy(
@@ -3505,10 +3720,85 @@ class TradingApplication:
                 max_trades_per_minute=self._settings.SCALP_MAX_TRADES_PER_MINUTE,
             )
 
+        if (
+            self._settings.ORDER_FLOW_STRATEGY_ENABLED
+            or self._settings.FUNDING_ARB_STRATEGY_ENABLED
+            or self._settings.LIQUIDATION_HUNTING_STRATEGY_ENABLED
+            or self._settings.MARKET_MAKING_STRATEGY_ENABLED
+            or self._settings.STAT_ARB_STRATEGY_ENABLED
+        ):
+            from trader.strategies.advanced_alpha import (
+                FundingArbitrageStrategy,
+                LiquidationHuntingStrategy,
+                MarketMakingStrategy,
+                OrderFlowStrategy,
+                StatisticalArbitrageStrategy,
+            )
+
+            if self._settings.ORDER_FLOW_STRATEGY_ENABLED and self._flow_tracker is not None:
+                strategies.append(
+                    OrderFlowStrategy(
+                        flow_tracker=self._flow_tracker,
+                        orderbook_tracker=self._orderbook_tracker,
+                        min_flow_imbalance=self._settings.ORDER_FLOW_MIN_IMBALANCE,
+                        min_book_imbalance=self._settings.ORDER_FLOW_MIN_BOOK_IMBALANCE,
+                        max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                    )
+                )
+                log.info("advanced_alpha.strategy_active", strategy_id="order_flow_v1")
+            elif self._settings.ORDER_FLOW_STRATEGY_ENABLED:
+                log.warning(
+                    "advanced_alpha.strategy_inactive",
+                    strategy_id="order_flow_v1",
+                    reason="flow_tracker_missing",
+                )
+            if self._settings.FUNDING_ARB_STRATEGY_ENABLED:
+                strategies.append(FundingArbitrageStrategy(min_abs_funding_bps=self._settings.FUNDING_ARB_MIN_ABS_BPS))
+                log.info("advanced_alpha.strategy_active", strategy_id="funding_arbitrage_v1")
+            else:
+                log.info("advanced_alpha.strategy_disabled", strategy_id="funding_arbitrage_v1")
+            if self._settings.LIQUIDATION_HUNTING_STRATEGY_ENABLED and self._flow_tracker is not None:
+                strategies.append(
+                    LiquidationHuntingStrategy(
+                        flow_tracker=self._flow_tracker,
+                        min_liq_notional_usd=self._settings.LIQUIDATION_HUNTING_MIN_NOTIONAL_USD,
+                        min_liq_imbalance=self._settings.LIQUIDATION_HUNTING_MIN_IMBALANCE,
+                    )
+                )
+                log.info("advanced_alpha.strategy_active", strategy_id="liquidation_hunting_v1")
+            elif self._settings.LIQUIDATION_HUNTING_STRATEGY_ENABLED:
+                log.warning(
+                    "advanced_alpha.strategy_inactive",
+                    strategy_id="liquidation_hunting_v1",
+                    reason="flow_tracker_missing",
+                )
+            if self._settings.MARKET_MAKING_STRATEGY_ENABLED:
+                strategies.append(
+                    MarketMakingStrategy(
+                        spread_provider=_spread_for,
+                        min_spread_bps=self._settings.MARKET_MAKING_MIN_SPREAD_BPS,
+                        max_spread_bps=self._settings.MARKET_MAKING_MAX_SPREAD_BPS,
+                    )
+                )
+                log.info("advanced_alpha.strategy_active", strategy_id="market_making_v1")
+            else:
+                log.info("advanced_alpha.strategy_disabled", strategy_id="market_making_v1")
+            if self._settings.STAT_ARB_STRATEGY_ENABLED:
+                strategies.append(StatisticalArbitrageStrategy(min_zscore=self._settings.STAT_ARB_MIN_ZSCORE))
+                log.info("advanced_alpha.strategy_active", strategy_id="statistical_arbitrage_v1")
+            else:
+                log.info("advanced_alpha.strategy_disabled", strategy_id="statistical_arbitrage_v1")
+            log.info(
+                "advanced_alpha.enabled",
+                strategies=[s.strategy_id for s in strategies],
+                priority_order=priority_order,
+            )
+
         self._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
             health_checker=self._health_checker,
             min_confidence=profile_cfg.min_confidence,
+            strategy_priorities=strategy_priorities,
         )
         await self._refresh_closed_pnl_memory()
 
@@ -3564,6 +3854,7 @@ class TradingApplication:
                     exit=current_price,
                     pnl_pct=round(pnl_pct, 3),
                 )
+                self._record_shadow_close(symbol, hit, pnl_pct)
                 del _shadow_positions[symbol]
                 if self._execution_engine is not None:
                     await self._execution_engine.record_position_closed(symbol)
@@ -3600,6 +3891,16 @@ class TradingApplication:
 
             # Check shadow TP/SL exits first
             await _check_shadow_exits(symbol, current_price)
+            if self._shadow_loss_guard_blocks():
+                self._record_diag("shadow_loss_guard_blocked")
+                log.info(
+                    "strategy_loop.shadow_loss_guard_blocked",
+                    symbol=symbol,
+                    blocked_until=(
+                        self._shadow_loss_guard_until.isoformat() if self._shadow_loss_guard_until else None
+                    ),
+                )
+                return
 
             # Classify regime
             regime_ctx = None
@@ -3631,6 +3932,37 @@ class TradingApplication:
                 return
 
             self._record_diag("signals_emitted")
+            model_decision_meta: dict[str, Any] | None = None
+
+            async def _record_signal(blocked: str | None = None) -> None:
+                if self._trade_journal is not None:
+                    await self._trade_journal.record_signal(
+                        proposal=proposal,
+                        feature_vector=vec,
+                        regime_context=regime_ctx,
+                        model_decision=model_decision_meta,
+                        blocked_reason=blocked,
+                    )
+
+            if not self._trend_mtf_confirmed(proposal.symbol, proposal.side.value):
+                self._record_diag("trend_confirmation_blocked")
+                log.info(
+                    "strategy_loop.trend_confirmation_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                )
+                await _record_signal("trend_confirmation_blocked")
+                return
+
+            if self._symbol_side_blocked(proposal.symbol, proposal.side.value):
+                self._record_diag("symbol_side_blocked")
+                log.info(
+                    "strategy_loop.symbol_side_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                )
+                await _record_signal("symbol_side_blocked")
+                return
 
             # --- Hybrid ML mode: a compatible CHAMPION may take over the decision ---
             # The model scores P(net-positive outcome) for the proposed direction.
@@ -3638,14 +3970,13 @@ class TradingApplication:
             # decision: confidence = model score, rationale = "ML model decision".
             # The side is kept — the directional_net label schema scores the
             # proposal's own direction, so a high score IS the model's directional view.
-            model_decision_meta: dict[str, Any] | None = None
             if (
                 self._settings.MODEL_ENABLED
                 and self._settings.MODEL_ALLOW_LIVE_DECISIONS
                 and self._model_registry is not None
             ):
                 try:
-                    ml_pred = self._model_registry.score_live(vec.values)
+                    ml_pred = self._model_registry.score_live(vec.values, vec.feature_names)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None
@@ -3684,16 +4015,6 @@ class TradingApplication:
                 except Exception as _ml_live_exc:
                     log.debug("ml_live.replace_failed", symbol=symbol, error=str(_ml_live_exc))
 
-            async def _record_signal(blocked: str | None = None) -> None:
-                if self._trade_journal is not None:
-                    await self._trade_journal.record_signal(
-                        proposal=proposal,
-                        feature_vector=vec,
-                        regime_context=regime_ctx,
-                        model_decision=model_decision_meta,
-                        blocked_reason=blocked,
-                    )
-
             # Record feature snapshot for ML training (no lookahead — uses candle open_time)
             snapshot_id = ""
             if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
@@ -3726,6 +4047,8 @@ class TradingApplication:
                         decision="SHADOW_BASELINE",
                         feature_snapshot_id=snapshot_id,
                         metadata={
+                            "strategy_id": proposal.strategy_id,
+                            "strategy_rationale": proposal.rationale or "",
                             "regime": (
                                 regime_ctx.regime.value
                                 if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
@@ -3748,7 +4071,7 @@ class TradingApplication:
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    shadow_prediction = self._model_registry.score_shadow(vec.values)
+                    shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
                     if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
                         shadow_gate_decision = None
@@ -3804,7 +4127,7 @@ class TradingApplication:
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
                 if self._settings.MODEL_GATE_CANARY_ENABLED:
                     try:
-                        live_prediction = self._model_registry.score_live(vec.values)
+                        live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)
                         if live_prediction is not None:
                             canary_threshold = self._model_gate_threshold(regime_ctx)
                             canary_gate_decision = (

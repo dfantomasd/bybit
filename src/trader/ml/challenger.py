@@ -188,13 +188,50 @@ class ChallengerModel:
     def feature_schema_hash(self) -> str:
         return hashlib.sha256(json.dumps(self.feature_names).encode()).hexdigest()[:16]
 
-    def predict(self, features: list[float]) -> ModelPrediction | None:
+    def _align_features(
+        self,
+        features: list[float],
+        feature_names: list[str] | None = None,
+    ) -> list[float] | None:
+        """Return a vector aligned to this artifact's feature schema."""
+
+        expected = len(self.feature_names)
+        got = len(features)
+        if expected == 0 or got == expected:
+            return features
+        if feature_names and len(feature_names) == got:
+            by_name = dict(zip(feature_names, features, strict=True))
+            artifact_names = set(self.feature_names)
+            aligned = [float(by_name.get(name, 0.0)) for name in self.feature_names]
+            missing = [name for name in self.feature_names if name not in by_name]
+            extra = [name for name in feature_names if name not in artifact_names]
+            log.info(
+                "challenger.predict_feature_aligned",
+                version=self.version,
+                expected=expected,
+                got=got,
+                missing=missing,
+                extra=extra,
+            )
+            return aligned
+        log.warning(
+            "challenger.predict_feature_mismatch",
+            version=self.version,
+            expected=expected,
+            got=got,
+        )
+        return None
+
+    def predict(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction | None:
         """Score a feature vector. Returns None if model not fitted."""
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
+        aligned_features = self._align_features(features, feature_names)
+        if aligned_features is None:
+            return None
         try:
-            x = np.array(features, dtype=np.float32).reshape(1, -1)
+            x = np.array(aligned_features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
                 x = self._scaler.transform(x)
             proba = self._clf.predict_proba(x)[0]
@@ -396,24 +433,24 @@ class ModelRegistry:
     def challenger(self) -> ChallengerModel | None:
         return self._challenger
 
-    def score_shadow(self, features: list[float]) -> ModelPrediction | None:
+    def score_shadow(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction | None:
         """Score observationally with challenger first, then champion fallback."""
 
         model = self._challenger or self._champion
-        return model.predict(features) if model is not None else None
+        return model.predict(features, feature_names) if model is not None else None
 
-    def score_live(self, features: list[float]) -> ModelPrediction | None:
+    def score_live(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction | None:
         """Score authoritatively with the compatible champion only."""
 
         model = self._champion
         if model is None or model.status != ModelStatus.CHAMPION:
             return None
-        return model.predict(features)
+        return model.predict(features, feature_names)
 
-    def score(self, features: list[float]) -> ModelPrediction | None:
+    def score(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction | None:
         """Backward-compatible runtime alias: champion-only, fail-closed."""
 
-        return self.score_live(features)
+        return self.score_live(features, feature_names)
 
     def partial_fit_challenger(self, features: list[float], label: int) -> None:
         if self._challenger is not None:

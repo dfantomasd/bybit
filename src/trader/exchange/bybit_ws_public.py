@@ -20,6 +20,7 @@ from trader.domain.enums import OrderSide
 from trader.domain.events import (
     BaseEvent,
     KlineEvent,
+    LiquidationEvent,
     MarketDataEvent,
     MarketType,
     OrderBookEvent,
@@ -277,6 +278,8 @@ class BybitPublicWebSocket:
             await self._handle_ticker(topic, data)
         elif topic.startswith("kline."):
             await self._handle_kline(topic, data)
+        elif topic.startswith("allLiquidation.") or topic.startswith("liquidation."):
+            await self._handle_liquidation(topic, data)
         else:
             await self._emit(
                 MarketDataEvent(
@@ -285,6 +288,28 @@ class BybitPublicWebSocket:
                     raw_payload=msg,
                 )
             )
+
+    async def _handle_liquidation(self, topic: str, data: Any) -> None:
+        """Emit LiquidationEvent(s) from public liquidation messages."""
+        items = data if isinstance(data, list) else [data]
+        for item in items:
+            symbol = item.get("s", item.get("symbol", ""))
+            if not symbol:
+                parts = topic.split(".")
+                symbol = parts[-1] if parts else ""
+            side_str = item.get("S", item.get("side", "Sell"))
+            try:
+                side = OrderSide(side_str)
+            except ValueError:
+                side = OrderSide.SELL
+            event = LiquidationEvent(
+                symbol=symbol,
+                market_type=MarketType.LINEAR,
+                side=side,
+                price=Decimal(str(item.get("p", item.get("price", "0")))),
+                qty=Decimal(str(item.get("v", item.get("q", item.get("qty", "0"))))),
+            )
+            await self._emit(event)
 
     async def _handle_op_response(self, msg: dict) -> None:
         op = msg.get("op", "")

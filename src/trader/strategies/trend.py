@@ -37,11 +37,13 @@ _STRATEGY_ID = "ema_crossover_v1"
 
 # Signal thresholds
 _EMA_SLOPE_MIN = 0.0001  # EMA9 must be rising at least this fast (normalised)
+_EMA_SEPARATION_MIN = 0.0002  # EMA9 and EMA21 must be meaningfully separated
 _RSI_LONG_MIN = 0.45  # RSI14 in [0,1] scale
 _RSI_LONG_MAX = 0.70
 _RSI_SHORT_MIN = 0.30
 _RSI_SHORT_MAX = 0.55
 _VOLUME_ZSCORE_MIN = -0.5  # reject low-volume entries
+_MACD_HIST_MIN_ABS = 0.0001  # reject weak MACD noise around zero
 
 _ATR_STOP_MULTIPLIER = 1.5
 _ATR_TP_MULTIPLIER = 3.0
@@ -108,6 +110,8 @@ class EMAcrossoverStrategy(BaseStrategy):
         ema9_slope = f.get("ema_slope_9")
         rsi14 = f.get("rsi_14")  # [0, 1]
         macd_hist = f.get("macd_hist")
+        return_3 = f.get("return_3")
+        return_5 = f.get("return_5")
         volume_z = f.get("volume_zscore")
         atr_pct = f.get("atr_14_pct")
         adx14 = f.get("adx_14")
@@ -144,12 +148,25 @@ class EMAcrossoverStrategy(BaseStrategy):
         # Actually: dist = ema/price - 1; if ema > price, dist > 0
         # EMA9 > EMA21 means ema9_dist > ema21_dist (both relative to same price)
         ema9_above_ema21 = ema9_dist > ema21_dist
+        ema_separation = abs(ema9_dist - ema21_dist)
+        if ema_separation < _EMA_SEPARATION_MIN:
+            return None
 
         # --- Long signal ---
         if ema9_above_ema21 and ema9_slope > _EMA_SLOPE_MIN:
+            # For a long trend continuation, price should already be above the
+            # fast EMA (ema_9 < 0 because feature = ema / price - 1), and very
+            # recent returns should agree when available. This avoids buying
+            # weak pullbacks that only look bullish because EMAs lag.
+            if ema9_dist >= 0:
+                return None
+            if return_3 is not None and return_3 <= 0:
+                return None
+            if return_5 is not None and return_5 <= 0:
+                return None
             if self._block_negative_funding_oi and funding_bps < -2.0 and oi_change_pct < -0.5:
                 return None
-            if _RSI_LONG_MIN <= rsi14 <= _RSI_LONG_MAX and macd_hist > 0:
+            if _RSI_LONG_MIN <= rsi14 <= _RSI_LONG_MAX and macd_hist > _MACD_HIST_MIN_ABS:
                 bonus_conditions = sum(
                     [
                         ema9_slope > _EMA_SLOPE_MIN * 3,
@@ -197,7 +214,15 @@ class EMAcrossoverStrategy(BaseStrategy):
 
         # --- Short signal ---
         if self._allow_short and not ema9_above_ema21 and ema9_slope < -_EMA_SLOPE_MIN:
-            if _RSI_SHORT_MIN <= rsi14 <= _RSI_SHORT_MAX and macd_hist < 0:
+            # Mirror of the long filter: price should be below fast EMA
+            # (ema_9 > 0), and short-term returns should already point down.
+            if ema9_dist <= 0:
+                return None
+            if return_3 is not None and return_3 >= 0:
+                return None
+            if return_5 is not None and return_5 >= 0:
+                return None
+            if _RSI_SHORT_MIN <= rsi14 <= _RSI_SHORT_MAX and macd_hist < -_MACD_HIST_MIN_ABS:
                 bonus_conditions = sum(
                     [
                         ema9_slope < -_EMA_SLOPE_MIN * 3,

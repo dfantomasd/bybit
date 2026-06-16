@@ -19,8 +19,8 @@ class _StubModel:
     status: str
     score_value: float
 
-    def predict(self, features: list[float]) -> ModelPrediction:
-        del features
+    def predict(self, features: list[float], feature_names: list[str] | None = None) -> ModelPrediction:
+        del features, feature_names
         return ModelPrediction(
             score=self.score_value,
             label=1 if self.score_value >= 0.5 else 0,
@@ -147,6 +147,20 @@ def test_promotion_accepts_compatible_good_model() -> None:
 
     assert allowed is True
     assert reason == "criteria_met"
+
+
+def test_predict_aligns_runtime_features_to_artifact_schema() -> None:
+    model = ChallengerModel(feature_names=["a", "b"])
+
+    aligned = model._align_features([2.0, 99.0, 1.0], ["b", "new_feature", "a"])
+
+    assert aligned == [1.0, 2.0]
+
+
+def test_predict_rejects_size_mismatch_without_feature_names() -> None:
+    model = ChallengerModel(feature_names=["a", "b"])
+
+    assert model._align_features([1.0, 2.0, 3.0]) is None
 
 
 @pytest.mark.asyncio

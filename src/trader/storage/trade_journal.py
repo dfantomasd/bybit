@@ -1151,6 +1151,44 @@ class TradeJournal:
             for r in rows
         }
 
+    async def get_symbol_side_stats(
+        self,
+        *,
+        horizon_minutes: int = 15,
+        lookback_days: int = 30,
+    ) -> dict[tuple[str, str], tuple[float, int]]:
+        """Per-(symbol, side) expectancy of resolved baseline signals."""
+
+        rows = await self._fetch(
+            """
+            SELECT
+                pe.symbol,
+                pe.strategy_signal AS side,
+                avg(po.net_return_bps) AS avg_bps,
+                count(*) AS cnt
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE po.net_return_bps IS NOT NULL
+              AND po.horizon_minutes = $1
+              AND po.label_schema_version = $3
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND pe.strategy_signal IN ('Buy', 'Sell')
+              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+              AND pe.created_at > now() - ($2::text || ' days')::interval
+            GROUP BY 1, 2
+            """,
+            horizon_minutes,
+            str(lookback_days),
+            LABEL_SCHEMA_VERSION,
+        )
+        return {
+            (str(r["symbol"]), str(r["side"])): (
+                float(r["avg_bps"]),
+                int(r["cnt"]),
+            )
+            for r in rows
+        }
+
     async def find_order_link_id_by_exchange_order_id(
         self,
         exchange_order_id: str,
