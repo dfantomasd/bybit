@@ -3290,8 +3290,11 @@ class TradingApplication:
 
         A bucket blocks only with >= BUCKET_MIN_SAMPLES resolved outcomes and an
         average net return below BUCKET_BLOCK_AVG_BPS — small samples never block.
+        In shadow mode the gate is skipped so virtual orders can accumulate training data.
         """
         assert self._settings is not None
+        if self._execution_engine is not None and self._execution_engine._shadow_mode:
+            return False
         if not self._settings.BUCKET_BLOCK_ENABLED or not self._bucket_stats:
             return False
         regime = (
@@ -3312,9 +3315,14 @@ class TradingApplication:
         return bool(count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS)
 
     def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
-        """True when a symbol+side pair has proven negative expectancy."""
+        """True when a symbol+side pair has proven negative expectancy.
+
+        In shadow mode the gate is skipped so virtual orders can accumulate training data.
+        """
 
         assert self._settings is not None
+        if self._execution_engine is not None and self._execution_engine._shadow_mode:
+            return False
         if not self._settings.SYMBOL_SIDE_BLOCK_ENABLED or not self._symbol_side_stats:
             return False
         stats = self._symbol_side_stats.get((symbol, side))
