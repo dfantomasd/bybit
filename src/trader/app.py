@@ -3390,40 +3390,25 @@ class TradingApplication:
         for interval in intervals:
             vec = self._feature_pipeline.latest(symbol, interval)
             if vec is None:
-                return False
+                continue
             f = dict(zip(vec.feature_names, vec.values, strict=True))
             ema9 = f.get("ema_9")
             ema21 = f.get("ema_21")
             slope9 = f.get("ema_slope_9")
             macd_hist = f.get("macd_hist")
-            ret3 = f.get("return_3")
-            ret5 = f.get("return_5")
             if any(value is None for value in (ema9, ema21, slope9, macd_hist)):
-                return False
+                continue
             assert ema9 is not None
             assert ema21 is not None
             assert slope9 is not None
             assert macd_hist is not None
             if side == "Buy":
-                confirmed = (
-                    ema9 > ema21
-                    and slope9 > 0
-                    and macd_hist > 0
-                    and (ret3 is None or ret3 > 0)
-                    and (ret5 is None or ret5 > 0)
-                )
+                confirmed = (ema9 > ema21 or slope9 > 0) and macd_hist > 0
             else:
-                confirmed = (
-                    ema9 < ema21
-                    and slope9 < 0
-                    and macd_hist < 0
-                    and (ret3 is None or ret3 < 0)
-                    and (ret5 is None or ret5 < 0)
-                )
-            if not confirmed:
-                return False
-            confirmations += 1
-        return confirmations == len(intervals)
+                confirmed = (ema9 < ema21 or slope9 < 0) and macd_hist < 0
+            if confirmed:
+                confirmations += 1
+        return confirmations > 0
 
     async def _run_bucket_stats_refresher(self) -> None:
         """Refresh in-memory expectancy gates from Postgres periodically."""
