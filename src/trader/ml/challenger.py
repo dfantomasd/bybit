@@ -226,7 +226,7 @@ class ChallengerModel:
             aligned = [float(by_name.get(name, 0.0)) for name in self.feature_names]
             missing = [name for name in self.feature_names if name not in by_name]
             extra = [name for name in feature_names if name not in artifact_names]
-            log.info(
+            log.debug(
                 "challenger.predict_feature_aligned",
                 version=self.version,
                 expected=expected,
