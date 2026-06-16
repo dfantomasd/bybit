@@ -289,8 +289,8 @@ class MarketMakingStrategy(BaseStrategy):
             rationale=f"market making mean-reversion proxy spread={spread:.2f}bps rsi={rsi:.2f} r1={r1:.4f}",
             feature_id=feature_vector.feature_id,
             risk_pct=0.0025,
-            tp_mult=0.55,
-            sl_mult=0.55,
+            tp_mult=0.80,
+            sl_mult=0.50,
             max_notional_usd=50.0,
         )
 
