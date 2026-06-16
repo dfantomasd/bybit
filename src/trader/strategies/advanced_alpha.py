@@ -174,12 +174,12 @@ class FundingArbitrageStrategy(BaseStrategy):
         atr_pct = f.get("atr_14_pct")
         funding = f.get("funding_rate_bps_clipped", f.get("funding_rate_bps"))
         oi_change = f.get("oi_change_pct_60m_clipped", f.get("oi_change_pct_60m", 0.0)) or 0.0
-        r3 = f.get("return_3", 0.0) or 0.0
+        r1 = f.get("log_return_1", 0.0) or 0.0
         if feature_vector.quality_score < 0.6 or atr_pct is None or funding is None:
             _reject(self.strategy_id, feature_vector.symbol, "low_quality_or_missing_funding")
             return None
-        if abs(funding) < self._min_abs_funding_bps or abs(r3) > self._max_abs_return_3:
-            _reject(self.strategy_id, feature_vector.symbol, "funding_or_momentum_not_extreme", funding_bps=funding, return_3=r3)
+        if abs(funding) < self._min_abs_funding_bps or abs(r1) > self._max_abs_return_3:
+            _reject(self.strategy_id, feature_vector.symbol, "funding_or_momentum_not_extreme", funding_bps=funding, log_return_1=r1)
             return None
         side = OrderSide.SELL if funding > 0 else OrderSide.BUY
         if side == OrderSide.SELL and oi_change < 0:
@@ -196,7 +196,7 @@ class FundingArbitrageStrategy(BaseStrategy):
             available_balance_usd=available_balance_usd,
             atr_pct=atr_pct,
             confidence=0.57 + min(0.18, abs(funding) / 100.0),
-            rationale=f"funding mean reversion funding={funding:.2f}bps oi={oi_change:.3f}",
+            rationale=f"funding mean reversion funding={funding:.2f}bps oi={oi_change:.3f} r1={r1:.4f}",
             feature_id=feature_vector.feature_id,
             tp_mult=1.0,
             sl_mult=0.65,
@@ -263,7 +263,7 @@ class MarketMakingStrategy(BaseStrategy):
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         rsi = f.get("rsi_14")
-        r3 = f.get("return_3", 0.0) or 0.0
+        r1 = f.get("log_return_1", 0.0) or 0.0
         spread = self._spread_provider(feature_vector.symbol)
         if feature_vector.quality_score < 0.6 or atr_pct is None or rsi is None or spread is None:
             _reject(self.strategy_id, feature_vector.symbol, "low_quality_or_missing_spread")
@@ -271,12 +271,12 @@ class MarketMakingStrategy(BaseStrategy):
         if spread < self._min_spread_bps or spread > self._max_spread_bps:
             _reject(self.strategy_id, feature_vector.symbol, "spread_outside_maker_band", spread_bps=spread)
             return None
-        if rsi < 0.35 and r3 < 0:
+        if rsi < 0.35 and r1 < 0:
             side = OrderSide.BUY
-        elif rsi > 0.65 and r3 > 0:
+        elif rsi > 0.65 and r1 > 0:
             side = OrderSide.SELL
         else:
-            _reject(self.strategy_id, feature_vector.symbol, "mean_reversion_setup_absent", rsi=rsi, return_3=r3)
+            _reject(self.strategy_id, feature_vector.symbol, "mean_reversion_setup_absent", rsi=rsi, log_return_1=r1)
             return None
         return _proposal(
             strategy_id=self.strategy_id,
@@ -286,7 +286,7 @@ class MarketMakingStrategy(BaseStrategy):
             available_balance_usd=available_balance_usd,
             atr_pct=atr_pct,
             confidence=0.56,
-            rationale=f"market making mean-reversion proxy spread={spread:.2f}bps rsi={rsi:.2f}",
+            rationale=f"market making mean-reversion proxy spread={spread:.2f}bps rsi={rsi:.2f} r1={r1:.4f}",
             feature_id=feature_vector.feature_id,
             risk_pct=0.0025,
             tp_mult=0.55,
@@ -309,17 +309,16 @@ class StatisticalArbitrageStrategy(BaseStrategy):
     def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
-        r1 = f.get("return_1")
-        r5 = f.get("return_5")
-        vol = f.get("realized_volatility", f.get("volatility_20"))
+        r1 = f.get("log_return_1")
+        vol = f.get("realized_vol_20")
         adx = f.get("adx_14", 0.0) or 0.0
-        if feature_vector.quality_score < 0.6 or atr_pct is None or r1 is None or r5 is None:
+        if feature_vector.quality_score < 0.6 or atr_pct is None or r1 is None:
             _reject(self.strategy_id, feature_vector.symbol, "low_quality_or_missing_returns")
             return None
         if vol is None or vol <= 0 or adx > self._max_adx:
             _reject(self.strategy_id, feature_vector.symbol, "volatility_or_adx_filter", volatility=vol, adx=adx)
             return None
-        z = (r1 - r5 / 5.0) / max(vol, 1e-9)
+        z = r1 / max(vol, 1e-9)
         if z >= self._min_zscore:
             side = OrderSide.SELL
         elif z <= -self._min_zscore:
