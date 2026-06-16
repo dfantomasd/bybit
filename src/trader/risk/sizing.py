@@ -66,6 +66,7 @@ class PositionSizer:
         available_balance: Decimal,
         entry_price: Decimal | None = None,
         remaining_position_budget_usd: Decimal | None = None,
+        realized_vol: Decimal | None = None,
     ) -> tuple[Decimal, str]:
         """Compute approved quantity.
 
@@ -155,6 +156,17 @@ class PositionSizer:
             raw_qty = raw_qty * quality_multiplier
 
         # ----------------------------------------------------------------
+        # Volatility-adaptive sizing — scale down in high-vol, up in low-vol
+        # target_vol is the profile's max_drawdown_pct as a daily vol proxy;
+        # multiplier clamped to [0.5, 1.5] so it never doubles or halves.
+        # ----------------------------------------------------------------
+        if realized_vol is not None and realized_vol > Decimal("0"):
+            target_vol = self._limits.max_drawdown_pct / Decimal("100")
+            vol_multiplier = target_vol / realized_vol
+            vol_multiplier = max(Decimal("0.5"), min(Decimal("1.5"), vol_multiplier))
+            raw_qty = raw_qty * vol_multiplier
+
+        # ----------------------------------------------------------------
         # Exposure cap check — don't push total exposure over limit
         # ----------------------------------------------------------------
         remaining_exposure_pct = self._limits.max_total_exposure_pct - current_exposure_pct
@@ -183,7 +195,8 @@ class PositionSizer:
         # Available balance cap
         # ----------------------------------------------------------------
         if entry_price is not None and entry_price > Decimal("0"):
-            max_qty_from_balance = available_balance / entry_price
+            leverage = max(self._limits.max_leverage, Decimal("1"))
+            max_qty_from_balance = (available_balance * leverage) / entry_price
             raw_qty = min(raw_qty, max_qty_from_balance)
 
         # ----------------------------------------------------------------

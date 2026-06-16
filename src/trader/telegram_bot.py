@@ -48,7 +48,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 import structlog
-from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
     Application,
@@ -161,6 +161,7 @@ class TradingController:
     worst_trades_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
+    champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -259,6 +260,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("strategy_report", self._cmd_strategy_report))
         app.add_handler(CommandHandler("report", self._cmd_strategy_report))
         app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
+        app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
@@ -360,7 +362,7 @@ class TelegramMonitorBot:
             f"{icon} <b>Сигнал [{mode}]</b>\n"
             f"{entry.symbol} {entry.side} | уверенность: <code>{entry.confidence:.2f}</code>\n"
             f"Режим рынка: <code>{entry.regime}</code>\n"
-            f"{entry.rationale}"
+            f"{html.escape(str(entry.rationale))}"
         )
         await self.notify(text)
 
@@ -397,9 +399,10 @@ class TelegramMonitorBot:
         update: Update,
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any | None:
         if update.effective_message is not None:
-            await self._reply_chunks(update.effective_message, text, reply_markup=reply_markup)
+            return await self._reply_chunks(update.effective_message, text, reply_markup=reply_markup)
+        return None
 
     @staticmethod
     def _split_message(text: str, limit: int = _TELEGRAM_MESSAGE_LIMIT) -> list[str]:
@@ -436,11 +439,11 @@ class TelegramMonitorBot:
         text: str,
         *,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any:
         from telegram.error import BadRequest
 
         try:
-            await message.reply_text(
+            return await message.reply_text(
                 text,
                 parse_mode=ParseMode.HTML,
                 disable_web_page_preview=True,
@@ -448,7 +451,7 @@ class TelegramMonitorBot:
             )
         except BadRequest as exc:
             log.debug("telegram.reply_html_failed_plaintext_fallback", error=str(exc))
-            await message.reply_text(
+            return await message.reply_text(
                 self._plain_text(text),
                 disable_web_page_preview=True,
                 reply_markup=reply_markup,
@@ -459,14 +462,16 @@ class TelegramMonitorBot:
         message: Any,
         text: str,
         reply_markup: InlineKeyboardMarkup | None = None,
-    ) -> None:
+    ) -> Any | None:
         chunks = self._split_message(text)
+        sent = None
         for index, chunk in enumerate(chunks):
-            await self._safe_reply_text(
+            sent = await self._safe_reply_text(
                 message,
                 chunk,
                 reply_markup=reply_markup if index == len(chunks) - 1 else None,
             )
+        return sent
 
     def _chat_id(self, update: Update) -> int | None:
         return update.effective_chat.id if update.effective_chat else None
@@ -577,6 +582,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                     InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance"),
                 ],
+                [InlineKeyboardButton("🏆 Champion health", callback_data="view:champion_health")],
                 [
                     InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
                     InlineKeyboardButton("🏆 Промоутить", callback_data="control:promote"),
@@ -1409,19 +1415,31 @@ class TelegramMonitorBot:
             return
         lines = [
             "📉 <b>История моделей</b>",
-            "<code>date UTC          q        prec   lift   wf</code>",
+            "<code>date UTC          q        score    n   lift   wf</code>",
         ]
         for row in rows:
             ts = self._fmt_timestamp(row.get("created_at")) if row.get("created_at") else "n/a"
             quality = str(row.get("quality") or "n/a")[:8]
-            precision = row.get("precision")
+            score = row.get("model_score")
+            paper_count = int(row.get("paper_gate_count") or 0)
             lift = row.get("lift_bps")
             walk_forward = row.get("walk_forward_bps")
-            precision_text = " n/a" if precision is None else f"{float(precision) * 100:4.1f}%"
+            score_text = "   n/a" if score is None else f"{float(score):+6.1f}"
             lift_text = " n/a" if lift is None else f"{float(lift):+5.1f}"
             wf_text = " n/a" if walk_forward is None else f"{float(walk_forward):+5.1f}"
-            lines.append(f"<code>{ts[:16]:16} {quality:8} {precision_text} {lift_text} {wf_text}</code>")
+            reason = str(row.get("selection_reason") or "")[:34]
+            lines.append(
+                f"<code>{ts[:16]:16} {quality:8} {score_text} {paper_count:4d} {lift_text} {wf_text}</code>"
+                + (f"\n<code>  {reason}</code>" if reason else "")
+            )
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
+    async def _cmd_champion_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        text, markup = await self._render_champion_health()
+        await self._reply(update, text, reply_markup=markup)
 
     async def _cmd_strategy_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Build one compact strategy diagnostics report for canary decisions."""
@@ -2009,7 +2027,7 @@ class TelegramMonitorBot:
             return None
         if value.tzinfo is None:
             value = value.replace(tzinfo=UTC)
-        return max(0.0, (datetime.now(UTC) - value.astimezone(UTC)).total_seconds())
+        return float(max(0.0, (datetime.now(UTC) - value.astimezone(UTC)).total_seconds()))
 
     @staticmethod
     def _age_label(age_s: Any) -> str:
@@ -3090,11 +3108,12 @@ class TelegramMonitorBot:
                 parse_mode=parse_mode,
                 disable_web_page_preview=True,
             )
-            self._dashboard_message_id = query.message.message_id
-            self._dashboard_chat_id = query.message.chat_id
+            if isinstance(query.message, Message):
+                self._dashboard_message_id = query.message.message_id
+                self._dashboard_chat_id = query.message.chat_id
         except (BadRequest, Exception) as exc:
             log.debug("telegram.edit_failed_sending_new", error=str(exc))
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     msg = await query.message.reply_text(
                         text=text,
@@ -3110,13 +3129,13 @@ class TelegramMonitorBot:
     async def _render_home(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the main dashboard text and keyboard."""
         ctrl = self._controller
-        mode = "SHADOW" if (ctrl and ctrl.is_shadow and ctrl.is_shadow()) else "ACTIVE"
-        paused = ctrl.is_paused() if (ctrl and ctrl.is_paused) else False
+        mode = "SHADOW" if (ctrl is not None and ctrl.is_shadow()) else "ACTIVE"
+        paused = ctrl.is_paused() if ctrl is not None else False
         risk = getattr(ctrl, "current_risk_profile", "—") if ctrl else "—"
         positions = 0
         if ctrl and hasattr(ctrl, "exposure") and ctrl.exposure is not None:
             positions = getattr(ctrl.exposure, "position_count", 0)
-        symbols_count = len(ctrl.active_symbols()) if (ctrl and ctrl.active_symbols) else 0
+        symbols_count = len(ctrl.active_symbols()) if ctrl is not None else 0
         entries_per_min: Any = "—"
         max_pos: Any = "—"
         if ctrl and ctrl.runtime_settings:
@@ -3353,8 +3372,88 @@ class TelegramMonitorBot:
         keyboard = InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
+                [InlineKeyboardButton("🏆 Champion health", callback_data="view:champion_health")],
                 [InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model")],
                 [InlineKeyboardButton("🔄 Обновить", callback_data="view:model")],
+                [InlineKeyboardButton("🏠 Главная", callback_data="view:home")],
+            ]
+        )
+        return "\n".join(lines), keyboard
+
+    async def _render_champion_health(self) -> tuple[str, InlineKeyboardMarkup]:
+        ctrl = self._controller
+        if ctrl is None or ctrl.champion_health_provider is None:
+            return (
+                "🏆 <b>Champion health</b>\n\nДанные недоступны.",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главная", callback_data="view:home")]]),
+            )
+        try:
+            data = await ctrl.champion_health_provider()
+        except Exception as exc:
+            return (
+                f"🏆 <b>Champion health</b>\n\nОшибка: <code>{html.escape(str(exc))}</code>",
+                InlineKeyboardMarkup([[InlineKeyboardButton("🏠 Главная", callback_data="view:home")]]),
+            )
+        champion = data.get("champion") or {}
+        alt = data.get("best_alternative") or {}
+        checks = data.get("checks") or []
+        logs = data.get("promotion_log") or []
+
+        def _fmt_bps(value: Any) -> str:
+            return "n/a" if value is None else f"{float(value):+.2f} bps"
+
+        def _model_lines(title: str, row: dict[str, Any]) -> list[str]:
+            if not row:
+                return [f"<b>{title}</b>: <code>нет</code>"]
+            return [
+                f"<b>{title}</b>: <code>{html.escape(str(row.get('version') or 'unknown'))}</code>",
+                f"status=<code>{html.escape(str(row.get('status') or 'n/a'))}</code> "
+                f"quality=<code>{html.escape(str(row.get('quality') or 'n/a'))}</code>",
+                f"score=<code>{float(row.get('model_score') or 0.0):+.2f}</code> "
+                f"wf=<code>{_fmt_bps(row.get('walk_forward_bps'))}</code> "
+                f"lift=<code>{_fmt_bps(row.get('lift_bps'))}</code>",
+                f"paper=<code>{int(row.get('paper_gate_count') or 0)}</code> "
+                f"folds=<code>{row.get('wf_positive_folds') or 0}/{row.get('wf_folds') or 0}</code> "
+                f"std=<code>{_fmt_bps(row.get('wf_std_bps'))}</code>",
+                f"reason=<code>{html.escape(str(row.get('selection_reason') or 'n/a'))}</code>",
+            ]
+
+        lines = ["🏆 <b>Champion health</b>", ""]
+        lines.extend(_model_lines("Champion", champion))
+        lines.append("")
+        lines.extend(_model_lines("Best alternative", alt))
+        lines.append("\n<b>Checks</b>")
+        if checks:
+            for check in checks:
+                mark = "OK" if check.get("ok") else "FAIL"
+                lines.append(
+                    f"{mark} <code>{html.escape(str(check.get('name') or 'check'))}</code>: "
+                    f"<code>{html.escape(str(check.get('value') or 'n/a'))}</code>"
+                )
+        else:
+            lines.append("Нет проверок: champion не найден.")
+
+        if logs:
+            lines.append("\n<b>Last promotion events</b>")
+            for row in logs[:3]:
+                reasons = row.get("reasons")
+                if isinstance(reasons, str):
+                    try:
+                        reasons = json.loads(reasons)
+                    except json.JSONDecodeError:
+                        reasons = [reasons]
+                reason_text = ", ".join(str(item) for item in (reasons or [])[:2])
+                lines.append(
+                    f"<code>{html.escape(str(row.get('event_type') or 'event'))}</code> "
+                    f"{html.escape(str(row.get('from_version') or 'none'))} -> "
+                    f"{html.escape(str(row.get('to_version') or 'none'))} "
+                    f"<code>{html.escape(reason_text[:80])}</code>"
+                )
+
+        keyboard = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton("🔄 Обновить", callback_data="view:champion_health")],
+                [InlineKeyboardButton("📉 История моделей", callback_data="view:model_performance")],
                 [InlineKeyboardButton("🏠 Главная", callback_data="view:home")],
             ]
         )
@@ -3374,21 +3473,19 @@ class TelegramMonitorBot:
         """Handle action: prefix callbacks from the dashboard."""
         ctrl = self._controller
         if action in ("pause", "resume"):
-            if ctrl is None or not ctrl.is_paused:
+            if ctrl is None:
                 await self._button_reply(update, "Управление недоступно.", reply_markup=self._main_menu())
                 return
             if action == "pause":
-                if ctrl.pause:
-                    await ctrl.pause()
+                await ctrl.pause()
             else:
-                if ctrl.resume:
-                    await ctrl.resume()
+                await ctrl.resume()
             text, markup = await self._render_home()
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "canary":
             fake_context = type("_Context", (), {"args": []})()
-            await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_canary_ready(update, fake_context)
             return
         await self._button_reply(update, f"Неизвестное действие: {action}", reply_markup=self._main_menu())
 
@@ -3453,7 +3550,7 @@ class TelegramMonitorBot:
             )
         except (BadRequest, Exception) as exc:
             log.debug("telegram.settings_edit_failed", error=str(exc))
-            if query.message:
+            if isinstance(query.message, Message):
                 try:
                     await query.message.reply_text(
                         text=text,
@@ -3480,6 +3577,7 @@ class TelegramMonitorBot:
             "compare": self._cmd_compare,
             "strategy_report": self._cmd_strategy_report,
             "model_performance": self._cmd_model_performance,
+            "champion_health": self._cmd_champion_health,
         }
         if action == "home":
             text, markup = await self._render_home()
@@ -3514,6 +3612,10 @@ class TelegramMonitorBot:
             text, markup = await self._render_model()
             await self._button_reply(update, text, reply_markup=markup)
             return
+        if action == "champion_health":
+            text, markup = await self._render_champion_health()
+            await self._button_reply(update, text, reply_markup=markup)
+            return
         if action == "diagnostics":
             await self._button_reply(
                 update,
@@ -3541,23 +3643,23 @@ class TelegramMonitorBot:
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "healthcheck":
-            await self._cmd_healthcheck(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_healthcheck(update, fake_context)
             return
         if action == "worst":
             fake_context.args = ["10"]
-            await self._cmd_worst(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_worst(update, fake_context)
             return
         if action == "db_model":
-            await self._cmd_db_model(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_db_model(update, fake_context)
             return
         if action == "canary":
-            await self._cmd_canary_ready(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_canary_ready(update, fake_context)
             return
         if action == "canary_model":
             await self._show_canary_model_metrics(update)
             return
         if action == "model_help":
-            await self._cmd_model_help(update, fake_context)  # type: ignore[arg-type]
+            await self._cmd_model_help(update, fake_context)
             return
         if action == "symbol_select":
             await self._show_symbol_select(update, page=0)
@@ -3577,7 +3679,7 @@ class TelegramMonitorBot:
         if handler is None:
             await self._button_reply(update, "Неизвестный экран.", reply_markup=self._main_menu())
             return
-        await handler(update, fake_context)  # type: ignore[arg-type]
+        await handler(update, fake_context)
 
     async def _show_symbol_select(self, update: Update, *, page: int) -> None:
         candidates = self._symbol_candidates()
@@ -3862,10 +3964,11 @@ class TelegramMonitorBot:
             )
             return
         cid = self._chat_id(update)
-        if cid:
+        controller = self._controller
+        if cid and controller is not None:
             self._pending[cid] = (
                 f"сменить риск-профиль с {old_profile} на {new_profile_str}",
-                lambda: self._controller.set_risk_profile(new_profile),
+                lambda: controller.set_risk_profile(new_profile),
                 datetime.now(tz=UTC),
             )
         await self._button_reply(

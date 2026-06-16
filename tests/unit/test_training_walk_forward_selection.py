@@ -2,10 +2,18 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime, timedelta
+
 import numpy as np
+import pytest
 
 from trader.ml.challenger import ChallengerModel
-from trader.training.train import _candidate_specs, _negative_bucket_keep_mask, _walk_forward_splits
+from trader.training.train import (
+    _candidate_specs,
+    _negative_bucket_keep_mask,
+    _validate_walk_forward_chronology,
+    _walk_forward_splits,
+)
 
 
 def test_walk_forward_splits_expand_train_window() -> None:
@@ -28,6 +36,25 @@ def test_walk_forward_splits_fallback_when_too_small() -> None:
     assert len(folds) == 1
     assert folds[0][0].tolist() == [0, 1, 2, 3, 4]
     assert folds[0][1].tolist() == [5]
+
+
+def test_walk_forward_chronology_requires_validation_after_train() -> None:
+    x = np.zeros((10, 2), dtype=np.float32)
+    folds = _walk_forward_splits(x, min_train_samples=5, n_folds=2)
+    timestamps = [datetime(2026, 6, 13, tzinfo=UTC) + timedelta(minutes=i) for i in range(10)]
+
+    windows = _validate_walk_forward_chronology(folds, timestamps)
+
+    assert windows[0]["train_end_at"] < windows[0]["val_start_at"]
+    assert windows[0]["train_samples"] == 5
+
+
+def test_walk_forward_chronology_rejects_overlapping_windows() -> None:
+    folds = [(np.array([0, 1]), np.array([1, 2]))]
+    timestamps = [datetime(2026, 6, 13, tzinfo=UTC)] * 3
+
+    with pytest.raises(RuntimeError, match="chronology violation"):
+        _validate_walk_forward_chronology(folds, timestamps)
 
 
 def test_candidate_specs_include_requested_families_only() -> None:

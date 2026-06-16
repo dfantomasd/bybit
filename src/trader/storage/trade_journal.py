@@ -14,6 +14,7 @@ import asyncpg
 import structlog
 
 from trader.domain.models import FeatureVector, RegimeContext, RiskDecision, TradeProposal
+from trader.ml.model_selection import model_selection_metrics, selection_reason
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
@@ -21,6 +22,8 @@ from trader.training.labels import (
 )
 
 log = structlog.get_logger(__name__)
+
+_MODEL_PROMOTION_ADVISORY_LOCK_ID = 926_202_606
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -37,6 +40,22 @@ def _parse_dec(v: Any) -> Decimal | None:
         return Decimal(str(v)) if v not in (None, "", "0", 0) else None
     except Exception:
         return None
+
+
+def _champion_selection_thresholds() -> tuple[int, int, float]:
+    min_paper_gate_count = 50
+    min_wf_positive_folds = 3
+    max_wf_std_bps = 25.0
+    try:
+        from trader.config import Settings
+
+        settings = Settings()
+        min_paper_gate_count = int(settings.MODEL_CHAMPION_MIN_PAPER_GATE_COUNT)
+        min_wf_positive_folds = int(settings.MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS)
+        max_wf_std_bps = float(settings.MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS)
+    except Exception as exc:
+        log.debug("trade_journal.champion_threshold_defaults", error=str(exc))
+    return min_paper_gate_count, min_wf_positive_folds, max_wf_std_bps
 
 
 def _parse_ts(v: Any) -> datetime | None:
@@ -87,6 +106,8 @@ class TradeJournal:
 
     def write_health(self) -> dict[str, Any]:
         """Return write-health snapshot for observability and safety gates."""
+        last_read_error_at = cast(datetime | None, getattr(self, "_last_read_error_at", None))
+        last_connect_error_at = cast(datetime | None, getattr(self, "_last_connect_error_at", None))
         return {
             "healthy": self.durable_state_healthy,
             "consecutive_write_errors": self._consecutive_write_errors,
@@ -95,13 +116,9 @@ class TradeJournal:
             ),
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
-            "last_read_error_at": (
-                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
-            ),
+            "last_read_error_at": last_read_error_at.isoformat() if last_read_error_at else None,
             "last_read_error": getattr(self, "_last_read_error", None),
-            "last_connect_error_at": (
-                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
-            ),
+            "last_connect_error_at": (last_connect_error_at.isoformat() if last_connect_error_at else None),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
 
@@ -345,6 +362,72 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
+            WITH ranked AS (
+                SELECT model_id,
+                       row_number() OVER (
+                           ORDER BY
+                               CASE WHEN COALESCE(
+                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                   NULLIF(metrics->>'wf_mean_bps', ''),
+                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                               )::double precision > 0 THEN 0 ELSE 1 END,
+                               COALESCE(
+                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                   NULLIF(metrics->>'wf_mean_bps', ''),
+                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
+                                   '-1000000'
+                               )::double precision DESC,
+                               COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                               training_finished_at DESC NULLS LAST,
+                               created_at DESC
+                       ) AS rn
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+            )
+            UPDATE model_versions mv
+            SET status = 'ARCHIVED'
+            FROM ranked
+            WHERE mv.model_id = ranked.model_id
+              AND ranked.rn > 1;
+            CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
+                ON model_versions ((status))
+                WHERE status = 'CHAMPION';
+
+            -- Model promotion audit log. Columns cover both automatic
+            -- DB-backed promotion and older manual/pure-eval audit payloads.
+            CREATE TABLE IF NOT EXISTS model_promotion_log (
+                promotion_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+                event_type text NOT NULL,
+                decision text,
+                challenger_version text,
+                champion_version text,
+                new_champion_version text,
+                from_version text,
+                to_version text,
+                reasons jsonb NOT NULL DEFAULT '[]'::jsonb,
+                metrics jsonb NOT NULL DEFAULT '{}'::jsonb,
+                metrics_snapshot jsonb,
+                decided_at timestamptz NOT NULL DEFAULT now(),
+                created_at timestamptz NOT NULL DEFAULT now()
+            );
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS decision text,
+                ADD COLUMN IF NOT EXISTS challenger_version text,
+                ADD COLUMN IF NOT EXISTS champion_version text,
+                ADD COLUMN IF NOT EXISTS new_champion_version text,
+                ADD COLUMN IF NOT EXISTS from_version text,
+                ADD COLUMN IF NOT EXISTS to_version text,
+                ADD COLUMN IF NOT EXISTS reasons jsonb DEFAULT '[]'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics jsonb DEFAULT '{}'::jsonb,
+                ADD COLUMN IF NOT EXISTS metrics_snapshot jsonb,
+                ADD COLUMN IF NOT EXISTS decided_at timestamptz DEFAULT now(),
+                ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_created
+                ON model_promotion_log (created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_versions
+                ON model_promotion_log (from_version, to_version, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_decided_at
+                ON model_promotion_log (decided_at DESC);
 
             -- Training run history
             CREATE TABLE IF NOT EXISTS training_runs (
@@ -358,21 +441,6 @@ class TradeJournal:
                 error text,
                 metrics jsonb
             );
-
-            -- Model promotion audit log
-            CREATE TABLE IF NOT EXISTS model_promotion_log (
-                log_id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
-                event_type text NOT NULL,
-                decision text NOT NULL,
-                challenger_version text,
-                champion_version text,
-                new_champion_version text,
-                decided_at timestamptz NOT NULL DEFAULT now(),
-                reasons jsonb,
-                metrics_snapshot jsonb
-            );
-            CREATE INDEX IF NOT EXISTS idx_model_promotion_log_decided_at
-                ON model_promotion_log (decided_at DESC);
 
             -- P0.5: execution-level fill events (exec_id is the exchange fill ID)
             CREATE TABLE IF NOT EXISTS execution_events (
@@ -684,7 +752,7 @@ class TradeJournal:
             datetime.now(tz=UTC),
         )
 
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+    async def record_transaction_log_entries(self, entries: list[dict[str, Any]]) -> int:
         """Persist Bybit transaction log entries. Returns count inserted."""
         if not self.is_enabled or not entries:
             return 0
@@ -2180,6 +2248,7 @@ class TradeJournal:
                 metrics = self._decode_json_field(data.get("metrics")) or {}
                 if not isinstance(metrics, dict):
                     metrics = {}
+                normalized = model_selection_metrics(metrics)
                 result.append(
                     {
                         "version": data.get("version"),
@@ -2188,8 +2257,12 @@ class TradeJournal:
                         "training_samples": data.get("training_samples"),
                         "quality": metrics.get("quality", "n/a"),
                         "precision": metrics.get("precision"),
-                        "lift_bps": metrics.get("lift_bps"),
-                        "walk_forward_expectancy_bps": metrics.get("walk_forward_expectancy_bps"),
+                        "lift_bps": normalized["lift_bps"],
+                        "walk_forward_expectancy_bps": normalized["walk_forward_bps"],
+                        "walk_forward_bps": normalized["walk_forward_bps"],
+                        "model_score": metrics.get("model_score", normalized["model_score"]),
+                        "paper_gate_count": normalized["paper_gate_count"],
+                        "selection_reason": selection_reason(metrics),
                     }
                 )
             return result
@@ -2198,6 +2271,118 @@ class TradeJournal:
             self._last_read_error = str(exc)
             log.warning("trade_journal.model_performance_history_failed", error=str(exc))
             return []
+
+    async def get_champion_health(self) -> dict[str, Any]:
+        """Return operator-facing champion health, candidate, and promotion audit context."""
+        if not self.is_enabled:
+            return {"connected": False}
+        min_paper_gate_count, min_wf_positive_folds, max_wf_std_bps = _champion_selection_thresholds()
+        try:
+            champion_rows = await self._fetch(
+                """
+                SELECT version, status, training_finished_at, created_at, training_samples, metrics
+                FROM model_versions
+                WHERE status = 'CHAMPION'
+                  AND artifact IS NOT NULL
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                LIMIT 1
+                """
+            )
+            candidate_rows = await self._fetch(
+                """
+                SELECT version, status, training_finished_at, created_at, training_samples, metrics
+                FROM model_versions
+                WHERE status IN ('SHADOW_CHALLENGER', 'VALIDATED', 'ARCHIVED')
+                  AND artifact IS NOT NULL
+                ORDER BY
+                    COALESCE(NULLIF(metrics->>'model_score', ''), '-1000000')::double precision DESC,
+                    training_finished_at DESC NULLS LAST,
+                    created_at DESC
+                LIMIT 1
+                """
+            )
+            promotion_rows = await self._fetch(
+                """
+                SELECT event_type, from_version, to_version, reasons, metrics, metrics_snapshot, created_at
+                FROM model_promotion_log
+                ORDER BY created_at DESC
+                LIMIT 5
+                """
+            )
+
+            def _model(row: Any | None) -> dict[str, Any] | None:
+                if not row:
+                    return None
+                data = dict(row)
+                metrics = self._decode_json_field(data.get("metrics")) or {}
+                if not isinstance(metrics, dict):
+                    metrics = {}
+                normalized = model_selection_metrics(metrics)
+                return {
+                    "version": data.get("version"),
+                    "status": data.get("status"),
+                    "created_at": data.get("training_finished_at") or data.get("created_at"),
+                    "training_samples": data.get("training_samples"),
+                    "quality": metrics.get("quality", "n/a"),
+                    "model_score": metrics.get("model_score", normalized["model_score"]),
+                    "walk_forward_bps": normalized["walk_forward_bps"],
+                    "wf_positive_folds": metrics.get("wf_positive_folds"),
+                    "wf_folds": metrics.get("wf_folds"),
+                    "wf_std_bps": metrics.get("wf_std_bps"),
+                    "lift_bps": normalized["lift_bps"],
+                    "paper_gate_count": normalized["paper_gate_count"],
+                    "selection_reason": selection_reason(metrics),
+                    "walk_forward_chronology": metrics.get("walk_forward_chronology"),
+                }
+
+            champion = _model(champion_rows[0] if champion_rows else None)
+            candidate = _model(candidate_rows[0] if candidate_rows else None)
+            checks: list[dict[str, Any]] = []
+            if champion:
+                wf = champion.get("walk_forward_bps")
+                paper_count = int(champion.get("paper_gate_count") or 0)
+                positive_folds = int(champion.get("wf_positive_folds") or 0)
+                wf_folds = int(champion.get("wf_folds") or 0)
+                wf_std = champion.get("wf_std_bps")
+                checks = [
+                    {"name": "walk_forward_positive", "ok": wf is not None and float(wf) > 0, "value": wf},
+                    {
+                        "name": "paper_gate_count",
+                        "ok": paper_count >= min_paper_gate_count,
+                        "value": paper_count,
+                        "threshold": min_paper_gate_count,
+                    },
+                    {
+                        "name": "wf_fold_stability",
+                        "ok": wf_folds == 0 or positive_folds >= min(min_wf_positive_folds, wf_folds),
+                        "value": f"{positive_folds}/{wf_folds}",
+                        "threshold": min(min_wf_positive_folds, wf_folds),
+                    },
+                    {
+                        "name": "wf_std_bps",
+                        "ok": wf_std is None or float(wf_std) <= max_wf_std_bps,
+                        "value": wf_std,
+                        "threshold": max_wf_std_bps,
+                    },
+                    {
+                        "name": "strict_walk_forward",
+                        "ok": champion.get("walk_forward_chronology") in (None, "strict_after_train"),
+                        "value": champion.get("walk_forward_chronology") or "legacy",
+                    },
+                ]
+
+            return {
+                "connected": True,
+                "champion": champion,
+                "best_alternative": candidate,
+                "checks": checks,
+                "promotion_log": [dict(row) for row in promotion_rows],
+            }
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.warning("trade_journal.champion_health_failed", error=str(exc))
+            return {"connected": self.is_enabled, "error": str(exc)}
 
     async def get_dashboard_data(self, horizon_minutes: int = 15) -> dict[str, Any]:
         """Return compact Chart.js-ready diagnostics for /dashboard."""
@@ -2386,6 +2571,48 @@ class TradeJournal:
             result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
+
+            # Per-schema breakdown: newest schema first. Wrapped in its own try/except so
+            # a query failure here cannot break the rest of get_db_diagnostics().
+            try:
+                schema_rows = await self._fetch(
+                    """
+                    SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
+                    FROM (
+                        SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
+                               fs.feature_schema_hash,
+                               fs.created_at AS latest_at
+                        FROM feature_snapshots fs
+                        JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                        JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                        WHERE po.horizon_minutes = 15
+                          AND po.label IS NOT NULL
+                          AND fs.feature_values IS NOT NULL
+                          AND fs.training_eligible = true
+                          AND pe.model_version = 'RULE_BASELINE_V1'
+                          AND pe.strategy_signal IN ('Buy', 'Sell')
+                        ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
+                                 fs.feature_schema_hash, fs.created_at DESC
+                    ) deduped
+                    GROUP BY feature_schema_hash
+                    ORDER BY latest_at DESC
+                    LIMIT 5
+                    """
+                )
+                if schema_rows:
+                    result["training_schema_distribution"] = [
+                        {
+                            "schema_hash": str(row["feature_schema_hash"]),
+                            "sample_count": int(row["cnt"]),
+                            "latest_at": row["latest_at"].isoformat() if row["latest_at"] else None,
+                        }
+                        for row in schema_rows
+                    ]
+                    result["newest_training_schema_hash"] = str(schema_rows[0]["feature_schema_hash"])
+                    result["newest_training_schema_samples"] = int(schema_rows[0]["cnt"])
+            except Exception as _schema_exc:
+                log.debug("trade_journal.schema_distribution_failed", error=str(_schema_exc))
+
             rows = await self._fetch(
                 """
                 SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
@@ -2642,14 +2869,11 @@ class TradeJournal:
 
         async with self._pool.acquire() as conn:
             async with conn.transaction():
-                prev = await conn.fetchrow(
-                    "SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1"
-                )
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _MODEL_PROMOTION_ADVISORY_LOCK_ID)
+                prev = await conn.fetchrow("SELECT version FROM model_versions WHERE status = 'CHAMPION' LIMIT 1")
                 prev_version = prev["version"] if prev else None
-                await conn.execute(
-                    "UPDATE model_versions SET status = 'ROLLED_BACK' WHERE status = 'CHAMPION'"
-                )
-                await conn.execute(
+                await conn.execute("UPDATE model_versions SET status = 'ARCHIVED' WHERE status = 'CHAMPION'")
+                promoted = await conn.execute(
                     """
                     UPDATE model_versions
                     SET status = 'CHAMPION'
@@ -2657,6 +2881,8 @@ class TradeJournal:
                     """,
                     version,
                 )
+                if not str(promoted).endswith(" 1"):
+                    raise RuntimeError(f"promotion_failed: model {version!r} was not an eligible challenger")
                 await conn.execute(
                     """
                     INSERT INTO model_promotion_log
@@ -2681,7 +2907,7 @@ class TradeJournal:
         reason: str,
         event_data: dict[str, Any] | None = None,
     ) -> str | None:
-        """Find the most recent ROLLED_BACK model, restore it as CHAMPION, archive current.
+        """Find the most recent ARCHIVED model, restore it as CHAMPION, roll back current.
 
         Returns the restored version string, or None if no candidate exists.
         """
@@ -2690,15 +2916,60 @@ class TradeJournal:
         assert self._pool is not None
         import json as _json
 
+        min_paper_gate_count, _min_wf_positive_folds, _max_wf_std_bps = _champion_selection_thresholds()
         async with self._pool.acquire() as conn:
             async with conn.transaction():
+                await conn.execute("SELECT pg_advisory_xact_lock($1)", _MODEL_PROMOTION_ADVISORY_LOCK_ID)
                 restore = await conn.fetchrow(
                     """
                     SELECT version FROM model_versions
-                    WHERE status = 'ROLLED_BACK'
-                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    WHERE status = 'ARCHIVED'
+                      AND artifact IS NOT NULL
+                      AND COALESCE(metrics->>'label_schema_version', '') = $1
+                      AND COALESCE(
+                            NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                            NULLIF(metrics->>'walk_forward_bps', ''),
+                            NULLIF(metrics->>'wf_mean_bps', ''),
+                            NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                          ) IS NOT NULL
+                      AND COALESCE(
+                            NULLIF(metrics #>> '{paper_gate,count}', ''),
+                            NULLIF(metrics->>'paper_gate_count', ''),
+                            NULLIF(metrics->>'total_pass_count', ''),
+                            '0'
+                          )::integer >= $2
+                    ORDER BY
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                NULLIF(metrics->>'walk_forward_bps', ''),
+                                NULLIF(metrics->>'wf_mean_bps', ''),
+                                NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                            )::double precision > 0 THEN 0
+                            ELSE 1
+                        END ASC,
+                        CASE
+                            WHEN COALESCE(
+                                NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                NULLIF(metrics->>'walk_forward_bps', ''),
+                                NULLIF(metrics->>'wf_mean_bps', ''),
+                                NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                            )::double precision > 0 THEN COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision
+                            ELSE NULL
+                        END DESC NULLS LAST,
+                        COALESCE(
+                            NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                            NULLIF(metrics->>'walk_forward_bps', ''),
+                            NULLIF(metrics->>'wf_mean_bps', ''),
+                            NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                        )::double precision DESC,
+                        COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                        training_finished_at DESC NULLS LAST,
+                        created_at DESC
                     LIMIT 1
-                    """
+                    """,
+                    LABEL_SCHEMA_VERSION,
+                    min_paper_gate_count,
                 )
                 if restore is None:
                     log.warning(
@@ -2772,7 +3043,7 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return await conn.fetch(query, *args)
+                return list(await conn.fetch(query, *args))
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

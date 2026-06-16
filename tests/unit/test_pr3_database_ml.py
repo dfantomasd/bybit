@@ -225,6 +225,8 @@ async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
     journal._fetch = AsyncMock(
         side_effect=[
             [],
+            [],
+            [],
             [
                 {
                     "version": "challenger_v1",
@@ -250,6 +252,104 @@ async def test_registry_load_active_falls_back_to_shadow_challenger() -> None:
         assert pred.is_live_decision is False
 
 
+@pytest.mark.asyncio
+async def test_select_best_champion_prefers_positive_walk_forward_lift_over_freshness(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Positive out-of-sample evidence wins; freshness only breaks equal lift."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+    older_better = ChallengerModel(version="older_better", feature_names=["f1"])
+    newer_loss = ChallengerModel(version="newer_loss", feature_names=["f1"])
+    for i in range(10):
+        older_better.partial_fit([float(i)], label=i % 2)
+        newer_loss.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        return_value=[
+            {
+                "version": "older_better",
+                "artifact": older_better.to_bytes(),
+                "training_samples": older_better.training_samples,
+                "metrics": {
+                    "label_schema_version": "directional_net_v1",
+                    "quality": "GOOD",
+                    "walk_forward_expectancy_bps": 1.2,
+                    "lift_bps": 5.9,
+                    "paper_gate": {"count": 75},
+                },
+            }
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is not None
+    assert row["version"] == "older_better"
+    query = journal._fetch.await_args.args[0]
+    assert "walk_forward_expectancy_bps" in query
+    assert "paper_gate,count" in query
+    assert "CASE WHEN COALESCE" in query
+
+
+@pytest.mark.asyncio
+async def test_select_best_champion_falls_back_when_no_walk_forward(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When WF has not been calculated at all, registry keeps legacy ordering with warning."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+    fallback = ChallengerModel(version="fallback_good", feature_names=["f1"])
+    for i in range(10):
+        fallback.partial_fit([float(i)], label=i % 2)
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        side_effect=[
+            [],
+            [],
+            [
+                {
+                    "version": "fallback_good",
+                    "artifact": fallback.to_bytes(),
+                    "training_samples": fallback.training_samples,
+                    "metrics": {"label_schema_version": "directional_net_v1", "quality": "GOOD"},
+                }
+            ],
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is not None
+    assert row["version"] == "fallback_good"
+    assert journal._fetch.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_select_best_champion_does_not_fallback_when_walk_forward_lacks_paper_gate(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A calculated WF champion with too little paper evidence must fail closed."""
+    monkeypatch.setenv("MODEL_CHAMPION_MIN_PAPER_GATE_COUNT", "50")
+
+    journal = MagicMock()
+    journal.is_enabled = True
+    journal._fetch = AsyncMock(
+        side_effect=[
+            [],
+            [{"has_walk_forward": True}],
+        ]
+    )
+
+    registry = ModelRegistry(trade_journal=journal)
+    row = await registry.select_best_champion()
+
+    assert row is None
+    assert journal._fetch.await_count == 2
+
+
 # ---------------------------------------------------------------------------
 # TradeJournal: schema validation (mocked pool)
 # ---------------------------------------------------------------------------
@@ -263,6 +363,107 @@ async def test_trade_journal_schema_includes_durable_order_state() -> None:
     journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=False)
     # When disabled, operations are no-ops — just verify init doesn't crash
     assert not journal.is_enabled
+
+
+@pytest.mark.asyncio
+async def test_model_performance_history_includes_score_and_selection_reason() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        return [
+            {
+                "version": "v_good",
+                "status": "CHAMPION",
+                "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                "training_samples": 900,
+                "metrics": {
+                    "quality": "GOOD",
+                    "precision": 0.62,
+                    "lift_bps": 4.2,
+                    "walk_forward_expectancy_bps": 3.1,
+                    "paper_gate": {"count": 80},
+                },
+            }
+        ]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    rows = await journal.get_model_performance_history()
+
+    assert rows[0]["version"] == "v_good"
+    assert rows[0]["model_score"] > 0
+    assert rows[0]["paper_gate_count"] == 80
+    assert rows[0]["selection_reason"] == "selected:positive_walk_forward_lift"
+
+
+@pytest.mark.asyncio
+async def test_champion_health_includes_checks_alternative_and_promotion_log() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+    calls = 0
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return [
+                {
+                    "version": "champion",
+                    "status": "CHAMPION",
+                    "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
+                    "training_samples": 1000,
+                    "metrics": {
+                        "quality": "GOOD",
+                        "walk_forward_expectancy_bps": 4.0,
+                        "lift_bps": 2.0,
+                        "paper_gate": {"count": 80},
+                        "wf_folds": 5,
+                        "wf_positive_folds": 4,
+                        "wf_std_bps": 3.0,
+                        "walk_forward_chronology": "strict_after_train",
+                    },
+                }
+            ]
+        if calls == 2:
+            return [
+                {
+                    "version": "candidate",
+                    "status": "VALIDATED",
+                    "training_finished_at": datetime(2026, 6, 7, 11, 1, tzinfo=UTC),
+                    "created_at": datetime(2026, 6, 7, 11, 1, tzinfo=UTC),
+                    "training_samples": 1000,
+                    "metrics": {"quality": "GOOD", "walk_forward_expectancy_bps": 3.0},
+                }
+            ]
+        return [
+            {
+                "event_type": "PROMOTED",
+                "from_version": "old",
+                "to_version": "champion",
+                "reasons": ["criteria_met"],
+                "metrics": {},
+                "metrics_snapshot": {},
+                "created_at": datetime(2026, 6, 7, 12, 1, tzinfo=UTC),
+            }
+        ]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    health = await journal.get_champion_health()
+
+    assert health["champion"]["version"] == "champion"
+    assert health["best_alternative"]["version"] == "candidate"
+    assert all(check["ok"] for check in health["checks"])
+    assert health["promotion_log"][0]["event_type"] == "PROMOTED"
 
 
 @pytest.mark.asyncio

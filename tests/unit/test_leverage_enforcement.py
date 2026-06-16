@@ -121,11 +121,10 @@ class TestLeverageEnforcement:
         assert engine._leverage_confirmed["BTCUSDT"] == Decimal("5")
 
     @pytest.mark.asyncio
-    async def test_leverage_failure_does_not_block_order(self):
-        """If set_leverage fails, the order still proceeds (best-effort enforcement)."""
+    async def test_leverage_failure_blocks_order(self):
+        """If set_leverage fails, live order submission fails closed."""
         engine = _make_engine(max_leverage=Decimal("3"))
         engine._adapter._rest.set_leverage = AsyncMock(side_effect=RuntimeError("API error"))
         result = await engine.submit(_proposal(), Decimal("10000"), Decimal("10000"))
-        # Order should still go through despite leverage failure
-        assert result is not None
-        engine._adapter.place_order.assert_awaited_once()
+        assert result is None
+        engine._adapter.place_order.assert_not_awaited()

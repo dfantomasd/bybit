@@ -101,7 +101,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     SCALP_STRATEGY_ENABLED: bool = True
     """Enable the cost-aware micro-scalping strategy alongside the trend strategy."""
-    MAX_SPREAD_BPS_SCALP: float = 2.5
+    MAX_SPREAD_BPS_SCALP: float = 5.0
     """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
     MIN_NET_SCALP_RETURN_PCT: float = 0.08
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
@@ -180,9 +180,9 @@ class Settings(BaseSettings):
     BUCKET_BLOCK_ENABLED: bool = True
     """Skip strategy evaluation in (regime, volatility, UTC hour) buckets whose
     own historical signals show persistent negative expectancy."""
-    BUCKET_MIN_SAMPLES: int = 30
+    BUCKET_MIN_SAMPLES: int = 200
     """Minimum resolved outcomes in a bucket before it can be blocked."""
-    BUCKET_BLOCK_AVG_BPS: float = -2.0
+    BUCKET_BLOCK_AVG_BPS: float = -10.0
     """Block a bucket when its average net return is below this (bps)."""
     BUCKET_STATS_REFRESH_SECONDS: int = 3600
     """How often the in-memory bucket statistics are refreshed from Postgres."""
@@ -429,8 +429,12 @@ class Settings(BaseSettings):
     """CSV list of model families considered by offline walk-forward selection."""
     MODEL_WF_FOLDS: int = 5
     MODEL_WF_MIN_TRAIN_SAMPLES: int = 500
-    MODEL_THRESHOLD_GRID: str = "0,2,5,8,12"
-    """CSV label thresholds in bps evaluated during offline selection."""
+    MODEL_THRESHOLD_GRID: str = "0,2,5"
+    """CSV label thresholds in bps evaluated during offline selection.
+    0 bps = break-even after costs (net-cost-aware label already deducts fees).
+    20 bps removed: too demanding for 5-min bars, leaves almost no positive labels."""
+    MODEL_LABEL_HORIZON: int = 30
+    """Bars ahead to measure label outcome; 30 bars on 5m = 2.5h horizon."""
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
@@ -447,9 +451,13 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_ENABLED: bool = True
     """Automatically train a shadow challenger when enough new labelled examples accumulate."""
     MODEL_AUTO_TRAIN_MIN_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES: int = 50
+    """Minimum samples required to fire auto-training when the loaded model uses a stale feature
+    schema (predict() returns None for every candle). Lower than MIN_SAMPLES because any working
+    model is better than no model — we can retrain again once more samples accumulate."""
     MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
-    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
+    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
@@ -460,18 +468,28 @@ class Settings(BaseSettings):
     MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
     MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
     """Minimum live lift (bps) the challenger must show before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS: float = 0.0
+    """Minimum average net return (bps) among challenger GATE_PASS outcomes."""
+    MODEL_AUTO_PROMOTE_MIN_WF_BPS: float = 0.0
+    """Minimum walk-forward expectancy (bps) stored in challenger training metrics."""
+    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 3
+    """Minimum positive walk-forward folds required before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS: float = 25.0
+    """Maximum walk-forward fold standard deviation allowed before auto-promotion."""
     MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
     """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
     return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""
     MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS: int = 1000
     MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES: int = 50
     """Minimum resolved challenger returns required to run the bootstrap test."""
-    MODEL_CHAMPION_DEGRADE_MIN_SIGNALS: int = 100
-    """Minimum live champion shadow-gate observations before triggering a rollback check."""
-    MODEL_CHAMPION_MIN_LIFT_BPS: float = -5.0
-    """If the champion's live shadow-gate lift falls below this threshold, trigger rollback."""
-    MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS: int = 14400
-    """How often (seconds) the champion health monitor runs. Default: 4 hours."""
+    MODEL_CHAMPION_MONITOR_SECONDS: int = 14_400
+    """How often to check current CHAMPION for degradation and rollback."""
+    MODEL_CHAMPION_MIN_WF_BPS: float = 0.0
+    """Rollback CHAMPION when stored walk-forward expectancy falls below this."""
+    MODEL_CHAMPION_MAX_DRAWDOWN_BPS: float = 1500.0
+    """Rollback CHAMPION when recent model return drawdown exceeds this bps limit."""
+    MODEL_CHAMPION_MIN_PAPER_GATE_COUNT: int = 50
+    """Minimum paper-gate sample count required for walk-forward champion selection."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55

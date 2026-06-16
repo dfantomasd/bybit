@@ -343,20 +343,24 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["prediction_outcomes"] = sum(result["prediction_outcomes_by_horizon"].values())
 
         # Mirror the training query's eligibility exactly (threshold, signal,
-        # training_eligible, one sample per candle). Training requires the
-        # minimum WITHIN ONE feature_schema_hash, so report the largest single
-        # schema bucket; summing across schemas overstates progress and makes
-        # the auto-trainer fire prematurely.
+        # training_eligible, one sample per candle). Order by most-recent schema
+        # first so that when a new feature schema is introduced, the newest schema
+        # becomes current_feature_schema_hash and the mismatch is detected immediately.
+        # Summing across schemas would overstate progress and fire the auto-trainer
+        # prematurely on stale data.
+        # Check horizons 5 and 15 so that the schema-change trigger fires even when
+        # the 15-min resolver hasn't yet produced labels (e.g. after a feature pipeline
+        # change) but the 5-min resolver already has labeled data for the new schema.
         rows = await self._fetch(
             """
-            SELECT feature_schema_hash, count(*) AS cnt
+            SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
             FROM (
                 SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
-                       fs.snapshot_id, fs.feature_schema_hash
+                       fs.snapshot_id, fs.feature_schema_hash, fs.created_at AS latest_at
                 FROM feature_snapshots fs
                 JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = 15
+                WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $1
                   AND po.label_threshold_bps = 5.0
@@ -366,22 +370,36 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                   AND pe.strategy_signal IN ('Buy', 'Sell')
             ) deduped
             GROUP BY feature_schema_hash
-            ORDER BY cnt DESC
+            ORDER BY latest_at DESC
             """,
             LABEL_SCHEMA_VERSION,
         )
-        result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
-        current_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
+        # newest schema = most recently seen feature schema (rows[0] after ORDER BY latest_at DESC)
+        newest_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
+        newest_feature_schema_samples = int(rows[0]["cnt"]) if rows else 0
+        # dominant schema = schema with most samples (needed for mismatch check reference)
+        rows_by_count = sorted(rows, key=lambda r: int(r["cnt"]), reverse=True)
+        current_feature_schema_hash = (
+            str(dict(rows_by_count[0]).get("feature_schema_hash") or "") if rows_by_count else ""
+        )
+        # Report newest-schema sample count for training_eligible_15m so the auto-trainer
+        # only fires when the current pipeline schema has enough samples. Firing early would
+        # cause the trainer to fall back to the old (dominant) schema, perpetuating the mismatch.
+        result["labelled_samples_15m"] = newest_feature_schema_samples
         result["training_eligible_schema_15m"] = {
-            "feature_schema_hash": current_feature_schema_hash,
-            "sample_count": result["labelled_samples_15m"],
-            "horizon_minutes": 15,
+            "feature_schema_hash": newest_feature_schema_hash,
+            "sample_count": newest_feature_schema_samples,
+            "horizon_minutes": "5_or_15",
             "label_schema_version": LABEL_SCHEMA_VERSION,
             "label_threshold_bps": 5.0,
         }
         result["labelled_samples_15m_by_schema"] = {
             str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows
         }
+        # Expose newest-schema fields so app.py's schema-change trigger can fire
+        # when the feature pipeline changes but the loaded model still uses the old schema.
+        result["newest_training_schema_hash"] = newest_feature_schema_hash
+        result["newest_training_schema_samples"] = newest_feature_schema_samples
         # The auto-trainer gate reads training_eligible_15m; keep it in sync
         # with the per-schema maximum, not the base class's cross-schema union.
         result["training_eligible_15m"] = result["labelled_samples_15m"]
@@ -423,7 +441,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             )
         latest_model = dict(rows[0]) if rows else {}
         latest_model_schema_hash = str(latest_model.get("feature_schema_hash") or "")
-        if latest_model and current_feature_schema_hash and latest_model_schema_hash != current_feature_schema_hash:
+        # Compare against the NEWEST schema (what the pipeline is currently producing),
+        # not the dominant schema (which may still be the old schema with more historical samples).
+        _mismatch_reference = newest_feature_schema_hash or current_feature_schema_hash
+        if latest_model and _mismatch_reference and latest_model_schema_hash != _mismatch_reference:
             latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
             latest_model["training_samples"] = 0
             latest_model["training_samples_compatible"] = 0
@@ -434,6 +455,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             if isinstance(_metrics_raw, str):
                 try:
                     import json as _json
+
                     _metrics_raw = _json.loads(_metrics_raw)
                 except Exception:
                     _metrics_raw = {}
@@ -474,4 +496,4 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 def install_directional_trade_journal() -> None:
     """Install the directional implementation for existing import paths."""
 
-    _base_module.TradeJournal = DirectionalTradeJournal
+    _base_module.TradeJournal = DirectionalTradeJournal  # type: ignore[misc]

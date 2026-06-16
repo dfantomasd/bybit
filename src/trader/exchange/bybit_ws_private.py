@@ -77,7 +77,7 @@ class BybitPrivateWebSocket:
         endpoint: str,
         api_key: str,
         api_secret: str,
-        event_queue: asyncio.Queue,
+        event_queue: asyncio.Queue[BaseEvent],
         metrics: Any = None,
         logger: Any = None,
     ) -> None:
@@ -149,7 +149,7 @@ class BybitPrivateWebSocket:
     async def _run_connection(self) -> None:
         """Single connection attempt — returns when disconnected."""
         try:
-            import websockets  # type: ignore
+            import websockets
         except ImportError:
             self._log.error("websockets_not_installed")
             await asyncio.sleep(5.0)
@@ -218,7 +218,7 @@ class BybitPrivateWebSocket:
             self._authenticated = False
             self._ws = None
 
-    def _build_auth_msg(self) -> dict:
+    def _build_auth_msg(self) -> dict[str, Any]:
         """Build Bybit V5 WebSocket auth message using HMAC-SHA256."""
         expires = int((time.time() + _AUTH_EXPIRES_SECONDS) * 1000)
         sign_str = f"GET/realtime{expires}"

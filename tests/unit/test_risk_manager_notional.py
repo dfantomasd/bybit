@@ -41,6 +41,7 @@ def _proposal(
     qty: str = "10",
     entry: str = "0.20",
     confidence: float = 0.30,  # low → multiplier shrinks qty
+    expected_risk: float | None = None,
 ) -> TradeProposal:
     entry_d = Decimal(entry)
     return TradeProposal(
@@ -53,6 +54,7 @@ def _proposal(
         stop_loss=entry_d * Decimal("0.98"),  # 2% stop
         take_profit=entry_d * Decimal("1.04"),
         confidence=confidence,
+        expected_risk=expected_risk,
         regime=MarketRegime.BULL_TREND,
     )
 
@@ -126,6 +128,50 @@ class TestPostMultiplierMinNotional:
             f"notional {decision.approved_qty * Decimal('0.20')} should be >= 5"
         )
         assert "min_notional_buffer_applied" in (decision.triggered_rules or [])
+
+    @pytest.mark.asyncio
+    async def test_expected_risk_multiplies_signal_confidence(self):
+        """LLM risk multiplier must not replace the signal confidence."""
+        manager, _, _ = _make_manager()
+        info = _instrument(
+            min_notional="1",
+            min_order_qty="1",
+            max_order_qty="1000",
+            qty_step="1",
+        )
+        proposal = _proposal(qty="300", entry="10", confidence=0.50, expected_risk=0.40)
+
+        decision = await manager.evaluate(
+            proposal=proposal,
+            capital=Decimal("1000"),
+            available_balance=Decimal("1000"),
+            instrument_info=info,
+        )
+
+        assert decision.status in (RiskDecisionStatus.APPROVED, RiskDecisionStatus.RESIZED)
+        assert decision.approved_qty == Decimal("10")
+
+    @pytest.mark.asyncio
+    async def test_expected_risk_defaults_to_one_when_missing(self):
+        """Missing LLM multiplier should leave the signal confidence multiplier intact."""
+        manager, _, _ = _make_manager()
+        info = _instrument(
+            min_notional="1",
+            min_order_qty="1",
+            max_order_qty="1000",
+            qty_step="1",
+        )
+        proposal = _proposal(qty="300", entry="10", confidence=0.50, expected_risk=None)
+
+        decision = await manager.evaluate(
+            proposal=proposal,
+            capital=Decimal("1000"),
+            available_balance=Decimal("1000"),
+            instrument_info=info,
+        )
+
+        assert decision.status in (RiskDecisionStatus.APPROVED, RiskDecisionStatus.RESIZED)
+        assert decision.approved_qty == Decimal("25")
 
     @pytest.mark.asyncio
     async def test_ceil_to_step_rounds_up_correctly(self):

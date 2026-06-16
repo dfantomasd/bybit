@@ -110,4 +110,4 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
 def install_source_candle_guard() -> None:
     """Install guarded pipeline for existing import paths."""
 
-    _pipeline_module.FeaturePipeline = SourceCandleFeaturePipeline
+    _pipeline_module.FeaturePipeline = SourceCandleFeaturePipeline  # type: ignore[misc]

@@ -423,3 +423,64 @@ def ema_slope(series: Sequence[float], period: int, lookback: int = 3) -> float 
     if denom == 0 or y_mean == 0:
         return None
     return (num / denom) / y_mean  # normalise by price level
+
+
+def multi_ewma_signal(
+    closes: Sequence[float],
+    periods: tuple[int, ...] = (3, 12, 50, 100, 200),
+) -> float | None:
+    """Multi-tier EWMA directional signal in [-1, 1].
+
+    Computes the average normalised cross of adjacent EMA tiers.
+    Positive = bullish stack, negative = bearish.
+    Inspired by Krypto-trading-bot's EWMA_LS strategy.
+    """
+    if len(closes) < max(periods) + 1:
+        return None
+    last_price = closes[-1]
+    if last_price <= 0:
+        return None
+    score = 0.0
+    count = 0
+    for i in range(len(periods) - 1):
+        fast = ema_value(closes, periods[i])
+        slow = ema_value(closes, periods[i + 1])
+        if fast is None or slow is None:
+            return None
+        score += (fast - slow) / last_price
+        count += 1
+    if count == 0:
+        return None
+    raw = score / count
+    # Clamp to [-1, 1]: scale by 100 to turn sub-percent differences into
+    # meaningful magnitudes, then clamp.
+    return max(-1.0, min(1.0, raw * 100))
+
+
+def vwap(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    closes: Sequence[float],
+    volumes: Sequence[float],
+    period: int | None = None,
+) -> float | None:
+    """Volume-Weighted Average Price over the last ``period`` bars.
+
+    Uses typical price: (high + low + close) / 3.
+    Returns ``None`` when there is insufficient data or zero total volume.
+    """
+    n = min(len(highs), len(lows), len(closes), len(volumes))
+    if n == 0:
+        return None
+    if period is not None:
+        if n < period:
+            return None
+        highs = highs[-period:]
+        lows = lows[-period:]
+        closes = closes[-period:]
+        volumes = volumes[-period:]
+    total_vol = sum(volumes)
+    if total_vol == 0:
+        return None
+    total_tp_vol = sum(((h + lo + c) / 3.0) * v for h, lo, c, v in zip(highs, lows, closes, volumes, strict=False))
+    return total_tp_vol / total_vol

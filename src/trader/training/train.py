@@ -25,10 +25,26 @@ from typing import Any
 import click
 import numpy as np
 
+from trader.ml.model_selection import model_selection_metrics
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
+
+
+def _settings_horizon() -> int:
+    """Return MODEL_LABEL_HORIZON from settings, falling back to 15."""
+    try:
+        from trader.config import Settings
+
+        return int(getattr(Settings(), "MODEL_LABEL_HORIZON", 15))
+    except Exception:
+        import os
+
+        try:
+            return int(os.environ.get("MODEL_LABEL_HORIZON", 15))
+        except (ValueError, TypeError):
+            return 15
 
 
 def _parse_float_csv(raw: str, default: list[float]) -> list[float]:
@@ -76,6 +92,38 @@ def _walk_forward_splits(
     return result
 
 
+def _validate_walk_forward_chronology(
+    folds: list[tuple[np.ndarray, np.ndarray]],
+    timestamps: list[datetime],
+) -> list[dict[str, Any]]:
+    """Assert every validation fold starts strictly after its train window."""
+
+    windows: list[dict[str, Any]] = []
+    for fold_idx, (train_idx, val_idx) in enumerate(folds):
+        if len(train_idx) == 0 or len(val_idx) == 0:
+            raise RuntimeError(f"empty walk-forward fold: {fold_idx}")
+        train_end = timestamps[int(train_idx[-1])]
+        val_start = timestamps[int(val_idx[0])]
+        val_end = timestamps[int(val_idx[-1])]
+        if val_start <= train_end:
+            raise RuntimeError(
+                "walk-forward chronology violation: "
+                f"fold={fold_idx} train_end={train_end.isoformat()} val_start={val_start.isoformat()}"
+            )
+        windows.append(
+            {
+                "fold": int(fold_idx),
+                "train_start_at": timestamps[int(train_idx[0])].isoformat(),
+                "train_end_at": train_end.isoformat(),
+                "val_start_at": val_start.isoformat(),
+                "val_end_at": val_end.isoformat(),
+                "train_samples": int(len(train_idx)),
+                "validation_samples": int(len(val_idx)),
+            }
+        )
+    return windows
+
+
 def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
     families = {item.strip().upper() for item in str(enabled or "").split(",") if item.strip()}
     if not families:
@@ -118,6 +166,23 @@ def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
         )
     if "SGD" in families:
         specs.append({"model_type": "SGD"})
+    if "MLP" in families:
+        specs.extend(
+            [
+                {
+                    "model_type": "MLP",
+                    "hidden_layer_sizes": (64, 32),
+                    "learning_rate_init": 0.001,
+                    "alpha": 0.0001,
+                },
+                {
+                    "model_type": "MLP",
+                    "hidden_layer_sizes": (128, 64, 32),
+                    "learning_rate_init": 0.0005,
+                    "alpha": 0.001,
+                },
+            ]
+        )
     return specs
 
 
@@ -237,19 +302,8 @@ def _evaluate_model(
             "validation_by_side": {},
         }
 
-    scores: list[float] = []
-    preds: list[int] = []
-    for features in x_val:
-        pred = model.predict(features.tolist())
-        if pred is None:
-            scores.append(0.0)
-            preds.append(0)
-            continue
-        scores.append(float(pred.score))
-        preds.append(int(pred.label))
-
-    pred_arr = np.array(preds, dtype=np.int32)
-    score_arr = np.array(scores, dtype=np.float32)
+    # Batch prediction — single sklearn call instead of a Python loop per sample
+    score_arr, pred_arr = model.predict_batch(x_val)
     positives = y_val == 1
     predicted_positive = pred_arr == 1
     true_positive = predicted_positive & positives
@@ -480,6 +534,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         sides_list: list[str] = []
         regimes_list: list[str] = []
         hours_list: list[int] = []
+        created_at_list: list[datetime] = []
         feature_names: list[str] = []
         feature_schema_hash = ""
         expected_vector_size: int | None = None
@@ -516,7 +571,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             sides_list.append(side)
             regimes_list.append(str(row["regime"] or "unknown"))
             created_at = row["created_at"]
-            hours_list.append(int(created_at.hour if created_at is not None else 0))
+            created_dt = created_at if isinstance(created_at, datetime) else datetime.now(tz=UTC)
+            hours_list.append(int(created_dt.hour))
+            created_at_list.append(created_dt)
 
         x_arr = np.array(x_list, dtype=np.float32)
         returns_bps = np.array(returns_list, dtype=np.float32)
@@ -573,65 +630,70 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         )
         if not folds:
             raise RuntimeError("not enough samples for walk-forward validation")
+        wf_windows = _validate_walk_forward_chronology(folds, created_at_list)
 
-        candidate_results: list[dict[str, Any]] = []
-        for selected_label_threshold in label_thresholds:
+        def _run_candidate(spec: dict[str, Any], selected_label_threshold: float) -> dict[str, Any] | None:
             y = (returns_bps > float(selected_label_threshold)).astype(np.int32)
             if len(np.unique(y)) < 2:
-                log.info("Skipping label threshold %.2f bps: one-class labels", selected_label_threshold)
-                continue
-            for spec in candidates:
-                fold_metrics: list[dict[str, Any]] = []
-                for fold_idx, (train_idx, val_idx) in enumerate(folds):
-                    y_train = y[train_idx]
-                    y_val = y[val_idx]
-                    if len(np.unique(y_train)) < 2 or len(np.unique(y_val)) < 2:
-                        log.info(
-                            "Skipping fold with one-class labels",
-                            extra={
-                                "fold": fold_idx,
-                                "model_type": spec.get("model_type"),
-                                "label_threshold_bps": selected_label_threshold,
-                            },
-                        )
-                        continue
-                    fold_model = ChallengerModel(
-                        version=f"{run_id}_fold{fold_idx}",
-                        feature_names=feature_names,
-                        model_type=str(spec["model_type"]),
-                        model_params={k: v for k, v in spec.items() if k != "model_type"},
-                    )
-                    try:
-                        fold_model.fit_batch(x_arr[train_idx], y_train, params=fold_model.model_params)
-                        metrics = _evaluate_model(
-                            fold_model, x_arr[val_idx], y_val, returns_bps[val_idx], sides[val_idx]
-                        )
-                    except Exception as exc:
-                        log.warning(
-                            "Candidate fold failed: model_type=%s label_threshold=%s fold=%s error=%s",
-                            spec.get("model_type"),
-                            selected_label_threshold,
-                            fold_idx,
-                            exc,
-                        )
-                        continue
-                    metrics["fold"] = fold_idx
-                    metrics["val_start_idx"] = int(val_idx[0])
-                    metrics["val_end_idx"] = int(val_idx[-1])
-                    fold_metrics.append(metrics)
-                if not fold_metrics:
+                return None
+            fold_metrics: list[dict[str, Any]] = []
+            for fold_idx, (train_idx, val_idx) in enumerate(folds):
+                y_train = y[train_idx]
+                y_val_fold = y[val_idx]
+                if len(np.unique(y_train)) < 2 or len(np.unique(y_val_fold)) < 2:
                     continue
-                summary = _summarise_walk_forward(fold_metrics)
-                summary.update(
-                    {
-                        "candidate": spec,
-                        "model_type": spec["model_type"],
-                        "model_params": {k: v for k, v in spec.items() if k != "model_type"},
-                        "selected_label_threshold_bps": float(selected_label_threshold),
-                        "fold_metrics": fold_metrics,
-                    }
+                fold_model = ChallengerModel(
+                    version=f"{run_id}_fold{fold_idx}",
+                    feature_names=feature_names,
+                    model_type=str(spec["model_type"]),
+                    model_params={k: v for k, v in spec.items() if k != "model_type"},
                 )
-                candidate_results.append(summary)
+                try:
+                    fold_model.fit_batch(x_arr[train_idx], y_train, params=fold_model.model_params)
+                    metrics = _evaluate_model(
+                        fold_model, x_arr[val_idx], y_val_fold, returns_bps[val_idx], sides[val_idx]
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Candidate fold failed: model_type=%s label_threshold=%s fold=%s error=%s",
+                        spec.get("model_type"),
+                        selected_label_threshold,
+                        fold_idx,
+                        exc,
+                    )
+                    continue
+                metrics["fold"] = fold_idx
+                metrics["val_start_idx"] = int(val_idx[0])
+                metrics["val_end_idx"] = int(val_idx[-1])
+                metrics.update(wf_windows[fold_idx])
+                fold_metrics.append(metrics)
+            if not fold_metrics:
+                return None
+            summary = _summarise_walk_forward(fold_metrics)
+            summary.update(
+                {
+                    "candidate": spec,
+                    "model_type": spec["model_type"],
+                    "model_params": {k: v for k, v in spec.items() if k != "model_type"},
+                    "selected_label_threshold_bps": float(selected_label_threshold),
+                    "fold_metrics": fold_metrics,
+                }
+            )
+            return summary
+
+        tasks = [(spec, threshold) for threshold in label_thresholds for spec in candidates]
+
+        try:
+            from joblib import Parallel
+            from joblib import delayed as jdelayed
+
+            raw_results = Parallel(n_jobs=1)(
+                jdelayed(_run_candidate)(spec, threshold) for spec, threshold in tasks
+            )
+        except (ImportError, ModuleNotFoundError):
+            raw_results = [_run_candidate(spec, threshold) for spec, threshold in tasks]
+
+        candidate_results: list[dict[str, Any]] = [r for r in raw_results if r is not None]
 
         if not candidate_results:
             raise RuntimeError("no trainable model candidate survived walk-forward validation")
@@ -697,6 +759,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             "selected_label_threshold_bps": selected_label_threshold,
             "selected_model_params": model.model_params,
             "validation_samples": int(sum(len(v) for _, v in folds)),
+            "walk_forward_windows": wf_windows,
+            "walk_forward_chronology": "strict_after_train",
             **{k: v for k, v in best.items() if k != "fold_metrics"},
             "fold_metrics": best["fold_metrics"],
         }
@@ -724,6 +788,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             "train_samples": int(len(x_arr)),
             "run_id": run_id,
         }
+        stored_metrics |= model_selection_metrics(stored_metrics)
         await pool.execute(
             """
             INSERT INTO model_versions (version, status, training_samples, feature_schema_hash, artifact, metrics,
@@ -782,7 +847,12 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 @click.command()
 @click.option("--min-samples", default=500, type=int, help="Minimum compatible samples required")
 @click.option("--label-bps", default=5.0, type=float, help="Resolved net-return threshold in bps")
-@click.option("--horizon", default=15, type=int, help="Prediction horizon in minutes")
+@click.option(
+    "--horizon",
+    default=lambda: _settings_horizon(),
+    type=int,
+    help="Prediction horizon in minutes (default: MODEL_LABEL_HORIZON config, fallback 15)",
+)
 def main(min_samples: int, label_bps: float, horizon: int) -> None:
     """Train a challenger from directional, cost-aware historical labels."""
 

@@ -28,10 +28,11 @@ import json
 import os
 import signal
 import sys
+import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import uvicorn
 
@@ -44,11 +45,11 @@ log = get_logger(__name__)
 # Fallback symbols (used only if screener fails); prefer cheap coins for small balance
 _SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 _WS_INTERVAL = "1"  # 1-minute klines over WS
-_MIN_SEED_BARS = 60  # bars to fetch from REST at startup
+_MIN_SEED_BARS = 250  # bars to fetch from REST at startup (multi_ewma_signal needs 201)
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
 _TRAINING_HEARTBEAT_SECONDS = 30.0
-_TRAINING_TIMEOUT_SECONDS = 900.0
+_TRAINING_TIMEOUT_SECONDS = 1800.0
 _TRADE_JOURNAL_RECONNECT_INTERVAL = 30.0
 _BALANCE_REFRESH_INTERVAL = 60.0  # seconds between balance refreshes
 _FALLBACK_BALANCE_USD = Decimal("1000")  # used when API key not configured
@@ -67,6 +68,7 @@ _INTERVAL_MS = {
 try:
     from prometheus_client import Counter as _PromCounter
 
+    _ML_REPLACEMENT_COUNTER: Any | None
     _ML_REPLACEMENT_COUNTER = _PromCounter(
         "trader_ml_replacement_total",
         "Signals where the ML champion replaced the rule-based decision",
@@ -113,20 +115,32 @@ class TradingApplication:
         self._bucket_stats_refreshed_at: datetime | None = None
         # Per-candle training sampler: last sampled candle open_time per symbol
         self._last_candle_sample_at: dict[str, datetime] = {}
+        # Candle sampler health counters — reset every log cycle
+        self._candle_sampler_total: int = 0
+        self._candle_sampler_scored: int = 0
+        self._candle_sampler_no_model: int = 0
+        self._candle_sampler_gate_pass: int = 0
+        self._candle_sampler_gate_block: int = 0
+        # Per-symbol signal cooldown: suppress duplicate proposals within one candle period.
+        # The strategy loop runs every ~10s but features refresh ~60s (one 1m candle), so
+        # without a cooldown the same signal fires 5-6 times and floods training data with
+        # correlated duplicates before execution can block them.
+        self._last_signal_at: dict[str, datetime] = {}
+        self._signal_cooldown_s: float = 60.0
         self._strategy_ensemble: Any | None = None
         self._risk_manager: Any | None = None
         self._execution_engine: Any | None = None
         self._exposure_tracker: Any | None = None
         self._screener: Any | None = None
         self._regime_classifier: Any | None = None
-        self._background_tasks: list[asyncio.Task] = []
+        self._background_tasks: list[asyncio.Task[Any]] = []
         # Cached balance (refreshed periodically)
         self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
         self._balance_refreshed_at: datetime | None = None
         # Operator control state
         self._trading_paused: bool = False
         self._current_risk_profile_str: str = ""
-        self._signal_log: deque = deque(maxlen=20)
+        self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None
         self._performance_blocked_symbols: set[str] = set()
@@ -146,9 +160,10 @@ class TradingApplication:
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
-        self._training_task: asyncio.Task | None = None
+        self._training_task: asyncio.Task[Any] | None = None
         self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
+        self._training_failed_at: float | None = None  # monotonic time of last failed training
         # Private WebSocket (order/position/balance real-time events)
         self._ws_private: Any | None = None
         # ML shadow scoring
@@ -163,7 +178,7 @@ class TradingApplication:
         if self._screener is not None:
             symbols = self._screener.active_symbols
             if symbols:
-                return symbols
+                return cast(list[str], symbols)
         return list(_SYMBOLS)
 
     def _market_data_intervals(self) -> list[str]:
@@ -322,7 +337,7 @@ class TradingApplication:
     def _make_state_proxy(self) -> _AppStateProxy:
         return _AppStateProxy(self)
 
-    async def _start_http_server(self) -> asyncio.Task:
+    async def _start_http_server(self) -> asyncio.Task[Any]:
         from trader.api.fastapi_app import create_app
 
         assert self._settings is not None
@@ -582,48 +597,38 @@ class TradingApplication:
             await self._telegram_bot.notify(f"✅ <b>Training ALL завершено</b>\n{summary}")
 
     async def _start_model_promote(self, version: str) -> str:
-        """Promote a SHADOW_CHALLENGER model to CHAMPION via subprocess."""
+        """Promote a model through the same strict engine used by auto-promotion."""
         if self._trade_journal is None or not self._trade_journal.is_enabled:
             raise RuntimeError("Trade journal/Postgres is not available.")
 
         def code_text(value: str, limit: int = 800) -> str:
             return html.escape(value[-limit:])
 
-        cmd = [
-            sys.executable,
-            "-m",
-            "trader.training.promote",
-            "--version",
-            version,
-            "--confirm",
-        ]
         log.info("model_promote.started", version=version)
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            stdout_b, stderr_b = await asyncio.wait_for(proc.communicate(), timeout=60.0)
-            stdout = stdout_b.decode(errors="replace").strip()
-            stderr = stderr_b.decode(errors="replace").strip()
-            if proc.returncode == 0 and "promoted to CHAMPION" in stdout:
-                if (
-                    self._model_registry is not None
-                    and self._trade_journal is not None
-                    and self._trade_journal.is_enabled
-                ):
+            from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+
+            async def _reload_registry() -> None:
+                if self._model_registry is not None:
                     await self._model_registry.load_active_model()
+
+            engine = AutoPromotionEngine(
+                trade_journal=self._trade_journal,
+                config=AutoPromotionConfig.from_settings(self._settings),
+                reload_registry=_reload_registry,
+            )
+            decision = await asyncio.wait_for(engine.promote(version), timeout=60.0)
+            if decision.promote:
+                message = f"Model {version} promoted to CHAMPION: {', '.join(decision.reasons)}"
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
-                        f"🏆 <b>Модель промоутирована</b>\n<code>{code_text(stdout)}</code>"
+                        f"🏆 <b>Модель промоутирована</b>\n<code>{code_text(message)}</code>"
                     )
-                return f"🏆 <b>Промоут успешен!</b>\n<code>{code_text(stdout)}</code>"
-            else:
-                out = stderr or stdout or f"exit {proc.returncode}"
-                if self._telegram_bot is not None:
-                    await self._telegram_bot.notify(f"❌ <b>Промоут не прошёл</b>\n<code>{code_text(out)}</code>")
-                return f"❌ <b>Промоут не прошёл:</b>\n<code>{code_text(out)}</code>"
+                return f"🏆 <b>Промоут успешен!</b>\n<code>{code_text(message)}</code>"
+            out = "; ".join(decision.reasons)
+            if self._telegram_bot is not None:
+                await self._telegram_bot.notify(f"❌ <b>Промоут не прошёл</b>\n<code>{code_text(out)}</code>")
+            return f"❌ <b>Промоут не прошёл:</b>\n<code>{code_text(out)}</code>"
         except TimeoutError:
             return "❌ Промоут завис (timeout 60s)"
         except Exception as exc:
@@ -697,6 +702,7 @@ class TradingApplication:
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:
                 self._last_training_message = stderr or stdout or "training timeout"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training timed out</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             elif proc.returncode == 0 and "Checkpoint saved" in stdout:
                 self._last_training_message = stdout.splitlines()[-2] if len(stdout.splitlines()) >= 2 else stdout
@@ -715,6 +721,7 @@ class TradingApplication:
                 )
             else:
                 self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
+                self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training failed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             log.info(
                 "model_training.finished",
@@ -723,6 +730,7 @@ class TradingApplication:
             )
         except Exception as exc:
             self._last_training_message = str(exc)
+            self._training_failed_at = time.monotonic()
             text = f"❌ <b>Training crashed</b>\n<code>{code_text(str(exc))}</code>"
             log.warning("model_training.crashed", error=str(exc))
         if self._trade_journal is not None and self._trade_journal.is_enabled:
@@ -742,19 +750,42 @@ class TradingApplication:
 
         check_seconds = max(60, int(self._settings.MODEL_AUTO_TRAIN_CHECK_SECONDS))
         min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
+        schema_change_min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
         increment_samples = max(1, int(self._settings.MODEL_AUTO_TRAIN_INCREMENT_SAMPLES))
         horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
         label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
 
+        # First check fires after a short grace period so the trade journal has time to
+        # connect. Subsequent checks use the full check_seconds interval. Without this,
+        # a 300s initial wait means the trainer never runs when deployments restart the
+        # bot more frequently than check_seconds.
+        first_run = True
+
         while not self._shutdown_event.is_set():
+            wait_seconds = min(60, check_seconds) if first_run else check_seconds
+            first_run = False
             try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=check_seconds)
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=wait_seconds)
                 break
             except TimeoutError:
                 pass
 
             if self._training_task is not None and not self._training_task.done():
                 continue
+
+            # Back off for 30 minutes after a training failure to avoid an infinite
+            # retry loop (e.g. OOM kill causes returncode -9, then latest_samples=0
+            # looks like a fresh trigger on the very next check cycle).
+            _training_failure_cooldown = 1800.0
+            if self._training_failed_at is not None:
+                elapsed_since_failure = time.monotonic() - self._training_failed_at
+                if elapsed_since_failure < _training_failure_cooldown:
+                    remaining = int(_training_failure_cooldown - elapsed_since_failure)
+                    log.info(
+                        "model_auto_training.failure_cooldown",
+                        cooldown_remaining_s=remaining,
+                    )
+                    continue
 
             if self._trade_journal is None:
                 log.info("model_auto_training.waiting", reason="trade_journal_not_started")
@@ -776,16 +807,46 @@ class TradingApplication:
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
                 enough_increment = latest_samples > 0 and (trainable - latest_samples) >= increment_samples
-                if not (enough_initial or enough_increment):
+
+                # Schema-mismatch trigger: if current model uses an outdated feature schema,
+                # fire as soon as the new schema has min_samples — don't wait for increment_samples.
+                # This eliminates the silent multi-hour window where predict() always returns None.
+                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
+                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                current_schema_hash = ""
+                if self._model_registry is not None:
+                    _active = self._model_registry.challenger or self._model_registry.champion
+                    if _active is not None:
+                        current_schema_hash = _active.feature_schema_hash
+                schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
+
+                if not (enough_initial or enough_increment or enough_schema_change):
+                    if schema_mismatch and newest_schema_samples > 0:
+                        log.warning(
+                            "model_auto_training.schema_mismatch_accumulating",
+                            current_schema=current_schema_hash,
+                            newest_schema=newest_schema_hash,
+                            newest_schema_samples=newest_schema_samples,
+                            schema_change_min_samples=schema_change_min_samples,
+                            min_samples_needed=schema_change_min_samples,
+                        )
                     continue
 
-                msg = await self._start_model_training(min_samples, horizon, label_bps)
+                trigger_reason = (
+                    "schema_change" if enough_schema_change
+                    else ("initial" if enough_initial else "increment")
+                )
+                effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
+                msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
                     trainable=trainable,
                     latest_samples=latest_samples,
-                    min_samples=min_samples,
+                    min_samples=effective_min_samples,
                     increment_samples=increment_samples,
+                    trigger_reason=trigger_reason,
+                    schema_mismatch=schema_mismatch,
                 )
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
@@ -825,20 +886,21 @@ class TradingApplication:
             return 0.0
 
     async def _run_auto_model_promoter(self) -> None:
-        """Promote challenger to champion automatically when it consistently beats the champion.
-
-        Delegates all criteria evaluation to AutoPromotionEngine (pure, testable).
-        On approval, performs an atomic DB promotion via TradeJournal and reloads the registry.
-        """
+        """Promote the best eligible challenger and roll back degraded champions."""
         assert self._settings is not None
         if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
             log.info("model_auto_promote.disabled")
             return
 
-        from trader.ml.auto_promotion import AutoPromotionEngine
+        from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
 
-        engine = AutoPromotionEngine.from_settings(self._settings)
-        check_seconds = max(120, int(self._settings.MODEL_AUTO_PROMOTE_CHECK_SECONDS))
+        config = AutoPromotionConfig.from_settings(self._settings)
+        check_seconds = config.check_seconds
+        last_monitor_at = datetime.now(tz=UTC) - timedelta(seconds=config.monitor_seconds)
+
+        async def _reload_registry() -> None:
+            if self._model_registry is not None:
+                await self._model_registry.load_active_model()
 
         while not self._shutdown_event.is_set():
             try:
@@ -851,183 +913,53 @@ class TradingApplication:
                 continue
 
             try:
-                diag = await self._trade_journal.get_db_diagnostics()
-                latest_model = diag.get("latest_model_version", {}) or {}
+                engine = AutoPromotionEngine(
+                    trade_journal=self._trade_journal,
+                    config=config,
+                    reload_registry=_reload_registry,
+                )
+                now = datetime.now(tz=UTC)
+                if (now - last_monitor_at).total_seconds() >= config.monitor_seconds:
+                    rollback = await engine.rollback_if_needed()
+                    last_monitor_at = now
+                    if rollback.rollback and self._telegram_bot is not None:
+                        await self._telegram_bot.notify(
+                            "↩️ <b>Авто-откат модели</b>\n"
+                            f"Было: <code>{rollback.champion_version}</code>\n"
+                            f"Стало: <code>{rollback.rollback_version}</code>\n"
+                            f"Причины: <code>{html.escape(', '.join(rollback.reasons))}</code>"
+                        )
 
-                challenger_version = str(latest_model.get("version", "") or "")
-                challenger_status = str(latest_model.get("status", "") or "")
-
+                challenger_version = await engine.best_challenger()
                 if not challenger_version:
+                    log.debug("model_auto_promote.waiting", reason="no_eligible_challenger")
                     continue
 
-                from trader.training.labels import LABEL_SCHEMA_VERSION
-
-                gate = await self._trade_journal.get_shadow_gate_stats(
-                    model_version=challenger_version,
-                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version=LABEL_SCHEMA_VERSION,
-                )
-                champion_wf_bps = await self._get_champion_walk_forward_bps()
-
-                from trader.training.bootstrap import bootstrap_pvalue
-
-                min_boot = max(50, int(self._settings.MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES))
-                n_iter = max(100, int(self._settings.MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS))
-                horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-                challenger_returns = await self._trade_journal.get_returns_for_model(
-                    challenger_version, limit=200, horizon_minutes=horizon
-                )
-                baseline_returns = await self._trade_journal.get_returns_for_model(
-                    "RULE_BASELINE_V1", limit=200, horizon_minutes=horizon
-                )
-
-                boot: Any = None
-                if len(challenger_returns) >= min_boot and len(baseline_returns) >= min_boot:
-                    boot = bootstrap_pvalue(challenger_returns, baseline_returns, n_iter=n_iter)
+                decision = await engine.promote(challenger_version)
+                if not decision.promote:
                     log.info(
-                        "model_auto_promote.bootstrap",
+                        "model_auto_promote.waiting",
                         version=challenger_version,
-                        p_value=boot.p_value,
-                        mean_diff_bps=round(boot.mean_diff_bps, 4),
-                        n_iterations=boot.n_iterations,
-                        n_challenger=boot.n_challenger,
-                        n_baseline=boot.n_baseline,
+                        reasons=decision.reasons,
+                        metrics=decision.metrics,
                     )
-
-                decision = engine.evaluate_promotion(
-                    challenger_version=challenger_version,
-                    challenger_status=challenger_status,
-                    gate_stats=gate,
-                    champion_wf_bps=champion_wf_bps,
-                    bootstrap_result=boot,
-                )
-                log.info("model_auto_promote.evaluated", summary=decision.log_summary())
-
-                if not decision.approved:
                     continue
 
-                await self._trade_journal.promote_challenger_to_champion(
-                    challenger_version,
-                    event_data=decision.metrics_snapshot,
-                )
-
-                if self._model_registry is not None:
-                    try:
-                        await self._model_registry.load_active_model()
-                    except Exception as exc:
-                        log.warning("model_auto_promote.registry_reload_failed", error=str(exc))
-
-                total_count = int(gate.get("total_count", 0) or 0)
-                lift_bps = float(gate.get("lift_vs_all_bps") or 0.0)
-                quality = str(gate.get("quality", "") or "").upper()
+                # Promotion and Canary are separate safety steps. This does not
+                # auto-enable MODEL_GATE_CANARY_ENABLED.
 
                 if self._telegram_bot is not None:
-                    boot_line = (
-                        f"Bootstrap p-value: <code>{boot.p_value:.4f}</code> ({boot.n_iterations} итераций)\n"
-                        if boot else ""
-                    )
                     await self._telegram_bot.notify(
                         f"🤖 <b>Авто-промоут</b>\n"
                         f"Версия: <code>{challenger_version}</code>\n"
-                        f"Сигналов: <code>{total_count}</code> | "
-                        f"Lift: <code>{lift_bps:+.2f} bps</code> vs чемпион <code>{champion_wf_bps:+.2f} bps</code>\n"
-                        f"{boot_line}"
-                        f"Качество: <code>{quality}</code>\n"
-                        f"✅ Промоутирован в CHAMPION"
+                        f"Сигналов: <code>{decision.metrics.get('total_count')}</code> | "
+                        f"Lift: <code>{float(decision.metrics.get('lift_bps') or 0.0):+.2f} bps</code>\n"
+                        f"WF: <code>{float(decision.metrics.get('wf_bps') or 0.0):+.2f} bps</code>, "
+                        f"p-value: <code>{float(decision.metrics.get('bootstrap_p_value') or 0.0):.4f}</code>\n"
+                        f"Предыдущий чемпион: <code>{decision.champion_version or 'none'}</code>"
                     )
             except Exception as exc:
                 log.warning("model_auto_promote.failed", error=str(exc))
-
-    async def _run_champion_monitor(self) -> None:
-        """Monitor champion health and trigger automatic rollback on degradation.
-
-        Runs every MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS (default: 4 hours).
-        Only active when MODEL_AUTO_PROMOTE_ENABLED is True.
-        """
-        assert self._settings is not None
-        if not self._settings.MODEL_AUTO_PROMOTE_ENABLED:
-            log.info("champion_monitor.disabled")
-            return
-
-        from trader.ml.auto_promotion import AutoPromotionEngine
-
-        engine = AutoPromotionEngine.from_settings(self._settings)
-        interval = max(
-            3600,
-            int(getattr(self._settings, "MODEL_CHAMPION_MONITOR_INTERVAL_SECONDS", 14400)),
-        )
-
-        while not self._shutdown_event.is_set():
-            try:
-                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval)
-                break
-            except TimeoutError:
-                pass
-
-            if self._trade_journal is None or not self._trade_journal.is_enabled:
-                continue
-
-            try:
-                from trader.training.labels import LABEL_SCHEMA_VERSION
-
-                diag = await self._trade_journal.get_db_diagnostics()
-                champ = (
-                    diag.get("active_model_version")
-                    or diag.get("latest_model_version")
-                    or {}
-                )
-                champion_version = str(champ.get("version", "") or "")
-                champion_status = str(champ.get("status", "") or "")
-
-                if champion_status != "CHAMPION" or not champion_version:
-                    continue
-
-                gate = await self._trade_journal.get_shadow_gate_stats(
-                    model_version=champion_version,
-                    horizon_minutes=int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES),
-                    label_schema_version=LABEL_SCHEMA_VERSION,
-                )
-
-                deg = engine.evaluate_degradation(
-                    champion_version=champion_version,
-                    gate_stats=gate,
-                )
-
-                if not deg.should_rollback:
-                    continue
-
-                log.warning(
-                    "champion_monitor.rollback_triggered",
-                    champion=champion_version,
-                    reason=deg.reason,
-                )
-
-                new_champ = await self._trade_journal.rollback_champion(
-                    current_version=champion_version,
-                    reason=deg.reason,
-                    event_data=deg.metrics_snapshot,
-                )
-
-                if self._model_registry is not None:
-                    try:
-                        await self._model_registry.load_active_model()
-                    except Exception as exc:
-                        log.warning("champion_monitor.registry_reload_failed", error=str(exc))
-
-                if self._telegram_bot is not None:
-                    restore_line = (
-                        f"Восстановлен: <code>{new_champ}</code>"
-                        if new_champ
-                        else "⚠️ Нет кандидата для восстановления"
-                    )
-                    await self._telegram_bot.notify(
-                        f"⚠️ <b>Авто-откат чемпиона</b>\n"
-                        f"Причина: <code>{html.escape(deg.reason)}</code>\n"
-                        f"Откатываем: <code>{champion_version}</code>\n"
-                        f"{restore_line}"
-                    )
-            except Exception as exc:
-                log.warning("champion_monitor.failed", error=str(exc))
 
     async def _run_model_progress_reporter(self) -> None:
         """Send an hourly Telegram report on model training progress and promotion readiness."""
@@ -1051,17 +983,61 @@ class TradingApplication:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
 
-                gate = diag.get("shadow_gate_15m", {}) or {}
                 latest_model = diag.get("latest_model_version", {}) or {}
                 champion_wf_bps = await self._get_champion_walk_forward_bps()
 
                 version = str(latest_model.get("version", "—") or "—")
                 status = str(latest_model.get("status", "—") or "—")
                 training_samples = int(latest_model.get("training_samples", 0) or 0)
+                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+
+                # Fetch gate stats for the latest model (challenger), not the active champion.
+                # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
+                # be a different version — producing a misleading "0 signals" for the challenger.
+                gate: dict = {}
+                if version and version != "—" and self._trade_journal is not None:
+                    gate = await self._trade_journal.get_shadow_gate_stats(
+                        version,
+                        15,
+                        "directional_net_v1",
+                    )
+                else:
+                    gate = diag.get("shadow_gate_15m", {}) or {}
+
                 total_count = int(gate.get("total_count", 0) or 0)
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
-                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+
+                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
+                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                current_schema_hash = ""
+                if self._model_registry is not None:
+                    _rep_model = self._model_registry.challenger or self._model_registry.champion
+                    if _rep_model is not None:
+                        current_schema_hash = _rep_model.feature_schema_hash
+                schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                _sc_min = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
+
+                log.info(
+                    "model_progress_reporter.stats",
+                    challenger_version=version,
+                    challenger_status=status,
+                    training_samples=training_samples,
+                    labelled_15m=labelled,
+                    gate_total=total_count,
+                    gate_pass=gate.get("pass_count"),
+                    gate_block=gate.get("block_count"),
+                    lift_bps=round(float(lift_bps), 3) if lift_bps is not None else None,
+                    pass_precision=round(float(pass_precision), 3) if pass_precision is not None else None,
+                    gate_schema_hash=gate.get("feature_schema_hash"),
+                    model_schema=current_schema_hash[:8] if current_schema_hash else None,
+                    newest_schema=newest_schema_hash[:8] if newest_schema_hash else None,
+                    newest_schema_samples=newest_schema_samples,
+                    schema_drift=schema_drift,
+                    candle_sampler_total=self._candle_sampler_total,
+                    candle_sampler_scored=self._candle_sampler_scored,
+                    candle_sampler_no_model=self._candle_sampler_no_model,
+                )
 
                 min_signals = max(10, int(self._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
                 min_lift = float(self._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
@@ -1082,6 +1058,16 @@ class TradingApplication:
                     "📊 <b>Прогресс модели</b>",
                     f"Версия: <code>{version}</code> [{status}]",
                     f"Обучено на: <code>{training_samples}</code> примерах | Доступно: <code>{labelled}</code>",
+                ]
+
+                if schema_drift:
+                    lines.append(
+                        f"⚠️ <b>Смена схемы фичей!</b> Модель: <code>{current_schema_hash[:8]}</code> → "
+                        f"Новая: <code>{newest_schema_hash[:8]}</code> "
+                        f"({newest_schema_samples}/{_sc_min} примеров)"
+                    )
+
+                lines += [
                     "",
                     "<b>Условия для авто-промоута:</b>",
                     check(is_challenger, f"Статус SHADOW_CHALLENGER → {status}"),
@@ -1100,6 +1086,11 @@ class TradingApplication:
                     lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")
                 elif not is_challenger and status == "CHAMPION":
                     lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
+                elif schema_drift:
+                    lines.append(
+                        f"\n⏳ Модель не обучена под текущую схему фичей. "
+                        f"Авто-обучение запустится при {newest_schema_samples}/{_sc_min} примерах."
+                    )
                 else:
                     missing = []
                     if not has_signals:
@@ -1229,7 +1220,11 @@ class TradingApplication:
                 self._execution_engine._max_concurrent_pending if self._execution_engine is not None else None
             ),
             "max_same_side": self._execution_engine._max_same_side if self._execution_engine is not None else None,
-            "max_positions": self._settings.MAX_POSITIONS if self._settings is not None else None,
+            "max_positions": (
+                self._execution_engine._max_open_positions
+                if self._execution_engine is not None
+                else (self._settings.MAX_POSITIONS if self._settings is not None else None)
+            ),
             "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
             "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
             "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
@@ -1273,6 +1268,8 @@ class TradingApplication:
             if not 1 <= ivalue <= 10:
                 raise ValueError("max_positions must be 1..10")
             self._settings.MAX_POSITIONS = ivalue
+            if self._execution_engine is not None:
+                self._execution_engine._max_open_positions = ivalue
             return f"Max simultaneous positions set to {ivalue}"
         if key == "price_cap":
             fvalue = float(value)
@@ -1325,13 +1322,13 @@ class TradingApplication:
             return list(_SYMBOLS)
         wide = self._screener.wide_universe
         if wide:
-            return [item.symbol for item in wide[:100]]
-        return self._screener.active_symbols
+            return [str(item.symbol) for item in wide[:100]]
+        return cast(list[str], self._screener.active_symbols)
 
     def _selected_symbols(self) -> list[str]:
         if self._screener is None:
             return []
-        return self._screener.manual_symbols
+        return cast(list[str], self._screener.manual_symbols)
 
     async def _toggle_manual_symbol(self, symbol: str) -> str:
         if self._screener is None:
@@ -1376,11 +1373,11 @@ class TradingApplication:
                 return None
             try:
                 ctx = self._regime_classifier.classify(vec)
-                return ctx.regime.value
+                return cast(str, ctx.regime.value)
             except Exception:
                 return None
 
-        async def _db_diagnostics_provider() -> dict:
+        async def _db_diagnostics_provider() -> dict[str, Any]:
             if self._trade_journal is None:
                 return {
                     "connected": False,
@@ -1394,9 +1391,9 @@ class TradingApplication:
             diag["paper_notional_usd"] = (
                 float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
             )
-            return diag
+            return cast(dict[str, Any], diag)
 
-        async def _healthcheck_provider() -> dict:
+        async def _healthcheck_provider() -> dict[str, Any]:
             diag = self.get_diagnostics()
             blockers = {
                 "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
@@ -1428,12 +1425,12 @@ class TradingApplication:
                 "today_avg_net_bps": today_avg_net_bps,
             }
 
-        async def _recent_trades_provider() -> list[dict]:
+        async def _recent_trades_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_recent_closed_trades(limit=10)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_recent_closed_trades(limit=10))
 
-        async def _bucket_stats_provider() -> dict:
+        async def _bucket_stats_provider() -> dict[str, Any]:
             assert self._settings is not None
             return {
                 "buckets": [
@@ -1458,30 +1455,35 @@ class TradingApplication:
                 "block_below_bps": self._settings.BUCKET_BLOCK_AVG_BPS,
             }
 
-        async def _pnl_analysis_provider() -> dict:
+        async def _pnl_analysis_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_strategy_pnl_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_strategy_pnl_analysis())
 
-        async def _compare_provider() -> dict:
+        async def _compare_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_model_compare_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_model_compare_analysis())
 
-        async def _worst_trades_provider(limit: int) -> list[dict]:
+        async def _worst_trades_provider(limit: int) -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_worst_prediction_outcomes(limit=limit)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_worst_prediction_outcomes(limit=limit))
 
-        async def _costs_detailed_provider() -> dict:
+        async def _costs_detailed_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_detailed_costs()
+            return cast(dict[str, Any], await self._trade_journal.get_detailed_costs())
 
-        async def _model_performance_provider() -> list[dict]:
+        async def _model_performance_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_model_performance_history()
+            return cast(list[dict[str, Any]], await self._trade_journal.get_model_performance_history())
+
+        async def _champion_health_provider() -> dict[str, Any]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return {"connected": False, "error": "trade_journal_unavailable"}
+            return cast(dict[str, Any], await self._trade_journal.get_champion_health())
 
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
@@ -1494,7 +1496,7 @@ class TradingApplication:
         async def _load_subscriptions() -> list[int]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_telegram_subscriptions()
+            return cast(list[int], await self._trade_journal.get_telegram_subscriptions())
 
         controller = TradingController(
             pause=self._pause_trading,
@@ -1515,7 +1517,7 @@ class TradingApplication:
             current_profile=lambda: self._current_risk_profile_str,
             active_symbols=lambda: self._screener.active_symbols if self._screener is not None else list(_SYMBOLS),
             regime_for=_regime_for,
-            signal_log=self._signal_log,  # type: ignore[arg-type]
+            signal_log=self._signal_log,
             diagnostics_provider=self.get_diagnostics,
             db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
@@ -1527,6 +1529,7 @@ class TradingApplication:
             worst_trades_provider=_worst_trades_provider,
             costs_detailed_provider=_costs_detailed_provider,
             model_performance_provider=_model_performance_provider,
+            champion_health_provider=_champion_health_provider,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,
@@ -1663,6 +1666,7 @@ class TradingApplication:
             max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
             max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
+            max_open_positions=self._settings.MAX_POSITIONS,
             startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
             is_canary=is_canary,
             fee_provider=self._fee_provider,
@@ -1698,7 +1702,8 @@ class TradingApplication:
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
         for symbol in symbols:
-            # Seed historical candles
+            # Seed historical candles (also invalidates cache, triggers recompute,
+            # and pre-warms turnover_24h — see _seed_candle_store).
             await self._seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._ws_public is not None:
@@ -1717,6 +1722,7 @@ class TradingApplication:
         log.info("screener.symbols_removed", symbols=symbols)
         for symbol in symbols:
             self._last_candle_sample_at.pop(symbol, None)
+            self._last_signal_at.pop(symbol, None)
 
     async def _start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
@@ -1783,6 +1789,11 @@ class TradingApplication:
         retry_base_delay_s = max(0.0, float(getattr(self._settings, "CANDLE_SEED_RETRY_BASE_DELAY_SECONDS", 1.0)))
 
         for symbol in seed_symbols:
+            # Clear any pre-existing cached vector before touching the candle store.
+            # This prevents the watchdog from reading a stale vector during the seeding
+            # window and then re-caching it, which would persist until the next WS kline.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
             for interval in self._market_data_intervals():
                 try:
                     for attempt in range(1, retry_attempts + 1):
@@ -1868,6 +1879,31 @@ class TradingApplication:
                         error=str(exc),
                         has_api_key=has_api_key,
                     )
+            # After all intervals seeded: invalidate again (watchdog may have run during
+            # the seeding window and re-cached a stale vector), then trigger an immediate
+            # recompute so the next strategy call gets a valid vector without waiting for
+            # the next WS kline or the 60-second watchdog cycle.
+            if self._feature_pipeline is not None:
+                self._feature_pipeline.invalidate_symbol(symbol)
+                await self._feature_pipeline.on_confirmed_candle(symbol, _WS_INTERVAL)
+
+        # Pre-warm InstrumentInfo.turnover_24h for all seeded symbols in ONE batch call
+        # so position_sizer never hits liquidity_data_missing on the first signal.
+        # A single batch GET avoids per-symbol rate-limit pressure during startup.
+        if self._execution_engine is not None and self._bybit_adapter is not None:
+            try:
+                resp = await self._bybit_adapter._rest.get_tickers(category="linear")
+                items = resp.get("result", {}).get("list", [])
+                seed_set = set(seed_symbols)
+                for item in items:
+                    sym = item.get("symbol", "")
+                    if sym not in seed_set:
+                        continue
+                    raw_t24h = item.get("turnover24h")
+                    if raw_t24h:
+                        self._execution_engine.update_ticker_turnover(sym, Decimal(str(raw_t24h)))
+            except Exception as exc:
+                log.debug("seed.ticker_prefetch_failed", symbols=seed_symbols, error=str(exc))
 
     async def _reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
@@ -1879,7 +1915,7 @@ class TradingApplication:
         """
         assert self._settings is not None
         reconcile_interval = 300  # 5 minutes
-        bars_to_check = 10
+        bars_to_check = 30
 
         while not self._shutdown_event.is_set():
             try:
@@ -2155,7 +2191,9 @@ class TradingApplication:
 
         # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
         # size the buffer so a consumer stall never drops a confirmed kline.
-        event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+        from trader.domain.events import BaseEvent
+
+        event_queue: asyncio.Queue[BaseEvent] = asyncio.Queue(maxsize=5000)
 
         self._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",
@@ -2167,7 +2205,7 @@ class TradingApplication:
         async def consume_events() -> None:
 
             from trader.data.candles import candle_from_kline_event
-            from trader.domain.events import KlineEvent, LiquidationEvent, OrderBookEvent, TradeEvent
+            from trader.domain.events import KlineEvent, LiquidationEvent, OrderBookEvent, TickerEvent, TradeEvent
 
             while not self._shutdown_event.is_set():
                 try:
@@ -2193,8 +2231,17 @@ class TradingApplication:
                                 event.qty,
                                 event.timestamp,
                             )
+                    elif isinstance(event, TickerEvent):
+                        if (
+                            event.turnover_24h is not None
+                            and event.turnover_24h > 0
+                            and self._execution_engine is not None
+                        ):
+                            self._execution_engine.update_ticker_turnover(event.symbol, event.turnover_24h)
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
+                        if self._candle_store is None:
+                            continue
                         self._candle_store.add(event.symbol, event.interval, candle)
 
                         if event.confirm:
@@ -2624,7 +2671,7 @@ class TradingApplication:
                                 count=resolved,
                             )
                     except Exception as exc:
-                        log.debug("outcome_resolver.error", horizon=horizon, error=str(exc))
+                        log.warning("outcome_resolver.error", horizon=horizon, error=str(exc))
 
             try:
                 await asyncio.wait_for(
@@ -2739,6 +2786,26 @@ class TradingApplication:
                         log.debug("reconciliation.clean", summary=result.summary)
             except Exception as exc:
                 log.warning("reconciliation.error", error=str(exc))
+
+            try:
+                await asyncio.wait_for(
+                    self._shutdown_event.wait(),
+                    timeout=interval,
+                )
+            except TimeoutError:
+                pass
+
+    async def _run_transaction_log_sync(self) -> None:
+        """Periodically sync Bybit transaction log outside the hot strategy loop."""
+        assert self._settings is not None
+        interval = max(1.0, float(self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS))
+
+        while not self._shutdown_event.is_set():
+            self._last_tx_log_sync_at = datetime.now(tz=UTC)
+            try:
+                await self._sync_transaction_log()
+            except Exception as exc:
+                log.debug("transaction_log.periodic_sync_failed", error=str(exc))
 
             try:
                 await asyncio.wait_for(
@@ -2991,7 +3058,7 @@ class TradingApplication:
         """Provide daily net PnL for Telegram /net command."""
         if self._trade_journal is None:
             return {}
-        return await self._trade_journal.get_daily_net_results()
+        return cast(dict[str, Any], await self._trade_journal.get_daily_net_results())
 
     async def _sync_execution_positions(self) -> None:
         """Keep local execution/risk state aligned with Bybit TP/SL closures."""
@@ -3143,6 +3210,8 @@ class TradingApplication:
                 metadata={"source": "candle_sampler"},
             )
 
+            self._candle_sampler_total += 1
+
             # Challenger shadow gate on every sampled candle. Signal-only shadow
             # scoring accumulates GATE_PASS/GATE_BLOCK observations slower than
             # the auto-trainer rotates model versions, so per-version gate stats
@@ -3150,6 +3219,7 @@ class TradingApplication:
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
                 shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
                 if shadow_prediction is not None:
+                    self._candle_sampler_scored += 1
                     threshold = self._model_gate_threshold(None)
                     gate_decision = None
                     gate_reason = "shadow_gate_disabled"
@@ -3158,6 +3228,10 @@ class TradingApplication:
                         gate_reason = (
                             "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
                         )
+                        if gate_decision == "GATE_PASS":
+                            self._candle_sampler_gate_pass += 1
+                        else:
+                            self._candle_sampler_gate_block += 1
                     await self._trade_journal.record_prediction_event(
                         symbol=symbol,
                         interval=interval,
@@ -3173,8 +3247,43 @@ class TradingApplication:
                             "threshold": threshold,
                         },
                     )
+                else:
+                    self._candle_sampler_no_model += 1
+                    # Only warn once per 50 misses to avoid log spam
+                    if self._candle_sampler_no_model % 50 == 1:
+                        challenger = (
+                            self._model_registry.challenger if self._model_registry is not None else None
+                        )
+                        log.warning(
+                            "candle_sampler.shadow_score_unavailable",
+                            symbol=symbol,
+                            feature_count=len(vec.feature_names),
+                            challenger_version=(challenger.version if challenger is not None else None),
+                            challenger_feature_count=(
+                                len(challenger.feature_names) if challenger is not None else None
+                            ),
+                            no_model_count=self._candle_sampler_no_model,
+                        )
+
+            # Periodic health summary — emitted every 200 candles (~30 min at 7 symbols)
+            if self._candle_sampler_total % 200 == 0:
+                score_rate = (
+                    round(self._candle_sampler_scored / self._candle_sampler_total, 3)
+                    if self._candle_sampler_total
+                    else 0.0
+                )
+                log.info(
+                    "candle_sampler.health",
+                    total=self._candle_sampler_total,
+                    scored=self._candle_sampler_scored,
+                    no_model=self._candle_sampler_no_model,
+                    gate_pass=self._candle_sampler_gate_pass,
+                    gate_block=self._candle_sampler_gate_block,
+                    score_rate=score_rate,
+                )
+
         except Exception as exc:
-            log.debug("candle_sampler.failed", symbol=symbol, error=str(exc))
+            log.warning("candle_sampler.failed", symbol=symbol, error=str(exc))
 
     def _bucket_blocked(self, regime_ctx: Any) -> bool:
         """True when the current (regime, volatility, UTC hour) bucket is toxic.
@@ -3200,7 +3309,7 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS
+        return bool(count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS)
 
     def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
         """True when a symbol+side pair has proven negative expectancy."""
@@ -3659,7 +3768,7 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies: list = [
+        strategies: list[Any] = [
             EMAcrossoverStrategy(
                 symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
@@ -3917,7 +4026,17 @@ class TradingApplication:
                 log.debug("strategy_loop.bucket_blocked", symbol=symbol)
                 return
 
+            # Skip symbols with an existing open position — the engine would
+            # reject them anyway, but avoiding the ensemble call prevents
+            # no_decision entries from polluting the training dataset.
+            if self._execution_engine is not None and self._execution_engine.has_open_position(symbol):
+                return
+
             # Strategy ensemble
+            settings = self._settings
+            if settings is None or self._strategy_ensemble is None:
+                log.warning("strategy_loop.not_ready", symbol=symbol)
+                return
             try:
                 proposal = self._strategy_ensemble.evaluate_all(
                     feature_vector=vec,
@@ -3930,6 +4049,16 @@ class TradingApplication:
 
             if proposal is None:
                 return
+
+            # Cooldown: suppress duplicate proposals for the same symbol within one candle
+            # period. The strategy loop runs every ~10s but features update every ~60s, so
+            # without this the same signal fires 5-6× per candle, flooding training data with
+            # correlated duplicates and spamming execution with skipped proposals.
+            now_ts = datetime.now(tz=UTC)
+            last_sig = self._last_signal_at.get(symbol)
+            if last_sig is not None and (now_ts - last_sig).total_seconds() < self._signal_cooldown_s:
+                return
+            self._last_signal_at[symbol] = now_ts
 
             self._record_diag("signals_emitted")
             model_decision_meta: dict[str, Any] | None = None
@@ -3970,18 +4099,14 @@ class TradingApplication:
             # decision: confidence = model score, rationale = "ML model decision".
             # The side is kept — the directional_net label schema scores the
             # proposal's own direction, so a high score IS the model's directional view.
-            if (
-                self._settings.MODEL_ENABLED
-                and self._settings.MODEL_ALLOW_LIVE_DECISIONS
-                and self._model_registry is not None
-            ):
+            if settings.MODEL_ENABLED and settings.MODEL_ALLOW_LIVE_DECISIONS and self._model_registry is not None:
                 try:
                     ml_pred = self._model_registry.score_live(vec.values, vec.feature_names)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None
                         and ml_pred.score < ml_threshold
-                        and self._settings.FALLBACK_TO_RULE_WHEN_MODEL_UNSURE
+                        and settings.FALLBACK_TO_RULE_WHEN_MODEL_UNSURE
                     ):
                         # Model exists but is unsure — keep the rule-based proposal.
                         # Counted so /healthcheck can show how often the fallback fires.
@@ -4068,7 +4193,7 @@ class TradingApplication:
                         error=str(_baseline_exc),
                     )
 
-            if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
+            if settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
                     shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
@@ -4086,7 +4211,7 @@ class TradingApplication:
                             if regime_ctx is not None and getattr(regime_ctx, "volatility_level", None) is not None
                             else "UNKNOWN"
                         )
-                        if self._settings.MODEL_SHADOW_GATE_ENABLED:
+                        if settings.MODEL_SHADOW_GATE_ENABLED:
                             shadow_gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
                             shadow_gate_reason = (
                                 "score_meets_threshold"
@@ -4125,7 +4250,7 @@ class TradingApplication:
                 # --- Champion Canary gate: live blocking only when explicitly enabled ---
                 # score_live() returns None when no compatible directional_net Champion exists.
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
-                if self._settings.MODEL_GATE_CANARY_ENABLED:
+                if settings.MODEL_GATE_CANARY_ENABLED:
                     try:
                         live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)
                         if live_prediction is not None:
@@ -4188,25 +4313,25 @@ class TradingApplication:
                 return
 
             # DB availability guard for CANARY_LIVE / LIVE
-            if self._settings.TRADING_MODE in (
+            if settings.TRADING_MODE in (
                 TradingMode.CANARY_LIVE,
                 TradingMode.LIVE,
             ):
-                if self._settings.TRADE_JOURNAL_REQUIRED_FOR_ACTIVE:
+                if settings.TRADE_JOURNAL_REQUIRED_FOR_ACTIVE:
                     if self._trade_journal is None or not self._trade_journal.is_enabled:
                         log.warning(
                             "strategy_loop.blocked_no_journal",
                             symbol=symbol,
-                            mode=self._settings.TRADING_MODE,
+                            mode=settings.TRADING_MODE,
                         )
                         await _record_signal("no_trade_journal")
                         return
-                if self._settings.DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE:
+                if settings.DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE:
                     if self._trade_journal is None or not self._trade_journal.durable_state_healthy:
                         log.warning(
                             "strategy_loop.blocked_durable_store_unhealthy",
                             symbol=symbol,
-                            mode=self._settings.TRADING_MODE,
+                            mode=settings.TRADING_MODE,
                             write_health=(
                                 self._trade_journal.write_health() if self._trade_journal is not None else {}
                             ),
@@ -4300,19 +4425,6 @@ class TradingApplication:
                 await self._sync_execution_positions()
                 await self._manage_open_positions()
                 self._check_zero_trading()
-
-                # Sync transaction log periodically
-                now = datetime.now(tz=UTC)
-                tx_interval = self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
-                if (
-                    self._last_tx_log_sync_at is None
-                    or (now - self._last_tx_log_sync_at).total_seconds() >= tx_interval
-                ):
-                    self._last_tx_log_sync_at = now
-                    try:
-                        await self._sync_transaction_log()
-                    except Exception as _tx_exc:
-                        log.debug("strategy_loop.tx_log_sync_failed", error=str(_tx_exc))
 
                 balance = self._cached_balance
                 capital = balance
@@ -4507,6 +4619,9 @@ class TradingApplication:
             reconciliation_task = asyncio.create_task(self._run_reconciliation(), name="reconciliation")
             self._background_tasks.append(reconciliation_task)
 
+            tx_log_task = asyncio.create_task(self._run_transaction_log_sync(), name="transaction-log-sync")
+            self._background_tasks.append(tx_log_task)
+
             # Risk monitor: updates equity/drawdown, checks WS staleness
             risk_monitor_task = asyncio.create_task(self._run_risk_monitor(), name="risk-monitor")
             self._background_tasks.append(risk_monitor_task)
@@ -4534,10 +4649,6 @@ class TradingApplication:
             # Auto-promotion: promotes challenger to champion when it consistently beats the champion
             auto_promoter_task = asyncio.create_task(self._run_auto_model_promoter(), name="auto-model-promoter")
             self._background_tasks.append(auto_promoter_task)
-
-            # Champion health monitor: auto-rollback if champion degrades (runs every 4h)
-            champion_monitor_task = asyncio.create_task(self._run_champion_monitor(), name="champion-monitor")
-            self._background_tasks.append(champion_monitor_task)
 
             # Hourly model progress report via Telegram
             model_reporter_task = asyncio.create_task(

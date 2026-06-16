@@ -1,316 +1,247 @@
-"""Unit tests for AutoPromotionEngine (pure evaluation, no I/O)."""
+"""Tests for safe automatic model promotion."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import json
+from typing import Any
+from unittest.mock import AsyncMock
 
 import pytest
 
-from trader.ml.auto_promotion import AutoPromotionEngine, DegradationDecision, PromotionDecision
+from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+from trader.ml.challenger import ModelStatus
+from trader.training.labels import LABEL_SCHEMA_VERSION
 
 
-# ---------------------------------------------------------------------------
-# Fixtures / helpers
-# ---------------------------------------------------------------------------
-
-
-def _engine(**kwargs) -> AutoPromotionEngine:
-    defaults = dict(
-        min_signals=50,
-        min_lift_bps=1.0,
-        pvalue_threshold=0.05,
-        champion_degrade_min_signals=100,
-        champion_min_lift_bps=-5.0,
-        champion_min_pass_expectancy_bps=-20.0,
-    )
-    defaults.update(kwargs)
-    return AutoPromotionEngine(**defaults)
-
-
-@dataclass
-class _Boot:
-    p_value: float
-    mean_diff_bps: float
-    n_iterations: int
-    n_challenger: int
-    n_baseline: int
-
-
-def _good_gate(*, total=60, lift=3.0, quality="GOOD") -> dict:
+def _model(
+    version: str,
+    *,
+    status: str = ModelStatus.SHADOW_CHALLENGER,
+    quality: str = "GOOD",
+    wf_bps: float = 5.0,
+    lift_bps: float = 5.0,
+    samples: int = 1000,
+) -> dict[str, Any]:
     return {
-        "total_count": total,
-        "lift_vs_all_bps": lift,
-        "quality": quality,
-        "pass_count": 40,
-        "pass_avg_net_return_bps": 5.0,
+        "version": version,
+        "status": status,
+        "training_samples": samples,
+        "feature_schema_hash": "abc123",
+        "metrics": {
+            "quality": quality,
+            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "walk_forward_expectancy_bps": wf_bps,
+            "wf_mean_bps": wf_bps,
+            "best_threshold_avg_net_return_bps": wf_bps,
+            "lift_bps": lift_bps,
+            "precision": 0.42,
+            "total_pass_count": 80,
+            "wf_folds": 5,
+            "wf_positive_folds": 5,
+            "wf_std_bps": 4.0,
+            "walk_forward_chronology": "strict_after_train",
+        },
     }
 
 
-def _good_boot(p=0.02) -> _Boot:
-    return _Boot(p_value=p, mean_diff_bps=2.5, n_iterations=1000, n_challenger=60, n_baseline=60)
+class _Conn:
+    def __init__(self, journal: _Journal) -> None:
+        self.journal = journal
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def __aenter__(self) -> _Conn:
+        return self
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
+
+    def transaction(self) -> _Conn:
+        return self
+
+    async def fetchrow(self, query: str, *args: Any) -> dict[str, Any] | None:
+        del query, args
+        for row in self.journal.models.values():
+            if row["status"] == ModelStatus.CHAMPION:
+                return {"version": row["version"]}
+        return None
+
+    async def execute(self, query: str, *args: Any) -> str:
+        self.executed.append((query, args))
+        self.journal.conn_exec.append((query, args))
+        if "status = 'ROLLED_BACK'" in query:
+            version = str(args[0])
+            self.journal.models[version]["status"] = ModelStatus.ROLLED_BACK
+            return "UPDATE 1"
+        if "status = 'ARCHIVED'" in query and "WHERE status = 'CHAMPION'" in query:
+            for row in self.journal.models.values():
+                if row["status"] == ModelStatus.CHAMPION:
+                    row["status"] = ModelStatus.ARCHIVED
+            return "UPDATE 1"
+        if "status = 'CHAMPION'" in query and "version = $1" in query:
+            version = str(args[0])
+            if version in self.journal.models:
+                self.journal.models[version]["status"] = ModelStatus.CHAMPION
+                return "UPDATE 1"
+            return "UPDATE 0"
+        if "INSERT INTO model_promotion_log" in query:
+            self.journal.promotion_logs.append(args)
+            return "INSERT 0 1"
+        return "SELECT 1"
 
 
-# ---------------------------------------------------------------------------
-# evaluate_promotion — all criteria pass
-# ---------------------------------------------------------------------------
+class _Acquire:
+    def __init__(self, conn: _Conn) -> None:
+        self.conn = conn
+
+    async def __aenter__(self) -> _Conn:
+        return self.conn
+
+    async def __aexit__(self, *args: Any) -> None:
+        return None
 
 
-def test_promotion_approved_all_criteria():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
+class _Pool:
+    def __init__(self, journal: _Journal) -> None:
+        self.conn = _Conn(journal)
+
+    def acquire(self) -> _Acquire:
+        return _Acquire(self.conn)
+
+
+class _Journal:
+    def __init__(self, models: list[dict[str, Any]]) -> None:
+        self.models = {str(row["version"]): dict(row) for row in models}
+        self._pool = _Pool(self)
+        self.promotion_logs: list[tuple[Any, ...]] = []
+        self.conn_exec: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _fetch(self, query: str, *args: Any) -> list[dict[str, Any]]:
+        if "WHERE version = $1" in query:
+            row = self.models.get(str(args[0]))
+            return [dict(row)] if row else []
+        if "status = 'CHAMPION'" in query:
+            return [dict(row) for row in self.models.values() if row["status"] == ModelStatus.CHAMPION][:1]
+        if "status = 'ARCHIVED'" in query:
+            return [dict(row) for row in self.models.values() if row["status"] == ModelStatus.ARCHIVED][:1]
+        if "status IN ('SHADOW_CHALLENGER', 'VALIDATED')" in query:
+            return [
+                dict(row)
+                for row in self.models.values()
+                if row["status"] in {ModelStatus.SHADOW_CHALLENGER, ModelStatus.VALIDATED}
+            ]
+        return []
+
+    async def _execute(self, query: str, *args: Any) -> None:
+        if "INSERT INTO model_promotion_log" in query:
+            self.promotion_logs.append(args)
+
+    async def get_shadow_gate_stats(self, model_version: str, horizon_minutes: int, label_schema_version: str) -> dict:
+        del horizon_minutes, label_schema_version
+        row = self.models[model_version]
+        metrics = row["metrics"]
+        return {
+            "total_count": 120,
+            "pass_count": int(metrics.get("total_pass_count", 80)),
+            "lift_vs_all_bps": float(metrics.get("lift_bps", 5.0)),
+            "pass_avg_net_return_bps": float(metrics.get("walk_forward_expectancy_bps", 5.0)),
+            "pass_precision": float(metrics.get("precision", 0.42)),
+            "quality": metrics.get("quality", "GOOD"),
+        }
+
+    async def get_returns_for_model(self, model_version: str, limit: int, horizon_minutes: int | None = None) -> list:
+        del limit, horizon_minutes
+        if model_version == "RULE_BASELINE_V1":
+            return [0.0] * 80
+        if model_version in self.models:
+            return [8.0] * 80
+        return []
+
+
+def _config() -> AutoPromotionConfig:
+    return AutoPromotionConfig(
+        enabled=True,
+        min_training_samples=500,
+        min_shadow_signals=50,
+        min_pass_count=20,
+        min_lift_bps=1.0,
+        min_pass_expectancy_bps=0.0,
+        min_wf_bps=0.0,
+        bootstrap_iterations=200,
+        min_bootstrap_samples=50,
     )
-    assert isinstance(decision, PromotionDecision)
-    assert decision.approved is True
-    assert decision.blocking_reasons == []
-    assert decision.version == "v1"
-    assert "lift_bps" in decision.metrics_snapshot
 
 
-# ---------------------------------------------------------------------------
-# evaluate_promotion — each individual criterion blocks
-# ---------------------------------------------------------------------------
-
-
-def test_promotion_blocked_wrong_status():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="CHAMPION",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
+@pytest.mark.asyncio
+async def test_best_challenger_uses_best_eligible_model_not_latest_weak() -> None:
+    journal = _Journal(
+        [
+            _model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0),
+            _model("good-old", wf_bps=6.0, lift_bps=5.0),
+            _model("weak-latest", quality="WEAK", wf_bps=-8.0, lift_bps=-2.0),
+        ]
     )
-    assert decision.approved is False
-    assert any("status_not_shadow_challenger" in r for r in decision.blocking_reasons)
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+
+    assert await engine.best_challenger() == "good-old"
 
 
-def test_promotion_blocked_insufficient_signals():
-    engine = _engine(min_signals=50)
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(total=30),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
-    )
-    assert decision.approved is False
-    assert any("insufficient_signals" in r for r in decision.blocking_reasons)
+@pytest.mark.asyncio
+async def test_should_promote_blocks_weak_challenger() -> None:
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION), _model("weak", quality="WEAK")])
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+
+    decision = await engine.should_promote(None, "weak")
+
+    assert decision.promote is False
+    assert any(reason.startswith("quality_not_GOOD") for reason in decision.reasons)
 
 
-def test_promotion_blocked_insufficient_lift():
-    engine = _engine(min_lift_bps=5.0)
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(lift=2.0),
-        champion_wf_bps=0.5,
-        bootstrap_result=_good_boot(),
-    )
-    assert decision.approved is False
-    assert any("insufficient_lift" in r for r in decision.blocking_reasons)
+@pytest.mark.asyncio
+async def test_promote_archives_champion_promotes_challenger_logs_and_reloads() -> None:
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), _model("challenger")])
+    reload_registry = AsyncMock()
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config(), reload_registry=reload_registry)
+
+    decision = await engine.promote("challenger")
+
+    assert decision.promote is True
+    assert journal.models["champion"]["status"] == ModelStatus.ARCHIVED
+    assert journal.models["challenger"]["status"] == ModelStatus.CHAMPION
+    assert journal.promotion_logs
+    assert json.loads(journal.promotion_logs[-1][2]) == ["criteria_met"]
+    snapshot = json.loads(journal.promotion_logs[-1][3])["snapshot"]
+    assert snapshot["champion"]["version"] == "champion"
+    assert snapshot["challenger"]["version"] == "challenger"
+    assert "walk_forward_bps" in snapshot["delta"]
+    reload_registry.assert_awaited_once()
 
 
-def test_promotion_blocked_weak_quality():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(quality="WEAK"),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
-    )
-    assert decision.approved is False
-    assert any("quality_not_good" in r for r in decision.blocking_reasons)
+@pytest.mark.asyncio
+async def test_should_promote_blocks_unstable_walk_forward_folds() -> None:
+    challenger = _model("unstable")
+    challenger["metrics"]["wf_positive_folds"] = 1
+    challenger["metrics"]["wf_std_bps"] = 40.0
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), challenger])
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+
+    decision = await engine.should_promote(None, "unstable")
+
+    assert decision.promote is False
+    assert any(reason.startswith("unstable_walk_forward_folds") for reason in decision.reasons)
+    assert any(reason.startswith("unstable_walk_forward_std") for reason in decision.reasons)
 
 
-def test_promotion_blocked_doesnt_beat_champion():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(lift=3.0),
-        champion_wf_bps=4.0,  # champion is better
-        bootstrap_result=_good_boot(),
-    )
-    assert decision.approved is False
-    assert any("not_better_than_champion" in r for r in decision.blocking_reasons)
+@pytest.mark.asyncio
+async def test_rollback_restores_previous_archived_champion() -> None:
+    champion = _model("bad-champion", status=ModelStatus.CHAMPION, wf_bps=-2.0)
+    archived = _model("old-champion", status=ModelStatus.ARCHIVED, wf_bps=4.0)
+    journal = _Journal([champion, archived])
+    reload_registry = AsyncMock()
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config(), reload_registry=reload_registry)
 
+    decision = await engine.rollback_if_needed()
 
-def test_promotion_blocked_bootstrap_not_significant():
-    engine = _engine(pvalue_threshold=0.05)
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(p=0.10),  # p >= 0.05
-    )
-    assert decision.approved is False
-    assert any("lift_not_significant" in r for r in decision.blocking_reasons)
-
-
-def test_promotion_blocked_bootstrap_none():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=None,
-    )
-    assert decision.approved is False
-    assert any("bootstrap_not_run" in r for r in decision.blocking_reasons)
-
-
-def test_promotion_multiple_blocking_reasons():
-    """All criteria fail simultaneously — blocking_reasons lists all of them."""
-    engine = _engine(min_signals=100)
-    decision = engine.evaluate_promotion(
-        challenger_version="v1",
-        challenger_status="VALIDATED",
-        gate_stats={"total_count": 5, "lift_vs_all_bps": -1.0, "quality": "WEAK"},
-        champion_wf_bps=10.0,
-        bootstrap_result=_good_boot(p=0.99),
-    )
-    assert decision.approved is False
-    assert len(decision.blocking_reasons) >= 4
-
-
-# ---------------------------------------------------------------------------
-# log_summary
-# ---------------------------------------------------------------------------
-
-
-def test_log_summary_approved():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v2",
-        challenger_status="SHADOW_CHALLENGER",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
-    )
-    summary = decision.log_summary()
-    assert "APPROVED" in summary
-    assert "v2" in summary
-
-
-def test_log_summary_rejected():
-    engine = _engine()
-    decision = engine.evaluate_promotion(
-        challenger_version="v2",
-        challenger_status="CHAMPION",
-        gate_stats=_good_gate(),
-        champion_wf_bps=1.5,
-        bootstrap_result=_good_boot(),
-    )
-    summary = decision.log_summary()
-    assert "REJECTED" in summary
-    assert "v2" in summary
-
-
-# ---------------------------------------------------------------------------
-# evaluate_degradation — healthy champion
-# ---------------------------------------------------------------------------
-
-
-def test_degradation_healthy():
-    engine = _engine(champion_degrade_min_signals=100, champion_min_lift_bps=-5.0)
-    deg = engine.evaluate_degradation(
-        champion_version="champ_v1",
-        gate_stats={
-            "total_count": 150,
-            "lift_vs_all_bps": 2.0,
-            "pass_avg_net_return_bps": 10.0,
-        },
-    )
-    assert isinstance(deg, DegradationDecision)
-    assert deg.should_rollback is False
-    assert deg.champion_version == "champ_v1"
-
-
-def test_degradation_insufficient_observations():
-    engine = _engine(champion_degrade_min_signals=100)
-    deg = engine.evaluate_degradation(
-        champion_version="champ_v1",
-        gate_stats={"total_count": 40, "lift_vs_all_bps": -10.0},
-    )
-    assert deg.should_rollback is False
-    assert "insufficient_observations" in deg.reason
-
-
-def test_degradation_lift_below_floor():
-    engine = _engine(champion_degrade_min_signals=50, champion_min_lift_bps=-5.0)
-    deg = engine.evaluate_degradation(
-        champion_version="champ_v1",
-        gate_stats={"total_count": 100, "lift_vs_all_bps": -8.0},
-    )
-    assert deg.should_rollback is True
-    assert "lift_degraded" in deg.reason
-
-
-def test_degradation_negative_pass_expectancy():
-    engine = _engine(
-        champion_degrade_min_signals=50,
-        champion_min_lift_bps=-5.0,
-        champion_min_pass_expectancy_bps=-20.0,
-    )
-    deg = engine.evaluate_degradation(
-        champion_version="champ_v1",
-        gate_stats={
-            "total_count": 100,
-            "lift_vs_all_bps": -3.0,  # above floor, won't trigger lift rollback
-            "pass_avg_net_return_bps": -25.0,  # below -20 bps
-        },
-    )
-    assert deg.should_rollback is True
-    assert "negative_pass_expectancy" in deg.reason
-
-
-def test_degradation_metrics_snapshot_populated():
-    engine = _engine(champion_degrade_min_signals=50)
-    deg = engine.evaluate_degradation(
-        champion_version="champ_v1",
-        gate_stats={"total_count": 80, "lift_vs_all_bps": 1.0},
-    )
-    assert "total_count" in deg.metrics_snapshot
-    assert "lift_bps" in deg.metrics_snapshot
-
-
-# ---------------------------------------------------------------------------
-# from_settings
-# ---------------------------------------------------------------------------
-
-
-def test_from_settings():
-    class FakeSettings:
-        MODEL_AUTO_PROMOTE_MIN_SIGNALS = 75
-        MODEL_AUTO_PROMOTE_MIN_LIFT_BPS = 2.5
-        MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD = 0.03
-        MODEL_CHAMPION_DEGRADE_MIN_SIGNALS = 200
-        MODEL_CHAMPION_MIN_LIFT_BPS = -3.0
-
-    engine = AutoPromotionEngine.from_settings(FakeSettings())  # type: ignore[arg-type]
-    assert engine.min_signals == 75
-    assert engine.min_lift_bps == 2.5
-    assert engine.pvalue_threshold == 0.03
-    assert engine.champion_degrade_min_signals == 200
-    assert engine.champion_min_lift_bps == -3.0
-
-
-def test_from_settings_defaults_for_missing_champion_fields():
-    """Settings without MODEL_CHAMPION_* still produce a valid engine via getattr fallback."""
-
-    class MinimalSettings:
-        MODEL_AUTO_PROMOTE_MIN_SIGNALS = 50
-        MODEL_AUTO_PROMOTE_MIN_LIFT_BPS = 1.0
-        MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD = 0.05
-
-    engine = AutoPromotionEngine.from_settings(MinimalSettings())  # type: ignore[arg-type]
-    assert engine.champion_degrade_min_signals == 100  # default
-    assert engine.champion_min_lift_bps == -5.0  # default
+    assert decision.rollback is True
+    assert journal.models["bad-champion"]["status"] == ModelStatus.ROLLED_BACK
+    assert journal.models["old-champion"]["status"] == ModelStatus.CHAMPION
+    reload_registry.assert_awaited_once()
