@@ -209,19 +209,26 @@ class ChallengerModel:
     def feature_schema_hash(self) -> str:
         return hashlib.sha256(json.dumps(sorted(self.feature_names)).encode()).hexdigest()[:16]
 
-    def predict(self, features: list[float]) -> ModelPrediction | None:
+    def predict(self, features: list[float], names: list[str] | None = None) -> ModelPrediction | None:
         """Score a feature vector. Returns None if model not fitted."""
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return None
         if self.feature_names and len(features) != len(self.feature_names):
-            log.warning(
-                "challenger.predict_feature_mismatch",
-                expected=len(self.feature_names),
-                got=len(features),
-                version=self.version,
-            )
-            return None
+            # If caller supplies feature names, try to extract the model's known subset.
+            # This handles schema evolution where the live pipeline gains new features
+            # before a retrained model that knows about them is available.
+            if names and len(names) == len(features) and set(self.feature_names).issubset(set(names)):
+                name_to_val = dict(zip(names, features))
+                features = [name_to_val[n] for n in self.feature_names]
+            else:
+                log.warning(
+                    "challenger.predict_feature_mismatch",
+                    expected=len(self.feature_names),
+                    got=len(features),
+                    version=self.version,
+                )
+                return None
         try:
             x = np.array(features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
@@ -471,24 +478,24 @@ class ModelRegistry:
     def challenger(self) -> ChallengerModel | None:
         return self._challenger
 
-    def score_shadow(self, features: list[float]) -> ModelPrediction | None:
+    def score_shadow(self, features: list[float], names: list[str] | None = None) -> ModelPrediction | None:
         """Score observationally with challenger first, then champion fallback."""
 
         model = self._challenger or self._champion
-        return model.predict(features) if model is not None else None
+        return model.predict(features, names) if model is not None else None
 
-    def score_live(self, features: list[float]) -> ModelPrediction | None:
+    def score_live(self, features: list[float], names: list[str] | None = None) -> ModelPrediction | None:
         """Score authoritatively with the compatible champion only."""
 
         model = self._champion
         if model is None or model.status != ModelStatus.CHAMPION:
             return None
-        return model.predict(features)
+        return model.predict(features, names)
 
-    def score(self, features: list[float]) -> ModelPrediction | None:
+    def score(self, features: list[float], names: list[str] | None = None) -> ModelPrediction | None:
         """Backward-compatible runtime alias: champion-only, fail-closed."""
 
-        return self.score_live(features)
+        return self.score_live(features, names)
 
     def partial_fit_challenger(self, features: list[float], label: int) -> None:
         if self._challenger is not None:

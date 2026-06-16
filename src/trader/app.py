@@ -3142,7 +3142,7 @@ class TradingApplication:
             # the auto-trainer rotates model versions, so per-version gate stats
             # (lift, paper gate) would otherwise stay at zero forever.
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
-                shadow_prediction = self._model_registry.score_shadow(vec.values)
+                shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
                 if shadow_prediction is not None:
                     self._candle_sampler_scored += 1
                     threshold = self._model_gate_threshold(None)
@@ -3770,7 +3770,7 @@ class TradingApplication:
             model_decision_meta: dict[str, Any] | None = None
             if settings.MODEL_ENABLED and settings.MODEL_ALLOW_LIVE_DECISIONS and self._model_registry is not None:
                 try:
-                    ml_pred = self._model_registry.score_live(vec.values)
+                    ml_pred = self._model_registry.score_live(vec.values, vec.feature_names)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None
@@ -3873,7 +3873,7 @@ class TradingApplication:
             if settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    shadow_prediction = self._model_registry.score_shadow(vec.values)
+                    shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
                     if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
                         shadow_gate_decision = None
@@ -3929,7 +3929,7 @@ class TradingApplication:
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
                 if settings.MODEL_GATE_CANARY_ENABLED:
                     try:
-                        live_prediction = self._model_registry.score_live(vec.values)
+                        live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)
                         if live_prediction is not None:
                             canary_threshold = self._model_gate_threshold(regime_ctx)
                             canary_gate_decision = (
