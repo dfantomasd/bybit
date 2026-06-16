@@ -3293,7 +3293,7 @@ class TradingApplication:
         In shadow mode the gate is skipped so virtual orders can accumulate training data.
         """
         assert self._settings is not None
-        if self._execution_engine is not None and self._execution_engine._shadow_mode:
+        if self._initial_shadow_mode():
             return False
         if not self._settings.BUCKET_BLOCK_ENABLED or not self._bucket_stats:
             return False
@@ -3321,7 +3321,7 @@ class TradingApplication:
         """
 
         assert self._settings is not None
-        if self._execution_engine is not None and self._execution_engine._shadow_mode:
+        if self._initial_shadow_mode():
             return False
         if not self._settings.SYMBOL_SIDE_BLOCK_ENABLED or not self._symbol_side_stats:
             return False
