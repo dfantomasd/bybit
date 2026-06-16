@@ -698,7 +698,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         if not candidate_results:
             raise RuntimeError("no trainable model candidate survived walk-forward validation")
 
-        min_positive_folds = min(3, len(folds))
+        min_positive_folds = min(int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", 2)), len(folds))
         eligible_results = [r for r in candidate_results if int(r.get("wf_positive_folds") or 0) >= min_positive_folds]
         selection_pool = eligible_results or candidate_results
 

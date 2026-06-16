@@ -457,7 +457,7 @@ class Settings(BaseSettings):
     model is better than no model — we can retrain again once more samples accumulate."""
     MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
-    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
+    MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 15
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
@@ -472,7 +472,7 @@ class Settings(BaseSettings):
     """Minimum average net return (bps) among challenger GATE_PASS outcomes."""
     MODEL_AUTO_PROMOTE_MIN_WF_BPS: float = 0.0
     """Minimum walk-forward expectancy (bps) stored in challenger training metrics."""
-    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 3
+    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 2
     """Minimum positive walk-forward folds required before auto-promotion."""
     MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS: float = 25.0
     """Maximum walk-forward fold standard deviation allowed before auto-promotion."""
