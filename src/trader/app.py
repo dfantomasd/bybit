@@ -38,6 +38,7 @@ import uvicorn
 
 from trader.domain.enums import SystemStatus, TradingMode
 from trader.domain.errors import RateLimitError
+from trader.domain.models import FeatureVector
 from trader.monitoring.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -1207,6 +1208,160 @@ class TradingApplication:
 
         self._model_gate_recent_blocks.append(True)
         return True, f"score_below_threshold:{score:.3f}<{threshold:.3f}"
+
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _utc_age_seconds(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return float(max(0.0, (datetime.now(tz=UTC) - value.astimezone(UTC)).total_seconds()))
+
+    def _economic_readiness_report(
+        self,
+        *,
+        db_diag: dict[str, Any],
+        runtime_diag: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return an operator-facing readiness verdict for real-money modes."""
+        assert self._settings is not None
+        runtime_diag = runtime_diag or {}
+        issues: list[str] = []
+        metrics: dict[str, Any] = {}
+
+        if not db_diag.get("connected"):
+            issues.append("db_not_connected")
+
+        latest_age = self._utc_age_seconds(db_diag.get("latest_candle_1m"))
+        metrics["latest_candle_age_s"] = latest_age
+        if latest_age is None or latest_age > 600:
+            issues.append(f"stale_1m_candle:{latest_age}")
+
+        active_symbols = runtime_diag.get("active_symbols") or []
+        metrics["active_symbols"] = len(active_symbols)
+        if len(active_symbols) < 3:
+            issues.append(f"insufficient_active_symbols:{len(active_symbols)}")
+
+        feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
+        metrics["feature_snapshots"] = feature_snapshots
+        if feature_snapshots < 1000:
+            issues.append(f"insufficient_feature_snapshots:{feature_snapshots}")
+
+        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
+        metrics["training_eligible_15m"] = trainable_15m
+        if trainable_15m < 1000:
+            issues.append(f"insufficient_labelled_15m:{trainable_15m}")
+
+        prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
+        metrics["prediction_outcomes"] = prediction_outcomes
+        if prediction_outcomes < 1000:
+            issues.append(f"insufficient_prediction_outcomes:{prediction_outcomes}")
+
+        active_model = self._dict_or_empty(db_diag.get("active_model_version"))
+        model_metrics = self._dict_or_empty(active_model.get("metrics"))
+        model_status = str(active_model.get("status") or "")
+        metrics["active_model_version"] = active_model.get("version")
+        metrics["active_model_status"] = model_status or None
+        if not active_model.get("version"):
+            issues.append("missing_active_model")
+        if model_status != "CHAMPION":
+            issues.append(f"active_model_not_champion:{model_status or 'none'}")
+
+        expected_quality = str(self._settings.MODEL_GATE_CANARY_MIN_QUALITY).upper()
+        quality = str(model_metrics.get("quality") or "").upper()
+        metrics["model_quality"] = quality or None
+        if expected_quality and quality != expected_quality:
+            issues.append(f"model_quality_not_{expected_quality.lower()}:{quality or 'none'}")
+
+        walk_forward = self._float_or_none(model_metrics.get("walk_forward_expectancy_bps"))
+        metrics["walk_forward_expectancy_bps"] = walk_forward
+        if walk_forward is None or walk_forward <= 0:
+            issues.append(f"non_positive_walk_forward_bps:{walk_forward}")
+
+        gate = self._dict_or_empty(db_diag.get("shadow_gate_15m"))
+        gate_total = int(gate.get("total_count") or 0)
+        metrics["gate_total_count"] = gate_total
+        if gate_total < int(self._settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS):
+            issues.append(f"insufficient_gate_observations:{gate_total}")
+        gate_lift = self._float_or_none(gate.get("lift_vs_all_bps"))
+        metrics["gate_lift_vs_all_bps"] = gate_lift
+        if gate_lift is None or gate_lift < float(self._settings.MODEL_GATE_CANARY_MIN_LIFT_BPS):
+            issues.append(f"insufficient_gate_lift_bps:{gate_lift}")
+
+        paper = self._dict_or_empty(db_diag.get("paper_pnl_15m"))
+        paper_gate = self._dict_or_empty(paper.get("model_gate"))
+        paper_count = int(paper_gate.get("count") or 0)
+        paper_total_bps = self._float_or_none(paper_gate.get("total_bps"))
+        metrics["paper_gate_count"] = paper_count
+        metrics["paper_gate_total_bps"] = paper_total_bps
+        if paper_count < 20:
+            issues.append(f"insufficient_paper_gate_trades:{paper_count}")
+        if paper_total_bps is None or paper_total_bps <= 0:
+            issues.append(f"non_positive_paper_gate_bps:{paper_total_bps}")
+
+        return {
+            "ready": not issues,
+            "mode": self._settings.TRADING_MODE.value,
+            "issues": issues,
+            "metrics": metrics,
+        }
+
+    async def _enforce_economic_readiness_for_active(self) -> None:
+        """Fail closed before real-money modes when paper evidence is not ready."""
+        assert self._settings is not None
+        if self._settings.TRADING_MODE not in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+            return
+        if not self._settings.ECONOMIC_READINESS_REQUIRED_FOR_ACTIVE:
+            log.warning(
+                "economic_readiness_gate_disabled_for_active_mode",
+                trading_mode=self._settings.TRADING_MODE.value,
+            )
+            return
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            log.critical("economic_readiness_blocked", issues=["trade_journal_unavailable"])
+            raise SystemExit(1)
+
+        db_diag = await self._trade_journal.get_db_diagnostics()
+        issues = self._economic_readiness_report(
+            db_diag=db_diag,
+            runtime_diag=self.get_diagnostics(),
+        )["issues"]
+        if issues:
+            log.critical(
+                "economic_readiness_blocked",
+                trading_mode=self._settings.TRADING_MODE.value,
+                issues=issues,
+            )
+            raise SystemExit(1)
+        log.info("economic_readiness_passed", trading_mode=self._settings.TRADING_MODE.value)
+
+    @staticmethod
+    def _feature_values_for_side(vec: FeatureVector, side: str) -> tuple[list[str], list[float]]:
+        """Return model features augmented with the proposed trade direction."""
+        normalized_side = str(side).strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            raise ValueError(f"unsupported proposal side for ML features: {side!r}")
+        by_name = dict(zip(vec.feature_names, vec.values, strict=True))
+        by_name["proposal_side"] = 1.0 if normalized_side == "buy" else -1.0
+        names = sorted(by_name.keys())
+        values = [float(by_name[name]) for name in names]
+        return names, values
 
     def _runtime_settings(self) -> dict[str, Any]:
         return {
@@ -3178,6 +3333,7 @@ class TradingApplication:
             # ema_* features are normalised distances to close; their ordering
             # matches the raw EMA ordering, so this is the rule trend direction.
             side = "Buy" if ema9 > ema21 else "Sell"
+            model_feature_names, model_feature_values = self._feature_values_for_side(vec, side)
 
             candles = self._candle_store.confirmed(symbol, interval) if self._candle_store else []
             if not candles:
@@ -3188,14 +3344,14 @@ class TradingApplication:
                 return
             self._last_candle_sample_at[symbol] = candle_open_time
 
-            schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+            schema_hash = hashlib.sha256(json.dumps(model_feature_names).encode()).hexdigest()[:16]
             snapshot_id = await self._trade_journal.record_feature_snapshot(
                 symbol=symbol,
                 interval=interval,
                 candle_open_time=candle_open_time,
                 feature_schema_hash=schema_hash,
-                feature_names=vec.feature_names,
-                feature_values=vec.values,
+                feature_names=model_feature_names,
+                feature_values=model_feature_values,
             )
             if not snapshot_id:
                 return
@@ -3217,7 +3373,7 @@ class TradingApplication:
             # the auto-trainer rotates model versions, so per-version gate stats
             # (lift, paper gate) would otherwise stay at zero forever.
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
-                shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
+                shadow_prediction = self._model_registry.score_shadow(model_feature_values, model_feature_names)
                 if shadow_prediction is not None:
                     self._candle_sampler_scored += 1
                     threshold = self._model_gate_threshold(None)
@@ -4055,6 +4211,7 @@ class TradingApplication:
 
             self._record_diag("signals_emitted")
             model_decision_meta: dict[str, Any] | None = None
+            model_feature_names, model_feature_values = self._feature_values_for_side(vec, proposal.side.value)
 
             async def _record_signal(blocked: str | None = None) -> None:
                 if self._trade_journal is not None:
@@ -4094,7 +4251,7 @@ class TradingApplication:
             # proposal's own direction, so a high score IS the model's directional view.
             if settings.MODEL_ENABLED and settings.MODEL_ALLOW_LIVE_DECISIONS and self._model_registry is not None:
                 try:
-                    ml_pred = self._model_registry.score_live(vec.values, vec.feature_names)
+                    ml_pred = self._model_registry.score_live(model_feature_values, model_feature_names)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None
@@ -4137,7 +4294,7 @@ class TradingApplication:
             snapshot_id = ""
             if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
                 try:
-                    _schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+                    _schema_hash = hashlib.sha256(json.dumps(model_feature_names).encode()).hexdigest()[:16]
                     _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
                     _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
                     snapshot_id = await self._trade_journal.record_feature_snapshot(
@@ -4145,8 +4302,8 @@ class TradingApplication:
                         interval=_WS_INTERVAL,
                         candle_open_time=_candle_open_time,
                         feature_schema_hash=_schema_hash,
-                        feature_names=vec.feature_names,
-                        feature_values=vec.values,
+                        feature_names=model_feature_names,
+                        feature_values=model_feature_values,
                     )
                 except Exception as _snap_exc:
                     log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
@@ -4189,7 +4346,7 @@ class TradingApplication:
             if settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
+                    shadow_prediction = self._model_registry.score_shadow(model_feature_values, model_feature_names)
                     if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
                         shadow_gate_decision = None
@@ -4601,6 +4758,8 @@ class TradingApplication:
 
             # Give features a moment to compute from seeded data
             await asyncio.sleep(2.0)
+
+            await self._enforce_economic_readiness_for_active()
 
             await self._start_strategy_loop()
 

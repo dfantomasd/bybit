@@ -11,6 +11,7 @@ Covers:
 - test_entry_rate_limit
 - test_same_side_limit
 - test_db_required_for_canary (config gate)
+- test_economic_readiness_blocks_canary_with_weak_paper_edge
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, OrderStatus, RiskDecisionStatus, RiskProfile
-from trader.domain.models import InstrumentInfo, TradeProposal
+from trader.domain.models import FeatureVector, InstrumentInfo, TradeProposal
 from trader.exchange.reconciliation import ReconciliationService
 from trader.execution.engine import ExecutionEngine
 from trader.risk.circuit_breakers import CircuitBreakerManager
@@ -104,6 +105,120 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
     assert app._model_gate_quality["best_threshold"] == 0.61
     assert app._model_gate_quality["gate_total_count"] == 77
     assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
+
+
+def test_model_features_include_proposal_side() -> None:
+    """Directional labels must expose the proposed side as an explicit ML feature."""
+    from trader.app import TradingApplication
+
+    vec = FeatureVector(
+        symbol="DOGEUSDT",
+        timestamp=datetime.now(tz=UTC),
+        values=[0.2, 0.7],
+        feature_names=["rsi_14", "volume_zscore"],
+        quality_score=1.0,
+        lookback_bars=100,
+    )
+
+    buy_names, buy_values = TradingApplication._feature_values_for_side(vec, "Buy")
+    sell_names, sell_values = TradingApplication._feature_values_for_side(vec, "Sell")
+
+    side_idx = buy_names.index("proposal_side")
+    assert buy_names == sell_names
+    assert buy_values[side_idx] == 1.0
+    assert sell_values[side_idx] == -1.0
+
+
+def test_model_features_reject_unknown_proposal_side() -> None:
+    """Side-aware ML features must fail fast instead of silently treating bad side as Sell."""
+    from trader.app import TradingApplication
+
+    vec = FeatureVector(
+        symbol="DOGEUSDT",
+        timestamp=datetime.now(tz=UTC),
+        values=[0.2],
+        feature_names=["rsi_14"],
+        quality_score=1.0,
+        lookback_bars=100,
+    )
+
+    with pytest.raises(ValueError, match="unsupported proposal side"):
+        TradingApplication._feature_values_for_side(vec, "Hold")
+
+
+def _active_settings() -> MagicMock:
+    from trader.domain.enums import TradingMode
+
+    settings = MagicMock()
+    settings.TRADING_MODE = TradingMode.CANARY_LIVE
+    settings.ECONOMIC_READINESS_REQUIRED_FOR_ACTIVE = True
+    settings.MODEL_GATE_CANARY_MIN_QUALITY = "GOOD"
+    settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS = 50
+    settings.MODEL_GATE_CANARY_MIN_LIFT_BPS = 0.0
+    return settings
+
+
+@pytest.mark.asyncio
+async def test_economic_readiness_blocks_canary_with_weak_paper_edge() -> None:
+    """CANARY_LIVE must fail closed when model/paper evidence is not positive."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+    app.get_diagnostics = MagicMock(return_value={"active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"]})  # type: ignore[method-assign]
+    app._trade_journal = MagicMock()
+    app._trade_journal.is_enabled = True
+    app._trade_journal.get_db_diagnostics = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_15m": 2500,
+            "active_model_version": {
+                "version": "v_bad",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "WEAK", "walk_forward_expectancy_bps": -1.0},
+            },
+            "shadow_gate_15m": {"total_count": 100, "lift_vs_all_bps": 1.0},
+            "paper_pnl_15m": {"model_gate": {"count": 6, "total_bps": -12.5}},
+        }
+    )
+
+    with pytest.raises(SystemExit) as exc_info:
+        await app._enforce_economic_readiness_for_active()
+
+    assert exc_info.value.code == 1
+
+
+@pytest.mark.asyncio
+async def test_economic_readiness_allows_canary_with_proven_edge() -> None:
+    """CANARY_LIVE startup can proceed when the active champion has enough positive paper evidence."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+    app.get_diagnostics = MagicMock(return_value={"active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"]})  # type: ignore[method-assign]
+    app._trade_journal = MagicMock()
+    app._trade_journal.is_enabled = True
+    app._trade_journal.get_db_diagnostics = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_15m": 2500,
+            "active_model_version": {
+                "version": "v_good",
+                "status": "CHAMPION",
+                "metrics": {"quality": "GOOD", "walk_forward_expectancy_bps": 2.5},
+            },
+            "shadow_gate_15m": {"total_count": 120, "lift_vs_all_bps": 1.2},
+            "paper_pnl_15m": {"model_gate": {"count": 35, "total_bps": 18.0}},
+        }
+    )
+
+    await app._enforce_economic_readiness_for_active()
 
 
 def _instrument(min_notional: str = "5") -> InstrumentInfo:
@@ -341,8 +456,8 @@ async def test_entry_rate_limit() -> None:
 
 @pytest.mark.asyncio
 async def test_same_side_limit() -> None:
-    """MAX_SAME_SIDE_POSITIONS=1 should block second Buy when one Buy already open."""
-    engine, adapter, _ = _make_engine(shadow=True, max_same_side=1)
+    """MAX_SAME_SIDE_POSITIONS=1 should block second Buy in live mode."""
+    engine, adapter, _ = _make_engine(shadow=False, max_same_side=1)
 
     # Inject an open Buy position on a different symbol
     engine._open_positions["BTCUSDT"] = {
@@ -355,6 +470,26 @@ async def test_same_side_limit() -> None:
     capital = Decimal("1000")
     result = await engine.submit(prop, capital=capital, available_balance=capital)
     assert result is None  # blocked by same-side limit
+    assert not adapter.place_order.called
+
+
+@pytest.mark.asyncio
+async def test_shadow_same_side_limit_does_not_block_simulation() -> None:
+    """Shadow mode must keep collecting proposal/risk statistics even with same-side paper positions."""
+    engine, adapter, _ = _make_engine(shadow=True, max_same_side=1)
+
+    engine._open_positions["BTCUSDT"] = {
+        "side": OrderSide.BUY,
+        "size": Decimal("1"),
+        "entry_price": Decimal("50000"),
+    }
+
+    prop = _proposal("DOGEUSDT", "Buy")
+    capital = Decimal("1000")
+    result = await engine.submit(prop, capital=capital, available_balance=capital)
+
+    assert result is not None
+    assert not adapter.place_order.called
 
 
 # ---------------------------------------------------------------------------

@@ -79,3 +79,53 @@ def test_equal_priority_conflict_is_blocked() -> None:
     )
 
     assert ensemble.evaluate_all(_vector(), 10.0, 1000.0) is None
+
+
+def test_confirmation_required_blocks_commodity_strategy_alone() -> None:
+    ensemble = StrategyEnsemble(
+        strategies=[
+            _Strategy("ema_crossover_v1", OrderSide.BUY, 0.9),
+        ],
+        min_confidence=0.5,
+        strategy_priorities={"ema_crossover_v1": 1},
+        confirmation_required_for={"ema_crossover_v1"},
+        confirmation_sources={"order_flow_v1"},
+    )
+
+    assert ensemble.evaluate_all(_vector(), 10.0, 1000.0) is None
+
+
+def test_confirmation_required_allows_confirmed_commodity_strategy() -> None:
+    ensemble = StrategyEnsemble(
+        strategies=[
+            _Strategy("ema_crossover_v1", OrderSide.BUY, 0.8),
+            _Strategy("order_flow_v1", OrderSide.BUY, 0.6),
+        ],
+        min_confidence=0.5,
+        strategy_priorities={"ema_crossover_v1": 10, "order_flow_v1": 1},
+        confirmation_required_for={"ema_crossover_v1"},
+        confirmation_sources={"order_flow_v1"},
+    )
+
+    proposal = ensemble.evaluate_all(_vector(), 10.0, 1000.0)
+
+    assert proposal is not None
+    assert proposal.strategy_id == "ema_crossover_v1"
+    assert proposal.confidence > 0.8
+
+
+def test_independent_alpha_strategy_can_trade_without_confirmation() -> None:
+    ensemble = StrategyEnsemble(
+        strategies=[
+            _Strategy("order_flow_v1", OrderSide.SELL, 0.6),
+        ],
+        min_confidence=0.5,
+        strategy_priorities={"order_flow_v1": 10},
+        confirmation_required_for={"ema_crossover_v1", "scalp_micro_v1"},
+        confirmation_sources={"order_flow_v1"},
+    )
+
+    proposal = ensemble.evaluate_all(_vector(), 10.0, 1000.0)
+
+    assert proposal is not None
+    assert proposal.strategy_id == "order_flow_v1"

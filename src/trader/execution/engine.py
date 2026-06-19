@@ -228,11 +228,11 @@ class ExecutionEngine:
             if self._pending_entry_count >= self._max_concurrent_pending:
                 return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
 
-        same_side_count = sum(
-            1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
-        )
-        if same_side_count >= self._max_same_side:
-            return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
+            same_side_count = sum(
+                1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
+            )
+            if same_side_count >= self._max_same_side:
+                return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
 
         return None
 
@@ -593,7 +593,7 @@ class ExecutionEngine:
     # Instrument info
     # ------------------------------------------------------------------
 
-    def update_ticker_turnover(self, symbol: str, turnover_24h: "Decimal") -> None:
+    def update_ticker_turnover(self, symbol: str, turnover_24h: Decimal) -> None:
         """Patch cached InstrumentInfo with fresh 24h turnover from a WS ticker event."""
         cached = self._instrument_cache.get(symbol)
         if cached is None:
@@ -1012,15 +1012,18 @@ class ExecutionEngine:
                 pass
         _t_before_risk = datetime.now(UTC)
         try:
-            decision = await self._risk_manager.evaluate(
-                proposal=proposal,
-                capital=capital,
-                available_balance=available_balance,
-                instrument_info=instrument_info,
-                feature_vector=feature_vector,
-                regime_context=regime_context,
-                spread=spread,
-                atr=atr,
+            decision = cast(
+                RiskDecision,
+                await self._risk_manager.evaluate(
+                    proposal=proposal,
+                    capital=capital,
+                    available_balance=available_balance,
+                    instrument_info=instrument_info,
+                    feature_vector=feature_vector,
+                    regime_context=regime_context,
+                    spread=spread,
+                    atr=atr,
+                ),
             )
         except Exception as exc:
             log.error(

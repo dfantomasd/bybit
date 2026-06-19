@@ -490,6 +490,8 @@ class Settings(BaseSettings):
     """Rollback CHAMPION when recent model return drawdown exceeds this bps limit."""
     MODEL_CHAMPION_MIN_PAPER_GATE_COUNT: int = 50
     """Minimum paper-gate sample count required for walk-forward champion selection."""
+    ECONOMIC_READINESS_REQUIRED_FOR_ACTIVE: bool = True
+    """Require positive model/paper evidence before CANARY_LIVE or LIVE startup."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
