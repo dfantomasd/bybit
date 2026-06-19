@@ -500,16 +500,21 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             elif len(v) != expected_vector_size:
                 raise RuntimeError("mixed feature vector lengths in selected training window")
 
+            side = str(row["strategy_signal"])
+            if side not in {"Buy", "Sell"}:
+                raise RuntimeError(f"unsupported strategy signal in training data: {side!r}")
+
             current_names = row["feature_names"]
             parsed_names = json.loads(current_names) if isinstance(current_names, str) else list(current_names)
+            if "proposal_side" not in parsed_names:
+                by_name = dict(zip(parsed_names, v, strict=True))
+                by_name["proposal_side"] = 1.0 if side == "Buy" else -1.0
+                parsed_names = sorted(by_name.keys())
+                v = [float(by_name[name]) for name in parsed_names]
             if not feature_names:
                 feature_names = parsed_names
             elif parsed_names != feature_names:
                 raise RuntimeError("mixed feature names or order in selected training window")
-
-            side = str(row["strategy_signal"])
-            if side not in {"Buy", "Sell"}:
-                raise RuntimeError(f"unsupported strategy signal in training data: {side!r}")
 
             x_list.append(v)
             returns_list.append(float(row["net_return_bps"] or 0.0))
@@ -661,6 +666,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             model_type=str(best["model_type"]),
             model_params=dict(best.get("model_params") or {}),
         )
+        model_feature_schema_hash = model.feature_schema_hash
 
         # The saved artifact is trained on all usable samples with the candidate
         # selected only from out-of-sample walk-forward metrics.
@@ -715,7 +721,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         stored_metrics = metrics | {
             "features": len(feature_names),
             "model_type": model.model_type,
-            "feature_schema_hash": feature_schema_hash,
+            "feature_schema_hash": model_feature_schema_hash,
+            "source_feature_schema_hash": feature_schema_hash,
             "horizon_minutes": horizon_minutes,
             "label_bps_threshold": selected_label_threshold,
             "requested_label_bps_threshold": label_bps_threshold,
@@ -741,7 +748,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             version,
             ModelStatus.SHADOW_CHALLENGER,
             model.training_samples,
-            feature_schema_hash,
+            model_feature_schema_hash,
             artifact,
             json.dumps(stored_metrics),
             run_started,

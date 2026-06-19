@@ -12,7 +12,7 @@ from __future__ import annotations
 import traceback
 from contextvars import ContextVar
 from datetime import datetime, timedelta
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -474,4 +474,5 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 def install_directional_trade_journal() -> None:
     """Install the directional implementation for existing import paths."""
 
-    _base_module.TradeJournal = DirectionalTradeJournal
+    base_module = cast(Any, _base_module)
+    base_module.TradeJournal = DirectionalTradeJournal

@@ -87,6 +87,8 @@ class TradeJournal:
 
     def write_health(self) -> dict[str, Any]:
         """Return write-health snapshot for observability and safety gates."""
+        last_read_error_at = cast(datetime | None, getattr(self, "_last_read_error_at", None))
+        last_connect_error_at = cast(datetime | None, getattr(self, "_last_connect_error_at", None))
         return {
             "healthy": self.durable_state_healthy,
             "consecutive_write_errors": self._consecutive_write_errors,
@@ -95,12 +97,10 @@ class TradeJournal:
             ),
             "last_write_error_at": (self._last_write_error_at.isoformat() if self._last_write_error_at else None),
             "last_write_error": getattr(self, "_last_write_error", None),
-            "last_read_error_at": (
-                self._last_read_error_at.isoformat() if getattr(self, "_last_read_error_at", None) else None
-            ),
+            "last_read_error_at": last_read_error_at.isoformat() if last_read_error_at is not None else None,
             "last_read_error": getattr(self, "_last_read_error", None),
             "last_connect_error_at": (
-                self._last_connect_error_at.isoformat() if getattr(self, "_last_connect_error_at", None) else None
+                last_connect_error_at.isoformat() if last_connect_error_at is not None else None
             ),
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
@@ -684,7 +684,7 @@ class TradeJournal:
             datetime.now(tz=UTC),
         )
 
-    async def record_transaction_log_entries(self, entries: list[dict]) -> int:
+    async def record_transaction_log_entries(self, entries: list[dict[str, Any]]) -> int:
         """Persist Bybit transaction log entries. Returns count inserted."""
         if not self.is_enabled or not entries:
             return 0
@@ -2523,6 +2523,10 @@ class TradeJournal:
                     equity = 0.0
                     peak = 0.0
                     max_drawdown = 0.0
+                    wins = [ret for ret in returns if ret > 0]
+                    losses = [ret for ret in returns if ret < 0]
+                    gross_profit = sum(wins)
+                    gross_loss = abs(sum(losses))
                     for ret in returns:
                         equity += ret
                         peak = max(peak, equity)
@@ -2532,6 +2536,14 @@ class TradeJournal:
                         "avg_bps": (sum(returns) / len(returns)) if returns else None,
                         "total_bps": sum(returns),
                         "max_drawdown_bps": max_drawdown,
+                        "win_rate": (len(wins) / len(returns)) if returns else None,
+                        "profit_factor": (
+                            (gross_profit / gross_loss)
+                            if gross_loss > 0
+                            else (None if gross_profit <= 0 else float("inf"))
+                        ),
+                        "avg_win_bps": (gross_profit / len(wins)) if wins else None,
+                        "avg_loss_bps": (sum(losses) / len(losses)) if losses else None,
                     }
 
                 result["paper_pnl_15m"] = {
@@ -2772,7 +2784,7 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return await conn.fetch(query, *args)
+                return cast(list[asyncpg.Record], await conn.fetch(query, *args))
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

@@ -114,7 +114,12 @@ class AutoPromotionEngine:
         *,
         # --- Promotion criteria ---
         min_signals: int = 50,
+        min_gate_passes: int = 20,
         min_lift_bps: float = 1.0,
+        min_pass_expectancy_bps: float = 0.0,
+        min_paper_trades: int = 20,
+        min_paper_total_bps: float = 0.0,
+        max_paper_drawdown_bps: float = -50.0,
         pvalue_threshold: float = 0.05,
         # --- Champion degradation criteria ---
         champion_degrade_min_signals: int = 100,
@@ -122,17 +127,27 @@ class AutoPromotionEngine:
         champion_min_pass_expectancy_bps: float = -20.0,
     ) -> None:
         self.min_signals = min_signals
+        self.min_gate_passes = min_gate_passes
         self.min_lift_bps = min_lift_bps
+        self.min_pass_expectancy_bps = min_pass_expectancy_bps
+        self.min_paper_trades = min_paper_trades
+        self.min_paper_total_bps = min_paper_total_bps
+        self.max_paper_drawdown_bps = max_paper_drawdown_bps
         self.pvalue_threshold = pvalue_threshold
         self.champion_degrade_min_signals = champion_degrade_min_signals
         self.champion_min_lift_bps = champion_min_lift_bps
         self.champion_min_pass_expectancy_bps = champion_min_pass_expectancy_bps
 
     @classmethod
-    def from_settings(cls, settings: "Settings") -> "AutoPromotionEngine":
+    def from_settings(cls, settings: Settings) -> AutoPromotionEngine:
         return cls(
             min_signals=max(10, int(settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS)),
+            min_gate_passes=max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_GATE_PASSES", 20))),
             min_lift_bps=float(settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS),
+            min_pass_expectancy_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS", 0.0)),
+            min_paper_trades=max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_PAPER_TRADES", 20))),
+            min_paper_total_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_PAPER_TOTAL_BPS", 0.0)),
+            max_paper_drawdown_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MAX_PAPER_DRAWDOWN_BPS", -50.0)),
             pvalue_threshold=float(settings.MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD),
             champion_degrade_min_signals=max(
                 10, int(getattr(settings, "MODEL_CHAMPION_DEGRADE_MIN_SIGNALS", 100))
@@ -150,6 +165,7 @@ class AutoPromotionEngine:
         challenger_version: str,
         challenger_status: str,
         gate_stats: dict[str, Any],
+        paper_stats: dict[str, Any] | None = None,
         champion_wf_bps: float,
         bootstrap_result: _BootstrapResult | None,
     ) -> PromotionDecision:
@@ -169,18 +185,49 @@ class AutoPromotionEngine:
             blocking.append(f"status_not_shadow_challenger:{challenger_status}")
 
         total_count = int(gate_stats.get("total_count") or 0)
+        pass_count = int(gate_stats.get("pass_count") or 0)
         lift_bps = float(gate_stats.get("lift_vs_all_bps") or 0.0)
+        pass_expectancy_raw = gate_stats.get("pass_avg_net_return_bps")
+        pass_expectancy_bps = float(pass_expectancy_raw) if pass_expectancy_raw is not None else None
         quality = str(gate_stats.get("quality") or "").upper()
+        paper_required = paper_stats is not None
+        resolved_paper_stats: dict[str, Any] = paper_stats or {}
+        paper_gate_value = resolved_paper_stats.get("model_gate")
+        paper_gate: dict[str, Any] = (
+            paper_gate_value if isinstance(paper_gate_value, dict) else resolved_paper_stats
+        )
+        paper_count = int(paper_gate.get("count") or 0)
+        paper_total_bps = float(paper_gate.get("total_bps") or 0.0)
+        paper_drawdown_bps = float(paper_gate.get("max_drawdown_bps") or 0.0)
 
         # B — Observations
         if total_count < self.min_signals:
             blocking.append(f"insufficient_signals:{total_count}<{self.min_signals}")
+        if pass_count < self.min_gate_passes:
+            blocking.append(f"insufficient_gate_passes:{pass_count}<{self.min_gate_passes}")
 
         # C — Lift and quality
         if lift_bps < self.min_lift_bps:
             blocking.append(f"insufficient_lift:{lift_bps:.2f}<{self.min_lift_bps:.2f}")
+        if pass_expectancy_bps is None or pass_expectancy_bps < self.min_pass_expectancy_bps:
+            blocking.append(
+                f"insufficient_pass_expectancy:{pass_expectancy_bps}<"
+                f"{self.min_pass_expectancy_bps:.2f}"
+            )
         if quality != "GOOD":
             blocking.append(f"quality_not_good:{quality or 'UNKNOWN'}")
+
+        # C2 — Paper economics must be net positive, not just statistically pretty.
+        if paper_required:
+            if paper_count < self.min_paper_trades:
+                blocking.append(f"insufficient_paper_trades:{paper_count}<{self.min_paper_trades}")
+            if paper_total_bps <= self.min_paper_total_bps:
+                blocking.append(f"insufficient_paper_total:{paper_total_bps:.2f}<={self.min_paper_total_bps:.2f}")
+            if paper_drawdown_bps < self.max_paper_drawdown_bps:
+                blocking.append(
+                    f"paper_drawdown_too_deep:{paper_drawdown_bps:.2f}<"
+                    f"{self.max_paper_drawdown_bps:.2f}"
+                )
 
         # D — Must beat champion
         if lift_bps <= champion_wf_bps:
@@ -199,7 +246,12 @@ class AutoPromotionEngine:
         approved = len(blocking) == 0
         snap: dict[str, Any] = {
             "total_count": total_count,
+            "pass_count": pass_count,
             "lift_bps": round(lift_bps, 4),
+            "pass_expectancy_bps": round(pass_expectancy_bps, 4) if pass_expectancy_bps is not None else None,
+            "paper_count": paper_count,
+            "paper_total_bps": round(paper_total_bps, 4),
+            "paper_drawdown_bps": round(paper_drawdown_bps, 4),
             "quality": quality,
             "champion_wf_bps": round(champion_wf_bps, 4),
             "bootstrap_p_value": (

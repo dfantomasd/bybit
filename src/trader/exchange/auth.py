@@ -6,6 +6,8 @@ import hashlib
 import hmac
 import time
 
+from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
+
 # ---------------------------------------------------------------------------
 # HMAC-SHA256 Authenticator
 # ---------------------------------------------------------------------------
@@ -71,16 +73,20 @@ class RSAAuthenticator:
     def __init__(self, api_key: str, private_key_pem: str) -> None:
         from cryptography.hazmat.primitives import hashes, serialization
         from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.asymmetric.rsa import RSAPrivateKey
 
         self._api_key = api_key
         self._padding = padding.PKCS1v15()
         self._hash_algo = hashes.SHA256()
 
         # Load private key once at init time
-        self._private_key = serialization.load_pem_private_key(
+        private_key = serialization.load_pem_private_key(
             private_key_pem.encode("utf-8"),
             password=None,
         )
+        if not isinstance(private_key, RSAPrivateKey):
+            raise ValueError("RSAAuthenticator requires an RSA private key")
+        self._private_key: RSAPrivateKey = private_key
 
     def sign(self, timestamp: int, recv_window: int, params: str) -> str:
         """Return base64-encoded RSA-SHA256 signature.

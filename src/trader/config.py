@@ -164,6 +164,17 @@ class Settings(BaseSettings):
         "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
     )
     """Higher-priority strategies win ensemble conflicts when directions disagree."""
+    STRATEGY_CONFIRMATION_ENABLED: bool = True
+    """Require commodity strategies to be confirmed by an independent alpha source."""
+    STRATEGY_CONFIRMATION_REQUIRED_FOR: str = "ema_crossover_v1,scalp_micro_v1"
+    """CSV strategy IDs that cannot trade alone when confirmation is enabled."""
+    STRATEGY_CONFIRMATION_SOURCES: str = (
+        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1"
+    )
+    """CSV strategy IDs accepted as independent confirmation sources."""
+    STRATEGY_MIN_CONFIRMATION_SOURCES: int = 1
+    """Minimum number of independent confirming sources required."""
 
     # ------------------------------------------------------------------
     # Per-candle training sampler
@@ -376,6 +387,8 @@ class Settings(BaseSettings):
     """In CANARY_LIVE/LIVE modes, block new entries if TradeJournal is unavailable."""
     DURABLE_ORDER_STATE_REQUIRED_FOR_ACTIVE: bool = True
     """In CANARY_LIVE/LIVE modes, block new entries if durable order state is unavailable."""
+    ECONOMIC_READINESS_REQUIRED_FOR_ACTIVE: bool = True
+    """In CANARY_LIVE/LIVE modes, block startup until paper/gate diagnostics show positive edge."""
 
     # ------------------------------------------------------------------
     # Multi-timeframe candle store
@@ -458,8 +471,18 @@ class Settings(BaseSettings):
     then enable explicitly via env."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
     MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
+    MODEL_AUTO_PROMOTE_MIN_GATE_PASSES: int = 20
+    """Minimum resolved GATE_PASS observations required before auto-promotion."""
     MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
     """Minimum live lift (bps) the challenger must show before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS: float = 0.0
+    """Minimum average net return of GATE_PASS observations before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MIN_PAPER_TRADES: int = 20
+    """Minimum paper GATE_PASS trades required before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MIN_PAPER_TOTAL_BPS: float = 0.0
+    """Minimum cumulative paper GATE_PASS net return before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MAX_PAPER_DRAWDOWN_BPS: float = -50.0
+    """Most negative acceptable paper GATE_PASS drawdown before auto-promotion."""
     MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD: float = 0.05
     """Maximum bootstrap p-value for auto-promotion: the challenger's mean net
     return must beat the baseline in >= (1 - threshold) of bootstrap resamples."""

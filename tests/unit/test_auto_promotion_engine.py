@@ -4,10 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-import pytest
-
 from trader.ml.auto_promotion import AutoPromotionEngine, DegradationDecision, PromotionDecision
-
 
 # ---------------------------------------------------------------------------
 # Fixtures / helpers
@@ -15,14 +12,19 @@ from trader.ml.auto_promotion import AutoPromotionEngine, DegradationDecision, P
 
 
 def _engine(**kwargs) -> AutoPromotionEngine:
-    defaults = dict(
-        min_signals=50,
-        min_lift_bps=1.0,
-        pvalue_threshold=0.05,
-        champion_degrade_min_signals=100,
-        champion_min_lift_bps=-5.0,
-        champion_min_pass_expectancy_bps=-20.0,
-    )
+    defaults = {
+        "min_signals": 50,
+        "min_gate_passes": 20,
+        "min_lift_bps": 1.0,
+        "min_pass_expectancy_bps": 0.0,
+        "min_paper_trades": 20,
+        "min_paper_total_bps": 0.0,
+        "max_paper_drawdown_bps": -50.0,
+        "pvalue_threshold": 0.05,
+        "champion_degrade_min_signals": 100,
+        "champion_min_lift_bps": -5.0,
+        "champion_min_pass_expectancy_bps": -20.0,
+    }
     defaults.update(kwargs)
     return AutoPromotionEngine(**defaults)
 
@@ -48,6 +50,16 @@ def _good_gate(*, total=60, lift=3.0, quality="GOOD") -> dict:
 
 def _good_boot(p=0.02) -> _Boot:
     return _Boot(p_value=p, mean_diff_bps=2.5, n_iterations=1000, n_challenger=60, n_baseline=60)
+
+
+def _good_paper(*, count=25, total=12.0, drawdown=-4.0) -> dict:
+    return {
+        "model_gate": {
+            "count": count,
+            "total_bps": total,
+            "max_drawdown_bps": drawdown,
+        }
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -165,6 +177,64 @@ def test_promotion_blocked_bootstrap_none():
     )
     assert decision.approved is False
     assert any("bootstrap_not_run" in r for r in decision.blocking_reasons)
+
+
+def test_promotion_blocked_insufficient_gate_passes():
+    engine = _engine(min_gate_passes=45)
+    decision = engine.evaluate_promotion(
+        challenger_version="v1",
+        challenger_status="SHADOW_CHALLENGER",
+        gate_stats=_good_gate(),
+        champion_wf_bps=1.5,
+        bootstrap_result=_good_boot(),
+    )
+    assert decision.approved is False
+    assert any("insufficient_gate_passes" in r for r in decision.blocking_reasons)
+
+
+def test_promotion_blocked_negative_pass_expectancy():
+    engine = _engine(min_pass_expectancy_bps=0.0)
+    gate = _good_gate()
+    gate["pass_avg_net_return_bps"] = -0.1
+    decision = engine.evaluate_promotion(
+        challenger_version="v1",
+        challenger_status="SHADOW_CHALLENGER",
+        gate_stats=gate,
+        champion_wf_bps=1.5,
+        bootstrap_result=_good_boot(),
+    )
+    assert decision.approved is False
+    assert any("insufficient_pass_expectancy" in r for r in decision.blocking_reasons)
+
+
+def test_promotion_blocks_bad_paper_economics_when_provided():
+    engine = _engine(min_paper_trades=20, min_paper_total_bps=0.0, max_paper_drawdown_bps=-20.0)
+    decision = engine.evaluate_promotion(
+        challenger_version="v1",
+        challenger_status="SHADOW_CHALLENGER",
+        gate_stats=_good_gate(),
+        paper_stats=_good_paper(count=12, total=-3.0, drawdown=-30.0),
+        champion_wf_bps=1.5,
+        bootstrap_result=_good_boot(),
+    )
+    assert decision.approved is False
+    assert any("insufficient_paper_trades" in r for r in decision.blocking_reasons)
+    assert any("insufficient_paper_total" in r for r in decision.blocking_reasons)
+    assert any("paper_drawdown_too_deep" in r for r in decision.blocking_reasons)
+
+
+def test_promotion_approves_with_good_paper_economics():
+    engine = _engine()
+    decision = engine.evaluate_promotion(
+        challenger_version="v1",
+        challenger_status="SHADOW_CHALLENGER",
+        gate_stats=_good_gate(),
+        paper_stats=_good_paper(),
+        champion_wf_bps=1.5,
+        bootstrap_result=_good_boot(),
+    )
+    assert decision.approved is True
+    assert decision.metrics_snapshot["paper_total_bps"] == 12.0
 
 
 def test_promotion_multiple_blocking_reasons():

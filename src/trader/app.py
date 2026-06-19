@@ -31,12 +31,13 @@ import sys
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import uvicorn
 
 from trader.domain.enums import SystemStatus, TradingMode
 from trader.domain.errors import RateLimitError
+from trader.domain.models import FeatureVector
 from trader.monitoring.logging import configure_logging, get_logger
 
 log = get_logger(__name__)
@@ -64,6 +65,7 @@ _INTERVAL_MS = {
     "60": 3_600_000,
 }
 
+_ML_REPLACEMENT_COUNTER: Any | None
 try:
     from prometheus_client import Counter as _PromCounter
 
@@ -119,14 +121,14 @@ class TradingApplication:
         self._exposure_tracker: Any | None = None
         self._screener: Any | None = None
         self._regime_classifier: Any | None = None
-        self._background_tasks: list[asyncio.Task] = []
+        self._background_tasks: list[asyncio.Task[Any]] = []
         # Cached balance (refreshed periodically)
         self._cached_balance: Decimal = _FALLBACK_BALANCE_USD
         self._balance_refreshed_at: datetime | None = None
         # Operator control state
         self._trading_paused: bool = False
         self._current_risk_profile_str: str = ""
-        self._signal_log: deque = deque(maxlen=20)
+        self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None
         self._performance_blocked_symbols: set[str] = set()
@@ -146,7 +148,7 @@ class TradingApplication:
         # Diagnostics: rolling deque of (timestamp, event_type) for last-hour stats
         self._diag_events: deque[tuple[datetime, str]] = deque(maxlen=10_000)
         self._last_strategy_loop_at: datetime | None = None
-        self._training_task: asyncio.Task | None = None
+        self._training_task: asyncio.Task[Any] | None = None
         self._training_start_lock: asyncio.Lock = asyncio.Lock()
         self._last_training_message: str = "never"
         # Private WebSocket (order/position/balance real-time events)
@@ -163,7 +165,7 @@ class TradingApplication:
         if self._screener is not None:
             symbols = self._screener.active_symbols
             if symbols:
-                return symbols
+                return list(symbols)
         return list(_SYMBOLS)
 
     def _market_data_intervals(self) -> list[str]:
@@ -322,7 +324,7 @@ class TradingApplication:
     def _make_state_proxy(self) -> _AppStateProxy:
         return _AppStateProxy(self)
 
-    async def _start_http_server(self) -> asyncio.Task:
+    async def _start_http_server(self) -> asyncio.Task[Any]:
         from trader.api.fastapi_app import create_app
 
         assert self._settings is not None
@@ -898,6 +900,7 @@ class TradingApplication:
                     challenger_version=challenger_version,
                     challenger_status=challenger_status,
                     gate_stats=gate,
+                    paper_stats=diag.get("paper_pnl_15m") if isinstance(diag.get("paper_pnl_15m"), dict) else {},
                     champion_wf_bps=champion_wf_bps,
                     bootstrap_result=boot,
                 )
@@ -1188,6 +1191,170 @@ class TradingApplication:
             return False, f"insufficient_gate_lift:{lift}"
         return True, "quality_ok"
 
+    @staticmethod
+    def _float_or_none(value: Any) -> float | None:
+        if value is None:
+            return None
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+    @staticmethod
+    def _utc_age_seconds(value: Any) -> float | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            try:
+                value = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            except ValueError:
+                return None
+        if not isinstance(value, datetime):
+            return None
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=UTC)
+        return float(max(0.0, (datetime.now(tz=UTC) - value.astimezone(UTC)).total_seconds()))
+
+    def _economic_readiness_issues(
+        self,
+        *,
+        db_diag: dict[str, Any],
+        runtime_diag: dict[str, Any] | None = None,
+    ) -> list[str]:
+        """Return blockers that make real-money modes economically unproven."""
+        return list(self._economic_readiness_report(db_diag=db_diag, runtime_diag=runtime_diag)["issues"])
+
+    def _economic_readiness_report(
+        self,
+        *,
+        db_diag: dict[str, Any],
+        runtime_diag: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        """Return an operator-facing readiness verdict for moving beyond shadow/testnet."""
+        assert self._settings is not None
+        runtime_diag = runtime_diag or {}
+        issues: list[str] = []
+        report_metrics: dict[str, Any] = {}
+
+        if not db_diag.get("connected"):
+            issues.append("db_not_connected")
+
+        latest_age = self._utc_age_seconds(db_diag.get("latest_candle_1m"))
+        report_metrics["latest_candle_age_s"] = latest_age
+        if latest_age is None or latest_age > 600:
+            issues.append(f"stale_1m_candle:{latest_age}")
+
+        active_symbols = runtime_diag.get("active_symbols") or []
+        report_metrics["active_symbols"] = len(active_symbols)
+        if len(active_symbols) < 3:
+            issues.append(f"insufficient_active_symbols:{len(active_symbols)}")
+
+        feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
+        report_metrics["feature_snapshots"] = feature_snapshots
+        if feature_snapshots < 1000:
+            issues.append(f"insufficient_feature_snapshots:{feature_snapshots}")
+
+        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
+        report_metrics["training_eligible_15m"] = trainable_15m
+        if trainable_15m < 1000:
+            issues.append(f"insufficient_labelled_15m:{trainable_15m}")
+
+        prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
+        report_metrics["prediction_outcomes"] = prediction_outcomes
+        if prediction_outcomes < 1000:
+            issues.append(f"insufficient_prediction_outcomes:{prediction_outcomes}")
+
+        active_model = self._dict_or_empty(db_diag.get("active_model_version"))
+        model_metrics = self._dict_or_empty(active_model.get("metrics"))
+        model_version = str(active_model.get("version") or "")
+        model_status = str(active_model.get("status") or "")
+        report_metrics["active_model_version"] = model_version or None
+        report_metrics["active_model_status"] = model_status or None
+        if not model_version:
+            issues.append("missing_active_model")
+        if model_status != "CHAMPION":
+            issues.append(f"active_model_not_champion:{model_status or 'none'}")
+        expected_quality = str(self._settings.MODEL_GATE_CANARY_MIN_QUALITY).upper()
+        quality = str(model_metrics.get("quality") or "").upper()
+        report_metrics["model_quality"] = quality or None
+        if expected_quality and quality != expected_quality:
+            issues.append(f"model_quality_not_{expected_quality.lower()}:{quality or 'none'}")
+        walk_forward = self._float_or_none(model_metrics.get("walk_forward_expectancy_bps"))
+        report_metrics["walk_forward_expectancy_bps"] = walk_forward
+        if walk_forward is None or walk_forward <= 0:
+            issues.append(f"non_positive_walk_forward_bps:{walk_forward}")
+
+        gate = self._dict_or_empty(db_diag.get("shadow_gate_15m"))
+        gate_total = int(gate.get("total_count") or 0)
+        report_metrics["gate_total_count"] = gate_total
+        min_gate = int(self._settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS)
+        if gate_total < min_gate:
+            issues.append(f"insufficient_gate_observations:{gate_total}")
+        gate_lift = self._float_or_none(gate.get("lift_vs_all_bps"))
+        report_metrics["gate_lift_vs_all_bps"] = gate_lift
+        if gate_lift is None or gate_lift < float(self._settings.MODEL_GATE_CANARY_MIN_LIFT_BPS):
+            issues.append(f"insufficient_gate_lift_bps:{gate_lift}")
+
+        paper = self._dict_or_empty(db_diag.get("paper_pnl_15m"))
+        paper_gate = self._dict_or_empty(paper.get("model_gate"))
+        paper_gate_count = int(paper_gate.get("count") or 0)
+        paper_gate_bps = self._float_or_none(paper_gate.get("total_bps"))
+        report_metrics["paper_gate_count"] = paper_gate_count
+        report_metrics["paper_gate_total_bps"] = paper_gate_bps
+        report_metrics["paper_gate_max_drawdown_bps"] = self._float_or_none(paper_gate.get("max_drawdown_bps"))
+        report_metrics["paper_gate_profit_factor"] = self._float_or_none(paper_gate.get("profit_factor"))
+        if paper_gate_count < 20:
+            issues.append(f"insufficient_paper_gate_trades:{paper_gate_count}")
+        if paper_gate_bps is None or paper_gate_bps <= 0:
+            issues.append(f"non_positive_paper_gate_bps:{paper_gate_bps}")
+
+        return {
+            "ready": not issues,
+            "mode": self._settings.TRADING_MODE.value,
+            "issues": issues,
+            "metrics": report_metrics,
+        }
+
+    async def _enforce_economic_readiness_for_active(self) -> None:
+        """Fail closed before real-money modes when paper evidence is not ready."""
+        assert self._settings is not None
+        if self._settings.TRADING_MODE not in (TradingMode.CANARY_LIVE, TradingMode.LIVE):
+            return
+        if not self._settings.ECONOMIC_READINESS_REQUIRED_FOR_ACTIVE:
+            log.warning(
+                "economic_readiness_gate_disabled_for_active_mode",
+                trading_mode=self._settings.TRADING_MODE.value,
+            )
+            return
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            log.critical("economic_readiness_blocked", issues=["trade_journal_unavailable"])
+            raise SystemExit(1)
+
+        db_diag = await self._trade_journal.get_db_diagnostics()
+        runtime_diag = self.get_diagnostics()
+        issues = self._economic_readiness_issues(db_diag=db_diag, runtime_diag=runtime_diag)
+        if issues:
+            log.critical(
+                "economic_readiness_blocked",
+                trading_mode=self._settings.TRADING_MODE.value,
+                issues=issues,
+            )
+            raise SystemExit(1)
+        log.info("economic_readiness_passed", trading_mode=self._settings.TRADING_MODE.value)
+
+    @staticmethod
+    def _feature_values_for_side(vec: FeatureVector, side: str) -> tuple[list[str], list[float]]:
+        """Return model features augmented with the proposed trade direction."""
+        normalized_side = str(side).strip().lower()
+        if normalized_side not in {"buy", "sell"}:
+            raise ValueError(f"unsupported proposal side for ML features: {side!r}")
+        side_feature = 1.0 if normalized_side == "buy" else -1.0
+        by_name = dict(zip(vec.feature_names, vec.values, strict=True))
+        by_name["proposal_side"] = side_feature
+        names = sorted(by_name.keys())
+        values = [float(by_name[name]) for name in names]
+        return names, values
+
     def _model_gate_canary_blocks(self, gate_decision: str, threshold: float, score: float) -> tuple[bool, str]:
         """Decide whether observational gate may block execution without starving trades."""
         assert self._settings is not None
@@ -1326,12 +1493,12 @@ class TradingApplication:
         wide = self._screener.wide_universe
         if wide:
             return [item.symbol for item in wide[:100]]
-        return self._screener.active_symbols
+        return list(self._screener.active_symbols)
 
     def _selected_symbols(self) -> list[str]:
         if self._screener is None:
             return []
-        return self._screener.manual_symbols
+        return list(self._screener.manual_symbols)
 
     async def _toggle_manual_symbol(self, symbol: str) -> str:
         if self._screener is None:
@@ -1376,11 +1543,11 @@ class TradingApplication:
                 return None
             try:
                 ctx = self._regime_classifier.classify(vec)
-                return ctx.regime.value
+                return str(ctx.regime.value)
             except Exception:
                 return None
 
-        async def _db_diagnostics_provider() -> dict:
+        async def _db_diagnostics_provider() -> dict[str, Any]:
             if self._trade_journal is None:
                 return {
                     "connected": False,
@@ -1394,9 +1561,14 @@ class TradingApplication:
             diag["paper_notional_usd"] = (
                 float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
             )
-            return diag
+            if self._settings is not None:
+                diag["economic_readiness"] = self._economic_readiness_report(
+                    db_diag=diag,
+                    runtime_diag=self.get_diagnostics(),
+                )
+            return cast(dict[str, Any], diag)
 
-        async def _healthcheck_provider() -> dict:
+        async def _healthcheck_provider() -> dict[str, Any]:
             diag = self.get_diagnostics()
             blockers = {
                 "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
@@ -1428,12 +1600,12 @@ class TradingApplication:
                 "today_avg_net_bps": today_avg_net_bps,
             }
 
-        async def _recent_trades_provider() -> list[dict]:
+        async def _recent_trades_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_recent_closed_trades(limit=10)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_recent_closed_trades(limit=10))
 
-        async def _bucket_stats_provider() -> dict:
+        async def _bucket_stats_provider() -> dict[str, Any]:
             assert self._settings is not None
             return {
                 "buckets": [
@@ -1458,30 +1630,30 @@ class TradingApplication:
                 "block_below_bps": self._settings.BUCKET_BLOCK_AVG_BPS,
             }
 
-        async def _pnl_analysis_provider() -> dict:
+        async def _pnl_analysis_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_strategy_pnl_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_strategy_pnl_analysis())
 
-        async def _compare_provider() -> dict:
+        async def _compare_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_model_compare_analysis()
+            return cast(dict[str, Any], await self._trade_journal.get_model_compare_analysis())
 
-        async def _worst_trades_provider(limit: int) -> list[dict]:
+        async def _worst_trades_provider(limit: int) -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_worst_prediction_outcomes(limit=limit)
+            return cast(list[dict[str, Any]], await self._trade_journal.get_worst_prediction_outcomes(limit=limit))
 
-        async def _costs_detailed_provider() -> dict:
+        async def _costs_detailed_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return await self._trade_journal.get_detailed_costs()
+            return cast(dict[str, Any], await self._trade_journal.get_detailed_costs())
 
-        async def _model_performance_provider() -> list[dict]:
+        async def _model_performance_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_model_performance_history()
+            return cast(list[dict[str, Any]], await self._trade_journal.get_model_performance_history())
 
         async def _add_subscription(chat_id: int) -> None:
             if self._trade_journal is not None:
@@ -1494,7 +1666,7 @@ class TradingApplication:
         async def _load_subscriptions() -> list[int]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return []
-            return await self._trade_journal.get_telegram_subscriptions()
+            return cast(list[int], await self._trade_journal.get_telegram_subscriptions())
 
         controller = TradingController(
             pause=self._pause_trading,
@@ -1515,7 +1687,7 @@ class TradingApplication:
             current_profile=lambda: self._current_risk_profile_str,
             active_symbols=lambda: self._screener.active_symbols if self._screener is not None else list(_SYMBOLS),
             regime_for=_regime_for,
-            signal_log=self._signal_log,  # type: ignore[arg-type]
+            signal_log=self._signal_log,
             diagnostics_provider=self.get_diagnostics,
             db_diagnostics_provider=_db_diagnostics_provider,
             allow_risk_increase=self._settings.TELEGRAM_ALLOW_RISK_INCREASE,
@@ -2155,7 +2327,9 @@ class TradingApplication:
 
         # Orderbook deltas add ~150-300 events/s on top of klines/tickers —
         # size the buffer so a consumer stall never drops a confirmed kline.
-        event_queue: asyncio.Queue = asyncio.Queue(maxsize=5000)
+        from trader.domain.events import BaseEvent
+
+        event_queue: asyncio.Queue[BaseEvent] = asyncio.Queue(maxsize=5000)
 
         self._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",
@@ -2195,6 +2369,7 @@ class TradingApplication:
                             )
                     elif isinstance(event, KlineEvent):
                         candle = candle_from_kline_event(event)
+                        assert self._candle_store is not None
                         self._candle_store.add(event.symbol, event.interval, candle)
 
                         if event.confirm:
@@ -2991,7 +3166,7 @@ class TradingApplication:
         """Provide daily net PnL for Telegram /net command."""
         if self._trade_journal is None:
             return {}
-        return await self._trade_journal.get_daily_net_results()
+        return cast(dict[str, Any], await self._trade_journal.get_daily_net_results())
 
     async def _sync_execution_positions(self) -> None:
         """Keep local execution/risk state aligned with Bybit TP/SL closures."""
@@ -3111,6 +3286,7 @@ class TradingApplication:
             # ema_* features are normalised distances to close; their ordering
             # matches the raw EMA ordering, so this is the rule trend direction.
             side = "Buy" if ema9 > ema21 else "Sell"
+            model_feature_names, model_feature_values = self._feature_values_for_side(vec, side)
 
             candles = self._candle_store.confirmed(symbol, interval) if self._candle_store else []
             if not candles:
@@ -3121,14 +3297,14 @@ class TradingApplication:
                 return
             self._last_candle_sample_at[symbol] = candle_open_time
 
-            schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+            schema_hash = hashlib.sha256(json.dumps(model_feature_names).encode()).hexdigest()[:16]
             snapshot_id = await self._trade_journal.record_feature_snapshot(
                 symbol=symbol,
                 interval=interval,
                 candle_open_time=candle_open_time,
                 feature_schema_hash=schema_hash,
-                feature_names=vec.feature_names,
-                feature_values=vec.values,
+                feature_names=model_feature_names,
+                feature_values=model_feature_values,
             )
             if not snapshot_id:
                 return
@@ -3148,7 +3324,7 @@ class TradingApplication:
             # the auto-trainer rotates model versions, so per-version gate stats
             # (lift, paper gate) would otherwise stay at zero forever.
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None:
-                shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
+                shadow_prediction = self._model_registry.score_shadow(model_feature_values, model_feature_names)
                 if shadow_prediction is not None:
                     threshold = self._model_gate_threshold(None)
                     gate_decision = None
@@ -3200,7 +3376,7 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS
+        return bool(count >= self._settings.BUCKET_MIN_SAMPLES and avg_bps < self._settings.BUCKET_BLOCK_AVG_BPS)
 
     def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
         """True when a symbol+side pair has proven negative expectancy."""
@@ -3212,7 +3388,7 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return (
+        return bool(
             count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES
             and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
         )
@@ -3659,7 +3835,7 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies: list = [
+        strategies: list[Any] = [
             EMAcrossoverStrategy(
                 symbol=None,  # None = evaluate any symbol passed in
                 allow_short=True,
@@ -3676,7 +3852,7 @@ class TradingApplication:
                 return None
             for scored in self._screener.wide_universe:
                 if scored.symbol == symbol:
-                    return scored.spread_bps
+                    return float(scored.spread_bps)
             return None
 
         priority_order = [
@@ -3799,6 +3975,21 @@ class TradingApplication:
             health_checker=self._health_checker,
             min_confidence=profile_cfg.min_confidence,
             strategy_priorities=strategy_priorities,
+            confirmation_required_for=(
+                {
+                    sid.strip()
+                    for sid in self._settings.STRATEGY_CONFIRMATION_REQUIRED_FOR.split(",")
+                    if sid.strip()
+                }
+                if self._settings.STRATEGY_CONFIRMATION_ENABLED
+                else set()
+            ),
+            confirmation_sources={
+                sid.strip()
+                for sid in self._settings.STRATEGY_CONFIRMATION_SOURCES.split(",")
+                if sid.strip()
+            },
+            min_confirmation_sources=self._settings.STRATEGY_MIN_CONFIRMATION_SOURCES,
         )
         await self._refresh_closed_pnl_memory()
 
@@ -3873,11 +4064,12 @@ class TradingApplication:
 
         async def process_symbol(symbol: str, balance: Decimal, capital: Decimal) -> None:
             """Evaluate one symbol: features → regime → ensemble → execution."""
+            assert self._settings is not None
             if symbol in _effective_blocked_symbols:
                 log.debug("performance_filter.symbol_blocked", symbol=symbol)
                 return
 
-            if self._feature_pipeline is None:
+            if self._feature_pipeline is None or self._strategy_ensemble is None:
                 return
 
             vec = self._feature_pipeline.latest(symbol, _WS_INTERVAL)
@@ -3933,6 +4125,7 @@ class TradingApplication:
 
             self._record_diag("signals_emitted")
             model_decision_meta: dict[str, Any] | None = None
+            model_feature_names, model_feature_values = self._feature_values_for_side(vec, proposal.side.value)
 
             async def _record_signal(blocked: str | None = None) -> None:
                 if self._trade_journal is not None:
@@ -3976,7 +4169,7 @@ class TradingApplication:
                 and self._model_registry is not None
             ):
                 try:
-                    ml_pred = self._model_registry.score_live(vec.values, vec.feature_names)
+                    ml_pred = self._model_registry.score_live(model_feature_values, model_feature_names)
                     ml_threshold = self._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None
@@ -4019,7 +4212,7 @@ class TradingApplication:
             snapshot_id = ""
             if self._trade_journal is not None and self._trade_journal.is_enabled and vec.feature_names:
                 try:
-                    _schema_hash = hashlib.sha256(json.dumps(sorted(vec.feature_names)).encode()).hexdigest()[:16]
+                    _schema_hash = hashlib.sha256(json.dumps(model_feature_names).encode()).hexdigest()[:16]
                     _candles = self._candle_store.confirmed(proposal.symbol, _WS_INTERVAL) if self._candle_store else []
                     _candle_open_time = _candles[-1].open_time if _candles else vec.timestamp
                     snapshot_id = await self._trade_journal.record_feature_snapshot(
@@ -4027,8 +4220,8 @@ class TradingApplication:
                         interval=_WS_INTERVAL,
                         candle_open_time=_candle_open_time,
                         feature_schema_hash=_schema_hash,
-                        feature_names=vec.feature_names,
-                        feature_values=vec.values,
+                        feature_names=model_feature_names,
+                        feature_values=model_feature_values,
                     )
                 except Exception as _snap_exc:
                     log.debug("strategy_loop.feature_snapshot_failed", error=str(_snap_exc))
@@ -4071,7 +4264,7 @@ class TradingApplication:
             if self._settings.MODEL_SHADOW_SCORING_ENABLED and self._model_registry is not None and snapshot_id:
                 # --- Challenger shadow scoring: observational only, never blocks ---
                 try:
-                    shadow_prediction = self._model_registry.score_shadow(vec.values, vec.feature_names)
+                    shadow_prediction = self._model_registry.score_shadow(model_feature_values, model_feature_names)
                     if shadow_prediction is not None:
                         threshold = self._model_gate_threshold(regime_ctx)
                         shadow_gate_decision = None
@@ -4127,7 +4320,7 @@ class TradingApplication:
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
                 if self._settings.MODEL_GATE_CANARY_ENABLED:
                     try:
-                        live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)
+                        live_prediction = self._model_registry.score_live(model_feature_values, model_feature_names)
                         if live_prediction is not None:
                             canary_threshold = self._model_gate_threshold(regime_ctx)
                             canary_gate_decision = (
@@ -4302,6 +4495,7 @@ class TradingApplication:
                 self._check_zero_trading()
 
                 # Sync transaction log periodically
+                assert self._settings is not None
                 now = datetime.now(tz=UTC)
                 tx_interval = self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
                 if (
@@ -4496,6 +4690,8 @@ class TradingApplication:
 
             # Give features a moment to compute from seeded data
             await asyncio.sleep(2.0)
+
+            await self._enforce_economic_readiness_for_active()
 
             await self._start_strategy_loop()
 

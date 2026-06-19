@@ -19,7 +19,7 @@ import asyncio
 import uuid
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -206,11 +206,11 @@ class ExecutionEngine:
             if self._pending_entry_count >= self._max_concurrent_pending:
                 return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
 
-        same_side_count = sum(
-            1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
-        )
-        if same_side_count >= self._max_same_side:
-            return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
+            same_side_count = sum(
+                1 for p in self._open_positions.values() if str(p.get("side", "")).upper() == side.upper()
+            )
+            if same_side_count >= self._max_same_side:
+                return f"same_side_limit: {same_side_count}/{self._max_same_side} {side} positions"
 
         return None
 
@@ -336,7 +336,7 @@ class ExecutionEngine:
                 total_pending=self._pending_entry_count,
             )
 
-    def restore_pending_entries_with_symbols(self, records: list[dict]) -> None:
+    def restore_pending_entries_with_symbols(self, records: list[dict[str, Any]]) -> None:
         """Restore pending entries from detailed records (includes symbol mapping).
 
         Empty and duplicate IDs are silently discarded. Count is synced
@@ -378,7 +378,7 @@ class ExecutionEngine:
         )
 
         # Build merged record dict — durable_order_state takes priority over order_events
-        merged: dict[str, dict] = {}
+        merged: dict[str, dict[str, Any]] = {}
         try:
             for rec in await self._trade_journal.get_pending_order_events():
                 oid = str(rec.get("order_link_id", ""))
@@ -514,7 +514,7 @@ class ExecutionEngine:
 
     async def _fetch_positions(self) -> list[Any] | None:
         try:
-            return await self._adapter.get_positions(self._category)
+            return cast(list[Any], await self._adapter.get_positions(self._category))
         except Exception as exc:
             log.warning("execution.sync_positions_failed", error=str(exc))
             return None
@@ -772,15 +772,18 @@ class ExecutionEngine:
             except (ValueError, IndexError):
                 pass
         try:
-            decision = await self._risk_manager.evaluate(
-                proposal=proposal,
-                capital=capital,
-                available_balance=available_balance,
-                instrument_info=instrument_info,
-                feature_vector=feature_vector,
-                regime_context=regime_context,
-                spread=spread,
-                atr=atr,
+            decision = cast(
+                RiskDecision,
+                await self._risk_manager.evaluate(
+                    proposal=proposal,
+                    capital=capital,
+                    available_balance=available_balance,
+                    instrument_info=instrument_info,
+                    feature_vector=feature_vector,
+                    regime_context=regime_context,
+                    spread=spread,
+                    atr=atr,
+                ),
             )
         except Exception as exc:
             log.error(

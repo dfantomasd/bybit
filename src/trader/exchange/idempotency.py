@@ -12,7 +12,7 @@ from __future__ import annotations
 import secrets
 from collections.abc import Iterable
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -142,7 +142,7 @@ class IdempotencyManager:
         entry = self._store.get(order_link_id)
         if entry is None:
             return None
-        return entry["status"]
+        return cast(OrderStatus, entry["status"])
 
     # ------------------------------------------------------------------
     # State mutations

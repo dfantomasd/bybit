@@ -10,7 +10,7 @@ from __future__ import annotations
 
 from collections import OrderedDict
 from datetime import datetime
-from typing import Any
+from typing import Any, cast
 
 import structlog
 
@@ -110,4 +110,5 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
 def install_source_candle_guard() -> None:
     """Install guarded pipeline for existing import paths."""
 
-    _pipeline_module.FeaturePipeline = SourceCandleFeaturePipeline
+    pipeline_module = cast(Any, _pipeline_module)
+    pipeline_module.FeaturePipeline = SourceCandleFeaturePipeline

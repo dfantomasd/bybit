@@ -16,13 +16,12 @@ from typing import Any
 import structlog
 
 from trader.data.orderbook import LocalOrderBook
-from trader.domain.enums import OrderSide
+from trader.domain.enums import MarketType, OrderSide
 from trader.domain.events import (
     BaseEvent,
     KlineEvent,
     LiquidationEvent,
     MarketDataEvent,
-    MarketType,
     OrderBookEvent,
     TickerEvent,
     TradeEvent,
@@ -56,7 +55,7 @@ class BybitPublicWebSocket:
         self,
         endpoint: str,
         subscriptions: list[str],
-        event_queue: asyncio.Queue,
+        event_queue: asyncio.Queue[BaseEvent],
         metrics: Any = None,
         logger: Any = None,
     ) -> None:
@@ -140,7 +139,7 @@ class BybitPublicWebSocket:
     async def _run_connection(self) -> None:
         """Single connection attempt — returns when disconnected."""
         try:
-            import websockets  # type: ignore
+            import websockets
         except ImportError:
             self._log.error("websockets_not_installed")
             await asyncio.sleep(5.0)
@@ -265,7 +264,7 @@ class BybitPublicWebSocket:
 
         topic: str = msg.get("topic", "")
         msg_type: str = msg.get("type", "")  # snapshot | delta
-        data: dict = msg.get("data", {})
+        data: dict[str, Any] = msg.get("data", {})
         exchange_ts: int = msg.get("ts", 0)
         received_ts = time.time()
         latency_ms = (received_ts * 1000 - exchange_ts) if exchange_ts else None
@@ -311,7 +310,7 @@ class BybitPublicWebSocket:
             )
             await self._emit(event)
 
-    async def _handle_op_response(self, msg: dict) -> None:
+    async def _handle_op_response(self, msg: dict[str, Any]) -> None:
         op = msg.get("op", "")
         if op == "pong" or (op == "subscribe" and msg.get("success")):
             pass  # expected responses
@@ -322,7 +321,7 @@ class BybitPublicWebSocket:
         self,
         topic: str,
         msg_type: str,
-        data: dict,
+        data: dict[str, Any],
         latency_ms: float | None,
     ) -> None:
         """Update local orderbook and emit OrderBookEvent."""
@@ -390,7 +389,7 @@ class BybitPublicWebSocket:
             )
             await self._emit(event)
 
-    async def _handle_ticker(self, topic: str, data: dict) -> None:
+    async def _handle_ticker(self, topic: str, data: dict[str, Any]) -> None:
         """Emit TickerEvent."""
         symbol = data.get("symbol", data.get("s", ""))
         event = TickerEvent(

@@ -39,12 +39,18 @@ class StrategyEnsemble:
         min_confidence: float = 0.50,
         agree_bonus: float = 0.05,
         strategy_priorities: dict[str, int] | None = None,
+        confirmation_required_for: set[str] | None = None,
+        confirmation_sources: set[str] | None = None,
+        min_confirmation_sources: int = 1,
     ) -> None:
         self._strategies = strategies
         self._health = health_checker
         self._min_confidence = min_confidence
         self._agree_bonus = agree_bonus
         self._strategy_priorities = strategy_priorities or {}
+        self._confirmation_required_for = confirmation_required_for or set()
+        self._confirmation_sources = confirmation_sources or set()
+        self._min_confirmation_sources = max(1, int(min_confirmation_sources))
 
     def _priority(self, proposal: TradeProposal) -> int:
         return self._strategy_priorities.get(proposal.strategy_id, 0)
@@ -117,6 +123,23 @@ class StrategyEnsemble:
 
         # Pick highest-confidence proposal and boost by agreement
         best = max(agreed, key=lambda p: (self._priority(p), p.confidence))
+        if best.strategy_id in self._confirmation_required_for:
+            confirming_sources = {
+                proposal.strategy_id
+                for proposal in agreed
+                if proposal.strategy_id != best.strategy_id and proposal.strategy_id in self._confirmation_sources
+            }
+            if len(confirming_sources) < self._min_confirmation_sources:
+                log.info(
+                    "ensemble.confirmation_required_blocked",
+                    symbol=feature_vector.symbol,
+                    strategy_id=best.strategy_id,
+                    side=best.side.value,
+                    confirming_sources=sorted(confirming_sources),
+                    min_confirmation_sources=self._min_confirmation_sources,
+                )
+                return None
+
         agreement_bonus = self._agree_bonus * (len(agreed) - 1)
 
         # Rebuild with updated confidence (frozen model, need model_copy)
