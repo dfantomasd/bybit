@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
 from typing import Any
 from unittest.mock import AsyncMock
 
@@ -188,12 +189,24 @@ async def test_best_challenger_uses_best_eligible_model_not_latest_weak() -> Non
 @pytest.mark.asyncio
 async def test_should_promote_blocks_weak_challenger() -> None:
     journal = _Journal([_model("champion", status=ModelStatus.CHAMPION), _model("weak", quality="WEAK")])
-    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+    config = replace(_config(), required_quality="GOOD")
+    engine = AutoPromotionEngine(trade_journal=journal, config=config)
 
     decision = await engine.should_promote(None, "weak")
 
     assert decision.promote is False
-    assert any(reason.startswith("quality_not_GOOD") for reason in decision.reasons)
+    assert any(reason.startswith("quality_below_GOOD") for reason in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_should_promote_allows_weak_when_min_quality_is_weak() -> None:
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), _model("weak", quality="WEAK")])
+    config = replace(_config(), required_quality="WEAK")
+    engine = AutoPromotionEngine(trade_journal=journal, config=config)
+
+    decision = await engine.should_promote(None, "weak")
+
+    assert decision.promote is True
 
 
 @pytest.mark.asyncio

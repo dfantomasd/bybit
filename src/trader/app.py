@@ -1063,6 +1063,29 @@ class TradingApplication:
                 has_lift = lift_bps is not None and float(lift_bps) >= min_lift
                 beats_champion = lift_bps is not None and float(lift_bps) > champion_wf_bps
                 is_challenger = status == "SHADOW_CHALLENGER"
+                promotion_reasons: list[str] = []
+                promotion_engine_allows = False
+                promotion_engine_checked = False
+                if (
+                    self._settings.MODEL_AUTO_PROMOTE_ENABLED
+                    and is_challenger
+                    and version
+                    and version != "—"
+                    and self._trade_journal is not None
+                ):
+                    try:
+                        from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+
+                        promotion_engine = AutoPromotionEngine(
+                            trade_journal=self._trade_journal,
+                            config=AutoPromotionConfig.from_settings(self._settings),
+                        )
+                        promotion_decision = await promotion_engine.should_promote(None, version)
+                        promotion_engine_checked = True
+                        promotion_engine_allows = promotion_decision.promote
+                        promotion_reasons = list(promotion_decision.reasons)
+                    except Exception as promo_exc:
+                        promotion_reasons = [f"promotion_check_failed:{promo_exc}"]
 
                 lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "н/д"
                 precision_str = f"{float(pass_precision) * 100:.1f}%" if pass_precision is not None else "н/д"
@@ -1100,8 +1123,15 @@ class TradingApplication:
                     f"Canary: <code>{'включён' if self._settings.MODEL_GATE_CANARY_ENABLED else 'выключен'}</code>",
                 ]
 
-                if all([is_challenger, has_signals, has_lift, beats_champion]):
+                if all([is_challenger, has_signals, has_lift, beats_champion]) and (
+                    not self._settings.MODEL_AUTO_PROMOTE_ENABLED
+                    or not promotion_engine_checked
+                    or promotion_engine_allows
+                ):
                     lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")
+                elif promotion_engine_checked and not promotion_engine_allows:
+                    safe_reasons = ", ".join(html.escape(reason) for reason in promotion_reasons[:4])
+                    lines.append(f"\n⏳ Auto-promoter ждёт: <code>{safe_reasons}</code>")
                 elif not is_challenger and status == "CHAMPION":
                     lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
                 elif schema_drift:

@@ -51,6 +51,15 @@ def _metric_score(metrics: dict[str, Any]) -> float:
     return float(model_selection_metrics(metrics)["model_score"])
 
 
+def _quality_rank(quality: str) -> int:
+    normalized = str(quality or "").upper()
+    if normalized == "GOOD":
+        return 2
+    if normalized == "WEAK":
+        return 1
+    return 0
+
+
 def _model_snapshot(row: dict[str, Any] | None) -> dict[str, Any] | None:
     if not row:
         return None
@@ -121,7 +130,13 @@ class AutoPromotionConfig:
             min_wf_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_BPS", 0.0)),
             min_wf_positive_folds=max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", 3))),
             max_wf_std_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS", 25.0)),
-            required_quality=str(getattr(settings, "MODEL_GATE_CANARY_MIN_QUALITY", "GOOD")).upper(),
+            required_quality=str(
+                getattr(
+                    settings,
+                    "MODEL_AUTO_PROMOTE_MIN_QUALITY",
+                    getattr(settings, "MODEL_GATE_CANARY_MIN_QUALITY", "GOOD"),
+                )
+            ).upper(),
             pvalue_threshold=float(getattr(settings, "MODEL_AUTO_PROMOTE_PVALUE_THRESHOLD", 0.05)),
             bootstrap_iterations=max(100, int(getattr(settings, "MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS", 1000))),
             min_bootstrap_samples=max(2, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES", 50))),
@@ -221,8 +236,9 @@ class AutoPromotionEngine:
             reasons.append(f"incompatible_label_schema:{label_schema or 'missing'}")
         if training_samples < self._config.min_training_samples:
             reasons.append(f"insufficient_training_samples:{training_samples}<{self._config.min_training_samples}")
-        if quality != self._config.required_quality:
-            reasons.append(f"quality_not_{self._config.required_quality}:{quality or 'missing'}")
+        required_quality = str(self._config.required_quality or "").upper()
+        if required_quality and _quality_rank(quality) < _quality_rank(required_quality):
+            reasons.append(f"quality_below_{required_quality}:{quality or 'missing'}")
         if wf_bps is None or wf_bps < self._config.min_wf_bps:
             reasons.append(f"weak_walk_forward:{wf_bps}")
         wf_folds = _int_or_zero(metrics.get("wf_folds"))
