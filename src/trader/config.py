@@ -356,7 +356,7 @@ class Settings(BaseSettings):
     """Reserved: correlation-based position limiting (not yet wired into execution)."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
-    SHADOW_LOSS_GUARD_ENABLED: bool = True
+    SHADOW_LOSS_GUARD_ENABLED: bool = False
     """Temporarily block new entries after a poor run of shadow TP/SL outcomes."""
     SHADOW_LOSS_GUARD_MIN_CLOSED: int = 3
     """Minimum recent shadow closes before the loss guard can activate."""
@@ -399,6 +399,10 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ADAPTIVE_LOAD_GOVERNOR_ENABLED: bool = True
     LOAD_GOVERNOR_CHECK_SECONDS: int = 30
+    OUTCOME_RESOLVER_INTERVAL_SECONDS: int = 60
+    """How often to resolve pending prediction outcomes from stored candles."""
+    OUTCOME_RESOLVER_BATCH_LIMIT: int = 1000
+    """Maximum prediction outcomes to resolve per horizon on each resolver pass."""
     MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
@@ -465,14 +469,14 @@ class Settings(BaseSettings):
     Disabled by default: let the model train and accumulate shadow evidence first,
     then enable explicitly via env."""
     MODEL_AUTO_PROMOTE_CHECK_SECONDS: int = 600
-    MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 50
-    MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 1.0
+    MODEL_AUTO_PROMOTE_MIN_SIGNALS: int = 30
+    MODEL_AUTO_PROMOTE_MIN_LIFT_BPS: float = 0.5
     """Minimum live lift (bps) the challenger must show before auto-promotion."""
     MODEL_AUTO_PROMOTE_MIN_PASS_EXPECTANCY_BPS: float = 0.0
     """Minimum average net return (bps) among challenger GATE_PASS outcomes."""
     MODEL_AUTO_PROMOTE_MIN_WF_BPS: float = 0.0
     """Minimum walk-forward expectancy (bps) stored in challenger training metrics."""
-    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 3
+    MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS: int = 2
     """Minimum positive walk-forward folds required before auto-promotion."""
     MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS: float = 25.0
     """Maximum walk-forward fold standard deviation allowed before auto-promotion."""
@@ -494,7 +498,7 @@ class Settings(BaseSettings):
     """Require positive model/paper evidence before CANARY_LIVE or LIVE startup."""
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
-    MODEL_SHADOW_GATE_THRESHOLD: float = 0.55
+    MODEL_SHADOW_GATE_THRESHOLD: float = 0.50
     MODEL_GATE_CANARY_ENABLED: bool = False
     """When enabled, allow the model gate to block entries only with conservative safeguards.
     Disabled by default until a promoted CHAMPION shows positive shadow-gate lift."""

@@ -1832,6 +1832,77 @@ class TradeJournal:
             log.debug("trade_journal.shadow_gate_stats_failed", error=str(exc))
             return {}
 
+    async def get_shadow_gate_event_counts(
+        self,
+        model_version: str,
+        horizon_minutes: int,
+        label_schema_version: str,
+    ) -> dict[str, Any]:
+        """Return raw/resolved gate-event counts for a model version."""
+        if not self.is_enabled:
+            return {}
+
+        try:
+            model_rows = await self._fetch(
+                """
+                SELECT feature_schema_hash
+                FROM model_versions
+                WHERE version = $1
+                LIMIT 1
+                """,
+                model_version,
+            )
+            feature_schema_hash = str(model_rows[0]["feature_schema_hash"] or "") if model_rows else ""
+            if not feature_schema_hash:
+                return {"model_version": model_version, "feature_schema_hash": ""}
+
+            rows = await self._fetch(
+                """
+                SELECT
+                    pe.decision,
+                    count(*) AS total_count,
+                    count(po.prediction_id) AS resolved_count
+                FROM prediction_events pe
+                JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                LEFT JOIN prediction_outcomes po
+                    ON po.prediction_id = pe.prediction_id
+                   AND po.horizon_minutes = $2
+                   AND po.label_schema_version = $3
+                WHERE pe.model_version = $1
+                  AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.feature_schema_hash = $4
+                GROUP BY pe.decision
+                """,
+                model_version,
+                horizon_minutes,
+                label_schema_version,
+                feature_schema_hash,
+            )
+            result: dict[str, Any] = {
+                "model_version": model_version,
+                "feature_schema_hash": feature_schema_hash,
+                "total_count": 0,
+                "resolved_count": 0,
+                "pending_count": 0,
+            }
+            for row in rows:
+                decision = str(row["decision"])
+                total = int(row["total_count"] or 0)
+                resolved = int(row["resolved_count"] or 0)
+                key = "pass" if decision == "GATE_PASS" else "block"
+                result[f"{key}_count"] = total
+                result[f"{key}_resolved_count"] = resolved
+                result["total_count"] += total
+                result["resolved_count"] += resolved
+            result["pending_count"] = max(0, int(result["total_count"]) - int(result["resolved_count"]))
+            return result
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug("trade_journal.shadow_gate_event_counts_failed", error=str(exc))
+            return {}
+
     @staticmethod
     def _decode_json_field(value: Any) -> Any:
         if isinstance(value, str):

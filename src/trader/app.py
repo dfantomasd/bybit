@@ -996,16 +996,26 @@ class TradingApplication:
                 # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
                 # be a different version — producing a misleading "0 signals" for the challenger.
                 gate: dict = {}
+                gate_events: dict = {}
                 if version and version != "—" and self._trade_journal is not None:
                     gate = await self._trade_journal.get_shadow_gate_stats(
                         version,
                         15,
                         "directional_net_v1",
                     )
+                    gate_event_counter = getattr(self._trade_journal, "get_shadow_gate_event_counts", None)
+                    if gate_event_counter is not None:
+                        gate_events = await gate_event_counter(
+                            version,
+                            15,
+                            "directional_net_v1",
+                        )
                 else:
                     gate = diag.get("shadow_gate_15m", {}) or {}
 
-                total_count = int(gate.get("total_count", 0) or 0)
+                resolved_count = int(gate.get("total_count", 0) or 0)
+                observed_count = int(gate_events.get("total_count", resolved_count) or 0)
+                pending_count = int(gate_events.get("pending_count", 0) or 0)
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
 
@@ -1025,9 +1035,11 @@ class TradingApplication:
                     challenger_status=status,
                     training_samples=training_samples,
                     labelled_15m=labelled,
-                    gate_total=total_count,
-                    gate_pass=gate.get("pass_count"),
-                    gate_block=gate.get("block_count"),
+                    gate_total=observed_count,
+                    gate_resolved=resolved_count,
+                    gate_pending=pending_count,
+                    gate_pass=gate_events.get("pass_count", gate.get("pass_count")),
+                    gate_block=gate_events.get("block_count", gate.get("block_count")),
                     lift_bps=round(float(lift_bps), 3) if lift_bps is not None else None,
                     pass_precision=round(float(pass_precision), 3) if pass_precision is not None else None,
                     gate_schema_hash=gate.get("feature_schema_hash"),
@@ -1047,7 +1059,7 @@ class TradingApplication:
                 def check(ok: bool, label: str) -> str:
                     return f"{'✅' if ok else '❌'} {label}"
 
-                has_signals = total_count >= min_signals
+                has_signals = resolved_count >= min_signals
                 has_lift = lift_bps is not None and float(lift_bps) >= min_lift
                 beats_champion = lift_bps is not None and float(lift_bps) > champion_wf_bps
                 is_challenger = status == "SHADOW_CHALLENGER"
@@ -1059,6 +1071,11 @@ class TradingApplication:
                     "📊 <b>Прогресс модели</b>",
                     f"Версия: <code>{version}</code> [{status}]",
                     f"Обучено на: <code>{training_samples}</code> примерах | Доступно: <code>{labelled}</code>",
+                    (
+                        f"Gate: <code>{resolved_count}</code> resolved / "
+                        f"<code>{observed_count}</code> всего"
+                        + (f" / <code>{pending_count}</code> ждёт outcome" if pending_count else "")
+                    ),
                 ]
 
                 if schema_drift:
@@ -1072,7 +1089,7 @@ class TradingApplication:
                     "",
                     "<b>Условия для авто-промоута:</b>",
                     check(is_challenger, f"Статус SHADOW_CHALLENGER → {status}"),
-                    check(has_signals, f"Сигналов ≥ {min_signals} → сейчас {total_count}"),
+                    check(has_signals, f"Resolved GATE ≥ {min_signals} → сейчас {resolved_count}"),
                     check(has_lift, f"Lift ≥ {min_lift:+.1f} bps → сейчас {lift_str}"),
                     check(
                         beats_champion,
@@ -1095,7 +1112,7 @@ class TradingApplication:
                 else:
                     missing = []
                     if not has_signals:
-                        missing.append(f"ещё {min_signals - total_count} сигналов")
+                        missing.append(f"ещё {min_signals - resolved_count} resolved GATE")
                     if not has_lift:
                         missing.append("lift > 0")
                     if not beats_champion and has_lift:
@@ -2808,7 +2825,9 @@ class TradingApplication:
 
     async def _run_outcome_resolver(self) -> None:
         """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
-        interval = 300.0  # every 5 minutes
+        assert self._settings is not None
+        interval = float(self._settings.OUTCOME_RESOLVER_INTERVAL_SECONDS)
+        batch_limit = int(self._settings.OUTCOME_RESOLVER_BATCH_LIMIT)
         horizons = [5, 15, 30, 60]
 
         while not self._shutdown_event.is_set():
@@ -2818,6 +2837,7 @@ class TradingApplication:
                         resolved = await self._trade_journal.resolve_outcomes_from_candles(
                             horizon_minutes=horizon,
                             label_bps_threshold=5.0,
+                            limit=batch_limit,
                         )
                         if resolved > 0:
                             log.info(

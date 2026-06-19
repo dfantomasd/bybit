@@ -226,7 +226,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
               AND pe.feature_snapshot_id IS NOT NULL
               AND pe.strategy_signal IN ('Buy', 'Sell')
               AND fs.training_eligible = true
-            ORDER BY pe.created_at ASC
+            ORDER BY
+                CASE WHEN pe.decision IN ('GATE_PASS', 'GATE_BLOCK') THEN 0 ELSE 1 END,
+                pe.created_at ASC
             LIMIT $2
             """,
             horizon_minutes,

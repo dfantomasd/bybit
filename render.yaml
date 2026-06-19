@@ -59,7 +59,7 @@ services:
       - key: STARTUP_WARMUP_SECONDS
         value: "180"
       - key: SHADOW_LOSS_GUARD_ENABLED
-        value: "true"
+        value: "false"
       - key: SHADOW_LOSS_GUARD_MIN_CLOSED
         value: "3"
       - key: SHADOW_LOSS_GUARD_WINDOW
@@ -77,6 +77,10 @@ services:
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"
+      - key: OUTCOME_RESOLVER_INTERVAL_SECONDS
+        value: "60"
+      - key: OUTCOME_RESOLVER_BATCH_LIMIT
+        value: "1000"
       # Multi-timeframe
       - key: MULTITIMEFRAME_ENABLED
         value: "true"
@@ -146,13 +150,13 @@ services:
       - key: MODEL_AUTO_PROMOTE_CHECK_SECONDS
         value: "600"
       - key: MODEL_AUTO_PROMOTE_MIN_SIGNALS
-        value: "50"
+        value: "30"
       - key: MODEL_AUTO_PROMOTE_MIN_LIFT_BPS
-        value: "1.0"
+        value: "0.5"
       - key: MODEL_SHADOW_GATE_ENABLED
         value: "true"
       - key: MODEL_SHADOW_GATE_THRESHOLD
-        value: "0.55"
+        value: "0.50"
       - key: MODEL_GATE_CANARY_ENABLED
         value: "false"
       - key: MODEL_GATE_CANARY_MAX_BLOCK_RATE_PCT

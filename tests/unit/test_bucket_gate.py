@@ -32,6 +32,12 @@ def _make_app(**overrides) -> TradingApplication:
     return app
 
 
+def _make_active_app(**overrides) -> TradingApplication:
+    app = _make_app(**overrides)
+    app._initial_shadow_mode = lambda: False  # type: ignore[method-assign]
+    return app
+
+
 def _regime_ctx(regime: str = "BULL_TREND", volatility: str = "NORMAL") -> SimpleNamespace:
     return SimpleNamespace(
         regime=SimpleNamespace(value=regime),
@@ -63,9 +69,14 @@ class TestBucketGate:
         assert app._bucket_blocked(_regime_ctx()) is False
 
     def test_toxic_bucket_blocks(self) -> None:
-        app = _make_app()
+        app = _make_active_app()
         app._bucket_stats = {_key(): (-5.0, 50)}
         assert app._bucket_blocked(_regime_ctx()) is True
+
+    def test_initial_shadow_mode_never_bucket_blocks(self) -> None:
+        app = _make_app()
+        app._bucket_stats = {_key(): (-5.0, 50)}
+        assert app._bucket_blocked(_regime_ctx()) is False
 
     def test_small_sample_never_blocks(self) -> None:
         app = _make_app()
@@ -93,14 +104,19 @@ class TestBucketGate:
         assert app._bucket_blocked(_regime_ctx()) is False
 
     def test_none_regime_ctx_uses_unknown_bucket(self) -> None:
-        app = _make_app()
+        app = _make_active_app()
         app._bucket_stats = {("UNKNOWN", "UNKNOWN", datetime.now(tz=UTC).hour): (-10.0, 100)}
         assert app._bucket_blocked(None) is True
 
     def test_toxic_symbol_side_blocks(self) -> None:
-        app = _make_app()
+        app = _make_active_app()
         app._symbol_side_stats = {("ADAUSDT", "Buy"): (-5.0, 25)}
         assert app._symbol_side_blocked("ADAUSDT", "Buy") is True
+
+    def test_initial_shadow_mode_never_symbol_side_blocks(self) -> None:
+        app = _make_app()
+        app._symbol_side_stats = {("ADAUSDT", "Buy"): (-5.0, 25)}
+        assert app._symbol_side_blocked("ADAUSDT", "Buy") is False
 
     def test_symbol_side_small_sample_never_blocks(self) -> None:
         app = _make_app()
@@ -155,7 +171,7 @@ class TestBucketGate:
 
         assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is True
 
-    def test_trend_mtf_confirmation_blocks_misaligned_buy(self) -> None:
+    def test_trend_mtf_confirmation_accepts_one_aligned_interval(self) -> None:
         app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5,15")
         vectors = {
             ("XRPUSDT", "5"): _trend_vec("XRPUSDT"),
@@ -163,11 +179,21 @@ class TestBucketGate:
         }
         app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vectors.get((symbol, interval)))
 
-        assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is False
+        assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is True
 
-    def test_trend_mtf_confirmation_blocks_missing_interval(self) -> None:
+    def test_trend_mtf_confirmation_accepts_one_present_aligned_interval(self) -> None:
         app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5,15")
         vectors = {("XRPUSDT", "5"): _trend_vec("XRPUSDT")}
+        app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vectors.get((symbol, interval)))
+
+        assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is True
+
+    def test_trend_mtf_confirmation_blocks_when_no_interval_aligns(self) -> None:
+        app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5,15")
+        vectors = {
+            ("XRPUSDT", "5"): _trend_vec("XRPUSDT", bullish=False),
+            ("XRPUSDT", "15"): _trend_vec("XRPUSDT", bullish=False),
+        }
         app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vectors.get((symbol, interval)))
 
         assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is False
