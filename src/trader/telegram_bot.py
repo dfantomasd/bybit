@@ -285,6 +285,7 @@ class TelegramMonitorBot:
         app.add_handler(CallbackQueryHandler(self._on_button))
         # Free-text handler for the "custom limit value" flow
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
+        app.add_error_handler(self._on_error)
 
         # Load persisted subscriptions so push notifications survive restarts
         if self._controller is not None and self._controller.load_subscriptions is not None:
@@ -333,6 +334,21 @@ class TelegramMonitorBot:
             log.warning("telegram_polling_network_error", error=str(error))
             return
         log.error("telegram_polling_error", error=str(error))
+
+    async def _on_error(self, update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Log handler crashes and give callback users a visible fallback."""
+        error = getattr(context, "error", None)
+        log.warning("telegram_handler_error", error=str(error), update_type=type(update).__name__)
+        if not isinstance(update, Update) or update.callback_query is None:
+            return
+        try:
+            await self._button_reply(
+                update,
+                "⚠️ Кнопка не выполнилась из-за внутренней ошибки. Попробуйте ещё раз.",
+                reply_markup=self._main_menu(),
+            )
+        except Exception as exc:
+            log.debug("telegram_handler_error_reply_failed", error=str(exc))
 
     # ------------------------------------------------------------------
     # Push notifications (called by app.py)
@@ -776,12 +792,15 @@ class TelegramMonitorBot:
             except BadRequest as exc:
                 log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
             start = 1 if edited and len(chunks) > 1 else 0
-            for index, chunk in enumerate(chunks[start:], start=start):
-                await self._safe_reply_text(
-                    message,
-                    chunk,
-                    reply_markup=reply_markup if index == len(chunks) - 1 else None,
-                )
+            try:
+                for index, chunk in enumerate(chunks[start:], start=start):
+                    await self._safe_reply_text(
+                        message,
+                        chunk,
+                        reply_markup=reply_markup if index == len(chunks) - 1 else None,
+                    )
+            except Exception as exc:
+                log.warning("telegram.button_reply_failed", error=str(exc))
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
@@ -3055,41 +3074,54 @@ class TelegramMonitorBot:
         query = update.callback_query
         if query is None:
             return
-        await query.answer()
+        try:
+            await query.answer()
+        except Exception as exc:
+            # Old buttons from chat history, redeploy races, or Telegram network
+            # hiccups should not prevent the actual callback action from running.
+            log.debug("telegram.callback_answer_failed_continuing", error=str(exc))
         if not await self._authorised(update):
             return
 
         data = query.data or ""
-        if data.startswith("confirm:"):
-            await self._handle_confirm_button(update, data.removeprefix("confirm:"))
-            return
-        if data.startswith("view:"):
-            await self._handle_view_button(update, data.removeprefix("view:"))
-            return
-        if data.startswith("control:"):
-            await self._handle_control_button(update, data.removeprefix("control:"))
-            return
-        if data.startswith("train:"):
-            await self._handle_train_button(update, data.removeprefix("train:"))
-            return
-        if data.startswith("limit:"):
-            await self._handle_limit_button(update, data.removeprefix("limit:"))
-            return
-        if data.startswith("mode:"):
-            await self._handle_mode_button(update, data.removeprefix("mode:"))
-            return
-        if data.startswith("risk:"):
-            await self._queue_risk_change(update, data.removeprefix("risk:").upper())
-            return
-        if data.startswith("sym:"):
-            await self._handle_symbol_button(update, data.removeprefix("sym:"))
-            return
-        if data == "noop":
-            return
-        if data.startswith("action:"):
-            await self._handle_action_button(update, data.removeprefix("action:"))
-            return
-        await self._button_reply(update, "Неизвестная кнопка.", reply_markup=self._main_menu())
+        try:
+            if data.startswith("confirm:"):
+                await self._handle_confirm_button(update, data.removeprefix("confirm:"))
+                return
+            if data.startswith("view:"):
+                await self._handle_view_button(update, data.removeprefix("view:"))
+                return
+            if data.startswith("control:"):
+                await self._handle_control_button(update, data.removeprefix("control:"))
+                return
+            if data.startswith("train:"):
+                await self._handle_train_button(update, data.removeprefix("train:"))
+                return
+            if data.startswith("limit:"):
+                await self._handle_limit_button(update, data.removeprefix("limit:"))
+                return
+            if data.startswith("mode:"):
+                await self._handle_mode_button(update, data.removeprefix("mode:"))
+                return
+            if data.startswith("risk:"):
+                await self._queue_risk_change(update, data.removeprefix("risk:").upper())
+                return
+            if data.startswith("sym:"):
+                await self._handle_symbol_button(update, data.removeprefix("sym:"))
+                return
+            if data == "noop":
+                return
+            if data.startswith("action:"):
+                await self._handle_action_button(update, data.removeprefix("action:"))
+                return
+            await self._button_reply(update, "Неизвестная кнопка.", reply_markup=self._main_menu())
+        except Exception as exc:
+            log.warning("telegram.callback_failed", callback_data=data[:80], error=str(exc), exc_info=True)
+            await self._button_reply(
+                update,
+                f"⚠️ Кнопка не выполнилась: <code>{html.escape(str(exc))[:500]}</code>",
+                reply_markup=self._main_menu(),
+            )
 
     async def _update_dashboard(
         self,

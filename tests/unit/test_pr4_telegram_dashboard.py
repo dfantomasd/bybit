@@ -600,6 +600,38 @@ async def test_menu_command_shows_main_menu() -> None:
 
 
 @pytest.mark.asyncio
+async def test_callback_answer_failure_still_handles_button() -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.callback_query.data = "view:menu"
+    update.callback_query.answer = AsyncMock(side_effect=RuntimeError("query is too old"))
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    update.callback_query.edit_message_text.assert_awaited()
+    edited_text = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Bybit AI Trader" in edited_text
+
+
+@pytest.mark.asyncio
+async def test_callback_exception_returns_visible_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.callback_query.data = "view:model"
+
+    async def _boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("db timeout")
+
+    monkeypatch.setattr(bot, "_handle_view_button", _boom)
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    update.callback_query.edit_message_text.assert_awaited()
+    edited_text = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Кнопка не выполнилась" in edited_text
+
+
+@pytest.mark.asyncio
 async def test_confirm_button_replay_is_rejected() -> None:
     """A confirm button fires once; the second press must be ignored."""
     bot = _make_bot()
