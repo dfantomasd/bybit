@@ -327,6 +327,77 @@ async def test_live_rejects_low_edge_increments_counter():
     assert engine._diag_no_tp_rejected == 0
 
 
+@pytest.mark.asyncio
+async def test_live_net_edge_uses_rounded_take_profit():
+    """LIVE edge gate must evaluate the same tick-rounded TP that will be submitted."""
+    from trader.domain.enums import MarketType, OrderSide, RiskDecisionStatus
+    from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
+
+    engine = _make_engine(
+        shadow_mode=False,
+        fee_rate=0.0,
+        min_net_edge_pct=0.05,
+        net_edge_safety_margin_pct=0.0,
+    )
+    engine._max_spread_bps = 0.0
+    engine._expected_slippage_pct = 0.0
+    engine._funding_buffer_pct = 0.0
+
+    proposal = MagicMock(spec=TradeProposal)
+    proposal.symbol = "BTCUSDT"
+    proposal.side = OrderSide.BUY
+    proposal.entry_price = Decimal("100")
+    proposal.take_profit = Decimal("100.09")
+    proposal.stop_loss = Decimal("99")
+    proposal.confidence = 0.7
+    proposal.requested_qty = Decimal("10")
+    proposal.proposal_id = "test-id-rounded"
+    proposal.strategy_id = "test"
+    proposal.rationale = "test"
+
+    decision = MagicMock(spec=RiskDecision)
+    decision.status = RiskDecisionStatus.APPROVED
+    decision.approved_qty = Decimal("10")
+    decision.approved_notional_usd = Decimal("1000")
+    decision.reason = "ok"
+    decision.decision_id = "decision-rounded"
+    decision.proposal_id = "test-id-rounded"
+    decision.triggered_rules = []
+    decision.portfolio_heat = 0.0
+    decision.current_drawdown_pct = 0.0
+    decision.open_positions_count = 0
+
+    instrument = InstrumentInfo(
+        symbol="BTCUSDT",
+        market_type=MarketType.LINEAR,
+        base_coin="BTC",
+        quote_coin="USDT",
+        min_order_qty=Decimal("1"),
+        max_order_qty=Decimal("1000"),
+        qty_step=Decimal("1"),
+        tick_size=Decimal("0.1"),
+        min_notional=Decimal("5"),
+    )
+
+    engine._open_positions = {}
+    engine._pending_entry_order_link_ids = set()
+    engine._is_canary = False
+    engine._risk_manager.evaluate = AsyncMock(return_value=decision)
+    engine._adapter.get_instrument_info = AsyncMock(return_value=instrument)
+    engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
+    engine._trade_journal = None
+
+    result = await engine._submit_locked(
+        proposal=proposal,
+        capital=Decimal("1000"),
+        available_balance=Decimal("1000"),
+    )
+
+    assert result is None
+    assert engine._diag_net_edge_rejected == 1
+    engine._adapter.place_order.assert_not_called()
+
+
 def test_shadow_mode_skips_net_edge_gate():
     """Shadow mode must NOT apply the net edge gate — counters start at zero and gate is not reached."""
     engine = _make_engine(shadow_mode=True)

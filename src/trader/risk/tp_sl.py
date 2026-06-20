@@ -6,7 +6,7 @@ All arithmetic uses Decimal. Prices are rounded to tick_size.
 from __future__ import annotations
 
 import logging
-from decimal import ROUND_DOWN, Decimal
+from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 
 logger = logging.getLogger(__name__)
 
@@ -69,21 +69,21 @@ class TPSLCalculator:
             sl_price = entry_price + sl_distance
             tp_price = entry_price - tp_distance
 
-        # Round to tick size
-        sl_price = self._round_to_tick(sl_price, tick_size)
-        tp_price = self._round_to_tick(tp_price, tick_size)
+        # Round conservatively to tick size: never improve exits on paper.
+        sl_price = self._round_exit_to_tick(sl_price, tick_size, side=side, is_stop_loss=True)
+        tp_price = self._round_exit_to_tick(tp_price, tick_size, side=side, is_stop_loss=False)
 
         # Ensure SL is strictly on the correct side after rounding
         if is_long:
             if sl_price >= entry_price:
                 sl_price = self._round_to_tick(entry_price - tick_size, tick_size)
             if tp_price <= entry_price:
-                tp_price = self._round_to_tick(entry_price + tick_size, tick_size)
+                tp_price = self._round_exit_to_tick(entry_price + tick_size, tick_size, side=side, is_stop_loss=False)
         else:
             if sl_price <= entry_price:
-                sl_price = self._round_to_tick(entry_price + tick_size, tick_size)
+                sl_price = self._round_exit_to_tick(entry_price + tick_size, tick_size, side=side, is_stop_loss=True)
             if tp_price >= entry_price:
-                tp_price = self._round_to_tick(entry_price - tick_size, tick_size)
+                tp_price = self._round_exit_to_tick(entry_price - tick_size, tick_size, side=side, is_stop_loss=False)
 
         return sl_price, tp_price
 
@@ -181,4 +181,21 @@ class TPSLCalculator:
         if tick_size <= Decimal("0"):
             return price
         ticks = (price / tick_size).to_integral_value(rounding=ROUND_DOWN)
+        return ticks * tick_size
+
+    @staticmethod
+    def _round_exit_to_tick(
+        price: Decimal,
+        tick_size: Decimal,
+        *,
+        side: str,
+        is_stop_loss: bool,
+    ) -> Decimal:
+        """Round exit prices conservatively for the trade direction."""
+        del is_stop_loss
+        if tick_size <= Decimal("0"):
+            return price
+        is_short = side.lower() in ("sell", "short")
+        rounding = ROUND_CEILING if is_short else ROUND_DOWN
+        ticks = (price / tick_size).to_integral_value(rounding=rounding)
         return ticks * tick_size

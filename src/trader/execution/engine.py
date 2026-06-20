@@ -1145,7 +1145,16 @@ class ExecutionEngine:
             taker = taker_default
 
             entry_price_d = proposal.entry_price
-            tp_d = proposal.take_profit
+            tp_d = self._round_exit_price(
+                proposal.take_profit,
+                instrument_info.tick_size,
+                proposal.side,
+                is_stop_loss=False,
+            )
+            if tp_d is None:
+                self._release_exposure_reservation(proposal)
+                exposure_reserved = False
+                return None
             if proposal.side == OrderSide.BUY:
                 gross_edge_pct = (tp_d - entry_price_d) / entry_price_d * Decimal("100")
             else:
@@ -1176,6 +1185,7 @@ class ExecutionEngine:
                 side=proposal.side.value,
                 entry_price=float(entry_price_d),
                 take_profit=float(tp_d),
+                raw_take_profit=float(proposal.take_profit),
                 gross_edge_pct=float(round(gross_edge_pct, 4)),
                 entry_fee_pct=float(round(entry_fee_pct, 4)),
                 exit_fee_pct=float(round(exit_fee_pct, 4)),
