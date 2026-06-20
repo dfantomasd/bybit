@@ -3576,6 +3576,46 @@ class TradingApplication:
                 cooldown_seconds=cooldown_s,
             )
 
+    @staticmethod
+    def _shadow_exit_hit(position: dict[str, Any], *, high: float, low: float) -> tuple[str, float] | None:
+        """Return the first conservative TP/SL hit for one shadow candle."""
+
+        side = str(position.get("side") or "")
+        tp = float(position["tp"])
+        sl = float(position["sl"])
+        if side == "Buy":
+            tp_hit = high >= tp
+            sl_hit = low <= sl
+            if tp_hit and sl_hit:
+                return "SL", sl
+            if tp_hit:
+                return "TP", tp
+            if sl_hit:
+                return "SL", sl
+            return None
+        if side == "Sell":
+            tp_hit = low <= tp
+            sl_hit = high >= sl
+            if tp_hit and sl_hit:
+                return "SL", sl
+            if tp_hit:
+                return "TP", tp
+            if sl_hit:
+                return "SL", sl
+            return None
+        return None
+
+    @staticmethod
+    def _shadow_pnl_pct(position: dict[str, Any], exit_price: float) -> float:
+        """Return direction-aware gross shadow PnL percent."""
+
+        entry = float(position["entry"])
+        if entry <= 0:
+            raise ValueError("shadow entry must be positive")
+        if str(position.get("side") or "") == "Sell":
+            return (entry - exit_price) / entry * 100.0
+        return (exit_price - entry) / entry * 100.0
+
     def _shadow_loss_guard_blocks(self) -> bool:
         """Return true while recent shadow losses should suppress new entries."""
 
@@ -4135,35 +4175,24 @@ class TradingApplication:
         # Shadow TP/SL tracker: symbol → {entry, tp, sl, side, opened_at}
         _shadow_positions: dict[str, dict[str, Any]] = {}
 
-        async def _check_shadow_exits(symbol: str, current_price: float) -> None:
+        async def _check_shadow_exits(symbol: str, current_price: float, high: float, low: float) -> None:
             """Close shadow positions that hit TP or SL."""
             pos = _shadow_positions.get(symbol)
             if pos is None:
                 return
-            side = pos["side"]
-            tp = pos["tp"]
-            sl = pos["sl"]
-            hit = None
-            if side == "Buy" and current_price >= tp:
-                hit = "TP"
-            elif side == "Buy" and current_price <= sl:
-                hit = "SL"
-            elif side == "Sell" and current_price <= tp:
-                hit = "TP"
-            elif side == "Sell" and current_price >= sl:
-                hit = "SL"
-            if hit:
-                pnl_pct = (
-                    (current_price - pos["entry"]) / pos["entry"] * 100
-                    if side == "Buy"
-                    else (pos["entry"] - current_price) / pos["entry"] * 100
-                )
+            hit_info = self._shadow_exit_hit(pos, high=high, low=low)
+            if hit_info:
+                hit, exit_price = hit_info
+                pnl_pct = self._shadow_pnl_pct(pos, exit_price)
                 log.info(
                     "shadow.position_closed",
                     symbol=symbol,
                     reason=hit,
                     entry=pos["entry"],
-                    exit=current_price,
+                    exit=exit_price,
+                    close=current_price,
+                    high=high,
+                    low=low,
                     pnl_pct=round(pnl_pct, 3),
                 )
                 self._record_shadow_close(symbol, hit, pnl_pct)
@@ -4176,8 +4205,8 @@ class TradingApplication:
                         label = "✅ TP" if hit == "TP" else "🛑 SL"
                         pnl_sign = "+" if pnl_pct >= 0 else ""
                         await self._telegram_bot.notify(
-                            f"{label} {symbol} {side} closed\n"
-                            f"Entry: {pos['entry']:.4f} → Exit: {current_price:.4f}\n"
+                            f"{label} {symbol} {pos['side']} closed\n"
+                            f"Entry: {pos['entry']:.4f} → Exit: {exit_price:.4f}\n"
                             f"PnL: {pnl_sign}{pnl_pct:.2f}% [SHADOW]"
                         )
                     except Exception as exc:
@@ -4196,13 +4225,14 @@ class TradingApplication:
             if vec is None:
                 return
 
-            closes = self._candle_store.closes(symbol, _WS_INTERVAL, 1) if self._candle_store else []
-            if not closes:
+            candles = self._candle_store.latest(symbol, _WS_INTERVAL, 1) if self._candle_store else []
+            if not candles:
                 return
-            current_price = closes[-1]
+            last_candle = candles[-1]
+            current_price = last_candle.close
 
             # Check shadow TP/SL exits first
-            await _check_shadow_exits(symbol, current_price)
+            await _check_shadow_exits(symbol, current_price, last_candle.high, last_candle.low)
             if self._shadow_loss_guard_blocks():
                 self._record_diag("shadow_loss_guard_blocked")
                 log.info(
@@ -4609,7 +4639,7 @@ class TradingApplication:
             if is_shadow and proposal.stop_loss and proposal.take_profit:
                 _shadow_positions[symbol] = {
                     "side": proposal.side.value,
-                    "entry": float(proposal.entry_price or current_price),
+                    "entry": float(current_price),
                     "tp": float(proposal.take_profit),
                     "sl": float(proposal.stop_loss),
                     "opened_at": datetime.now(tz=UTC),

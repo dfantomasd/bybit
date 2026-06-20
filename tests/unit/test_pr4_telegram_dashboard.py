@@ -108,6 +108,23 @@ async def test_shadow_off_blocked() -> None:
 
 
 @pytest.mark.asyncio
+async def test_render_pnl_uses_provider_net_without_double_subtracting_fees() -> None:
+    bot = _make_bot()
+    bot._net_results_provider = AsyncMock(
+        return_value={
+            "gross_closed_pnl_usd": -1.0,
+            "total_fees_usd": -0.25,
+            "net_pnl_usd": -1.0,
+        }
+    )
+
+    text, _ = await bot._render_pnl()
+
+    assert "Net PnL: <code>-1.00 USD</code>" in text
+    assert "-1.25 USD" not in text
+
+
+@pytest.mark.asyncio
 async def test_live_activation_blocked_via_mode_button() -> None:
     """mode:active button should return blocked message."""
     bot = _make_bot()

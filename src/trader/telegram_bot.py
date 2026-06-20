@@ -3298,7 +3298,7 @@ class TelegramMonitorBot:
                 data = await self._net_results_provider()
                 gross = data.get("gross_closed_pnl_usd", 0)
                 fees = data.get("total_fees_usd", 0)
-                net = gross - abs(fees) if (gross is not None and fees is not None) else None
+                net = data.get("net_pnl_usd", gross)
                 text_parts.append(f"Gross PnL: <code>{gross:+.2f} USD</code>")
                 text_parts.append(f"Комиссии: <code>{fees:.2f} USD</code>")
                 if net is not None:
