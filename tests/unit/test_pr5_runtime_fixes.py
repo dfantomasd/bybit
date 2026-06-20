@@ -214,6 +214,17 @@ def test_model_progress_reports_actual_and_compatible_samples() -> None:
     assert "Совместимо:" in src
 
 
+def test_canary_gate_scores_side_aware_model_features() -> None:
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._start_strategy_loop)
+    assert "model_feature_names, model_feature_values = self._feature_values_for_side" in src
+    assert "live_prediction = self._model_registry.score_live(model_feature_values, model_feature_names)" in src
+    assert "live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)" not in src
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

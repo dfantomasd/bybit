@@ -4572,7 +4572,7 @@ class TradingApplication:
                 # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
                 if settings.MODEL_GATE_CANARY_ENABLED:
                     try:
-                        live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)
+                        live_prediction = self._model_registry.score_live(model_feature_values, model_feature_names)
                         if live_prediction is not None:
                             canary_threshold = self._model_gate_threshold(regime_ctx)
                             canary_gate_decision = (
