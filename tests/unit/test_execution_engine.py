@@ -355,6 +355,53 @@ class TestExecutionEngine:
         assert "BTCUSDT" not in engine._last_entry_at
         engine._exposure.remove_position.assert_awaited_with("BTCUSDT")
 
+    @pytest.mark.asyncio
+    async def test_single_position_update_does_not_remove_other_symbols(self):
+        from trader.domain.events import PositionUpdateEvent
+
+        engine = _make_engine()
+        engine._open_positions["ETHUSDT"] = {
+            "side": OrderSide.SELL,
+            "size": Decimal("0.2"),
+            "entry_price": Decimal("3000"),
+        }
+
+        await engine.apply_position_update(
+            PositionUpdateEvent(
+                symbol="BTCUSDT",
+                market_type=MarketType.LINEAR,
+                side=OrderSide.BUY,
+                size=Decimal("0.01"),
+                entry_price=Decimal("50000"),
+            )
+        )
+
+        assert engine.has_open_position("BTCUSDT")
+        assert engine.has_open_position("ETHUSDT")
+        engine._exposure.update_position.assert_awaited_with("BTCUSDT", "Buy", Decimal("500.00"))
+
+    @pytest.mark.asyncio
+    async def test_zero_position_update_closes_symbol_without_snapshot_grace(self):
+        from trader.domain.events import PositionUpdateEvent
+
+        engine = _make_engine(approved=True, shadow_mode=True)
+        await engine.submit(_proposal(), Decimal("10000"), Decimal("10000"))
+        assert engine.has_open_position("BTCUSDT")
+
+        await engine.apply_position_update(
+            PositionUpdateEvent(
+                symbol="BTCUSDT",
+                market_type=MarketType.LINEAR,
+                side=OrderSide.BUY,
+                size=Decimal("0"),
+                entry_price=Decimal("0"),
+            )
+        )
+
+        assert not engine.has_open_position("BTCUSDT")
+        assert "BTCUSDT" not in engine._last_entry_at
+        engine._exposure.remove_position.assert_awaited_with("BTCUSDT")
+
     def test_get_status_returns_dict(self):
         engine = _make_engine()
         status = engine.get_status()

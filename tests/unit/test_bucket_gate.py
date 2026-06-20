@@ -188,7 +188,7 @@ class TestBucketGate:
 
         pnl = app._shadow_pnl_pct(pos, 100.05)
 
-        assert round(pnl, 4) == -0.17
+        assert round(pnl, 4) == -0.20
 
     def test_shadow_exit_is_conservative_when_tp_and_sl_same_candle(self) -> None:
         buy = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0}

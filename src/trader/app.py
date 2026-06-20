@@ -2603,6 +2603,7 @@ class TradingApplication:
                 BalanceUpdateEvent,
                 ExecutionUpdateEvent,
                 OrderUpdateEvent,
+                PositionUpdateEvent,
             )
 
             _terminal_order_states = {
@@ -2834,6 +2835,17 @@ class TradingApplication:
                                     "private_ws.execution_reconcile_failed",
                                     exec_id=event.exec_id,
                                     error=str(_rec_exc),
+                                )
+                    elif isinstance(event, PositionUpdateEvent):
+                        if self._execution_engine is not None:
+                            try:
+                                await self._execution_engine.apply_position_update(event)
+                                self._cache_exchange_position_update(event)
+                            except Exception as _pos_exc:
+                                log.warning(
+                                    "private_ws.position_update_failed",
+                                    symbol=event.symbol,
+                                    error=str(_pos_exc),
                                 )
                 except TimeoutError:
                     pass
@@ -3362,6 +3374,13 @@ class TradingApplication:
         self._latest_exchange_positions = positions
         self._latest_exchange_positions_at = datetime.now(tz=UTC)
 
+    def _cache_exchange_position_update(self, position: Any) -> None:
+        positions = list(self._latest_exchange_positions or [])
+        positions = [p for p in positions if getattr(p, "symbol", None) != position.symbol]
+        if position.size > Decimal("0"):
+            positions.append(position)
+        self._cache_exchange_positions(positions)
+
     def _recent_exchange_positions(self) -> list[Any] | None:
         assert self._settings is not None
         if self._latest_exchange_positions_at is None:
@@ -3406,7 +3425,7 @@ class TradingApplication:
         entry_fee_pct = taker * Decimal("100")
         exit_fee_pct = taker * Decimal("100")
         spread_pct = Decimal(str(self._settings.SCREENER_MAX_SPREAD_BPS)) / Decimal("100")
-        slippage_pct = Decimal(str(self._settings.EXPECTED_SLIPPAGE_PCT))
+        slippage_pct = Decimal(str(self._settings.EXPECTED_SLIPPAGE_PCT)) * Decimal("2")
         buffer_pct = Decimal(str(self._settings.MIN_NET_PROFIT_BUFFER_PCT))
         total_offset_pct = entry_fee_pct + exit_fee_pct + spread_pct + slippage_pct + buffer_pct
         # Also respect the legacy static offset as a minimum floor
@@ -3709,7 +3728,7 @@ class TradingApplication:
         taker_fee_pct = float(self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE) * 100.0
         round_trip_fee_pct = taker_fee_pct * 2.0
         spread_pct = float(self._settings.SCREENER_MAX_SPREAD_BPS) / 100.0
-        slippage_pct = float(self._settings.EXPECTED_SLIPPAGE_PCT)
+        slippage_pct = float(self._settings.EXPECTED_SLIPPAGE_PCT) * 2.0
         return gross - round_trip_fee_pct - spread_pct - slippage_pct
 
     def _shadow_loss_guard_blocks(self) -> bool:

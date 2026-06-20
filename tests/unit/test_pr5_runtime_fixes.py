@@ -780,3 +780,22 @@ def test_champion_readiness_not_reset_by_newer_challenger():
     assert isinstance(diag["active_model_version"], dict)
     # latest_model_version also present
     assert "latest_model_version" in diag
+
+
+def test_position_update_cache_preserves_unrelated_positions():
+    from types import SimpleNamespace
+
+    from trader.app import TradingApplication
+    from trader.domain.enums import OrderSide
+
+    app = TradingApplication()
+    btc = SimpleNamespace(symbol="BTCUSDT", side=OrderSide.BUY, size=Decimal("0.01"), entry_price=Decimal("50000"))
+    eth = SimpleNamespace(symbol="ETHUSDT", side=OrderSide.SELL, size=Decimal("0.2"), entry_price=Decimal("3000"))
+    app._cache_exchange_positions([btc, eth])
+
+    app._cache_exchange_position_update(
+        SimpleNamespace(symbol="BTCUSDT", side=OrderSide.BUY, size=Decimal("0"), entry_price=Decimal("0"))
+    )
+
+    cached = app._latest_exchange_positions
+    assert [p.symbol for p in cached] == ["ETHUSDT"]

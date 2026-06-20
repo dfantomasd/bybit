@@ -133,6 +133,19 @@ def test_breakeven_includes_spread_and_slippage():
     assert be_with > be_without
 
 
+def test_breakeven_charges_round_trip_slippage():
+    """Expected slippage is per leg, so breakeven must include entry + exit slippage."""
+    fee_rates = _make_fee_rates(taker=0.00055)
+    entry = Decimal("50000")
+    app_with = _make_app_with_settings(SCREENER_MAX_SPREAD_BPS=8.0, EXPECTED_SLIPPAGE_PCT=0.03)
+    app_without = _make_app_with_settings(SCREENER_MAX_SPREAD_BPS=8.0, EXPECTED_SLIPPAGE_PCT=0.0)
+
+    be_with = app_with._breakeven_stop(entry, "Buy", fee_rates=fee_rates)
+    be_without = app_without._breakeven_stop(entry, "Buy", fee_rates=fee_rates)
+
+    assert be_with - be_without == Decimal("30.0000")
+
+
 def test_short_breakeven_is_below_entry():
     """For a short position, breakeven stop is below entry price."""
     app = _make_app_with_settings()

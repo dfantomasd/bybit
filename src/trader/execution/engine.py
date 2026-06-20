@@ -619,11 +619,29 @@ class ExecutionEngine:
             kept_recent=sorted(kept_recent),
         )
 
-    async def record_position_closed(self, symbol: str) -> None:
-        """Call when a position is closed (e.g. TP/SL hit)."""
+    async def apply_position_update(self, position: Any) -> None:
+        """Apply a single private-WS position update without treating it as a full snapshot."""
+        async with self._submit_lock:
+            if position.size <= Decimal("0"):
+                await self._remove_position(position.symbol)
+                return
+
+            self._open_positions[position.symbol] = {
+                "side": position.side,
+                "size": position.size,
+                "entry_price": position.entry_price,
+            }
+            notional = position.size * position.entry_price
+            await self._exposure.update_position(position.symbol, position.side.value, notional)
+
+    async def _remove_position(self, symbol: str) -> None:
         self._open_positions.pop(symbol, None)
         self._last_entry_at.pop(symbol, None)
         await self._exposure.remove_position(symbol)
+
+    async def record_position_closed(self, symbol: str) -> None:
+        """Call when a position is closed (e.g. TP/SL hit)."""
+        await self._remove_position(symbol)
 
     # ------------------------------------------------------------------
     # Instrument info
