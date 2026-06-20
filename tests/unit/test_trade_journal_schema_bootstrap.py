@@ -103,6 +103,19 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_model_version_schema_hash_is_repaired_from_source_schema_metric() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    sql = "\n".join(pool.conn.executed_sql)
+    assert "SET feature_schema_hash = metrics->>'source_feature_schema_hash'" in sql
+    assert "feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash'" in sql
+
+
+@pytest.mark.asyncio
 async def test_market_candles_schema_defines_low_column_once() -> None:
     pool = _FakePool()
     journal = TradeJournal("postgresql://example/db")

@@ -366,6 +366,31 @@ def test_train_sql_deduplicates_by_source_candle_before_split() -> None:
     assert "WHERE es.candle_rank = 1" in src
 
 
+def test_train_stores_snapshot_schema_as_model_version_schema() -> None:
+    """model_versions.feature_schema_hash must match feature_snapshots.feature_schema_hash."""
+    import inspect
+
+    from trader.training import train
+
+    src = inspect.getsource(train)
+    assert "snapshot_feature_schema_hash = feature_schema_hash" in src
+    assert '"model_feature_schema_hash": model_feature_schema_hash' in src
+    assert '"feature_schema_hash": snapshot_feature_schema_hash' in src
+    assert "model.training_samples,\n            snapshot_feature_schema_hash," in src
+
+
+def test_directional_diagnostics_prefers_model_version_schema_column() -> None:
+    """Auto-training compatibility checks must compare snapshot schema to snapshot schema."""
+    import inspect
+
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    src = inspect.getsource(DirectionalTradeJournal._get_db_diagnostics_directional)
+    assert "NULLIF(feature_schema_hash, '')" in src
+    assert "NULLIF(metrics->>'source_feature_schema_hash', '')" in src
+    assert "metrics->>'feature_schema_hash'" in src
+
+
 def test_resolve_outcomes_sql_filters_training_eligible() -> None:
     """directional_trade_journal.resolve_outcomes_from_candles must filter training_eligible."""
     import inspect

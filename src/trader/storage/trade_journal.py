@@ -362,6 +362,11 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
+            UPDATE model_versions
+            SET feature_schema_hash = metrics->>'source_feature_schema_hash'
+            WHERE metrics ? 'source_feature_schema_hash'
+              AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
+              AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash';
             WITH ranked AS (
                 SELECT model_id,
                        row_number() OVER (

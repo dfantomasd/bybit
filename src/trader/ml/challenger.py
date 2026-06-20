@@ -755,10 +755,7 @@ class ModelRegistry:
                 WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
                   AND artifact IS NOT NULL
                   AND COALESCE(metrics->>'label_schema_version', '') = $1
-                ORDER BY
-                    CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
-                    training_finished_at DESC NULLS LAST,
-                    created_at DESC
+                ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
                 LIMIT 1
                 """,
                 LABEL_SCHEMA_VERSION,
@@ -773,10 +770,7 @@ class ModelRegistry:
                     FROM model_versions
                     WHERE status IN ('VALIDATED', 'SHADOW_CHALLENGER')
                       AND artifact IS NOT NULL
-                    ORDER BY
-                        CASE WHEN COALESCE(metrics->>'quality', 'WEAK') NOT IN ('WEAK', '') THEN 0 ELSE 1 END,
-                        training_finished_at DESC NULLS LAST,
-                        created_at DESC
+                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
                     LIMIT 1
                     """
                 )

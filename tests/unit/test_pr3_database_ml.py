@@ -948,3 +948,13 @@ async def test_load_latest_challenger_falls_back_when_schema_missing() -> None:
     assert model.training_samples == 100
     assert model.allow_live_decisions is False
     assert call_count == 2  # primary failed, fallback used
+
+
+def test_runtime_challenger_loader_prefers_freshness_over_quality() -> None:
+    """Runtime shadow scoring should load the freshest challenger; promotion ranks quality separately."""
+    import inspect
+
+    src = inspect.getsource(ModelRegistry.load_latest_challenger)
+    primary_query = src.split("if not rows:", maxsplit=1)[0]
+    assert "ORDER BY training_finished_at DESC NULLS LAST, created_at DESC" in primary_query
+    assert "CASE WHEN COALESCE(metrics->>'quality'" not in primary_query
