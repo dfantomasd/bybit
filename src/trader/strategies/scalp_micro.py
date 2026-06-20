@@ -89,9 +89,8 @@ class ScalpMicroStrategy(BaseStrategy):
         diag_hook:          Optional callable(reason) for rejection diagnostics
                             (e.g. "spread_rejected", "scalp_net_edge_rejected").
         imbalance_provider: Callable(symbol) -> latest L5 orderbook imbalance in
-                            [-1, 1], or None when unknown. Unknown fails OPEN
-                            (signal allowed) — the book feed is an enhancement,
-                            not a dependency.
+                            [-1, 1], or None when unknown. Unknown fails closed
+                            because micro-scalps need current book confirmation.
         min_imbalance:      Required |imbalance| agreeing with the signal side
                             (BUY needs >= +min, SELL needs <= -min).
     """
@@ -246,25 +245,32 @@ class ScalpMicroStrategy(BaseStrategy):
         if side is None:
             return None
 
-        # --- Orderbook imbalance confirmation (fail open: no data = no block) ---
-        # A signal against the visible book pressure is the classic adverse-fill
-        # setup; require imbalance to agree with the direction when known.
-        if self._imbalance_provider is not None:
+        # --- Orderbook imbalance confirmation (fail closed: no data = no scalp) ---
+        # Micro-scalps are small-edge trades; without fresh book confirmation the
+        # spread/slippage edge can disappear before execution.
+        if self._imbalance_provider is None:
+            self._diag("imbalance_missing")
+            return None
+        try:
             imbalance = self._imbalance_provider(symbol)
-            if imbalance is not None:
-                confirms = (
-                    imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
-                )
-                if not confirms:
-                    self._diag("imbalance_rejected")
-                    log.debug(
-                        "scalp_micro.imbalance_rejected",
-                        symbol=symbol,
-                        side=side.value,
-                        imbalance=round(imbalance, 3),
-                        min_imbalance=self._min_imbalance,
-                    )
-                    return None
+        except Exception as exc:
+            self._diag("imbalance_missing")
+            log.debug("scalp_micro.imbalance_provider_failed", symbol=symbol, error=str(exc))
+            return None
+        if imbalance is None:
+            self._diag("imbalance_missing")
+            return None
+        confirms = imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
+        if not confirms:
+            self._diag("imbalance_rejected")
+            log.debug(
+                "scalp_micro.imbalance_rejected",
+                symbol=symbol,
+                side=side.value,
+                imbalance=round(imbalance, 3),
+                min_imbalance=self._min_imbalance,
+            )
+            return None
 
         # --- Net edge check: gross edge is the TP distance ---
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0

@@ -611,12 +611,14 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                     "version": "v20260607_1000",
                     "status": "SHADOW_CHALLENGER",
                     "training_samples": 777,
+                    "feature_schema_hash": "abc1234567890def",
                     "metrics": {
                         "quality": "GOOD",
                         "precision": 0.62,
                         "lift_bps": 3.4,
                         "best_threshold": 0.6,
                         "best_threshold_avg_net_return_bps": 4.5,
+                        "horizon_minutes": 5,
                     },
                     "training_finished_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
                     "created_at": datetime(2026, 6, 7, 10, 1, tzinfo=UTC),
@@ -632,6 +634,9 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["prediction_outcomes_by_horizon"] == {"5": 300, "15": 777}
     assert diag["latest_training_run"]["status"] == "COMPLETED"
     assert diag["latest_model_version"]["version"] == "v20260607_1000"
+    assert diag["model_gate_horizon_minutes"] == 5
+    assert diag["shadow_gate_by_horizon"]["5"]["pass_count"] == 12
+    assert diag["paper_pnl_by_horizon"]["5"]["model_gate"]["count"] == 2
     assert diag["shadow_gate_15m"]["pass_count"] == 12
     assert diag["shadow_gate_15m"]["pass_vs_block_bps"] == 6.0
     assert diag["shadow_gate_15m"]["top_block_reasons"] == {"score_below_regime_threshold": 8}

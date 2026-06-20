@@ -1716,8 +1716,24 @@ class TelegramMonitorBot:
                 model_metrics = json.loads(model_metrics)
             except json.JSONDecodeError:
                 model_metrics = {}
-        gate = db_diag.get("shadow_gate_15m", {}) or {}
-        paper = db_diag.get("paper_pnl_15m", {}) or {}
+        try:
+            model_horizon = int(db_diag.get("model_gate_horizon_minutes") or model_metrics.get("horizon_minutes") or 15)
+        except (TypeError, ValueError):
+            model_horizon = 15
+        gate_by_horizon = db_diag.get("shadow_gate_by_horizon", {}) or {}
+        paper_by_horizon = db_diag.get("paper_pnl_by_horizon", {}) or {}
+        gate = (
+            gate_by_horizon.get(str(model_horizon))
+            or db_diag.get(f"shadow_gate_{model_horizon}m")
+            or db_diag.get("shadow_gate_15m", {})
+            or {}
+        )
+        paper = (
+            paper_by_horizon.get(str(model_horizon))
+            or db_diag.get(f"paper_pnl_{model_horizon}m")
+            or db_diag.get("paper_pnl_15m", {})
+            or {}
+        )
         paper_baseline = paper.get("baseline", {}) or {}
         paper_gate = paper.get("model_gate", {}) or {}
 
@@ -1729,7 +1745,14 @@ class TelegramMonitorBot:
             except (TypeError, ValueError):
                 return None
 
-        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
+        training_by_horizon = db_diag.get("training_eligible_by_horizon", {}) or {}
+        trainable_model_horizon = int(
+            training_by_horizon.get(
+                str(model_horizon),
+                db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")),
+            )
+            or 0
+        )
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
         gate_total = int(gate.get("total_count") or 0)
@@ -1817,17 +1840,17 @@ class TelegramMonitorBot:
             self._eta_for_samples(1000 - feature_snapshots, active_count * 240),
         )
         require(
-            "Размеченные примеры 15m",
-            trainable_15m >= 1000,
-            f"{trainable_15m}/1000 примеров",
-            "Дождитесь закрытия 15m исходов или загрузите историю свечей backfill, затем запустите обучение.",
-            self._eta_for_samples(1000 - trainable_15m, active_count * 4),
+            f"Размеченные примеры {model_horizon}m",
+            trainable_model_horizon >= 1000,
+            f"{trainable_model_horizon}/1000 примеров",
+            f"Дождитесь закрытия {model_horizon}m исходов или загрузите историю свечей backfill, затем запустите обучение.",
+            self._eta_for_samples(1000 - trainable_model_horizon, active_count * 4),
         )
         require(
             "Результаты прогнозов",
             prediction_outcomes >= 1000,
             f"{prediction_outcomes}/1000 исходов",
-            "Проверьте задачу outcome-resolver: она должна сопоставлять сигналы с результатом через 15 минут.",
+            f"Проверьте задачу outcome-resolver: она должна сопоставлять сигналы с результатом через {model_horizon} минут.",
             self._eta_for_samples(1000 - prediction_outcomes, active_count * 4),
         )
         require(
@@ -1907,8 +1930,8 @@ class TelegramMonitorBot:
         )
 
         warn_if(
-            trainable_15m < 2000,
-            f"Размеченных 15m примеров {trainable_15m}; для более уверенного CANARY лучше 2000+.",
+            trainable_model_horizon < 2000,
+            f"Размеченных {model_horizon}m примеров {trainable_model_horizon}; для более уверенного CANARY лучше 2000+.",
             "Можно начать с 1000 для первого кандидата, но перед реальными деньгами лучше добрать данные.",
         )
         warn_if(

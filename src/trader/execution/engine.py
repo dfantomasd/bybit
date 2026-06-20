@@ -138,7 +138,7 @@ class ExecutionEngine:
         self._maker_ttl_s = max(self._maker_timeout_s, float(maker_ttl_s))
         self._maker_allow_escalation = maker_allow_escalation
         # Callable(symbol) -> L5 orderbook imbalance in [-1, 1] or None; used by
-        # the maker escalation guard. Missing data fails open (escalation allowed).
+        # the maker escalation guard. Missing/stale data fails closed.
         self._imbalance_provider = imbalance_provider
         self._safety_ladder: SafetyModeLadder | None = safety_ladder
         self._max_open_positions: int = max(1, int(max_open_positions))
@@ -1902,17 +1902,20 @@ class ExecutionEngine:
                     time_fraction=round(time_fraction, 2),
                 )
 
-        # Imbalance must not contradict the direction (fail open when unknown).
-        # Skip this gate when queue-depth override is active.
-        if not queue_override and self._imbalance_provider is not None:
-            try:
-                imbalance = self._imbalance_provider(intent.symbol)
-            except Exception:
-                imbalance = None
-            if imbalance is not None:
-                against = imbalance < 0 if intent.side == OrderSide.BUY else imbalance > 0
-                if against:
-                    return False, f"imbalance_against:{round(imbalance, 3)}"
+        # Imbalance data must be present before we pay taker. Queue-depth override
+        # may bypass an adverse known imbalance, but never missing/stale book data.
+        if self._imbalance_provider is None:
+            return False, "imbalance_provider_missing"
+        try:
+            imbalance = self._imbalance_provider(intent.symbol)
+        except Exception as exc:
+            return False, f"imbalance_unknown:{exc}"
+        if imbalance is None:
+            return False, "imbalance_unknown"
+        if not queue_override:
+            against = imbalance < 0 if intent.side == OrderSide.BUY else imbalance > 0
+            if against:
+                return False, f"imbalance_against:{round(imbalance, 3)}"
 
         # Price must not have run away from where the maker order was resting
         try:

@@ -26,6 +26,14 @@ class _Book:
         return 1.5
 
 
+class _StaleBook:
+    def latest_imbalance(self, _symbol: str) -> None:
+        return None
+
+    def microprice_deviation_bps(self, _symbol: str) -> None:
+        return None
+
+
 def _vector(**overrides: float) -> FeatureVector:
     features = {
         "atr_14_pct": 0.004,
@@ -37,6 +45,30 @@ def _vector(**overrides: float) -> FeatureVector:
         "oi_change_pct_60m_clipped": 0.0,
     }
     features.update(overrides)
+    return FeatureVector(
+        feature_id=uuid.uuid4(),
+        symbol=_SYMBOL,
+        timestamp=datetime.now(tz=UTC),
+        values=list(features.values()),
+        feature_names=list(features.keys()),
+        quality_score=1.0,
+        lookback_bars=60,
+    )
+
+
+def _vector_without(*missing: str, **overrides: float) -> FeatureVector:
+    features = {
+        "atr_14_pct": 0.004,
+        "rsi_14": 0.5,
+        "log_return_1": 0.0,
+        "realized_vol_20": 0.001,
+        "adx_14": 0.2,
+        "funding_rate_bps_clipped": 0.0,
+        "oi_change_pct_60m_clipped": 0.0,
+    }
+    features.update(overrides)
+    for name in missing:
+        features.pop(name, None)
     return FeatureVector(
         feature_id=uuid.uuid4(),
         symbol=_SYMBOL,
@@ -75,6 +107,15 @@ def test_order_flow_strategy_buys_aligned_tape_and_book_pressure() -> None:
     assert proposal.side == OrderSide.BUY
 
 
+def test_order_flow_strategy_rejects_missing_book_confirmation() -> None:
+    tracker = FlowTracker()
+    tracker.record_trade(_SYMBOL, OrderSide.BUY, Decimal("10"), Decimal("500"))
+    tracker.record_trade(_SYMBOL, OrderSide.SELL, Decimal("10"), Decimal("50"))
+
+    assert OrderFlowStrategy(tracker, None).evaluate(_vector(), 10.0, 1000.0) is None
+    assert OrderFlowStrategy(tracker, _StaleBook()).evaluate(_vector(), 10.0, 1000.0) is None
+
+
 def test_funding_arbitrage_fades_positive_funding() -> None:
     proposal = FundingArbitrageStrategy(min_abs_funding_bps=5.0).evaluate(
         _vector(funding_rate_bps_clipped=8.0, oi_change_pct_60m_clipped=0.2),
@@ -84,6 +125,25 @@ def test_funding_arbitrage_fades_positive_funding() -> None:
 
     assert proposal is not None
     assert proposal.side == OrderSide.SELL
+
+
+def test_funding_arbitrage_requires_oi_and_momentum_features() -> None:
+    assert (
+        FundingArbitrageStrategy(min_abs_funding_bps=5.0).evaluate(
+            _vector_without("oi_change_pct_60m_clipped", funding_rate_bps_clipped=8.0),
+            10.0,
+            1000.0,
+        )
+        is None
+    )
+    assert (
+        FundingArbitrageStrategy(min_abs_funding_bps=5.0).evaluate(
+            _vector_without("log_return_1", funding_rate_bps_clipped=8.0),
+            10.0,
+            1000.0,
+        )
+        is None
+    )
 
 
 def test_liquidation_hunting_fades_sell_liquidation_cluster() -> None:

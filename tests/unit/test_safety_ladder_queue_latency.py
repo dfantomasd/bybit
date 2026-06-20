@@ -138,19 +138,42 @@ class TestQueueAwareEscalation:
         engine = MagicMock(spec=ExecutionEngine)
         engine._maker_allow_escalation = True
         engine._maker_ttl_s = 5.0
-        engine._imbalance_provider = None
+        engine._imbalance_provider = MagicMock(return_value=0.7)
         engine._category = "linear"
         engine._maker_escalation_allowed = ExecutionEngine._maker_escalation_allowed.__get__(engine)
         return engine
 
     @pytest.mark.asyncio
-    async def test_escalation_allowed_when_no_imbalance_and_price_stable(self):
+    async def test_escalation_allowed_when_imbalance_confirms_and_price_stable(self):
         engine = self._make_engine_mock()
         engine._adapter = MagicMock()
         engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
         intent = _make_order_intent()
         allowed, reason = await engine._maker_escalation_allowed(intent, Decimal("100"), time_waited_s=0)
         assert allowed
+        assert reason == "ok"
+
+    @pytest.mark.asyncio
+    async def test_escalation_blocked_when_imbalance_provider_missing(self):
+        engine = self._make_engine_mock()
+        engine._imbalance_provider = None
+        engine._adapter = MagicMock()
+        engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
+        intent = _make_order_intent()
+        allowed, reason = await engine._maker_escalation_allowed(intent, Decimal("100"), time_waited_s=0)
+        assert not allowed
+        assert reason == "imbalance_provider_missing"
+
+    @pytest.mark.asyncio
+    async def test_escalation_blocked_when_imbalance_unknown(self):
+        engine = self._make_engine_mock()
+        engine._imbalance_provider = MagicMock(return_value=None)
+        engine._adapter = MagicMock()
+        engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
+        intent = _make_order_intent()
+        allowed, reason = await engine._maker_escalation_allowed(intent, Decimal("100"), time_waited_s=4.0)
+        assert not allowed
+        assert reason == "imbalance_unknown"
 
     @pytest.mark.asyncio
     async def test_escalation_blocked_by_price_drift(self):

@@ -119,6 +119,7 @@ class RiskManager:
         event_bus: Any = None,
         log: logging.Logger | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
+        require_liquidity_for_sizing: bool = False,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -129,6 +130,7 @@ class RiskManager:
         self._metrics = metrics
         self._event_bus = event_bus
         self._log = log or logger
+        self._require_liquidity_for_sizing = require_liquidity_for_sizing
         self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
 
         self._daily_pnl: Decimal = Decimal("0")
@@ -351,7 +353,11 @@ class RiskManager:
                 event_risk_score = 0.8
 
         remaining_position_budget_usd = self._exposure.remaining_position_exposure_usd(proposal.symbol)
-        sizer = PositionSizer(self._limits, instrument_info)
+        sizer = PositionSizer(
+            self._limits,
+            instrument_info,
+            require_liquidity=self._require_liquidity_for_sizing,
+        )
         approved_qty, rejection_reason = sizer.calculate(
             capital=capital,
             stop_distance_pct=stop_distance_pct,

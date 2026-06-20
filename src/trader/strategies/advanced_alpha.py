@@ -119,13 +119,23 @@ class OrderFlowStrategy(BaseStrategy):
         if stats is None or stats.total_notional < 2_000:
             _reject(self.strategy_id, feature_vector.symbol, "insufficient_trade_flow")
             return None
-        book = self._book.latest_imbalance(feature_vector.symbol) if self._book is not None else None
-        micro = self._book.microprice_deviation_bps(feature_vector.symbol) if self._book is not None else None
+        if self._book is None:
+            _reject(self.strategy_id, feature_vector.symbol, "missing_orderbook_confirmation")
+            return None
+        try:
+            book = self._book.latest_imbalance(feature_vector.symbol)
+            micro = self._book.microprice_deviation_bps(feature_vector.symbol)
+        except Exception as exc:
+            _reject(self.strategy_id, feature_vector.symbol, "orderbook_confirmation_failed", error=str(exc))
+            return None
+        if book is None or micro is None:
+            _reject(self.strategy_id, feature_vector.symbol, "stale_orderbook_confirmation")
+            return None
         if stats.imbalance >= self._min_flow_imbalance:
-            if book is not None and book < self._min_book_imbalance:
+            if book < self._min_book_imbalance:
                 _reject(self.strategy_id, feature_vector.symbol, "book_not_confirming_buy", book_imbalance=book)
                 return None
-            if micro is not None and micro < 0:
+            if micro < 0:
                 _reject(self.strategy_id, feature_vector.symbol, "microprice_not_confirming_buy", microprice_bps=micro)
                 return None
             return _proposal(
@@ -140,10 +150,10 @@ class OrderFlowStrategy(BaseStrategy):
                 feature_id=feature_vector.feature_id,
             )
         if stats.imbalance <= -self._min_flow_imbalance:
-            if book is not None and book > -self._min_book_imbalance:
+            if book > -self._min_book_imbalance:
                 _reject(self.strategy_id, feature_vector.symbol, "book_not_confirming_sell", book_imbalance=book)
                 return None
-            if micro is not None and micro > 0:
+            if micro > 0:
                 _reject(self.strategy_id, feature_vector.symbol, "microprice_not_confirming_sell", microprice_bps=micro)
                 return None
             return _proposal(
@@ -178,10 +188,13 @@ class FundingArbitrageStrategy(BaseStrategy):
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         funding = f.get("funding_rate_bps_clipped", f.get("funding_rate_bps"))
-        oi_change = f.get("oi_change_pct_60m_clipped", f.get("oi_change_pct_60m", 0.0)) or 0.0
-        r1 = f.get("log_return_1", 0.0) or 0.0
+        oi_change = f.get("oi_change_pct_60m_clipped", f.get("oi_change_pct_60m"))
+        r1 = f.get("log_return_1")
         if feature_vector.quality_score < 0.6 or atr_pct is None or funding is None:
             _reject(self.strategy_id, feature_vector.symbol, "low_quality_or_missing_funding")
+            return None
+        if oi_change is None or r1 is None:
+            _reject(self.strategy_id, feature_vector.symbol, "missing_oi_or_momentum")
             return None
         if abs(funding) < self._min_abs_funding_bps or abs(r1) > self._max_abs_return_3:
             _reject(

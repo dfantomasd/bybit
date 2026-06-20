@@ -44,9 +44,15 @@ class PositionSizer:
     10. Final hard cap check.
     """
 
-    def __init__(self, risk_limits: RiskLimits, instrument_info: InstrumentInfo) -> None:
+    def __init__(
+        self,
+        risk_limits: RiskLimits,
+        instrument_info: InstrumentInfo,
+        require_liquidity: bool = False,
+    ) -> None:
         self._limits = risk_limits
         self._info = instrument_info
+        self._require_liquidity = require_liquidity
 
     # ------------------------------------------------------------------
     # Public API
@@ -239,8 +245,8 @@ class PositionSizer:
 
         # ----------------------------------------------------------------
         # Liquidity cap — do not size an entry above 5% of average hourly
-        # 24h turnover. Missing liquidity data fails open but is visible in
-        # logs so operators know the protection was skipped.
+        # 24h turnover. In live modes the risk manager can require this data,
+        # so missing liquidity fails closed instead of silently skipping the cap.
         # ----------------------------------------------------------------
         if entry_price is not None and entry_price > Decimal("0"):
             turnover_24h = self._info.turnover_24h
@@ -255,6 +261,8 @@ class PositionSizer:
                         )
                     approved_qty = capped_qty
             else:
+                if self._require_liquidity:
+                    return Decimal("0"), "missing liquidity turnover_24h"
                 logger.warning(
                     "position_sizer.liquidity_data_missing",
                     extra={"symbol": self._info.symbol},

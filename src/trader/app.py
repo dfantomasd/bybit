@@ -1846,6 +1846,10 @@ class TradingApplication:
             exposure_tracker=self._exposure_tracker,
             circuit_breaker_manager=breakers,
             kill_switch=kill_switch,
+            require_liquidity_for_sizing=(
+                self._settings.LIVE_REQUIRE_LIQUIDITY_FOR_SIZING
+                and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
+            ),
         )
         self._kill_switch = kill_switch
         log.info(

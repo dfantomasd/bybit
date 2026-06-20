@@ -9,6 +9,7 @@ receive the extended implementation without a risky full-file rewrite.
 
 from __future__ import annotations
 
+import json
 import traceback
 from contextvars import ContextVar
 from datetime import datetime, timedelta
@@ -61,6 +62,95 @@ def default_cost_model() -> CostModelBps:
 
 class DirectionalTradeJournal(_BaseTradeJournal):
     """Trade journal with directional, cost-aware ML outcomes."""
+
+    @staticmethod
+    def _model_metrics_dict(model_row: dict[str, Any]) -> dict[str, Any]:
+        metrics = model_row.get("metrics") or {}
+        if isinstance(metrics, str):
+            try:
+                metrics = json.loads(metrics)
+            except json.JSONDecodeError:
+                metrics = {}
+        return metrics if isinstance(metrics, dict) else {}
+
+    @classmethod
+    def _model_horizon_minutes(cls, model_row: dict[str, Any], default: int = 15) -> int:
+        metrics = cls._model_metrics_dict(model_row)
+        for key in ("horizon_minutes", "model_horizon_minutes"):
+            try:
+                horizon = int(metrics.get(key))
+            except (TypeError, ValueError):
+                continue
+            if horizon > 0:
+                return horizon
+        return default
+
+    async def _paper_pnl_for_model(
+        self,
+        model_version: str,
+        horizon_minutes: int,
+        feature_schema_hash: str,
+    ) -> dict[str, Any]:
+        baseline_rows = await self._fetch(
+            """
+            SELECT po.net_return_bps
+            FROM prediction_events pe
+            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+            WHERE pe.model_version = 'RULE_BASELINE_V1'
+              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+              AND po.horizon_minutes = $1
+              AND po.label IS NOT NULL
+              AND po.label_schema_version = $2
+              AND pe.strategy_signal IN ('Buy', 'Sell')
+            ORDER BY pe.created_at ASC
+            LIMIT 1000
+            """,
+            int(horizon_minutes),
+            LABEL_SCHEMA_VERSION,
+        )
+        gate_rows = await self._fetch(
+            """
+            SELECT po.net_return_bps
+            FROM prediction_events pe
+            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+            WHERE pe.model_version = $1
+              AND pe.decision = 'GATE_PASS'
+              AND po.horizon_minutes = $2
+              AND po.label IS NOT NULL
+              AND po.label_schema_version = $3
+              AND ($4::text = '' OR fs.feature_schema_hash = $4)
+            ORDER BY pe.created_at ASC
+            LIMIT 1000
+            """,
+            model_version,
+            int(horizon_minutes),
+            LABEL_SCHEMA_VERSION,
+            feature_schema_hash,
+        )
+
+        def stats(rows: list[Any]) -> dict[str, Any]:
+            returns = [float(row["net_return_bps"] or 0.0) for row in rows]
+            equity = 0.0
+            peak = 0.0
+            max_drawdown = 0.0
+            for ret in returns:
+                equity += ret
+                peak = max(peak, equity)
+                max_drawdown = min(max_drawdown, equity - peak)
+            return {
+                "count": len(returns),
+                "avg_bps": (sum(returns) / len(returns)) if returns else None,
+                "total_bps": sum(returns),
+                "max_drawdown_bps": max_drawdown,
+            }
+
+        return {
+            "model_version": model_version,
+            "horizon_minutes": int(horizon_minutes),
+            "baseline": stats(baseline_rows),
+            "model_gate": stats(gate_rows),
+        }
 
     async def record_signal(
         self,
@@ -573,6 +663,28 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # When no CHAMPION exists, fall back to latest_model_version so that
         # diagnostics and the heartbeat can still show which model is loaded.
         result["active_model_version"] = dict(rows[0]) if rows else result.get("latest_model_version", {})
+
+        active_model = result.get("active_model_version", {}) or latest_model
+        active_version = str(active_model.get("version") or "")
+        active_schema_hash = str(
+            active_model.get("feature_schema_hash") or latest_model.get("feature_schema_hash") or ""
+        )
+        analysis_horizon = self._model_horizon_minutes(active_model or latest_model)
+        result["model_gate_horizon_minutes"] = analysis_horizon
+        if active_version:
+            gate = await self.get_shadow_gate_stats(active_version, analysis_horizon, LABEL_SCHEMA_VERSION)
+            gate["horizon_minutes"] = analysis_horizon
+            paper = await self._paper_pnl_for_model(active_version, analysis_horizon, active_schema_hash)
+            if active_schema_hash or gate.get("total_count"):
+                result["shadow_gate_by_horizon"] = {str(analysis_horizon): gate}
+                result["paper_pnl_by_horizon"] = {str(analysis_horizon): paper}
+                result[f"shadow_gate_{analysis_horizon}m"] = gate
+                result[f"paper_pnl_{analysis_horizon}m"] = paper
+                # Compatibility keys for existing Telegram/dashboard callers. The
+                # payload includes horizon_minutes so consumers can display the
+                # actual horizon instead of trusting the legacy key name.
+                result["shadow_gate_15m"] = gate
+                result["paper_pnl_15m"] = paper
 
         return result
 

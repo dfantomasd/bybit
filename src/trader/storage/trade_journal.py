@@ -1914,6 +1914,30 @@ class TradeJournal:
                 gate["pass_vs_block_bps"] = (
                     (float(pass_avg) - float(block_avg)) if pass_avg is not None and block_avg is not None else None
                 )
+                reason_rows = await self._fetch(
+                    """
+                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_BLOCK'
+                      AND po.horizon_minutes = $2
+                      AND po.label IS NOT NULL
+                      AND po.label_schema_version = $3
+                      AND fs.feature_values IS NOT NULL
+                      AND fs.feature_schema_hash = $4
+                    GROUP BY reason
+                    ORDER BY cnt DESC
+                    LIMIT 3
+                    """,
+                    model_version,
+                    horizon_minutes,
+                    label_schema_version,
+                    feature_schema_hash,
+                )
+                if reason_rows:
+                    gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
 
             # Quality check from model metrics
             quality = "UNKNOWN"

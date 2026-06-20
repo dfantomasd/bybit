@@ -113,7 +113,7 @@ class Settings(BaseSettings):
     """Hard notional cap per scalp position."""
     SCALP_MIN_OB_IMBALANCE: float = 0.15
     """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
-    >= +value, SELL needs <= -value). Missing/stale book data fails OPEN."""
+    >= +value, SELL needs <= -value). Missing/stale book data fails closed."""
     TREND_MIN_ADX: float = 0.25
     """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
     TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
@@ -300,6 +300,8 @@ class Settings(BaseSettings):
     MIN_NOTIONAL_SAFETY_BUFFER_PCT: float = 3.0
     """Safety buffer applied on top of exchange min-notional (e.g. 3% → $5 min becomes $5.15).
     Prevents near-limit orders from being rejected by code=110094."""
+    LIVE_REQUIRE_LIQUIDITY_FOR_SIZING: bool = True
+    """Require fresh turnover_24h data before sizing entries in LIVE/CANARY_LIVE."""
 
     # ------------------------------------------------------------------
     # Screener

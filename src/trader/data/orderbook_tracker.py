@@ -108,7 +108,8 @@ class OrderbookTracker:
             history.append(snap)
 
     # ------------------------------------------------------------------
-    # Readers (all return None when data is missing or stale — fail open)
+    # Readers return None when data is missing or stale; callers decide whether
+    # that should block a signal.
     # ------------------------------------------------------------------
 
     def _fresh_latest(self, symbol: str, now: datetime | None = None) -> ObSnapshot | None:

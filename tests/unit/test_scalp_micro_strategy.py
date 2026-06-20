@@ -76,6 +76,7 @@ def _strategy(
         max_trades_per_minute=10,
         max_position_notional_usd=100.0,
         diag_hook=rejections.append,
+        imbalance_provider=kwargs.pop("imbalance_provider", lambda _s: 0.30),
         **kwargs,
     )
 
@@ -197,9 +198,30 @@ class TestScalpMicroStrategy:
         assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
         assert "imbalance_rejected" in rejections
 
-    def test_missing_imbalance_fails_open(self) -> None:
+    def test_missing_imbalance_fails_closed(self) -> None:
         closes, volumes = _cross_up_data()
         store = _make_store(closes, volumes)
-        strat = _strategy(store, imbalance_provider=lambda _s: None, min_imbalance=0.15)
-        proposal = strat.evaluate(_vector(), closes[-1], 1000.0)
-        assert proposal is not None  # no book data must not block the signal
+        rejections: list[str] = []
+        strat = _strategy(store, rejections=rejections, imbalance_provider=lambda _s: None, min_imbalance=0.15)
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert "imbalance_missing" in rejections
+
+    def test_missing_imbalance_provider_fails_closed(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+        strat = _strategy(store, rejections=rejections, imbalance_provider=None, min_imbalance=0.15)
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert "imbalance_missing" in rejections
+
+    def test_imbalance_provider_error_fails_closed(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+
+        def broken_provider(_symbol: str) -> float:
+            raise RuntimeError("book feed stale")
+
+        strat = _strategy(store, rejections=rejections, imbalance_provider=broken_provider, min_imbalance=0.15)
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert "imbalance_missing" in rejections

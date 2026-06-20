@@ -108,7 +108,7 @@ def _make_engine(
         maker_timeout_s=maker_timeout_s,
         maker_ttl_s=maker_timeout_s,
         maker_allow_escalation=maker_allow_escalation,
-        imbalance_provider=imbalance_provider,
+        imbalance_provider=imbalance_provider if imbalance_provider is not None else (lambda _s: 0.5),
     )
 
 
@@ -187,6 +187,22 @@ class TestMakerFirstExecution:
         assert engine._adapter.place_order.await_count == 1  # no taker order
         assert engine.get_diag_counts()["maker_aborted"] == 1
         assert not engine.has_pending_entries()  # slot released
+
+    @pytest.mark.asyncio
+    async def test_escalation_blocked_when_imbalance_unknown(self) -> None:
+        engine = _make_engine(imbalance_provider=lambda _s: None)
+        engine._adapter.get_open_orders = AsyncMock(
+            side_effect=lambda *_a, **_k: [
+                {"orderLinkId": engine._adapter.place_order.await_args_list[0].args[0].order_link_id}
+            ]
+        )
+
+        decision = await engine.submit(_proposal(), Decimal("10000"), Decimal("10000"))
+
+        assert decision is None
+        engine._adapter.cancel_order.assert_awaited_once()
+        assert engine._adapter.place_order.await_count == 1
+        assert engine.get_diag_counts()["maker_aborted"] == 1
 
     @pytest.mark.asyncio
     async def test_escalation_blocked_by_price_drift(self) -> None:
