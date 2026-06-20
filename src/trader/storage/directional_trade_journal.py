@@ -333,16 +333,21 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         rows = await self._fetch(
             """
             SELECT horizon_minutes, count(*) AS cnt
-            FROM prediction_outcomes
-            WHERE label IS NOT NULL
-              AND label_schema_version = $1
+            FROM (
+                SELECT horizon_minutes
+                FROM prediction_outcomes
+                WHERE label IS NOT NULL
+                  AND label_schema_version = $1
+                LIMIT 4000
+            ) capped
             GROUP BY horizon_minutes
             ORDER BY horizon_minutes
             """,
             LABEL_SCHEMA_VERSION,
         )
-        result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
-        result["prediction_outcomes"] = sum(result["prediction_outcomes_by_horizon"].values())
+        if rows:
+            result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
+            result["prediction_outcomes"] = min(1000, sum(result["prediction_outcomes_by_horizon"].values()))
 
         # Mirror the training query's eligibility exactly (threshold, signal,
         # training_eligible, one sample per candle). Order by most-recent schema
@@ -378,7 +383,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
         # newest schema = most recently seen feature schema (rows[0] after ORDER BY latest_at DESC)
         newest_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
-        newest_feature_schema_samples = int(rows[0]["cnt"]) if rows else 0
+        newest_feature_schema_samples = (
+            int(rows[0]["cnt"]) if rows else int(result.get("labelled_samples_15m") or 0)
+        )
         # dominant schema = schema with most samples (needed for mismatch check reference)
         rows_by_count = sorted(rows, key=lambda r: int(r["cnt"]), reverse=True)
         current_feature_schema_hash = (
@@ -395,9 +402,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "label_schema_version": LABEL_SCHEMA_VERSION,
             "label_threshold_bps": 5.0,
         }
-        result["labelled_samples_15m_by_schema"] = {
-            str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows
-        }
+        result["labelled_samples_15m_by_schema"] = (
+            {str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows}
+            if rows
+            else result.get("labelled_samples_15m_by_schema", {})
+        )
         # Expose newest-schema fields so app.py's schema-change trigger can fire
         # when the feature pipeline changes but the loaded model still uses the old schema.
         result["newest_training_schema_hash"] = newest_feature_schema_hash
@@ -406,40 +415,42 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # with the per-schema maximum, not the base class's cross-schema union.
         result["training_eligible_15m"] = result["labelled_samples_15m"]
 
-        horizon_rows = await self._fetch(
-            """
-            SELECT horizon_minutes, feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
-            FROM (
-                SELECT DISTINCT ON (
+        horizon_rows = []
+        if rows:
+            horizon_rows = await self._fetch(
+                """
+                SELECT horizon_minutes, feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
+                FROM (
+                    SELECT DISTINCT ON (
+                               po.horizon_minutes,
+                               fs.symbol,
+                               fs.interval,
+                               fs.candle_open_time,
+                               fs.feature_schema_hash
+                           )
                            po.horizon_minutes,
-                           fs.symbol,
-                           fs.interval,
-                           fs.candle_open_time,
-                           fs.feature_schema_hash
-                       )
-                       po.horizon_minutes,
-                       fs.snapshot_id,
-                       fs.feature_schema_hash,
-                       fs.created_at AS latest_at
-                FROM feature_snapshots fs
-                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
-                  AND po.label IS NOT NULL
-                  AND po.label_schema_version = $1
-                  AND po.label_threshold_bps = 5.0
-                  AND fs.feature_values IS NOT NULL
-                  AND fs.training_eligible = true
-                  AND pe.model_version = 'RULE_BASELINE_V1'
-                  AND pe.strategy_signal IN ('Buy', 'Sell')
-                ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
-                         fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
-            ) deduped
-            GROUP BY horizon_minutes, feature_schema_hash
-            ORDER BY horizon_minutes, latest_at DESC
-            """,
-            LABEL_SCHEMA_VERSION,
-        )
+                           fs.snapshot_id,
+                           fs.feature_schema_hash,
+                           fs.created_at AS latest_at
+                    FROM feature_snapshots fs
+                    JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
+                      AND po.label IS NOT NULL
+                      AND po.label_schema_version = $1
+                      AND po.label_threshold_bps = 5.0
+                      AND fs.feature_values IS NOT NULL
+                      AND fs.training_eligible = true
+                      AND pe.model_version = 'RULE_BASELINE_V1'
+                      AND pe.strategy_signal IN ('Buy', 'Sell')
+                    ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
+                             fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
+                ) deduped
+                GROUP BY horizon_minutes, feature_schema_hash
+                ORDER BY horizon_minutes, latest_at DESC
+                """,
+                LABEL_SCHEMA_VERSION,
+            )
         training_by_horizon: dict[str, int] = {}
         newest_schema_by_horizon: dict[str, dict[str, Any]] = {}
         for row in horizon_rows:

@@ -531,32 +531,32 @@ class TradeJournal:
                     chat_id bigint PRIMARY KEY,
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
-                UPDATE feature_snapshots fs
-                SET training_eligible = false,
-                    invalid_reason = 'duplicate_snapshot_same_candle',
-                    invalidated_at = now()
-                WHERE fs.snapshot_id IN (
-                    SELECT snapshot_id
-                    FROM (
-                        SELECT snapshot_id,
-                               ROW_NUMBER() OVER (
-                                   PARTITION BY symbol, interval, candle_open_time, feature_schema_hash
-                                   ORDER BY created_at ASC, snapshot_id ASC
-                               ) AS rn
-                        FROM feature_snapshots
-                        WHERE training_eligible = true
-                    ) ranked
-                    WHERE rn > 1
-                );
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
-                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
-                    WHERE training_eligible = true;
             """)
+            await self._ensure_feature_snapshot_unique_index(conn)
             # This index must be created AFTER ALTER TABLE adds label_schema_version
             # to avoid CREATE INDEX failing on an existing DB where the column was missing.
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
                 "ON prediction_outcomes (label_schema_version)"
+            )
+
+    async def _ensure_feature_snapshot_unique_index(self, conn: asyncpg.Connection) -> None:
+        """Best-effort index bootstrap; never make the journal unavailable."""
+        exists = await conn.fetchval("SELECT to_regclass('idx_feature_snapshots_unique_eligible')")
+        if exists:
+            return
+        try:
+            await conn.execute(
+                """
+                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                    WHERE training_eligible = true
+                """
+            )
+        except Exception as exc:
+            log.warning(
+                "trade_journal.feature_snapshot_unique_index_deferred",
+                error=str(exc),
             )
 
     async def record_signal(
@@ -1384,6 +1384,34 @@ class TradeJournal:
         )
         return {str(r["interval"]): int(r["cnt"]) for r in rows}
 
+    async def get_candle_readiness_counts(self) -> dict[str, int]:
+        """Return capped candle counts used by readiness checks.
+
+        Exact COUNT(*) over a large candle table is an operator nicety, not a
+        trading prerequisite. These bounded probes answer the important
+        readiness question without making Telegram diagnostics contend with
+        ingestion and training queries.
+        """
+        targets = {"1": 1000, "5": 200, "15": 200, "60": 100}
+        counts: dict[str, int] = {}
+        for interval, target in targets.items():
+            rows = await self._fetch(
+                """
+                SELECT count(*) AS cnt
+                FROM (
+                    SELECT 1
+                    FROM market_candles
+                    WHERE interval = $1
+                      AND confirmed = true
+                    LIMIT $2
+                ) capped
+                """,
+                interval,
+                target,
+            )
+            counts[interval] = int(rows[0]["cnt"]) if rows else 0
+        return counts
+
     async def get_candle_counts_per_symbol(self) -> dict[tuple[str, str], int]:
         """Return {(symbol, interval): confirmed count} for backfill gap detection."""
         rows = await self._fetch(
@@ -1411,6 +1439,51 @@ class TradeJournal:
             return cast(datetime, rows[0]["ts"])
         return None
 
+    async def get_feature_snapshot_readiness_count(self, limit: int = 1000) -> int:
+        rows = await self._fetch(
+            """
+            SELECT count(*) AS cnt
+            FROM (
+                SELECT 1
+                FROM feature_snapshots
+                LIMIT $1
+            ) capped
+            """,
+            int(limit),
+        )
+        return int(rows[0]["cnt"]) if rows else 0
+
+    async def get_prediction_outcome_readiness_count(self, limit: int = 1000) -> int:
+        rows = await self._fetch(
+            """
+            SELECT count(*) AS cnt
+            FROM (
+                SELECT 1
+                FROM prediction_outcomes
+                WHERE label IS NOT NULL
+                LIMIT $1
+            ) capped
+            """,
+            int(limit),
+        )
+        return int(rows[0]["cnt"]) if rows else 0
+
+    async def get_labelled_15m_readiness_count(self, limit: int = 1000) -> int:
+        rows = await self._fetch(
+            """
+            SELECT count(*) AS cnt
+            FROM (
+                SELECT 1
+                FROM prediction_outcomes
+                WHERE horizon_minutes = 15
+                  AND label IS NOT NULL
+                LIMIT $1
+            ) capped
+            """,
+            int(limit),
+        )
+        return int(rows[0]["cnt"]) if rows else 0
+
     async def apply_candle_retention(self) -> None:
         """Delete old candles according to retention policy."""
         retention = {"1": 30, "5": 180, "15": 365, "60": 730}
@@ -1432,6 +1505,14 @@ class TradeJournal:
         feature_values: list[float],
     ) -> str:
         """Write feature vector snapshot; return snapshot_id."""
+        args = (
+            symbol,
+            interval,
+            candle_open_time,
+            feature_schema_hash,
+            json.dumps(feature_names),
+            json.dumps(feature_values),
+        )
         rows = await self._fetch(
             """
             INSERT INTO feature_snapshots (
@@ -1446,13 +1527,20 @@ class TradeJournal:
                 feature_values = EXCLUDED.feature_values
             RETURNING snapshot_id
             """,
-            symbol,
-            interval,
-            candle_open_time,
-            feature_schema_hash,
-            json.dumps(feature_names),
-            json.dumps(feature_values),
+            *args,
         )
+        if not rows and self.is_enabled:
+            rows = await self._fetch(
+                """
+                INSERT INTO feature_snapshots (
+                    symbol, interval, candle_open_time,
+                    feature_schema_hash, feature_names, feature_values
+                )
+                VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+                RETURNING snapshot_id
+                """,
+                *args,
+            )
         return str(rows[0]["snapshot_id"]) if rows else ""
 
     async def record_prediction_event(
@@ -2605,46 +2693,30 @@ class TradeJournal:
         try:
             self._last_read_error = None
             self._last_read_error_at = None
-            result["candles_by_interval"] = await self.get_candle_counts()
+            result["candles_by_interval"] = await self.get_candle_readiness_counts()
             latest_candle_1m = await self.get_latest_candle_time("1")
             result["latest_candle_1m"] = latest_candle_1m
             if latest_candle_1m is not None:
                 result["last_confirmed_candle_age_s"] = max(
                     0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                 )
-            rows = await self._fetch("SELECT count(*) AS cnt FROM feature_snapshots")
-            result["feature_snapshots"] = int(rows[0]["cnt"]) if rows else 0
-            rows = await self._fetch("SELECT count(*) AS cnt FROM prediction_outcomes")
-            result["prediction_outcomes"] = int(rows[0]["cnt"]) if rows else 0
+            result["feature_snapshots"] = await self.get_feature_snapshot_readiness_count()
+            result["prediction_outcomes"] = await self.get_prediction_outcome_readiness_count()
             rows = await self._fetch(
                 """
                 SELECT horizon_minutes, count(*) AS cnt
-                FROM prediction_outcomes
-                WHERE label IS NOT NULL
+                FROM (
+                    SELECT horizon_minutes
+                    FROM prediction_outcomes
+                    WHERE label IS NOT NULL
+                    LIMIT 4000
+                ) capped
                 GROUP BY horizon_minutes
                 ORDER BY horizon_minutes
                 """
             )
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
-            rows = await self._fetch(
-                """
-                WITH labelled AS (
-                    SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time)
-                           fs.snapshot_id
-                    FROM feature_snapshots fs
-                    JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                    WHERE po.horizon_minutes = 15
-                      AND po.label IS NOT NULL
-                      AND fs.feature_values IS NOT NULL
-                      AND fs.training_eligible = true
-                      AND pe.model_version = 'RULE_BASELINE_V1'
-                    ORDER BY fs.symbol, fs.interval, fs.candle_open_time, fs.created_at ASC
-                )
-                SELECT count(*) AS cnt FROM labelled
-                """
-            )
-            result["labelled_samples_15m"] = int(rows[0]["cnt"]) if rows else 0
+            result["labelled_samples_15m"] = await self.get_labelled_15m_readiness_count()
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
 
