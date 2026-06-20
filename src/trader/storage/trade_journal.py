@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import math
@@ -24,6 +25,7 @@ from trader.training.labels import (
 log = structlog.get_logger(__name__)
 
 _MODEL_PROMOTION_ADVISORY_LOCK_ID = 926_202_606
+_POOL_CLOSE_TIMEOUT_SECONDS = 5.0
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -133,20 +135,23 @@ class TradeJournal:
                 max_size=3,
                 statement_cache_size=0,
             )
-            await self._ensure_schema()
             self._last_connect_error_at = None
             self._last_connect_error = None
-            log.info("trade_journal.connected")
         except Exception as exc:
-            if self._pool is not None:
-                try:
-                    await self._pool.close()
-                except Exception as close_exc:
-                    log.debug("trade_journal.failed_pool_close_failed", error=str(close_exc))
+            await self._close_pool_after_failure("failed_pool_close_failed")
             self._pool = None
             self._last_connect_error_at = datetime.now(tz=UTC)
             self._last_connect_error = str(exc)
             log.warning("trade_journal.unavailable", error=str(exc))
+            return
+
+        try:
+            await self._ensure_schema()
+        except Exception as exc:
+            self._last_connect_error_at = datetime.now(tz=UTC)
+            self._last_connect_error = f"schema bootstrap degraded: {exc}"
+            log.warning("trade_journal.schema_bootstrap_degraded", error=str(exc))
+        log.info("trade_journal.connected", schema_degraded=self._last_connect_error is not None)
 
     async def reconnect_if_needed(self, *, min_interval: float = 30.0, force: bool = False) -> bool:
         """Try to reconnect after transient startup/network failures."""
@@ -155,10 +160,7 @@ class TradeJournal:
         if self._pool is not None:
             if not force and self.durable_state_healthy:
                 return True
-            try:
-                await self._pool.close()
-            except Exception as close_exc:
-                log.debug("trade_journal.reconnect_pool_close_failed", error=str(close_exc))
+            await self._close_pool_after_failure("reconnect_pool_close_failed")
             self._pool = None
         if not force and self._last_connect_attempt_at is not None:
             age = datetime.now(tz=UTC) - self._last_connect_attempt_at
@@ -173,8 +175,19 @@ class TradeJournal:
 
     async def close(self) -> None:
         if self._pool is not None:
-            await self._pool.close()
+            await self._close_pool_after_failure("pool_close_failed")
             self._pool = None
+
+    async def _close_pool_after_failure(self, event: str) -> None:
+        if self._pool is None:
+            return
+        try:
+            await asyncio.wait_for(self._pool.close(), timeout=_POOL_CLOSE_TIMEOUT_SECONDS)
+        except TimeoutError:
+            log.warning("trade_journal.pool_close_timeout", timeout_s=_POOL_CLOSE_TIMEOUT_SECONDS)
+            self._pool.terminate()
+        except Exception as close_exc:
+            log.debug(f"trade_journal.{event}", error=str(close_exc))
 
     async def _ensure_schema(self) -> None:
         assert self._pool is not None

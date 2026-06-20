@@ -132,6 +132,77 @@ def test_get_diagnostics_exposes_specific_risk_rejection_counts():
     assert diag["hour_min_notional_rejected"] == 1
 
 
+@pytest.mark.asyncio
+async def test_trade_journal_pool_close_timeout_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trader.storage.trade_journal as trade_journal_module
+    from trader.storage.trade_journal import TradeJournal
+
+    monkeypatch.setattr(trade_journal_module, "_POOL_CLOSE_TIMEOUT_SECONDS", 0.01)
+
+    class SlowPool:
+        def __init__(self) -> None:
+            self.terminated = False
+
+        async def close(self) -> None:
+            await asyncio.sleep(60)
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+    pool = SlowPool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = pool  # type: ignore[assignment]
+
+    await journal.close()
+
+    assert pool.terminated is True
+    assert journal._pool is None
+
+
+@pytest.mark.asyncio
+async def test_trade_journal_connect_keeps_pool_when_schema_bootstrap_times_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import trader.storage.trade_journal as trade_journal_module
+    from trader.storage.trade_journal import TradeJournal
+
+    class FakePool:
+        async def close(self) -> None:
+            raise AssertionError("pool must not be closed for schema bootstrap timeout")
+
+    pool = FakePool()
+
+    async def fake_create_pool(**kwargs: Any) -> FakePool:
+        del kwargs
+        return pool
+
+    async def failing_schema(self: TradeJournal) -> None:
+        del self
+        raise TimeoutError("canceling statement due to statement timeout")
+
+    monkeypatch.setattr(trade_journal_module.asyncpg, "create_pool", fake_create_pool)
+    monkeypatch.setattr(TradeJournal, "_ensure_schema", failing_schema)
+
+    journal = TradeJournal("postgresql://example/db")
+
+    await journal.connect()
+
+    assert journal.is_enabled is True
+    assert journal._pool is pool
+    assert "schema bootstrap degraded" in str(journal.write_health()["last_connect_error"])
+
+
+def test_load_governor_uses_ws_stale_hysteresis() -> None:
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._run_load_governor)
+    assert "ws_stale_threshold_s = 90.0" in src
+    assert "overload_streak >= 2" in src
+    assert "restore_streak >= 2" in src
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

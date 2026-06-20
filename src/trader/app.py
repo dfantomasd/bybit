@@ -2852,6 +2852,9 @@ class TradingApplication:
 
         # Original feature_max from screener (set at startup)
         original_max: int | None = None
+        overload_streak = 0
+        restore_streak = 0
+        ws_stale_threshold_s = 90.0
 
         while not self._shutdown_event.is_set():
             await asyncio.sleep(check_interval)
@@ -2872,29 +2875,41 @@ class TradingApplication:
             ws_stale = False
             if self._health_checker is not None and self._health_checker._last_ws_message_at is not None:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
-                ws_stale = ws_age > 30.0
+                ws_stale = ws_age > ws_stale_threshold_s
 
             overloaded = lag_ms > max_lag_ms or ws_stale
+            if overloaded:
+                overload_streak += 1
+                restore_streak = 0
+            else:
+                restore_streak += 1
+                overload_streak = 0
             current = self._screener._feature_max
 
-            if overloaded and current > min_symbols:
+            if overloaded and overload_streak >= 2 and current > min_symbols:
+                streak = overload_streak
                 new_max = max(min_symbols, current - 1)
                 self._screener._feature_max = new_max
+                overload_streak = 0
                 log.warning(
                     "load_governor.reducing_symbols",
                     lag_ms=round(lag_ms, 1),
                     ws_stale=ws_stale,
+                    overload_streak=streak,
                     from_max=current,
                     to_max=new_max,
                     min_symbols=min_symbols,
                 )
-            elif not overloaded and current < original_max:
+            elif not overloaded and restore_streak >= 2 and current < original_max:
                 # Restore one symbol at a time
+                streak = restore_streak
                 new_max = min(original_max, current + 1)
                 self._screener._feature_max = new_max
+                restore_streak = 0
                 log.info(
                     "load_governor.restoring_symbols",
                     lag_ms=round(lag_ms, 1),
+                    restore_streak=streak,
                     from_max=current,
                     to_max=new_max,
                 )
