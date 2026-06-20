@@ -729,6 +729,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             model_params=dict(best.get("model_params") or {}),
         )
         model_feature_schema_hash = model.feature_schema_hash
+        snapshot_feature_schema_hash = feature_schema_hash
 
         # The saved artifact is trained on all usable samples with the candidate
         # selected only from out-of-sample walk-forward metrics.
@@ -785,8 +786,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         stored_metrics = metrics | {
             "features": len(feature_names),
             "model_type": model.model_type,
-            "feature_schema_hash": model_feature_schema_hash,
-            "source_feature_schema_hash": feature_schema_hash,
+            "feature_schema_hash": snapshot_feature_schema_hash,
+            "model_feature_schema_hash": model_feature_schema_hash,
+            "source_feature_schema_hash": snapshot_feature_schema_hash,
             "horizon_minutes": horizon_minutes,
             "label_bps_threshold": selected_label_threshold,
             "requested_label_bps_threshold": label_bps_threshold,
@@ -813,7 +815,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             version,
             ModelStatus.SHADOW_CHALLENGER,
             model.training_samples,
-            model_feature_schema_hash,
+            snapshot_feature_schema_hash,
             artifact,
             json.dumps(stored_metrics),
             run_started,

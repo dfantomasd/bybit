@@ -814,11 +814,7 @@ class TradingApplication:
                 # This eliminates the silent multi-hour window where predict() always returns None.
                 newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
                 newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
-                current_schema_hash = ""
-                if self._model_registry is not None:
-                    _active = self._model_registry.challenger or self._model_registry.champion
-                    if _active is not None:
-                        current_schema_hash = _active.feature_schema_hash
+                current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
                 schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
 
@@ -1021,11 +1017,7 @@ class TradingApplication:
 
                 newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
                 newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
-                current_schema_hash = ""
-                if self._model_registry is not None:
-                    _rep_model = self._model_registry.challenger or self._model_registry.champion
-                    if _rep_model is not None:
-                        current_schema_hash = _rep_model.feature_schema_hash
+                current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
                 schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
                 _sc_min = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
 

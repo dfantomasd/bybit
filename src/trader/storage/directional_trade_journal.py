@@ -413,7 +413,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 status,
                 training_samples,
                 metrics,
-                COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                COALESCE(
+                    NULLIF(feature_schema_hash, ''),
+                    NULLIF(metrics->>'source_feature_schema_hash', ''),
+                    metrics->>'feature_schema_hash',
+                    ''
+                ) AS feature_schema_hash,
                 training_finished_at,
                 created_at
             FROM model_versions
@@ -432,7 +437,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                     status,
                     training_samples,
                     metrics,
-                    COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                    COALESCE(
+                        NULLIF(feature_schema_hash, ''),
+                        NULLIF(metrics->>'source_feature_schema_hash', ''),
+                        metrics->>'feature_schema_hash',
+                        ''
+                    ) AS feature_schema_hash,
                     training_finished_at,
                     created_at
                 FROM model_versions
@@ -476,7 +486,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 status,
                 training_samples,
                 metrics,
-                COALESCE(metrics->>'feature_schema_hash', '') AS feature_schema_hash,
+                COALESCE(
+                    NULLIF(feature_schema_hash, ''),
+                    NULLIF(metrics->>'source_feature_schema_hash', ''),
+                    metrics->>'feature_schema_hash',
+                    ''
+                ) AS feature_schema_hash,
                 training_finished_at,
                 created_at
             FROM model_versions
