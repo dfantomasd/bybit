@@ -10,6 +10,7 @@ import pytest
 from trader.ml.challenger import ChallengerModel
 from trader.training.train import (
     _candidate_specs,
+    _filter_timestamps_by_mask,
     _negative_bucket_keep_mask,
     _validate_walk_forward_chronology,
     _walk_forward_splits,
@@ -85,6 +86,31 @@ def test_negative_bucket_filter_excludes_stable_losers() -> None:
     assert keep.tolist() == [False, False, False, True, True, True]
     assert excluded[0]["regime"] == "bad"
     assert excluded[0]["count"] == 3
+
+
+def test_negative_bucket_filter_keeps_timestamps_aligned() -> None:
+    timestamps = [datetime(2026, 6, 13, tzinfo=UTC) + timedelta(minutes=i) for i in range(6)]
+    keep = np.array([False, True, False, True, True, False], dtype=bool)
+
+    filtered = _filter_timestamps_by_mask(timestamps, keep)
+
+    assert filtered == [timestamps[1], timestamps[3], timestamps[4]]
+
+
+def test_negative_bucket_filter_rejects_timestamp_length_mismatch() -> None:
+    timestamps = [datetime(2026, 6, 13, tzinfo=UTC)]
+    keep = np.array([True, False], dtype=bool)
+
+    with pytest.raises(RuntimeError, match="timestamp/filter length mismatch"):
+        _filter_timestamps_by_mask(timestamps, keep)
+
+
+def test_walk_forward_chronology_rejects_missing_timestamps() -> None:
+    folds = [(np.array([0, 1]), np.array([2]))]
+    timestamps = [datetime(2026, 6, 13, tzinfo=UTC), datetime(2026, 6, 13, 0, 1, tzinfo=UTC)]
+
+    with pytest.raises(RuntimeError, match="timestamp mismatch"):
+        _validate_walk_forward_chronology(folds, timestamps)
 
 
 def test_challenger_model_params_roundtrip() -> None:

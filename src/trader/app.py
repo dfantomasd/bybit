@@ -803,7 +803,11 @@ class TradingApplication:
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
-                trainable = int(diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)) or 0)
+                training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
+                trainable = int(
+                    training_by_horizon.get(str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)))
+                    or 0
+                )
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_samples = int(latest_model.get("training_samples", 0) or 0)
                 enough_initial = latest_samples == 0 and trainable >= min_samples
@@ -812,8 +816,10 @@ class TradingApplication:
                 # Schema-mismatch trigger: if current model uses an outdated feature schema,
                 # fire as soon as the new schema has min_samples — don't wait for increment_samples.
                 # This eliminates the silent multi-hour window where predict() always returns None.
-                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
-                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
+                horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
+                newest_schema_hash = str(horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or "")
+                newest_schema_samples = int(horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0)
                 current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
                 schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
@@ -839,6 +845,7 @@ class TradingApplication:
                 log.info(
                     "model_auto_training.started",
                     trainable=trainable,
+                    horizon_minutes=horizon,
                     latest_samples=latest_samples,
                     min_samples=effective_min_samples,
                     increment_samples=increment_samples,
@@ -848,7 +855,7 @@ class TradingApplication:
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
                         "🤖 <b>Auto-training triggered</b>\n"
-                        f"trainable_15m=<code>{trainable}</code>, "
+                        f"trainable_{horizon}m=<code>{trainable}</code>, "
                         f"latest_model_samples=<code>{latest_samples}</code>\n"
                         f"{msg}"
                     )
@@ -986,7 +993,9 @@ class TradingApplication:
                 version = str(latest_model.get("version", "—") or "—")
                 status = str(latest_model.get("status", "—") or "—")
                 training_samples = int(latest_model.get("training_samples", 0) or 0)
-                labelled = int(diag.get("labelled_samples_15m", 0) or 0)
+                report_horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+                training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
+                labelled = int(training_by_horizon.get(str(report_horizon), diag.get("labelled_samples_15m", 0)) or 0)
 
                 # Fetch gate stats for the latest model (challenger), not the active champion.
                 # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
@@ -1015,8 +1024,10 @@ class TradingApplication:
                 lift_bps = gate.get("lift_vs_all_bps")
                 pass_precision = gate.get("pass_precision")
 
-                newest_schema_hash = str(diag.get("newest_training_schema_hash", "") or "")
-                newest_schema_samples = int(diag.get("newest_training_schema_samples", 0) or 0)
+                newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
+                horizon_schema = newest_schema_by_horizon.get(str(report_horizon), {}) or {}
+                newest_schema_hash = str(horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or "")
+                newest_schema_samples = int(horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0)
                 current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
                 schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
                 _sc_min = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
@@ -1026,7 +1037,8 @@ class TradingApplication:
                     challenger_version=version,
                     challenger_status=status,
                     training_samples=training_samples,
-                    labelled_15m=labelled,
+                    labelled_horizon=labelled,
+                    training_horizon_minutes=report_horizon,
                     gate_total=observed_count,
                     gate_resolved=resolved_count,
                     gate_pending=pending_count,
@@ -1085,7 +1097,7 @@ class TradingApplication:
                 lines = [
                     "📊 <b>Прогресс модели</b>",
                     f"Версия: <code>{version}</code> [{status}]",
-                    f"Обучено на: <code>{training_samples}</code> примерах | Доступно: <code>{labelled}</code>",
+                    f"Обучено на: <code>{training_samples}</code> примерах | Доступно ({report_horizon}m): <code>{labelled}</code>",
                     (
                         f"Gate: <code>{resolved_count}</code> resolved / "
                         f"<code>{observed_count}</code> всего"

@@ -640,6 +640,61 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
 
 
 @pytest.mark.asyncio
+async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
+    """Auto-trainer must not mix 5m and 15m sample readiness."""
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    journal = DirectionalTradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+    journal._pool = MagicMock()
+    journal._enabled = True
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del args
+        if "GROUP BY horizon_minutes" in query and "feature_schema_hash" not in query:
+            return [{"horizon_minutes": 5, "cnt": 900}, {"horizon_minutes": 15, "cnt": 100}]
+        if "GROUP BY horizon_minutes, feature_schema_hash" in query:
+            return [
+                {
+                    "horizon_minutes": 5,
+                    "feature_schema_hash": "schema5",
+                    "cnt": 900,
+                    "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
+                },
+                {
+                    "horizon_minutes": 15,
+                    "feature_schema_hash": "schema15",
+                    "cnt": 100,
+                    "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
+                },
+            ]
+        if "FROM feature_snapshots fs" in query:
+            return [{"feature_schema_hash": "schema5", "cnt": 900, "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC)}]
+        if "FROM model_versions" in query:
+            return []
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["training_eligible_by_horizon"] == {"5": 900, "15": 100}
+    assert diag["newest_training_schema_by_horizon"]["5"]["feature_schema_hash"] == "schema5"
+    assert diag["newest_training_schema_by_horizon"]["15"]["sample_count"] == 100
+
+
+def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
+    """Guard against regressing to mixed 5m/15m readiness counters."""
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._run_auto_model_trainer)
+    assert "training_eligible_by_horizon" in src
+    assert "training_by_horizon.get(str(horizon)" in src
+    assert "trainable_15m=" not in src
+
+
+@pytest.mark.asyncio
 async def test_db_diagnostics_reports_legacy_challenger_fallback() -> None:
     """Diagnostics should mirror registry fallback for legacy challenger artifacts."""
     from trader.storage.directional_trade_journal import DirectionalTradeJournal

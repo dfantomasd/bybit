@@ -102,6 +102,12 @@ def _validate_walk_forward_chronology(
     for fold_idx, (train_idx, val_idx) in enumerate(folds):
         if len(train_idx) == 0 or len(val_idx) == 0:
             raise RuntimeError(f"empty walk-forward fold: {fold_idx}")
+        max_idx = int(max(train_idx[-1], val_idx[-1]))
+        if max_idx >= len(timestamps):
+            raise RuntimeError(
+                "walk-forward chronology timestamp mismatch: "
+                f"fold={fold_idx} max_idx={max_idx} timestamps={len(timestamps)}"
+            )
         train_end = timestamps[int(train_idx[-1])]
         val_start = timestamps[int(val_idx[0])]
         val_end = timestamps[int(val_idx[-1])]
@@ -122,6 +128,14 @@ def _validate_walk_forward_chronology(
             }
         )
     return windows
+
+
+def _filter_timestamps_by_mask(timestamps: list[datetime], keep_mask: np.ndarray) -> list[datetime]:
+    """Apply the same sample mask used for training arrays to timestamp metadata."""
+
+    if len(timestamps) != len(keep_mask):
+        raise RuntimeError(f"timestamp/filter length mismatch: {len(timestamps)}!={len(keep_mask)}")
+    return [ts for ts, keep in zip(timestamps, keep_mask, strict=True) if bool(keep)]
 
 
 def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
@@ -615,6 +629,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 sides = sides[keep_mask]
                 regimes = regimes[keep_mask]
                 hours = hours[keep_mask]
+                created_at_list = _filter_timestamps_by_mask(created_at_list, keep_mask)
                 click.echo(f"Excluded {len(keep_mask) - int(keep_mask.sum())} samples from negative buckets")
             else:
                 click.echo("Negative bucket filter skipped: it would leave too few samples", err=True)

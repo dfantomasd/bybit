@@ -406,6 +406,62 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # with the per-schema maximum, not the base class's cross-schema union.
         result["training_eligible_15m"] = result["labelled_samples_15m"]
 
+        horizon_rows = await self._fetch(
+            """
+            SELECT horizon_minutes, feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
+            FROM (
+                SELECT DISTINCT ON (
+                           po.horizon_minutes,
+                           fs.symbol,
+                           fs.interval,
+                           fs.candle_open_time,
+                           fs.feature_schema_hash
+                       )
+                       po.horizon_minutes,
+                       fs.snapshot_id,
+                       fs.feature_schema_hash,
+                       fs.created_at AS latest_at
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $1
+                  AND po.label_threshold_bps = 5.0
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
+                         fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
+            ) deduped
+            GROUP BY horizon_minutes, feature_schema_hash
+            ORDER BY horizon_minutes, latest_at DESC
+            """,
+            LABEL_SCHEMA_VERSION,
+        )
+        training_by_horizon: dict[str, int] = {}
+        newest_schema_by_horizon: dict[str, dict[str, Any]] = {}
+        for row in horizon_rows:
+            row_dict = dict(row)
+            if "horizon_minutes" not in row_dict:
+                continue
+            horizon_key = str(row_dict["horizon_minutes"])
+            if horizon_key in newest_schema_by_horizon:
+                continue
+            samples = int(row_dict.get("cnt") or 0)
+            schema_hash = str(row_dict.get("feature_schema_hash") or "")
+            training_by_horizon[horizon_key] = samples
+            newest_schema_by_horizon[horizon_key] = {
+                "feature_schema_hash": schema_hash,
+                "sample_count": samples,
+                "horizon_minutes": horizon_key,
+                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "label_threshold_bps": 5.0,
+            }
+        result["training_eligible_by_horizon"] = training_by_horizon
+        result["newest_training_schema_by_horizon"] = newest_schema_by_horizon
+
         rows = await self._fetch(
             """
             SELECT
