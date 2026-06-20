@@ -230,3 +230,29 @@ class TestBucketGate:
         app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vectors.get((symbol, interval)))
 
         assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is False
+
+    def test_trend_mtf_confirmation_requires_ema_structure_and_slope_for_buy(self) -> None:
+        app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5")
+        vec = FeatureVector(
+            symbol="XRPUSDT",
+            feature_names=["ema_9", "ema_21", "ema_slope_9", "macd_hist"],
+            values=[-0.002, -0.001, 0.0002, 0.0002],
+            quality_score=0.95,
+            lookback_bars=100,
+        )
+        app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vec)
+
+        assert app._trend_mtf_confirmed("XRPUSDT", "Buy") is False
+
+    def test_trend_mtf_confirmation_requires_ema_structure_and_slope_for_sell(self) -> None:
+        app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5")
+        vec = FeatureVector(
+            symbol="XRPUSDT",
+            feature_names=["ema_9", "ema_21", "ema_slope_9", "macd_hist"],
+            values=[0.002, 0.001, -0.0002, -0.0002],
+            quality_score=0.95,
+            lookback_bars=100,
+        )
+        app._feature_pipeline = SimpleNamespace(latest=lambda symbol, interval: vec)
+
+        assert app._trend_mtf_confirmed("XRPUSDT", "Sell") is False

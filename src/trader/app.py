@@ -3776,9 +3776,9 @@ class TradingApplication:
             assert slope9 is not None
             assert macd_hist is not None
             if side == "Buy":
-                confirmed = (ema9 > ema21 or slope9 > 0) and macd_hist > 0
+                confirmed = ema9 > ema21 and slope9 > 0 and macd_hist > 0
             else:
-                confirmed = (ema9 < ema21 or slope9 < 0) and macd_hist < 0
+                confirmed = ema9 < ema21 and slope9 < 0 and macd_hist < 0
             if confirmed:
                 confirmations += 1
         return confirmations > 0
