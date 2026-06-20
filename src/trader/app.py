@@ -4588,7 +4588,8 @@ class TradingApplication:
 
                 # --- Champion Canary gate: live blocking only when explicitly enabled ---
                 # score_live() returns None when no compatible directional_net Champion exists.
-                # If no Champion is present, the trade is NOT blocked (fail-closed toward execution).
+                # In active execution, an enabled gate must fail closed: if the
+                # champion cannot be scored, the gate cannot prove this trade is acceptable.
                 if settings.MODEL_GATE_CANARY_ENABLED:
                     try:
                         live_prediction = self._model_registry.score_live(model_feature_values, model_feature_names)
@@ -4633,11 +4634,15 @@ class TradingApplication:
                                 await _record_signal("model_gate_canary_blocked")
                                 return
                         else:
-                            # No compatible Champion → do not block the trade
-                            log.debug(
+                            log.warning(
                                 "ml_canary.no_compatible_champion",
                                 symbol=proposal.symbol,
+                                active_execution=not self._initial_shadow_mode(),
                             )
+                            if not self._initial_shadow_mode():
+                                self._record_diag("model_gate_canary_blocked")
+                                await _record_signal("model_gate_no_compatible_champion")
+                                return
                     except Exception as _canary_exc:
                         log.debug(
                             "ml_canary.scoring_failed",

@@ -225,6 +225,18 @@ def test_canary_gate_scores_side_aware_model_features() -> None:
     assert "live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)" not in src
 
 
+def test_enabled_canary_gate_fails_closed_without_compatible_champion() -> None:
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._start_strategy_loop)
+    assert "ml_canary.no_compatible_champion" in src
+    assert 'await _record_signal("model_gate_no_compatible_champion")' in src
+    after = src.split('await _record_signal("model_gate_no_compatible_champion")', maxsplit=1)[1]
+    assert "return" in after[:80]
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------
