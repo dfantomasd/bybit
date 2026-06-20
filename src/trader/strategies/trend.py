@@ -72,6 +72,10 @@ class EMAcrossoverStrategy(BaseStrategy):
         max_risk_pct: float = 0.01,  # 1% of balance per trade
         min_adx: float = 0.30,
         block_negative_funding_oi: bool = True,
+        taker_fee_pct: float = 0.055,
+        expected_slippage_pct: float = 0.03,
+        max_spread_bps: float = 8.0,
+        min_net_return_pct: float = 0.05,
     ) -> None:
         self._symbol = symbol.upper() if symbol else None
         self._allow_short = allow_short
@@ -79,6 +83,15 @@ class EMAcrossoverStrategy(BaseStrategy):
         self._max_risk_pct = max_risk_pct
         self._min_adx = min_adx
         self._block_negative_funding_oi = block_negative_funding_oi
+        self._round_trip_fee_pct = max(0.0, taker_fee_pct) * 2.0
+        self._expected_slippage_pct = max(0.0, expected_slippage_pct)
+        self._max_spread_pct = max(0.0, max_spread_bps) / 100.0
+        self._min_net_return_pct = max(0.0, min_net_return_pct)
+
+    def _net_tp_return_pct(self, tp_dist: float) -> float:
+        gross_tp_pct = tp_dist * 100.0
+        safety_pct = 0.01
+        return gross_tp_pct - self._round_trip_fee_pct - self._max_spread_pct - self._expected_slippage_pct - safety_pct
 
     @property
     def strategy_id(self) -> str:
@@ -175,6 +188,8 @@ class EMAcrossoverStrategy(BaseStrategy):
 
                 stop_dist = atr_pct * _ATR_STOP_MULTIPLIER
                 tp_dist = atr_pct * _ATR_TP_MULTIPLIER
+                if self._net_tp_return_pct(tp_dist) < self._min_net_return_pct:
+                    return None
                 stop_price = current_price * (1 - stop_dist)
                 entry_price = current_price
 
@@ -229,6 +244,8 @@ class EMAcrossoverStrategy(BaseStrategy):
 
                 stop_dist = atr_pct * _ATR_STOP_MULTIPLIER
                 tp_dist = atr_pct * _ATR_TP_MULTIPLIER
+                if self._net_tp_return_pct(tp_dist) < self._min_net_return_pct:
+                    return None
                 stop_price = current_price * (1 + stop_dist)
                 entry_price = current_price
 

@@ -165,20 +165,30 @@ class TestBucketGate:
         assert app._shadow_loss_guard_blocks() is False
 
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:
+        app = _make_app(DEFAULT_LINEAR_TAKER_FEE_RATE=0.0, SCREENER_MAX_SPREAD_BPS=0.0, EXPECTED_SLIPPAGE_PCT=0.0)
         pos = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0}
 
         hit = TradingApplication._shadow_exit_hit(pos, high=102.5, low=100.5)
 
         assert hit == ("TP", 102.0)
-        assert TradingApplication._shadow_pnl_pct(pos, hit[1]) == 2.0
+        assert app._shadow_pnl_pct(pos, hit[1]) == 2.0
 
     def test_shadow_exit_uses_intrabar_low_for_sell_tp(self) -> None:
+        app = _make_app(DEFAULT_LINEAR_TAKER_FEE_RATE=0.0, SCREENER_MAX_SPREAD_BPS=0.0, EXPECTED_SLIPPAGE_PCT=0.0)
         pos = {"side": "Sell", "entry": 100.0, "tp": 98.0, "sl": 101.0}
 
         hit = TradingApplication._shadow_exit_hit(pos, high=99.5, low=97.5)
 
         assert hit == ("TP", 98.0)
-        assert TradingApplication._shadow_pnl_pct(pos, hit[1]) == 2.0
+        assert app._shadow_pnl_pct(pos, hit[1]) == 2.0
+
+    def test_shadow_pnl_deducts_round_trip_costs(self) -> None:
+        app = _make_app(DEFAULT_LINEAR_TAKER_FEE_RATE=0.00055, SCREENER_MAX_SPREAD_BPS=8.0, EXPECTED_SLIPPAGE_PCT=0.03)
+        pos = {"side": "Buy", "entry": 100.0, "tp": 100.05, "sl": 99.0}
+
+        pnl = app._shadow_pnl_pct(pos, 100.05)
+
+        assert round(pnl, 4) == -0.17
 
     def test_shadow_exit_is_conservative_when_tp_and_sl_same_candle(self) -> None:
         buy = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0}

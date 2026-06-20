@@ -810,9 +810,15 @@ class TradingApplication:
                     or 0
                 )
                 latest_model = diag.get("latest_model_version", {}) or {}
+                latest_run = diag.get("latest_training_run", {}) or {}
+                latest_run_status = str(latest_run.get("status") or "").upper()
+                latest_run_samples = (
+                    int(latest_run.get("sample_count") or 0) if latest_run_status == "COMPLETED" else 0
+                )
                 actual_latest_samples = int(
                     latest_model.get("actual_training_samples", latest_model.get("training_samples", 0)) or 0
                 )
+                latest_success_samples = max(actual_latest_samples, latest_run_samples)
                 compatible_latest_samples = int(
                     latest_model.get("training_samples_compatible", latest_model.get("training_samples", 0)) or 0
                 )
@@ -832,8 +838,10 @@ class TradingApplication:
                 schema_mismatch = bool(
                     newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash
                 )
-                if min_train_interval_s > 0 and actual_latest_samples > 0:
+                if min_train_interval_s > 0 and latest_success_samples > 0:
                     latest_finished_at = latest_model.get("training_finished_at") or latest_model.get("created_at")
+                    if latest_finished_at is None:
+                        latest_finished_at = latest_run.get("finished_at")
                     if isinstance(latest_finished_at, str):
                         try:
                             latest_finished_at = datetime.fromisoformat(latest_finished_at.replace("Z", "+00:00"))
@@ -848,12 +856,13 @@ class TradingApplication:
                                 "model_auto_training.success_cooldown",
                                 cooldown_remaining_s=int(min_train_interval_s - age_s),
                                 latest_actual_samples=actual_latest_samples,
+                                latest_run_samples=latest_run_samples,
                                 latest_compatible_samples=compatible_latest_samples,
                                 schema_mismatch=schema_mismatch,
                             )
                             continue
 
-                enough_initial = actual_latest_samples == 0 and trainable >= min_samples
+                enough_initial = latest_success_samples == 0 and trainable >= min_samples
                 enough_increment = (
                     not schema_mismatch
                     and compatible_latest_samples > 0
@@ -883,6 +892,7 @@ class TradingApplication:
                     trainable=trainable,
                     horizon_minutes=horizon,
                     latest_samples=actual_latest_samples,
+                    latest_run_samples=latest_run_samples,
                     compatible_latest_samples=compatible_latest_samples,
                     min_samples=effective_min_samples,
                     increment_samples=increment_samples,
@@ -894,6 +904,7 @@ class TradingApplication:
                         "🤖 <b>Auto-training triggered</b>\n"
                         f"trainable_{horizon}m=<code>{trainable}</code>, "
                         f"latest_model_samples=<code>{actual_latest_samples}</code>, "
+                        f"latest_run_samples=<code>{latest_run_samples}</code>, "
                         f"compatible=<code>{compatible_latest_samples}</code>\n"
                         f"{msg}"
                     )
@@ -3654,16 +3665,23 @@ class TradingApplication:
             return None
         return None
 
-    @staticmethod
-    def _shadow_pnl_pct(position: dict[str, Any], exit_price: float) -> float:
-        """Return direction-aware gross shadow PnL percent."""
+    def _shadow_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
+        """Return direction-aware net shadow PnL percent after estimated costs."""
 
         entry = float(position["entry"])
         if entry <= 0:
             raise ValueError("shadow entry must be positive")
         if str(position.get("side") or "") == "Sell":
-            return (entry - exit_price) / entry * 100.0
-        return (exit_price - entry) / entry * 100.0
+            gross = (entry - exit_price) / entry * 100.0
+        else:
+            gross = (exit_price - entry) / entry * 100.0
+        if self._settings is None:
+            return gross
+        taker_fee_pct = float(self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE) * 100.0
+        round_trip_fee_pct = taker_fee_pct * 2.0
+        spread_pct = float(self._settings.SCREENER_MAX_SPREAD_BPS) / 100.0
+        slippage_pct = float(self._settings.EXPECTED_SLIPPAGE_PCT)
+        return gross - round_trip_fee_pct - spread_pct - slippage_pct
 
     def _shadow_loss_guard_blocks(self) -> bool:
         """Return true while recent shadow losses should suppress new entries."""
@@ -4059,6 +4077,10 @@ class TradingApplication:
                 max_risk_pct=0.01,  # 1% of balance per trade
                 min_adx=self._settings.TREND_MIN_ADX,
                 block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
+                taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+                min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
             )
         ]
 
@@ -4690,9 +4712,13 @@ class TradingApplication:
 
             # Track shadow position for TP/SL simulation
             if is_shadow and proposal.stop_loss and proposal.take_profit:
+                engine_position = (
+                    self._execution_engine._open_positions.get(symbol) if self._execution_engine is not None else {}
+                )
+                entry_price = engine_position.get("entry_price") or proposal.entry_price or Decimal(str(current_price))
                 _shadow_positions[symbol] = {
                     "side": proposal.side.value,
-                    "entry": float(current_price),
+                    "entry": float(entry_price),
                     "tp": float(proposal.take_profit),
                     "sl": float(proposal.stop_loss),
                     "opened_at": datetime.now(tz=UTC),

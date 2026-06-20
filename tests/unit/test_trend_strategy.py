@@ -78,6 +78,25 @@ def test_low_adx_rejected() -> None:
     assert proposal is None
 
 
+def test_long_rejects_negative_net_edge_after_costs() -> None:
+    strategy = EMAcrossoverStrategy(
+        taker_fee_pct=0.055,
+        expected_slippage_pct=0.03,
+        max_spread_bps=30.0,
+        min_net_return_pct=0.05,
+    )
+    proposal = strategy.evaluate(
+        _features(
+            "DOGEUSDT",
+            [-0.001, -0.002, 0.000414, 0.599, 0.000122, 0.002, 0.003, 0.1, 0.001, 0.30],
+        ),
+        current_price=0.14235,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None
+
+
 def test_long_rejects_price_below_fast_ema() -> None:
     strategy = EMAcrossoverStrategy()
     proposal = strategy.evaluate(

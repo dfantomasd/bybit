@@ -699,6 +699,19 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     assert "trainable_15m=" not in src
 
 
+def test_auto_trainer_uses_latest_training_run_for_success_cooldown() -> None:
+    """A just-finished run must prevent checkpoint churn even if model diagnostics are stale."""
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._run_auto_model_trainer)
+    assert "latest_run_samples" in src
+    assert "latest_success_samples = max(actual_latest_samples, latest_run_samples)" in src
+    assert "enough_initial = latest_success_samples == 0" in src
+    assert "latest_finished_at = latest_run.get(\"finished_at\")" in src
+
+
 def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
     """A h5m challenger must not be reported with hard-coded 15m gate stats."""
     import inspect
