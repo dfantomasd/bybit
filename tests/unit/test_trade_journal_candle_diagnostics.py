@@ -118,3 +118,30 @@ async def test_db_diagnostics_uses_capped_readiness_counts() -> None:
     assert diag["feature_snapshots"] == 1000
     assert diag["prediction_outcomes"] == 1000
     assert diag["training_eligible_15m"] == 1000
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_preserves_partial_results_when_one_section_times_out() -> None:
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = object()  # type: ignore[assignment]
+    latest = datetime.now(tz=UTC) - timedelta(seconds=30)
+    journal.get_candle_readiness_counts = AsyncMock(return_value={"1": 1000, "5": 200})  # type: ignore[method-assign]
+    journal.get_latest_candle_time = AsyncMock(return_value=latest)  # type: ignore[method-assign]
+    journal.get_feature_snapshot_readiness_count = AsyncMock(side_effect=TimeoutError("statement timeout"))  # type: ignore[method-assign]
+    journal.get_prediction_outcome_readiness_count = AsyncMock(return_value=321)  # type: ignore[method-assign]
+    journal.get_labelled_15m_readiness_count = AsyncMock(return_value=123)  # type: ignore[method-assign]
+
+    async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        return []
+
+    journal._fetch = fake_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["candles_by_interval"] == {"1": 1000, "5": 200}
+    assert diag["latest_candle_1m"] == latest
+    assert diag["feature_snapshots"] == 0
+    assert diag["prediction_outcomes"] == 321
+    assert diag["training_eligible_15m"] == 123
+    assert "feature_snapshot_readiness_count" in str(diag["last_read_error"])

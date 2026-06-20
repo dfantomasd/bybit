@@ -68,6 +68,7 @@ def label_outcome(
         exit_fee_bps=float(x_fee),
         spread_bps=float(sprd),
         entry_slippage_bps=float(slip),
+        exit_slippage_bps=float(slip),
         funding_bps=float(funding_bps),
     )
     outcome = build_directional_outcome(

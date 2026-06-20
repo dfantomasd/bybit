@@ -91,7 +91,8 @@ class EMAcrossoverStrategy(BaseStrategy):
     def _net_tp_return_pct(self, tp_dist: float) -> float:
         gross_tp_pct = tp_dist * 100.0
         safety_pct = 0.01
-        return gross_tp_pct - self._round_trip_fee_pct - self._max_spread_pct - self._expected_slippage_pct - safety_pct
+        round_trip_slippage_pct = self._expected_slippage_pct * 2.0
+        return gross_tp_pct - self._round_trip_fee_pct - self._max_spread_pct - round_trip_slippage_pct - safety_pct
 
     @property
     def strategy_id(self) -> str:

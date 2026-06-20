@@ -1665,6 +1665,13 @@ class TelegramMonitorBot:
         if not await self._authorised(update):
             return
 
+        await self._reply(
+            update,
+            await self._render_canary_readiness_text(),
+            reply_markup=self._canary_menu(),
+        )
+
+    async def _render_canary_readiness_text(self) -> str:
         db_diag: dict[str, Any] = {}
         if self._controller is not None and self._controller.db_diagnostics_provider is not None:
             try:
@@ -1679,11 +1686,7 @@ class TelegramMonitorBot:
             except Exception as exc:
                 diag = {"error": str(exc)}
 
-        await self._reply(
-            update,
-            self._canary_readiness_text(db_diag=db_diag, diag=diag),
-            reply_markup=self._canary_menu(),
-        )
+        return self._canary_readiness_text(db_diag=db_diag, diag=diag)
 
     def _canary_readiness_text(self, *, db_diag: dict[str, Any], diag: dict[str, Any]) -> str:
         checks: list[tuple[str, bool, str, str, str]] = []
@@ -3516,8 +3519,11 @@ class TelegramMonitorBot:
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "canary":
-            fake_context = type("_Context", (), {"args": []})()
-            await self._cmd_canary_ready(update, fake_context)
+            await self._button_reply(
+                update,
+                await self._render_canary_readiness_text(),
+                reply_markup=self._canary_menu(),
+            )
             return
         await self._button_reply(update, f"Неизвестное действие: {action}", reply_markup=self._main_menu())
 

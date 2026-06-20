@@ -665,7 +665,7 @@ def test_short_prediction_label_direction() -> None:
 
 
 def test_outcome_subtracts_conservative_costs() -> None:
-    """net_return_bps must deduct entry_fee + exit_fee + slippage + spread."""
+    """net_return_bps must deduct fees, spread, and round-trip slippage."""
     from trader.analytics.outcome_labeler import (
         MODEL_FALLBACK_ENTRY_FEE_BPS,
         MODEL_FALLBACK_EXIT_FEE_BPS,
@@ -683,7 +683,7 @@ def test_outcome_subtracts_conservative_costs() -> None:
     expected_cost = (
         MODEL_FALLBACK_ENTRY_FEE_BPS
         + MODEL_FALLBACK_EXIT_FEE_BPS
-        + MODEL_FALLBACK_SLIPPAGE_BPS
+        + MODEL_FALLBACK_SLIPPAGE_BPS * 2
         + MODEL_FALLBACK_SPREAD_BPS
     )
     assert result.gross_return_bps == Decimal("0")

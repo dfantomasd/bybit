@@ -614,6 +614,36 @@ async def test_callback_answer_failure_still_handles_button() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dashboard_action_pause_button_is_routed() -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.callback_query.data = "action:pause"
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    assert bot._controller is not None
+    bot._controller.pause.assert_awaited_once()
+    update.callback_query.edit_message_text.assert_awaited()
+    edited_text = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Bybit AI Trader" in edited_text
+
+
+@pytest.mark.asyncio
+async def test_dashboard_action_canary_button_is_routed() -> None:
+    bot = _make_bot()
+    bot._db_diagnostics_provider = AsyncMock(return_value={"connected": True})
+    bot._diagnostics_provider = MagicMock(return_value={"active_symbols": ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]})
+    update = _fake_callback_update()
+    update.callback_query.data = "action:canary"
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    update.callback_query.edit_message_text.assert_awaited()
+    edited_text = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Готовность к реальным деньгам" in edited_text
+
+
+@pytest.mark.asyncio
 async def test_callback_exception_returns_visible_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
     bot = _make_bot()
     update = _fake_callback_update()

@@ -33,6 +33,7 @@ def test_legacy_labeler_matches_canonical_sell_bps_contract() -> None:
             entry_fee_bps=1.5,
             exit_fee_bps=2.5,
             entry_slippage_bps=3.0,
+            exit_slippage_bps=3.0,
             spread_bps=4.0,
             funding_bps=-1.0,
         ),
@@ -43,7 +44,26 @@ def test_legacy_labeler_matches_canonical_sell_bps_contract() -> None:
     assert float(legacy.mfe_bps) == pytest.approx(canonical.max_favorable_excursion_bps)
     assert float(legacy.mae_bps) == pytest.approx(canonical.max_adverse_excursion_bps)
     assert legacy.gross_return_bps == Decimal("100.0")
-    assert legacy.total_cost_bps == Decimal("10.0")
-    assert legacy.net_return_bps == Decimal("90.0")
+    assert legacy.total_cost_bps == Decimal("13.0")
+    assert legacy.net_return_bps == Decimal("87.0")
     assert legacy.mfe_bps == Decimal("150.0")
     assert float(legacy.mae_bps) == pytest.approx(-70.0)
+
+
+def test_legacy_labeler_charges_round_trip_slippage_like_live_gate() -> None:
+    """Training labels must not be cheaper than live entry checks."""
+    labelled = label_outcome(
+        side="Buy",
+        entry_price=Decimal("100"),
+        exit_price=Decimal("101"),
+        horizon_candles=[{"high": "101", "low": "100"}],
+        entry_fee_bps=Decimal("0"),
+        exit_fee_bps=Decimal("0"),
+        slippage_bps=Decimal("3.0"),
+        spread_bps=Decimal("0"),
+        funding_bps=Decimal("0"),
+    )
+
+    assert labelled.gross_return_bps == Decimal("100.0")
+    assert labelled.total_cost_bps == Decimal("6.0")
+    assert labelled.net_return_bps == Decimal("94.0")

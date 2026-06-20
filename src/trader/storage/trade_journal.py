@@ -2703,33 +2703,69 @@ class TradeJournal:
             result["write_health"] = self.write_health()
         if not self.is_enabled:
             return result
+
+        async def _read_or_default(label: str, default: Any, reader: Any) -> Any:
+            try:
+                return await reader()
+            except Exception as exc:
+                self._last_read_error_at = datetime.now(tz=UTC)
+                self._last_read_error = f"{label}: {exc}"
+                result["last_read_error"] = self._last_read_error
+                result["last_read_error_at"] = self._last_read_error_at
+                log.debug("trade_journal.diagnostics_section_failed", section=label, error=str(exc))
+                return default
+
         try:
             self._last_read_error = None
             self._last_read_error_at = None
-            result["candles_by_interval"] = await self.get_candle_readiness_counts()
-            latest_candle_1m = await self.get_latest_candle_time("1")
+            result["candles_by_interval"] = await _read_or_default(
+                "candle_readiness_counts",
+                {},
+                self.get_candle_readiness_counts,
+            )
+            latest_candle_1m = await _read_or_default(
+                "latest_candle_1m",
+                None,
+                lambda: self.get_latest_candle_time("1"),
+            )
             result["latest_candle_1m"] = latest_candle_1m
             if latest_candle_1m is not None:
                 result["last_confirmed_candle_age_s"] = max(
                     0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                 )
-            result["feature_snapshots"] = await self.get_feature_snapshot_readiness_count()
-            result["prediction_outcomes"] = await self.get_prediction_outcome_readiness_count()
-            rows = await self._fetch(
-                """
-                SELECT horizon_minutes, count(*) AS cnt
-                FROM (
-                    SELECT horizon_minutes
-                    FROM prediction_outcomes
-                    WHERE label IS NOT NULL
-                    LIMIT 4000
-                ) capped
-                GROUP BY horizon_minutes
-                ORDER BY horizon_minutes
-                """
+            result["feature_snapshots"] = await _read_or_default(
+                "feature_snapshot_readiness_count",
+                0,
+                self.get_feature_snapshot_readiness_count,
+            )
+            result["prediction_outcomes"] = await _read_or_default(
+                "prediction_outcome_readiness_count",
+                0,
+                self.get_prediction_outcome_readiness_count,
+            )
+            rows = await _read_or_default(
+                "prediction_outcomes_by_horizon",
+                [],
+                lambda: self._fetch(
+                    """
+                    SELECT horizon_minutes, count(*) AS cnt
+                    FROM (
+                        SELECT horizon_minutes
+                        FROM prediction_outcomes
+                        WHERE label IS NOT NULL
+                        LIMIT 4000
+                    ) capped
+                    GROUP BY horizon_minutes
+                    ORDER BY horizon_minutes
+                    """
+                ),
             )
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
-            result["labelled_samples_15m"] = await self.get_labelled_15m_readiness_count()
+            result["labelled_samples_15m"] = await _read_or_default(
+                "labelled_15m_readiness_count",
+                0,
+                self.get_labelled_15m_readiness_count,
+            )
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
 

@@ -97,6 +97,29 @@ def test_long_rejects_negative_net_edge_after_costs() -> None:
     assert proposal is None
 
 
+def test_trend_net_edge_charges_round_trip_slippage() -> None:
+    strategy = EMAcrossoverStrategy(
+        taker_fee_pct=0.0,
+        expected_slippage_pct=0.03,
+        max_spread_bps=0.0,
+        min_net_return_pct=0.05,
+    )
+
+    # ATR 0.00029 gives TP distance 0.116%. After 0.06% round-trip slippage
+    # and 0.01% safety, net edge is 0.046%; with one-sided slippage it would
+    # incorrectly pass at 0.076%.
+    proposal = strategy.evaluate(
+        _features(
+            "DOGEUSDT",
+            [-0.001, -0.002, 0.000414, 0.599, 0.000122, 0.002, 0.003, 0.1, 0.00029, 0.30],
+        ),
+        current_price=0.14235,
+        available_balance_usd=23.52,
+    )
+
+    assert proposal is None
+
+
 def test_long_rejects_price_below_fast_ema() -> None:
     strategy = EMAcrossoverStrategy()
     proposal = strategy.evaluate(
