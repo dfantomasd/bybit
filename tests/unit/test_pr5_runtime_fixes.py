@@ -203,6 +203,17 @@ def test_load_governor_uses_ws_stale_hysteresis() -> None:
     assert "restore_streak >= 2" in src
 
 
+def test_model_progress_reports_actual_and_compatible_samples() -> None:
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._run_model_progress_reporter)
+    assert "actual_training_samples" in src
+    assert "compatible_training_samples" in src
+    assert "Совместимо:" in src
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

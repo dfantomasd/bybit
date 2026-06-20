@@ -1042,6 +1042,10 @@ class TradingApplication:
                 version = str(latest_model.get("version", "—") or "—")
                 status = str(latest_model.get("status", "—") or "—")
                 training_samples = int(latest_model.get("training_samples", 0) or 0)
+                actual_training_samples = int(latest_model.get("actual_training_samples", training_samples) or 0)
+                compatible_training_samples = int(
+                    latest_model.get("training_samples_compatible", training_samples) or 0
+                )
                 report_horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
                 labelled = int(training_by_horizon.get(str(report_horizon), diag.get("labelled_samples_15m", 0)) or 0)
@@ -1092,6 +1096,8 @@ class TradingApplication:
                     challenger_version=version,
                     challenger_status=status,
                     training_samples=training_samples,
+                    actual_training_samples=actual_training_samples,
+                    compatible_training_samples=compatible_training_samples,
                     labelled_horizon=labelled,
                     training_horizon_minutes=report_horizon,
                     gate_total=observed_count,
@@ -1152,7 +1158,15 @@ class TradingApplication:
                 lines = [
                     "📊 <b>Прогресс модели</b>",
                     f"Версия: <code>{version}</code> [{status}]",
-                    f"Обучено на: <code>{training_samples}</code> примерах | Доступно ({report_horizon}m): <code>{labelled}</code>",
+                    (
+                        f"Обучено на: <code>{actual_training_samples}</code> примерах"
+                        + (
+                            f" | Совместимо: <code>{compatible_training_samples}</code>"
+                            if compatible_training_samples != actual_training_samples
+                            else ""
+                        )
+                        + f" | Доступно ({report_horizon}m): <code>{labelled}</code>"
+                    ),
                     (
                         f"Gate: <code>{resolved_count}</code> resolved / "
                         f"<code>{observed_count}</code> всего"
