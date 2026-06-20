@@ -791,6 +791,8 @@ class TelegramMonitorBot:
                     return
             except BadRequest as exc:
                 log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
+            except Exception as exc:
+                log.debug("telegram.edit_message_unavailable_fallback_to_reply", error=str(exc))
             start = 1 if edited and len(chunks) > 1 else 0
             try:
                 for index, chunk in enumerate(chunks[start:], start=start):

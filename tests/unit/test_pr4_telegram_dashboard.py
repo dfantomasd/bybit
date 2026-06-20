@@ -662,6 +662,19 @@ async def test_callback_exception_returns_visible_fallback(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.callback_query.edit_message_text = AsyncMock(side_effect=RuntimeError("edit timeout"))
+
+    await bot._button_reply(update, "✅ Готово", reply_markup=bot._main_menu())
+
+    update.callback_query.message.reply_text.assert_awaited()
+    reply_text = update.callback_query.message.reply_text.await_args.args[0]
+    assert "Готово" in reply_text
+
+
+@pytest.mark.asyncio
 async def test_confirm_button_replay_is_rejected() -> None:
     """A confirm button fires once; the second press must be ignored."""
     bot = _make_bot()
