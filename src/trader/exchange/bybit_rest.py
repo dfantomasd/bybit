@@ -50,6 +50,11 @@ _NON_RETRYABLE_CODES = {10003, 10004, 110007, 110013, 110014, 110017, 110025}
 _ALLOWED_NON_ZERO_CODES = {110043}  # "set leverage not modified" — not a real error
 
 
+def _body_snippet(value: str, limit: int = 300) -> str:
+    compact = " ".join(str(value or "").split())
+    return compact[:limit]
+
+
 def _raise_for_ret_code(response: dict[str, Any], context: str = "") -> None:
     """Raise an appropriate exception if retCode != 0."""
     ret_code = response.get("retCode", 0)
@@ -145,6 +150,69 @@ class BybitRestClient:
             "X-BAPI-RECV-WINDOW": str(self._recv_window),
         }
 
+    async def _read_json_response(
+        self,
+        resp: aiohttp.ClientResponse,
+        *,
+        path: str,
+        method: str,
+    ) -> tuple[int, dict[str, str], Any]:
+        """Read a Bybit response without hiding HTTP/body failures as JSON errors."""
+        http_status = resp.status
+        headers = dict(resp.headers)
+        text = await resp.text()
+        try:
+            response: Any = json.loads(text) if text else {}
+        except json.JSONDecodeError as exc:
+            logger.bind(method=method, endpoint=path).warning(
+                "bybit_rest_invalid_json",
+                http_status=http_status,
+                content_type=headers.get("Content-Type"),
+                body_snippet=_body_snippet(text),
+                error=str(exc),
+            )
+            code = f"HTTP_{http_status}" if http_status >= 400 else "INVALID_JSON_RESPONSE"
+            raise TradingSystemError(
+                f"Bybit returned non-JSON response for {path}: http_status={http_status} body={_body_snippet(text)!r}",
+                code=code,
+            ) from exc
+        return http_status, headers, response
+
+    async def _validate_response(
+        self,
+        response: Any,
+        *,
+        path: str,
+        method: str,
+        http_status: int,
+        endpoint_hint: str,
+    ) -> dict[str, Any]:
+        if http_status == 429:
+            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method=method)
+            await asyncio.sleep(wait)
+            raise RateLimitError(f"Bybit HTTP 429 rate limit for {path}")
+
+        if not isinstance(response, dict):
+            raise TradingSystemError(
+                f"Bybit returned non-dict response for {path}: "
+                f"http_status={http_status} type={type(response).__name__} value={response!r}",
+                code="INVALID_RESPONSE",
+            )
+
+        if http_status >= 400:
+            ret_code = response.get("retCode")
+            ret_msg = response.get("retMsg") or response.get("message") or "HTTP error"
+            raise TradingSystemError(
+                f"Bybit HTTP {http_status} for {path}: {ret_msg}",
+                code=f"HTTP_{http_status}" if ret_code is None else str(ret_code),
+            )
+
+        if response.get("retCode") == 10006:
+            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method=method)
+            await asyncio.sleep(wait)
+        _raise_for_ret_code(response, context=path)
+        return response
+
     # ------------------------------------------------------------------
     # Core request
     # ------------------------------------------------------------------
@@ -175,9 +243,11 @@ class BybitRestClient:
         try:
             session = self._get_session()
             async with session.get(url, params=params, headers=headers) as resp:
-                http_status = resp.status
-                resp_headers = dict(resp.headers)
-                response: Any = await resp.json(content_type=None)
+                http_status, resp_headers, response = await self._read_json_response(
+                    resp,
+                    path=path,
+                    method="GET",
+                )
         except Exception as exc:
             log.error("bybit_rest_exception", error=str(exc))
             raise
@@ -193,18 +263,13 @@ class BybitRestClient:
             elapsed_ms=round(elapsed_ms, 1),
         )
 
-        if not isinstance(response, dict):
-            raise TradingSystemError(
-                f"Bybit returned non-dict response for {path}: "
-                f"http_status={http_status} type={type(response).__name__} value={response!r}",
-                code="INVALID_RESPONSE",
-            )
-
-        if http_status == 429 or response.get("retCode") == 10006:
-            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method="GET")
-            await asyncio.sleep(wait)
-        _raise_for_ret_code(response, context=path)
-        return response
+        return await self._validate_response(
+            response,
+            path=path,
+            method="GET",
+            http_status=http_status,
+            endpoint_hint=endpoint_hint,
+        )
 
     async def _post(
         self,
@@ -231,9 +296,11 @@ class BybitRestClient:
         try:
             session = self._get_session()
             async with session.post(url, data=body_str, headers=headers) as resp:
-                http_status = resp.status
-                resp_headers = dict(resp.headers)
-                response: Any = await resp.json(content_type=None)
+                http_status, resp_headers, response = await self._read_json_response(
+                    resp,
+                    path=path,
+                    method="POST",
+                )
         except Exception as exc:
             log.error("bybit_rest_exception", error=str(exc))
             raise
@@ -249,18 +316,13 @@ class BybitRestClient:
             elapsed_ms=round(elapsed_ms, 1),
         )
 
-        if not isinstance(response, dict):
-            raise TradingSystemError(
-                f"Bybit returned non-dict response for {path}: "
-                f"http_status={http_status} type={type(response).__name__} value={response!r}",
-                code="INVALID_RESPONSE",
-            )
-
-        if http_status == 429 or response.get("retCode") == 10006:
-            wait = self._rate_limiter.handle_rate_limit_error(endpoint_hint, method="POST")
-            await asyncio.sleep(wait)
-        _raise_for_ret_code(response, context=path)
-        return response
+        return await self._validate_response(
+            response,
+            path=path,
+            method="POST",
+            http_status=http_status,
+            endpoint_hint=endpoint_hint,
+        )
 
     # ------------------------------------------------------------------
     # Server

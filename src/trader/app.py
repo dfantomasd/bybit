@@ -695,9 +695,7 @@ class TradingApplication:
                             stderr_b = f"training timeout after {elapsed:.0f}s".encode()
                         break
                     if self._telegram_bot is not None and not _notified_running:
-                        await self._telegram_bot.notify(
-                            f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)"
-                        )
+                        await self._telegram_bot.notify(f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)")
                         _notified_running = True
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()
@@ -806,7 +804,9 @@ class TradingApplication:
                 self._update_model_gate_quality_from_diag(diag)
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
                 trainable = int(
-                    training_by_horizon.get(str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)))
+                    training_by_horizon.get(
+                        str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0))
+                    )
                     or 0
                 )
                 latest_model = diag.get("latest_model_version", {}) or {}
@@ -822,10 +822,16 @@ class TradingApplication:
                 # This eliminates the silent multi-hour window where predict() always returns None.
                 newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
                 horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
-                newest_schema_hash = str(horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or "")
-                newest_schema_samples = int(horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0)
+                newest_schema_hash = str(
+                    horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or ""
+                )
+                newest_schema_samples = int(
+                    horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0
+                )
                 current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
-                schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                schema_mismatch = bool(
+                    newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash
+                )
                 if min_train_interval_s > 0 and actual_latest_samples > 0:
                     latest_finished_at = latest_model.get("training_finished_at") or latest_model.get("created_at")
                     if isinstance(latest_finished_at, str):
@@ -868,8 +874,7 @@ class TradingApplication:
                     continue
 
                 trigger_reason = (
-                    "schema_change" if enough_schema_change
-                    else ("initial" if enough_initial else "increment")
+                    "schema_change" if enough_schema_change else ("initial" if enough_initial else "increment")
                 )
                 effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
                 msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
@@ -1059,10 +1064,16 @@ class TradingApplication:
 
                 newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
                 horizon_schema = newest_schema_by_horizon.get(str(report_horizon), {}) or {}
-                newest_schema_hash = str(horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or "")
-                newest_schema_samples = int(horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0)
+                newest_schema_hash = str(
+                    horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or ""
+                )
+                newest_schema_samples = int(
+                    horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0
+                )
                 current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
-                schema_drift = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                schema_drift = bool(
+                    newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash
+                )
                 _sc_min = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
 
                 log.info(
@@ -3494,9 +3505,7 @@ class TradingApplication:
                     self._candle_sampler_no_model += 1
                     # Only warn once per 50 misses to avoid log spam
                     if self._candle_sampler_no_model % 50 == 1:
-                        challenger = (
-                            self._model_registry.challenger if self._model_registry is not None else None
-                        )
+                        challenger = self._model_registry.challenger if self._model_registry is not None else None
                         log.warning(
                             "candle_sampler.shadow_score_unavailable",
                             symbol=symbol,
@@ -3572,10 +3581,7 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return (
-            count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES
-            and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
-        )
+        return count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
 
     def _record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
         """Track shadow TP/SL results and arm a cooldown after poor recent outcomes."""
@@ -3593,9 +3599,8 @@ class TradingApplication:
         losses = [value for _, _, value in recent if value < 0]
         loss_rate = len(losses) / len(recent)
         avg_pnl = sum(value for _, _, value in recent) / len(recent)
-        if (
-            loss_rate >= float(self._settings.SHADOW_LOSS_GUARD_MAX_LOSS_RATE)
-            and avg_pnl <= float(self._settings.SHADOW_LOSS_GUARD_MIN_AVG_PNL_PCT)
+        if loss_rate >= float(self._settings.SHADOW_LOSS_GUARD_MAX_LOSS_RATE) and avg_pnl <= float(
+            self._settings.SHADOW_LOSS_GUARD_MIN_AVG_PNL_PCT
         ):
             cooldown_s = max(0, int(self._settings.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS))
             self._shadow_loss_guard_until = now + timedelta(seconds=cooldown_s)
@@ -4064,14 +4069,9 @@ class TradingApplication:
                     return scored.spread_bps
             return None
 
-        priority_order = [
-            sid.strip()
-            for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",")
-            if sid.strip()
-        ]
+        priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]
         strategy_priorities = {
-            strategy_id: len(priority_order) - index
-            for index, strategy_id in enumerate(priority_order)
+            strategy_id: len(priority_order) - index for index, strategy_id in enumerate(priority_order)
         }
 
         if self._settings.SCALP_STRATEGY_ENABLED and self._candle_store is not None:

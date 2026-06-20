@@ -81,6 +81,7 @@ def _proposal(
         rationale=rationale,
     )
 
+
 class OrderFlowStrategy(BaseStrategy):
     """Trade with aligned tape pressure, book imbalance, and microprice."""
 
@@ -102,7 +103,9 @@ class OrderFlowStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "order_flow_v1"
 
-    def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
+    def evaluate(
+        self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
+    ) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         spread = f.get("spread_bps")
@@ -169,7 +172,9 @@ class FundingArbitrageStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "funding_arbitrage_v1"
 
-    def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
+    def evaluate(
+        self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
+    ) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         funding = f.get("funding_rate_bps_clipped", f.get("funding_rate_bps"))
@@ -179,14 +184,24 @@ class FundingArbitrageStrategy(BaseStrategy):
             _reject(self.strategy_id, feature_vector.symbol, "low_quality_or_missing_funding")
             return None
         if abs(funding) < self._min_abs_funding_bps or abs(r1) > self._max_abs_return_3:
-            _reject(self.strategy_id, feature_vector.symbol, "funding_or_momentum_not_extreme", funding_bps=funding, log_return_1=r1)
+            _reject(
+                self.strategy_id,
+                feature_vector.symbol,
+                "funding_or_momentum_not_extreme",
+                funding_bps=funding,
+                log_return_1=r1,
+            )
             return None
         side = OrderSide.SELL if funding > 0 else OrderSide.BUY
         if side == OrderSide.SELL and oi_change < 0:
-            _reject(self.strategy_id, feature_vector.symbol, "oi_not_confirming_positive_funding_fade", oi_change=oi_change)
+            _reject(
+                self.strategy_id, feature_vector.symbol, "oi_not_confirming_positive_funding_fade", oi_change=oi_change
+            )
             return None
         if side == OrderSide.BUY and oi_change > 0:
-            _reject(self.strategy_id, feature_vector.symbol, "oi_not_confirming_negative_funding_fade", oi_change=oi_change)
+            _reject(
+                self.strategy_id, feature_vector.symbol, "oi_not_confirming_negative_funding_fade", oi_change=oi_change
+            )
             return None
         return _proposal(
             strategy_id=self.strategy_id,
@@ -206,7 +221,9 @@ class FundingArbitrageStrategy(BaseStrategy):
 class LiquidationHuntingStrategy(BaseStrategy):
     """Fade exhaustion after one-sided liquidation bursts."""
 
-    def __init__(self, flow_tracker: Any, min_liq_notional_usd: float = 20_000.0, min_liq_imbalance: float = 0.65) -> None:
+    def __init__(
+        self, flow_tracker: Any, min_liq_notional_usd: float = 20_000.0, min_liq_imbalance: float = 0.65
+    ) -> None:
         self._flow = flow_tracker
         self._min_liq_notional_usd = min_liq_notional_usd
         self._min_liq_imbalance = min_liq_imbalance
@@ -215,7 +232,9 @@ class LiquidationHuntingStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "liquidation_hunting_v1"
 
-    def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
+    def evaluate(
+        self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
+    ) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         if feature_vector.quality_score < 0.6 or atr_pct is None:
@@ -230,7 +249,12 @@ class LiquidationHuntingStrategy(BaseStrategy):
         elif liq.imbalance <= -self._min_liq_imbalance:
             side = OrderSide.BUY
         else:
-            _reject(self.strategy_id, feature_vector.symbol, "liquidation_imbalance_below_threshold", imbalance=liq.imbalance)
+            _reject(
+                self.strategy_id,
+                feature_vector.symbol,
+                "liquidation_imbalance_below_threshold",
+                imbalance=liq.imbalance,
+            )
             return None
         return _proposal(
             strategy_id=self.strategy_id,
@@ -250,7 +274,9 @@ class LiquidationHuntingStrategy(BaseStrategy):
 class MarketMakingStrategy(BaseStrategy):
     """Maker-first mean reversion proxy for the current single-order engine."""
 
-    def __init__(self, spread_provider: Callable[[str], float | None], min_spread_bps: float = 1.2, max_spread_bps: float = 4.0) -> None:
+    def __init__(
+        self, spread_provider: Callable[[str], float | None], min_spread_bps: float = 1.2, max_spread_bps: float = 4.0
+    ) -> None:
         self._spread_provider = spread_provider
         self._min_spread_bps = min_spread_bps
         self._max_spread_bps = max_spread_bps
@@ -259,7 +285,9 @@ class MarketMakingStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "market_making_v1"
 
-    def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
+    def evaluate(
+        self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
+    ) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         rsi = f.get("rsi_14")
@@ -306,7 +334,9 @@ class StatisticalArbitrageStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "statistical_arbitrage_v1"
 
-    def evaluate(self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float) -> TradeProposal | None:
+    def evaluate(
+        self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
+    ) -> TradeProposal | None:
         f = _features(feature_vector)
         atr_pct = f.get("atr_14_pct")
         r1 = f.get("log_return_1")

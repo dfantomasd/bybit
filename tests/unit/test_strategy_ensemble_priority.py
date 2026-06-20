@@ -35,8 +35,12 @@ class _Strategy(BaseStrategy):
             side=self._side,
             requested_qty=Decimal("1"),
             entry_price=Decimal(str(current_price)),
-            take_profit=Decimal(str(current_price * 1.01)) if self._side == OrderSide.BUY else Decimal(str(current_price * 0.99)),
-            stop_loss=Decimal(str(current_price * 0.99)) if self._side == OrderSide.BUY else Decimal(str(current_price * 1.01)),
+            take_profit=Decimal(str(current_price * 1.01))
+            if self._side == OrderSide.BUY
+            else Decimal(str(current_price * 0.99)),
+            stop_loss=Decimal(str(current_price * 0.99))
+            if self._side == OrderSide.BUY
+            else Decimal(str(current_price * 1.01)),
             confidence=self._confidence,
         )
 

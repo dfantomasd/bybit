@@ -38,15 +38,15 @@ _STRATEGY_ID = "ema_crossover_v1"
 # Signal thresholds
 _EMA_SLOPE_MIN = 0.0002  # EMA9 must be rising — raised to filter weak drift
 _EMA_SEPARATION_MIN = 0.0002  # EMA9 and EMA21 must be meaningfully separated
-_RSI_LONG_MIN = 0.50   # require momentum confirmation for longs
+_RSI_LONG_MIN = 0.50  # require momentum confirmation for longs
 _RSI_LONG_MAX = 0.70
 _RSI_SHORT_MIN = 0.30
-_RSI_SHORT_MAX = 0.50   # tighter ceiling — avoid buying dips in bear moves
+_RSI_SHORT_MAX = 0.50  # tighter ceiling — avoid buying dips in bear moves
 _VOLUME_ZSCORE_MIN = -0.5  # reject low-volume entries
 _MACD_HIST_MIN_ABS = 0.0001  # reject weak MACD noise around zero
 
 _ATR_STOP_MULTIPLIER = 2.0  # widened: 1.5→2.0 to survive normal intrabar noise
-_ATR_TP_MULTIPLIER = 4.0   # keep 2:1 R/R at the new stop distance
+_ATR_TP_MULTIPLIER = 4.0  # keep 2:1 R/R at the new stop distance
 _MIN_ATR_PCT = 0.001  # skip if ATR is basically zero
 _MAX_ATR_PCT = 0.05  # skip if market is too volatile
 
@@ -167,8 +167,8 @@ class EMAcrossoverStrategy(BaseStrategy):
                 bonus_conditions = sum(
                     [
                         ema9_slope > _EMA_SLOPE_MIN * 3,  # strong slope momentum
-                        rsi14 > 0.55,                     # clearer upside bias
-                        (volume_z or 0) > 0.5,            # above-average volume
+                        rsi14 > 0.55,  # clearer upside bias
+                        (volume_z or 0) > 0.5,  # above-average volume
                     ]
                 )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION
@@ -221,8 +221,8 @@ class EMAcrossoverStrategy(BaseStrategy):
                 bonus_conditions = sum(
                     [
                         ema9_slope < -_EMA_SLOPE_MIN * 3,  # strong downward momentum
-                        rsi14 < 0.40,                      # clearly oversold territory
-                        (volume_z or 0) > 0.5,             # above-average volume
+                        rsi14 < 0.40,  # clearly oversold territory
+                        (volume_z or 0) > 0.5,  # above-average volume
                     ]
                 )
                 confidence = _BASE_CONFIDENCE + bonus_conditions * _CONFIDENCE_PER_CONDITION

@@ -1243,9 +1243,7 @@ class ExecutionEngine:
                     reason=reserve_reason,
                 )
                 return None
-            decision = decision.model_copy(
-                update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED}
-            )
+            decision = decision.model_copy(update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED})
             log.info(
                 "execution.signal_qty_adjusted",
                 symbol=symbol,

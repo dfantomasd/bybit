@@ -668,7 +668,9 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
                 },
             ]
         if "FROM feature_snapshots fs" in query:
-            return [{"feature_schema_hash": "schema5", "cnt": 900, "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC)}]
+            return [
+                {"feature_schema_hash": "schema5", "cnt": 900, "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC)}
+            ]
         if "FROM model_versions" in query:
             return []
         return []
@@ -689,8 +691,9 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     from trader.app import TradingApplication
 
     src = inspect.getsource(TradingApplication._run_auto_model_trainer)
+    compact_src = "".join(src.split())
     assert "training_eligible_by_horizon" in src
-    assert "training_by_horizon.get(str(horizon)" in src
+    assert "training_by_horizon.get(str(horizon)" in compact_src
     assert "actual_training_samples" in src
     assert "training_samples_compatible" in src
     assert "trainable_15m=" not in src
@@ -705,7 +708,9 @@ def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
     src = inspect.getsource(TradingApplication._run_model_progress_reporter)
     assert "report_horizon" in src
     assert "get_shadow_gate_stats(\n                        version,\n                        report_horizon," in src
-    assert "gate_event_counter(\n                            version,\n                            report_horizon," in src
+    assert (
+        "gate_event_counter(\n                            version,\n                            report_horizon," in src
+    )
 
 
 def test_training_allowlist_excludes_unattributed_candle_sampler_rows() -> None:

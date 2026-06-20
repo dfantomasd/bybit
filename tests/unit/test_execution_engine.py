@@ -84,7 +84,9 @@ class _FakeExposure:
         self.update_position = AsyncMock()
         self.remove_position = AsyncMock()
 
-    def can_add_position(self, symbol: str, notional: Decimal, order_id: str | None = None, **kwargs) -> tuple[bool, str]:
+    def can_add_position(
+        self, symbol: str, notional: Decimal, order_id: str | None = None, **kwargs
+    ) -> tuple[bool, str]:
         del kwargs
         self.reserved.append((symbol, notional, order_id))
         return self.allow, self.reason
@@ -255,18 +257,18 @@ class TestExecutionEngine:
     def test_exit_price_rounding_is_conservative_for_both_sides(self):
         engine = _make_engine()
 
-        assert engine._round_exit_price(Decimal("101.24"), Decimal("0.1"), OrderSide.BUY, is_stop_loss=False) == Decimal(
-            "101.2"
-        )
+        assert engine._round_exit_price(
+            Decimal("101.24"), Decimal("0.1"), OrderSide.BUY, is_stop_loss=False
+        ) == Decimal("101.2")
         assert engine._round_exit_price(Decimal("99.26"), Decimal("0.1"), OrderSide.BUY, is_stop_loss=True) == Decimal(
             "99.2"
         )
-        assert engine._round_exit_price(Decimal("98.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=False) == Decimal(
-            "98.3"
-        )
-        assert engine._round_exit_price(Decimal("101.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=True) == Decimal(
-            "101.3"
-        )
+        assert engine._round_exit_price(
+            Decimal("98.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=False
+        ) == Decimal("98.3")
+        assert engine._round_exit_price(
+            Decimal("101.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=True
+        ) == Decimal("101.3")
 
     @pytest.mark.asyncio
     async def test_live_order_failure_starts_failure_cooldown_not_entry_cooldown(self):
