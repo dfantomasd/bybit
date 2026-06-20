@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -17,6 +17,7 @@ from trader.domain.enums import (
     VolatilityLevel,
 )
 from trader.domain.models import (
+    FeatureVector,
     InstrumentInfo,
     RegimeContext,
     RiskDecision,
@@ -72,6 +73,24 @@ def _approved_decision(proposal: TradeProposal, qty: Decimal | None = None) -> R
         current_drawdown_pct=0.0,
         open_positions_count=0,
     )
+
+
+class _FakeExposure:
+    def __init__(self, *, allow: bool = True, reason: str = "") -> None:
+        self.allow = allow
+        self.reason = reason
+        self.reserved: list[tuple[str, Decimal, str | None]] = []
+        self.released: list[str] = []
+        self.update_position = AsyncMock()
+        self.remove_position = AsyncMock()
+
+    def can_add_position(self, symbol: str, notional: Decimal, order_id: str | None = None, **kwargs) -> tuple[bool, str]:
+        del kwargs
+        self.reserved.append((symbol, notional, order_id))
+        return self.allow, self.reason
+
+    def release_reservation(self, order_id: str) -> None:
+        self.released.append(order_id)
 
 
 def _rejected_decision(proposal: TradeProposal) -> RiskDecision:
@@ -324,3 +343,86 @@ class TestExecutionEngine:
         assert "shadow_mode" in status
         assert "open_positions" in status
         assert "cooldown_s" in status
+
+    @pytest.mark.asyncio
+    async def test_sop_boost_revalidates_exposure_after_risk_decision(self):
+        exposure = _FakeExposure(allow=False, reason="total exposure would exceed cap")
+        engine = _make_engine(approved=True, shadow_mode=True, qty=Decimal("0.010"))
+        engine._exposure = exposure
+        proposal = _proposal()
+        feature_vector = FeatureVector(
+            symbol=proposal.symbol,
+            values=[1.0],
+            feature_names=["ob_imbalance_l5"],
+            quality_score=1.0,
+            lookback_bars=20,
+        )
+
+        result = await engine.submit(
+            proposal,
+            Decimal("10000"),
+            Decimal("10000"),
+            feature_vector=feature_vector,
+            regime_context=RegimeContext(
+                symbol=proposal.symbol,
+                regime=MarketRegime.BULL_TREND,
+                volatility_level=VolatilityLevel.NORMAL,
+                confidence=0.8,
+                spread_bps=5,
+            ),
+        )
+
+        assert result is None
+        assert exposure.released == [str(proposal.proposal_id)]
+        assert exposure.reserved == [(proposal.symbol, Decimal("600.0000"), str(proposal.proposal_id))]
+        engine._exposure.update_position.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_post_risk_qty_reduction_rejects_below_buffered_min_notional(self):
+        exposure = _FakeExposure()
+        engine = _make_engine(approved=True, shadow_mode=True, qty=Decimal("0.001"))
+        engine._exposure = exposure
+        proposal = _proposal(confidence=0.70).model_copy(
+            update={
+                "entry_price": Decimal("5000"),
+                "stop_loss": Decimal("4900"),
+                "take_profit": Decimal("5200"),
+                "timestamp": datetime.now(UTC) - timedelta(hours=1),
+            }
+        )
+        feature_vector = FeatureVector(
+            symbol=proposal.symbol,
+            values=[1.0],
+            feature_names=["realized_vol_20"],
+            quality_score=1.0,
+            lookback_bars=20,
+        )
+
+        result = await engine.submit(
+            proposal,
+            Decimal("10000"),
+            Decimal("10000"),
+            feature_vector=feature_vector,
+        )
+
+        assert result is None
+        assert exposure.released == [str(proposal.proposal_id)]
+        assert exposure.reserved == []
+        engine._exposure.update_position.assert_not_awaited()
+
+    def test_adjusted_exposure_rejection_releases_original_reservation(self):
+        exposure = _FakeExposure()
+        engine = _make_engine(approved=True, shadow_mode=True)
+        engine._exposure = exposure
+        proposal = _proposal().model_copy(update={"entry_price": Decimal("5000")})
+
+        allowed, reason = engine._reserve_adjusted_exposure(
+            proposal,
+            Decimal("0.001"),
+            _instrument_info(),
+        )
+
+        assert allowed is False
+        assert "post-signal notional" in reason
+        assert exposure.released == [str(proposal.proposal_id)]
+        assert exposure.reserved == []

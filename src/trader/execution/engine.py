@@ -334,6 +334,42 @@ class ExecutionEngine:
         if callable(release):
             release(str(proposal.proposal_id))
 
+    def _reserve_adjusted_exposure(
+        self,
+        proposal: TradeProposal,
+        qty: Decimal,
+        instrument_info: InstrumentInfo,
+    ) -> tuple[bool, str]:
+        """Replace RiskManager's reservation after post-risk execution sizing."""
+
+        if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
+            return True, ""
+        notional = qty * proposal.entry_price
+        # RiskManager reserved exposure for the pre-signal qty. From this point
+        # any outcome must release it: successful re-reservation uses the final
+        # qty, and rejection must not leave phantom pending exposure behind.
+        self._release_exposure_reservation(proposal)
+        if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
+            required_notional = instrument_info.min_notional * (
+                Decimal("1") + self._min_notional_buffer / Decimal("100")
+            )
+            if notional < required_notional:
+                return (
+                    False,
+                    f"post-signal notional {notional:.4f} < required {required_notional:.4f}",
+                )
+
+        # Replace the original reservation with the final qty so boosts cannot
+        # bypass caps and reductions do not over-reserve capital.
+        can_add = getattr(type(self._exposure), "can_add_position", None)
+        if can_add is None:
+            return True, ""
+        return self._exposure.can_add_position(
+            proposal.symbol,
+            notional,
+            order_id=str(proposal.proposal_id),
+        )
+
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
         return symbol in self._pending_entry_symbols.values()
@@ -1177,16 +1213,35 @@ class ExecutionEngine:
 
             qty_step = instrument_info.qty_step
             adjusted_qty = (adjusted_qty / qty_step).to_integral_value(rounding=_RD) * qty_step
-            if adjusted_qty >= instrument_info.min_order_qty:
-                decision = decision.model_copy(
-                    update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED}
-                )
-                log.info(
-                    "execution.signal_qty_adjusted",
+            if adjusted_qty < instrument_info.min_order_qty:
+                log.warning(
+                    "execution.signal_qty_adjustment_below_min_qty",
                     symbol=symbol,
                     multiplier=str(signal_qty_multiplier),
                     adjusted_qty=str(adjusted_qty),
+                    min_order_qty=str(instrument_info.min_order_qty),
                 )
+                self._release_exposure_reservation(proposal)
+                return None
+            can_reserve, reserve_reason = self._reserve_adjusted_exposure(proposal, adjusted_qty, instrument_info)
+            if not can_reserve:
+                log.warning(
+                    "execution.signal_qty_adjustment_rejected",
+                    symbol=symbol,
+                    multiplier=str(signal_qty_multiplier),
+                    adjusted_qty=str(adjusted_qty),
+                    reason=reserve_reason,
+                )
+                return None
+            decision = decision.model_copy(
+                update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED}
+            )
+            log.info(
+                "execution.signal_qty_adjusted",
+                symbol=symbol,
+                multiplier=str(signal_qty_multiplier),
+                adjusted_qty=str(adjusted_qty),
+            )
 
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
