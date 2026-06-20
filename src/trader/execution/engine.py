@@ -1990,7 +1990,7 @@ class ExecutionEngine:
         if price is None or tick_size <= Decimal("0"):
             return price
         rounding = ROUND_DOWN
-        if is_stop_loss and side == OrderSide.SELL:
+        if side == OrderSide.SELL:
             rounding = ROUND_CEILING
         ticks = (price / tick_size).to_integral_value(rounding=rounding)
         return ticks * tick_size
