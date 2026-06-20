@@ -229,8 +229,8 @@ def test_boundary_now_equals_close_epoch_is_confirmed() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_upsert_sql_updates_source_and_updated_at() -> None:
-    """Verify that the UPSERT DO UPDATE clause sets source and updated_at."""
+def test_upsert_sql_updates_metadata_and_protects_confirmed_candles() -> None:
+    """UPSERT must refresh metadata without downgrading confirmed candles."""
     import inspect
 
     from trader.storage.trade_journal import TradeJournal
@@ -238,15 +238,6 @@ def test_upsert_sql_updates_source_and_updated_at() -> None:
     src = inspect.getsource(TradeJournal.upsert_market_candle)
     assert "source" in src, "upsert must update source on conflict"
     assert "updated_at" in src, "upsert must update updated_at on conflict"
-
-
-def test_upsert_sql_protects_confirmed_from_unconfirmed() -> None:
-    """Unconfirmed candle must not overwrite a confirmed one (WHERE guard)."""
-    import inspect
-
-    from trader.storage.trade_journal import TradeJournal
-
-    src = inspect.getsource(TradeJournal.upsert_market_candle)
     assert "NOT market_candles.confirmed OR EXCLUDED.confirmed" in src
 
 
@@ -341,8 +332,8 @@ def test_audit_script_contains_no_delete_statements() -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_train_sql_filters_training_eligible() -> None:
-    """train.py must filter training rows through the eligible_samples CTE."""
+def test_training_sql_contracts() -> None:
+    """Training SQL must use eligible, deduped, schema-compatible samples."""
     import inspect
 
     from trader.training import train
@@ -350,55 +341,29 @@ def test_train_sql_filters_training_eligible() -> None:
     src = inspect.getsource(train)
     assert "WITH eligible_samples AS" in src
     assert "fs.training_eligible = true" in src
-
-
-def test_train_sql_deduplicates_by_source_candle_before_split() -> None:
-    """Training samples must be unique by source candle, not only snapshot_id."""
-    import inspect
-
-    from trader.training import train
-
-    src = inspect.getsource(train)
     assert "count(DISTINCT fs.snapshot_id)" not in src
     assert "DISTINCT ON (fs.snapshot_id)" not in src
     assert "ROW_NUMBER() OVER" in src
     assert "PARTITION BY fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash" in src
     assert "WHERE es.candle_rank = 1" in src
-
-
-def test_train_stores_snapshot_schema_as_model_version_schema() -> None:
-    """model_versions.feature_schema_hash must match feature_snapshots.feature_schema_hash."""
-    import inspect
-
-    from trader.training import train
-
-    src = inspect.getsource(train)
     assert "snapshot_feature_schema_hash = feature_schema_hash" in src
     assert '"model_feature_schema_hash": model_feature_schema_hash' in src
     assert '"feature_schema_hash": snapshot_feature_schema_hash' in src
     assert "model.training_samples,\n            snapshot_feature_schema_hash," in src
 
 
-def test_directional_diagnostics_prefers_model_version_schema_column() -> None:
-    """Auto-training compatibility checks must compare snapshot schema to snapshot schema."""
+def test_model_schema_compatibility_sql_contracts() -> None:
+    """Diagnostics/outcomes must compare snapshot schema to snapshot schema."""
     import inspect
 
     from trader.storage.directional_trade_journal import DirectionalTradeJournal
 
-    src = inspect.getsource(DirectionalTradeJournal._get_db_diagnostics_directional)
-    assert "NULLIF(feature_schema_hash, '')" in src
-    assert "NULLIF(metrics->>'source_feature_schema_hash', '')" in src
-    assert "metrics->>'feature_schema_hash'" in src
-
-
-def test_resolve_outcomes_sql_filters_training_eligible() -> None:
-    """directional_trade_journal.resolve_outcomes_from_candles must filter training_eligible."""
-    import inspect
-
-    from trader.storage.directional_trade_journal import DirectionalTradeJournal
-
-    src = inspect.getsource(DirectionalTradeJournal.resolve_outcomes_from_candles)
-    assert "training_eligible = true" in src
+    diagnostics_src = inspect.getsource(DirectionalTradeJournal._get_db_diagnostics_directional)
+    assert "NULLIF(feature_schema_hash, '')" in diagnostics_src
+    assert "NULLIF(metrics->>'source_feature_schema_hash', '')" in diagnostics_src
+    assert "metrics->>'feature_schema_hash'" in diagnostics_src
+    resolver_src = inspect.getsource(DirectionalTradeJournal.resolve_outcomes_from_candles)
+    assert "training_eligible = true" in resolver_src
 
 
 def test_promote_stats_sql_filters_training_eligible() -> None:

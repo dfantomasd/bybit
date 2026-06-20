@@ -2,6 +2,7 @@
 
 import re
 
+import pytest
 from src.trader.execution.engine import ExecutionEngine
 from src.trader.storage.trade_journal import TradeJournal
 
@@ -22,98 +23,79 @@ class TestGetPendingDurableOrdersExcludesUnknown:
 class TestRestorePendingEntriesExcludesUnknown:
     """Test that restore_pending_entries() filters out unknown:* IDs."""
 
-    def test_excludes_empty_ids(self) -> None:
+    @pytest.mark.parametrize(
+        ("order_ids", "expected"),
+        [
+            (["", "valid-id-1", "", "valid-id-2"], {"valid-id-1", "valid-id-2"}),
+            (["unknown:123", "valid-id", "unknown:abc"], {"valid-id"}),
+            (["", "unknown:foo", "valid-id", "unknown:bar", ""], {"valid-id"}),
+        ],
+    )
+    def test_filters_invalid_ids(self, order_ids: list[str], expected: set[str]) -> None:
         ee = ExecutionEngine(
             adapter=None,
             risk_manager=None,
             exposure_tracker=None,
             shadow_mode=True,
         )
-        ee.restore_pending_entries(["", "valid-id-1", "", "valid-id-2"])
-        assert ee._pending_entry_order_link_ids == {"valid-id-1", "valid-id-2"}
-        assert ee._pending_entry_count == 2
-
-    def test_excludes_unknown_prefix(self) -> None:
-        ee = ExecutionEngine(
-            adapter=None,
-            risk_manager=None,
-            exposure_tracker=None,
-            shadow_mode=True,
-        )
-        ee.restore_pending_entries(["unknown:123", "valid-id", "unknown:abc"])
-        assert ee._pending_entry_order_link_ids == {"valid-id"}
-        assert ee._pending_entry_count == 1
-
-    def test_excludes_both_empty_and_unknown(self) -> None:
-        ee = ExecutionEngine(
-            adapter=None,
-            risk_manager=None,
-            exposure_tracker=None,
-            shadow_mode=True,
-        )
-        ee.restore_pending_entries(["", "unknown:foo", "valid-id", "unknown:bar", ""])
-        assert ee._pending_entry_order_link_ids == {"valid-id"}
-        assert ee._pending_entry_count == 1
+        ee.restore_pending_entries(order_ids)
+        assert ee._pending_entry_order_link_ids == expected
+        assert ee._pending_entry_count == len(expected)
 
 
 class TestRestorePendingEntriesWithSymbolsExcludesUnknown:
     """Test that restore_pending_entries_with_symbols() filters out unknown:* IDs."""
 
-    def test_excludes_empty_ids(self) -> None:
+    @pytest.mark.parametrize(
+        ("entries", "expected_ids", "expected_symbols"),
+        [
+            (
+                [
+                    {"order_link_id": "", "symbol": "BTCUSDT"},
+                    {"order_link_id": "valid-id-1", "symbol": "BTCUSDT"},
+                    {"order_link_id": "valid-id-2", "symbol": "ETHUSDT"},
+                ],
+                {"valid-id-1", "valid-id-2"},
+                {"valid-id-1": "BTCUSDT", "valid-id-2": "ETHUSDT"},
+            ),
+            (
+                [
+                    {"order_link_id": "unknown:123", "symbol": "BTCUSDT"},
+                    {"order_link_id": "valid-id", "symbol": "ETHUSDT"},
+                    {"order_link_id": "unknown:abc", "symbol": "SOLUSDT"},
+                ],
+                {"valid-id"},
+                {"valid-id": "ETHUSDT"},
+            ),
+            (
+                [
+                    {"order_link_id": "", "symbol": "BTCUSDT"},
+                    {"order_link_id": "unknown:foo", "symbol": "BTCUSDT"},
+                    {"order_link_id": "valid-id", "symbol": "ETHUSDT"},
+                    {"order_link_id": "unknown:bar", "symbol": "SOLUSDT"},
+                    {"order_link_id": "", "symbol": "XRPUSDT"},
+                ],
+                {"valid-id"},
+                {"valid-id": "ETHUSDT"},
+            ),
+        ],
+    )
+    def test_filters_invalid_ids_with_symbols(
+        self,
+        entries: list[dict[str, str]],
+        expected_ids: set[str],
+        expected_symbols: dict[str, str],
+    ) -> None:
         ee = ExecutionEngine(
             adapter=None,
             risk_manager=None,
             exposure_tracker=None,
             shadow_mode=True,
         )
-        ee.restore_pending_entries_with_symbols(
-            [
-                {"order_link_id": "", "symbol": "BTCUSDT"},
-                {"order_link_id": "valid-id-1", "symbol": "BTCUSDT"},
-                {"order_link_id": "valid-id-2", "symbol": "ETHUSDT"},
-            ]
-        )
-        assert ee._pending_entry_order_link_ids == {"valid-id-1", "valid-id-2"}
-        assert ee._pending_entry_symbols == {"valid-id-1": "BTCUSDT", "valid-id-2": "ETHUSDT"}
-        assert ee._pending_entry_count == 2
-
-    def test_excludes_unknown_prefix(self) -> None:
-        ee = ExecutionEngine(
-            adapter=None,
-            risk_manager=None,
-            exposure_tracker=None,
-            shadow_mode=True,
-        )
-        ee.restore_pending_entries_with_symbols(
-            [
-                {"order_link_id": "unknown:123", "symbol": "BTCUSDT"},
-                {"order_link_id": "valid-id", "symbol": "ETHUSDT"},
-                {"order_link_id": "unknown:abc", "symbol": "SOLUSDT"},
-            ]
-        )
-        assert ee._pending_entry_order_link_ids == {"valid-id"}
-        assert ee._pending_entry_symbols == {"valid-id": "ETHUSDT"}
-        assert ee._pending_entry_count == 1
-
-    def test_excludes_both_empty_and_unknown(self) -> None:
-        ee = ExecutionEngine(
-            adapter=None,
-            risk_manager=None,
-            exposure_tracker=None,
-            shadow_mode=True,
-        )
-        ee.restore_pending_entries_with_symbols(
-            [
-                {"order_link_id": "", "symbol": "BTCUSDT"},
-                {"order_link_id": "unknown:foo", "symbol": "BTCUSDT"},
-                {"order_link_id": "valid-id", "symbol": "ETHUSDT"},
-                {"order_link_id": "unknown:bar", "symbol": "SOLUSDT"},
-                {"order_link_id": "", "symbol": "XRPUSDT"},
-            ]
-        )
-        assert ee._pending_entry_order_link_ids == {"valid-id"}
-        assert ee._pending_entry_symbols == {"valid-id": "ETHUSDT"}
-        assert ee._pending_entry_count == 1
+        ee.restore_pending_entries_with_symbols(entries)
+        assert ee._pending_entry_order_link_ids == expected_ids
+        assert ee._pending_entry_symbols == expected_symbols
+        assert ee._pending_entry_count == len(expected_ids)
 
     def test_deduplicates_same_id(self) -> None:
         ee = ExecutionEngine(
