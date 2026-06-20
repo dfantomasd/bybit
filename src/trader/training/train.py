@@ -447,7 +447,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND ($4::text[] IS NULL OR pe.metadata->>'strategy_id' IS NULL OR pe.metadata->>'strategy_id' = ANY($4::text[]))
+                  AND ($4::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($4::text[]))
             ),
             schema_counts AS (
                 SELECT
@@ -514,7 +514,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND ($3::text[] IS NULL OR pe.metadata->>'strategy_id' IS NULL OR pe.metadata->>'strategy_id' = ANY($3::text[]))
+                  AND ($3::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($3::text[]))
                 GROUP BY fs.feature_schema_hash
                 ORDER BY cnt DESC
                 """,

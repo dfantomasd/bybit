@@ -691,7 +691,32 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     src = inspect.getsource(TradingApplication._run_auto_model_trainer)
     assert "training_eligible_by_horizon" in src
     assert "training_by_horizon.get(str(horizon)" in src
+    assert "actual_training_samples" in src
+    assert "training_samples_compatible" in src
     assert "trainable_15m=" not in src
+
+
+def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
+    """A h5m challenger must not be reported with hard-coded 15m gate stats."""
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._run_model_progress_reporter)
+    assert "report_horizon" in src
+    assert "get_shadow_gate_stats(\n                        version,\n                        report_horizon," in src
+    assert "gate_event_counter(\n                            version,\n                            report_horizon," in src
+
+
+def test_training_allowlist_excludes_unattributed_candle_sampler_rows() -> None:
+    """Configured strategy allowlists must not be bypassed by NULL strategy_id rows."""
+    import inspect
+
+    from trader.training import train
+
+    src = inspect.getsource(train._train)
+    assert "OR pe.metadata->>'strategy_id' IS NULL" not in src
+    assert "OR pe.metadata->>'strategy_id' = ANY" in src
 
 
 @pytest.mark.asyncio

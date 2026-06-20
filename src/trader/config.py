@@ -461,6 +461,9 @@ class Settings(BaseSettings):
     model is better than no model — we can retrain again once more samples accumulate."""
     MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
+    MODEL_AUTO_TRAIN_MIN_INTERVAL_SECONDS: int = 3600
+    """Minimum time between successful auto-training runs. Prevents checkpoint churn
+    while a challenger has not yet accumulated shadow evidence."""
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False

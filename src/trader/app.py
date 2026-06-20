@@ -753,6 +753,7 @@ class TradingApplication:
         min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
         schema_change_min_samples = max(50, int(self._settings.MODEL_AUTO_TRAIN_SCHEMA_CHANGE_MIN_SAMPLES))
         increment_samples = max(1, int(self._settings.MODEL_AUTO_TRAIN_INCREMENT_SAMPLES))
+        min_train_interval_s = max(0, int(getattr(self._settings, "MODEL_AUTO_TRAIN_MIN_INTERVAL_SECONDS", 3600)))
         horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
         label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
 
@@ -809,9 +810,12 @@ class TradingApplication:
                     or 0
                 )
                 latest_model = diag.get("latest_model_version", {}) or {}
-                latest_samples = int(latest_model.get("training_samples", 0) or 0)
-                enough_initial = latest_samples == 0 and trainable >= min_samples
-                enough_increment = latest_samples > 0 and (trainable - latest_samples) >= increment_samples
+                actual_latest_samples = int(
+                    latest_model.get("actual_training_samples", latest_model.get("training_samples", 0)) or 0
+                )
+                compatible_latest_samples = int(
+                    latest_model.get("training_samples_compatible", latest_model.get("training_samples", 0)) or 0
+                )
 
                 # Schema-mismatch trigger: if current model uses an outdated feature schema,
                 # fire as soon as the new schema has min_samples — don't wait for increment_samples.
@@ -822,6 +826,33 @@ class TradingApplication:
                 newest_schema_samples = int(horizon_schema.get("sample_count", diag.get("newest_training_schema_samples", 0)) or 0)
                 current_schema_hash = str(latest_model.get("feature_schema_hash", "") or "")
                 schema_mismatch = bool(newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash)
+                if min_train_interval_s > 0 and actual_latest_samples > 0:
+                    latest_finished_at = latest_model.get("training_finished_at") or latest_model.get("created_at")
+                    if isinstance(latest_finished_at, str):
+                        try:
+                            latest_finished_at = datetime.fromisoformat(latest_finished_at.replace("Z", "+00:00"))
+                        except ValueError:
+                            latest_finished_at = None
+                    if isinstance(latest_finished_at, datetime):
+                        if latest_finished_at.tzinfo is None:
+                            latest_finished_at = latest_finished_at.replace(tzinfo=UTC)
+                        age_s = (datetime.now(tz=UTC) - latest_finished_at.astimezone(UTC)).total_seconds()
+                        if age_s < min_train_interval_s:
+                            log.info(
+                                "model_auto_training.success_cooldown",
+                                cooldown_remaining_s=int(min_train_interval_s - age_s),
+                                latest_actual_samples=actual_latest_samples,
+                                latest_compatible_samples=compatible_latest_samples,
+                                schema_mismatch=schema_mismatch,
+                            )
+                            continue
+
+                enough_initial = actual_latest_samples == 0 and trainable >= min_samples
+                enough_increment = (
+                    not schema_mismatch
+                    and compatible_latest_samples > 0
+                    and (trainable - compatible_latest_samples) >= increment_samples
+                )
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
 
                 if not (enough_initial or enough_increment or enough_schema_change):
@@ -846,7 +877,8 @@ class TradingApplication:
                     "model_auto_training.started",
                     trainable=trainable,
                     horizon_minutes=horizon,
-                    latest_samples=latest_samples,
+                    latest_samples=actual_latest_samples,
+                    compatible_latest_samples=compatible_latest_samples,
                     min_samples=effective_min_samples,
                     increment_samples=increment_samples,
                     trigger_reason=trigger_reason,
@@ -856,7 +888,8 @@ class TradingApplication:
                     await self._telegram_bot.notify(
                         "🤖 <b>Auto-training triggered</b>\n"
                         f"trainable_{horizon}m=<code>{trainable}</code>, "
-                        f"latest_model_samples=<code>{latest_samples}</code>\n"
+                        f"latest_model_samples=<code>{actual_latest_samples}</code>, "
+                        f"compatible=<code>{compatible_latest_samples}</code>\n"
                         f"{msg}"
                     )
             except Exception as exc:
@@ -1005,14 +1038,14 @@ class TradingApplication:
                 if version and version != "—" and self._trade_journal is not None:
                     gate = await self._trade_journal.get_shadow_gate_stats(
                         version,
-                        15,
+                        report_horizon,
                         "directional_net_v1",
                     )
                     gate_event_counter = getattr(self._trade_journal, "get_shadow_gate_event_counts", None)
                     if gate_event_counter is not None:
                         gate_events = await gate_event_counter(
                             version,
-                            15,
+                            report_horizon,
                             "directional_net_v1",
                         )
                 else:
