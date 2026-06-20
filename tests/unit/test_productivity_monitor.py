@@ -141,6 +141,19 @@ def test_top_rejection_reason():
     assert snap.top_rejection_reason == "low_volume"
 
 
+def test_old_rejection_reasons_expire_from_rolling_window():
+    m = _monitor()
+    old_ts = datetime.now(tz=UTC) - timedelta(hours=2)
+    m._rejection_times.append((old_ts, "old_risk"))
+    m._rejection_counts["old_risk"] = 1
+    m.record_rejection("fresh_risk")
+
+    snap = m.snapshot()
+
+    assert snap.top_rejection_reason == "fresh_risk"
+    assert "old_risk" not in m._rejection_counts
+
+
 def test_no_rejections_gives_none():
     m = _monitor()
     snap = m.snapshot()

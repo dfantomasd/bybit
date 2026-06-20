@@ -103,6 +103,35 @@ def test_zero_trading_warning_is_suppressed_when_shadow_orders_flow():
     log.info.assert_not_called()
 
 
+def test_top_blocker_prefers_specific_risk_reason():
+    app = _make_app()
+    diag = {
+        "hour_risk_rejected": 4,
+        "hour_min_notional_rejected": 4,
+        "hour_model_gate_canary_blocked": 1,
+    }
+
+    top, blockers = app._top_blocker_from_diag(diag, default="unknown")
+
+    assert top == "risk_rejected:min_notional"
+    assert blockers["risk_rejected"] == 4
+    assert blockers["risk_rejected:min_notional"] == 4
+
+
+def test_get_diagnostics_exposes_specific_risk_rejection_counts():
+    app = _make_app()
+    app._record_diag("risk_rejected")
+    app._record_diag("risk_rule:sizer_rejected")
+    app._record_diag("risk_market_filter_rejected")
+    app._record_diag("post_multiplier_min_notional_rejected")
+
+    diag = app.get_diagnostics()
+
+    assert diag["hour_risk_rejected"] == 1
+    assert diag["hour_risk_market_filter_rejected"] == 1
+    assert diag["hour_min_notional_rejected"] == 1
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

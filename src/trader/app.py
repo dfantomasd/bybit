@@ -1645,20 +1645,7 @@ class TradingApplication:
 
         async def _healthcheck_provider() -> dict[str, Any]:
             diag = self.get_diagnostics()
-            blockers = {
-                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
-                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
-                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
-                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
-                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
-                "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
-                "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
-                "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
-                "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
-                "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
-                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
-            }
-            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "нет блокировок"
+            top_blocker, blockers = self._top_blocker_from_diag(diag, default="нет блокировок")
             today_avg_net_bps = None
             if self._trade_journal is not None and self._trade_journal.is_enabled:
                 try:
@@ -3405,6 +3392,30 @@ class TradingApplication:
         """Record a diagnostics event with the current timestamp."""
         self._diag_events.append((datetime.now(tz=UTC), event))
 
+    def _top_blocker_from_diag(self, diag: dict[str, Any], *, default: str) -> tuple[str, dict[str, int]]:
+        """Return the most useful blocker label for operator diagnostics."""
+        blockers = {
+            "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
+            "risk_rejected:sizer_rejected": int(diag.get("hour_risk_sizer_rejected") or 0),
+            "risk_rejected:min_notional": int(diag.get("hour_min_notional_rejected") or 0),
+            "risk_rejected:exposure": int(diag.get("hour_risk_exposure_rejected") or 0),
+            "risk_rejected:balance": int(diag.get("hour_risk_balance_rejected") or 0),
+            "risk_rejected:spread_or_atr": int(diag.get("hour_risk_market_filter_rejected") or 0),
+            "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
+            "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+            "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
+            "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
+            "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
+            "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
+            "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
+            "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
+            "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
+        }
+        top_blocker = (
+            max(blockers, key=lambda k: (blockers[k], 1 if ":" in k else 0)) if any(blockers.values()) else default
+        )
+        return top_blocker, blockers
+
     async def _sample_confirmed_candle(self, symbol: str, interval: str, vec: Any) -> None:
         """Record a training sample on every confirmed 1m candle.
 
@@ -3774,20 +3785,7 @@ class TradingApplication:
                 return
 
             self._last_zero_trading_warn_at = now
-            blockers = {
-                "risk_rejected": int(diag.get("hour_risk_rejected") or 0),
-                "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
-                "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
-                "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
-                "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
-                "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
-                "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
-                "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
-                "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
-                "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
-                "min_notional_rejected": int(diag.get("hour_min_notional_rejected") or 0),
-            }
-            top_blocker = max(blockers, key=lambda k: blockers[k]) if any(blockers.values()) else "unknown"
+            top_blocker, blockers = self._top_blocker_from_diag(diag, default="unknown")
             log.warning(
                 "zero_trading.detected",
                 hour_signals=signals,
@@ -3828,6 +3826,10 @@ class TradingApplication:
             ),
             "hour_signals_emitted": hour_counts.get("signals_emitted", 0),
             "hour_risk_rejected": hour_counts.get("risk_rejected", 0),
+            "hour_risk_sizer_rejected": hour_counts.get("risk_sizer_rejected", 0),
+            "hour_risk_exposure_rejected": hour_counts.get("risk_exposure_rejected", 0),
+            "hour_risk_balance_rejected": hour_counts.get("risk_balance_rejected", 0),
+            "hour_risk_market_filter_rejected": hour_counts.get("risk_market_filter_rejected", 0),
             "hour_api_rejected": hour_counts.get("api_rejected", 0),
             "hour_min_notional_rejected": hour_counts.get("post_multiplier_min_notional_rejected", 0),
             "hour_skipped_open_position": hour_counts.get("skipped_open_position", 0),
@@ -4633,8 +4635,26 @@ class TradingApplication:
                 self._record_diag("risk_rejected")
                 # Track specific rejection reasons
                 for rule in decision.triggered_rules or []:
+                    self._record_diag(f"risk_rule:{rule}")
                     if rule == "post_multiplier_min_notional_rejected":
                         self._record_diag("post_multiplier_min_notional_rejected")
+                    if rule in (
+                        "exposure_cap",
+                        "exposure_cap_full",
+                        "exposure_cap_post_bump",
+                        "exposure_reservation",
+                    ):
+                        self._record_diag("risk_exposure_rejected")
+                    if rule in ("sizer_rejected", "post_multiplier_zero"):
+                        reason = (decision.reason or "").lower()
+                        if "balance" in reason or "capital" in reason:
+                            self._record_diag("risk_balance_rejected")
+                        elif "spread" in reason or "atr" in reason or "stop distance" in reason:
+                            self._record_diag("risk_market_filter_rejected")
+                        elif "min_notional" in reason or "notional" in reason:
+                            self._record_diag("post_multiplier_min_notional_rejected")
+                        else:
+                            self._record_diag("risk_sizer_rejected")
                 rejected_reason = "risk_rejected"
                 if decision.triggered_rules:
                     rejected_reason = f"risk_rejected:{decision.triggered_rules[0]}"

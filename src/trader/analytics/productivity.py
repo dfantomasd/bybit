@@ -88,6 +88,7 @@ class RuntimeProductivityMonitor:
 
     # Rejection reason counts (last hour; reset on each heartbeat if needed)
     _rejection_counts: dict[str, int] = field(default_factory=dict, init=False)
+    _rejection_times: deque[tuple[datetime, str]] = field(default_factory=deque, init=False)
 
     def record_scanner_cycle(self) -> None:
         self._last_scanner_cycle_at = _now()
@@ -127,6 +128,7 @@ class RuntimeProductivityMonitor:
             self._reentries_total += 1
 
     def record_rejection(self, reason: str) -> None:
+        self._rejection_times.append((_now(), reason))
         self._rejection_counts[reason] = self._rejection_counts.get(reason, 0) + 1
 
     def snapshot(self) -> ProductivitySnapshot:
@@ -196,3 +198,10 @@ class RuntimeProductivityMonitor:
         ):
             while dq and dq[0] < cutoff:
                 dq.popleft()
+        while self._rejection_times and self._rejection_times[0][0] < cutoff:
+            _ts, reason = self._rejection_times.popleft()
+            count = self._rejection_counts.get(reason, 0)
+            if count <= 1:
+                self._rejection_counts.pop(reason, None)
+            else:
+                self._rejection_counts[reason] = count - 1
