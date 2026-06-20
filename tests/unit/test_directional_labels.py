@@ -62,3 +62,62 @@ def test_sell_excursions_are_directional_and_path_aware() -> None:
 def test_unknown_side_is_rejected() -> None:
     with pytest.raises(ValueError, match="unsupported trade side"):
         directional_return_bps(side="Hold", entry_price=100.0, exit_price=101.0)
+
+
+@pytest.mark.parametrize(
+    ("entry_price", "exit_price"),
+    [
+        (0.0, 101.0),
+        (-1.0, 101.0),
+        (float("nan"), 101.0),
+        (100.0, 0.0),
+        (100.0, float("inf")),
+    ],
+)
+def test_directional_return_rejects_invalid_prices(entry_price: float, exit_price: float) -> None:
+    with pytest.raises(ValueError):
+        directional_return_bps(side="Buy", entry_price=entry_price, exit_price=exit_price)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"entry_fee_bps": -0.1},
+        {"exit_fee_bps": float("nan")},
+        {"spread_bps": -1.0},
+        {"entry_slippage_bps": -1.0},
+        {"exit_slippage_bps": -1.0},
+        {"safety_margin_bps": -1.0},
+        {"funding_bps": float("inf")},
+    ],
+)
+def test_cost_model_rejects_invalid_costs(kwargs: dict[str, float]) -> None:
+    with pytest.raises(ValueError):
+        CostModelBps(**kwargs)
+
+
+@pytest.mark.parametrize(
+    ("highs", "lows"),
+    [
+        ([float("nan")], [99.0]),
+        ([101.0], [0.0]),
+        ([], [99.0]),
+        ([101.0], []),
+    ],
+)
+def test_directional_excursions_reject_invalid_paths(highs: list[float], lows: list[float]) -> None:
+    with pytest.raises(ValueError):
+        directional_excursions_bps(side="Buy", entry_price=100.0, highs=highs, lows=lows)
+
+
+def test_label_threshold_must_be_finite() -> None:
+    with pytest.raises(ValueError, match="label_threshold_bps"):
+        build_directional_outcome(
+            side="Buy",
+            entry_price=100.0,
+            exit_price=101.0,
+            highs=[101.0],
+            lows=[99.0],
+            cost_model=CostModelBps(),
+            label_threshold_bps=float("nan"),
+        )

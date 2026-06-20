@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass
+from math import isfinite
 
 LABEL_SCHEMA_VERSION = "directional_net_v1"
 
@@ -30,6 +31,23 @@ class CostModelBps:
     exit_slippage_bps: float = 0.0
     funding_bps: float = 0.0
     safety_margin_bps: float = 0.0
+
+    def __post_init__(self) -> None:
+        non_negative_fields = (
+            "entry_fee_bps",
+            "exit_fee_bps",
+            "spread_bps",
+            "entry_slippage_bps",
+            "exit_slippage_bps",
+            "safety_margin_bps",
+        )
+        for name in non_negative_fields:
+            value = float(getattr(self, name))
+            if not isfinite(value) or value < 0.0:
+                raise ValueError(f"{name} must be a finite non-negative bps value")
+        funding = float(self.funding_bps)
+        if not isfinite(funding):
+            raise ValueError("funding_bps must be finite")
 
     @property
     def total_bps(self) -> float:
@@ -78,9 +96,9 @@ def directional_return_bps(*, side: str, entry_price: float, exit_price: float) 
 
     A profitable Sell therefore produces a positive value when price falls.
     """
-    if entry_price <= 0:
+    if not isfinite(entry_price) or entry_price <= 0:
         raise ValueError("entry_price must be positive")
-    if exit_price <= 0:
+    if not isfinite(exit_price) or exit_price <= 0:
         raise ValueError("exit_price must be positive")
     direction = direction_multiplier(side)
     return direction * (exit_price - entry_price) / entry_price * 10_000.0
@@ -98,13 +116,17 @@ def directional_excursions_bps(
     MFE is always non-negative and MAE is always non-positive. The caller
     should pass highs/lows for the full horizon path, not only the last bar.
     """
-    if entry_price <= 0:
+    if not isfinite(entry_price) or entry_price <= 0:
         raise ValueError("entry_price must be positive")
 
     high_values = list(highs)
     low_values = list(lows)
     if not high_values or not low_values:
         raise ValueError("highs and lows must not be empty")
+    if any(not isfinite(value) or value <= 0 for value in high_values):
+        raise ValueError("highs must contain only positive finite prices")
+    if any(not isfinite(value) or value <= 0 for value in low_values):
+        raise ValueError("lows must contain only positive finite prices")
 
     normalized_side = normalize_side(side)
     if normalized_side == "Buy":
@@ -128,6 +150,8 @@ def build_directional_outcome(
     label_threshold_bps: float,
 ) -> DirectionalOutcome:
     """Build one canonical cost-aware ML outcome."""
+    if not isfinite(label_threshold_bps):
+        raise ValueError("label_threshold_bps must be finite")
     normalized_side = normalize_side(side)
     gross_bps = directional_return_bps(side=normalized_side, entry_price=entry_price, exit_price=exit_price)
     mfe_bps, mae_bps = directional_excursions_bps(
