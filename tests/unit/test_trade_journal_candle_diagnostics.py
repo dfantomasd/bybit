@@ -216,7 +216,7 @@ async def test_fetch_timeout_returns_empty_list(monkeypatch: pytest.MonkeyPatch)
             return []
 
     class _Pool:
-        def acquire(self) -> "_Acquire":
+        def acquire(self) -> _Acquire:
             return _Acquire()
 
     class _Acquire:

@@ -1837,7 +1837,7 @@ class TradingApplication:
                     self._trade_journal.get_db_diagnostics(lite=lite),
                     timeout=8.0 if lite else 15.0,
                 )
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 log.warning("db_diagnostics_timeout", lite=lite)
                 return {
                     "connected": self._trade_journal.is_enabled,
