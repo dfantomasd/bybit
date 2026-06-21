@@ -1834,14 +1834,18 @@ class TradingApplication:
                 risk_profile=self._settings.RISK_PROFILE.value,
                 bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
                 default_category=self._settings.DEFAULT_MARKET_CATEGORY,
+                redis_url=self._settings.REDIS_URL.get_secret_value(),
             ),
             health_provider=self._health_checker.overall_health,
             adapter_factory=lambda: self._bybit_adapter,
             controller=controller,
             net_results_provider=self._get_net_results,
         )
-        await self._telegram_bot.start()
-        log.info("telegram_bot_started")
+        started = await self._telegram_bot.start()
+        if started:
+            log.info("telegram_bot_started")
+        else:
+            log.warning("telegram_bot_not_started", health=self._telegram_bot.health_snapshot())
 
     # ------------------------------------------------------------------
     # Risk & Execution
@@ -3492,8 +3496,11 @@ class TradingApplication:
             "risk_rejected:exposure": int(diag.get("hour_risk_exposure_rejected") or 0),
             "risk_rejected:balance": int(diag.get("hour_risk_balance_rejected") or 0),
             "risk_rejected:spread_or_atr": int(diag.get("hour_risk_market_filter_rejected") or 0),
+            "startup_warmup": int(diag.get("hour_skipped_startup_warmup") or 0),
+            "rate_limit": int(diag.get("hour_skipped_rate_limit") or 0),
             "model_gate_blocked": int(diag.get("hour_model_gate_canary_blocked") or 0),
             "net_edge_rejected": int(diag.get("hour_net_edge_rejected") or 0),
+            "post_signal_size_rejected": int(diag.get("hour_signal_qty_adjustment_rejected") or 0),
             "spread_rejected": int(diag.get("hour_spread_rejected") or 0),
             "scalp_net_edge_rejected": int(diag.get("hour_scalp_net_edge_rejected") or 0),
             "imbalance_rejected": int(diag.get("hour_imbalance_rejected") or 0),
@@ -3955,6 +3962,21 @@ class TradingApplication:
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_skipped_startup_warmup": (
+                self._execution_engine.get_diag_counts().get("skipped_startup_warmup", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_skipped_rate_limit": (
+                self._execution_engine.get_diag_counts().get("skipped_rate_limit", 0)
+                if self._execution_engine is not None
+                else 0
+            ),
+            "hour_signal_qty_adjustment_rejected": (
+                self._execution_engine.get_diag_counts().get("signal_qty_adjustment_rejected", 0)
                 if self._execution_engine is not None
                 else 0
             ),

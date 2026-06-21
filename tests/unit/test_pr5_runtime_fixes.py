@@ -118,6 +118,23 @@ def test_top_blocker_prefers_specific_risk_reason():
     assert blockers["risk_rejected:min_notional"] == 4
 
 
+def test_top_blocker_includes_engine_skip_reasons():
+    app = _make_app()
+    diag = {
+        "hour_signals_emitted": 3,
+        "hour_skipped_startup_warmup": 1,
+        "hour_skipped_rate_limit": 2,
+        "hour_signal_qty_adjustment_rejected": 1,
+    }
+
+    top, blockers = app._top_blocker_from_diag(diag, default="unknown")
+
+    assert top == "rate_limit"
+    assert blockers["startup_warmup"] == 1
+    assert blockers["rate_limit"] == 2
+    assert blockers["post_signal_size_rejected"] == 1
+
+
 def test_get_diagnostics_exposes_specific_risk_rejection_counts():
     app = _make_app()
     app._record_diag("risk_rejected")
@@ -637,6 +654,9 @@ def test_engine_diag_counts_initial():
     engine = _make_engine()
     counts = engine.get_diag_counts()
     assert counts["skipped_pending_entries"] == 0
+    assert counts["skipped_startup_warmup"] == 0
+    assert counts["skipped_rate_limit"] == 0
+    assert counts["signal_qty_adjustment_rejected"] == 0
     assert counts["order_placed"] == 0
     assert counts["order_failed"] == 0
     assert counts["pending_entry_count"] == 0

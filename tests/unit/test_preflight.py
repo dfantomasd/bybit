@@ -218,10 +218,20 @@ class TestIndividualChecks:
 
     async def test_withdrawal_permission_warns(self) -> None:
         rest = _make_rest_mock(api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]})
-        checker = _make_checker(rest=rest)
+        checker = _make_checker(rest=rest, trading_mode="SHADOW")
         result = await checker._check_api_key_permissions()
         assert result.warning is not None
+        assert result.passed is True
+        assert result.critical is False
         assert "WITHDRAWAL" in result.warning.upper() or "Wallet" in result.warning
+
+    async def test_withdrawal_permission_blocks_active_mode(self) -> None:
+        rest = _make_rest_mock(api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]})
+        checker = _make_checker(rest=rest, trading_mode="TESTNET")
+        result = await checker._check_api_key_permissions()
+        assert result.warning is not None
+        assert result.passed is False
+        assert result.critical is True
 
     async def test_no_withdrawal_permission_no_warning(self) -> None:
         rest = _make_rest_mock(api_key_permissions={"ContractTrade": ["Order", "Position"]})

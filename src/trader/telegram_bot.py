@@ -35,7 +35,10 @@ Safety:
 
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import html
+import inspect
 import json
 import os
 import re
@@ -68,6 +71,7 @@ log = structlog.get_logger(__name__)
 _CONFIRM_TTL_SECONDS = 300.0
 _CONFIRM_MAX_PENDING = 1000
 _TELEGRAM_MESSAGE_LIMIT = 4000
+_POLLING_LOCK_KEY_PREFIX = "bybit-trader:telegram-polling"
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -183,6 +187,9 @@ class TelegramBotConfig:
     risk_profile: str
     bybit_use_testnet: bool
     default_category: str = "linear"
+    redis_url: str = ""
+    polling_lock_ttl_s: int = 45
+    polling_lock_wait_s: int = 90
 
 
 # ---------------------------------------------------------------------------
@@ -230,6 +237,11 @@ class TelegramMonitorBot:
         self._last_polling_error: str | None = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
+        self._polling_disabled_reason: str | None = None
+        self._polling_lock_key: str | None = None
+        self._polling_lock_token: str | None = None
+        self._polling_lock_refresh_task: asyncio.Task[None] | None = None
+        self._redis_client: Any | None = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -239,10 +251,12 @@ class TelegramMonitorBot:
     def enabled(self) -> bool:
         return bool(self._config.token and self._config.allowed_chat_ids)
 
-    async def start(self) -> None:
+    async def start(self) -> bool:
         if not self.enabled:
             log.info("telegram_bot_disabled")
-            return
+            return False
+        if not await self._acquire_polling_lock():
+            return False
 
         app = Application.builder().token(self._config.token).build()
 
@@ -303,23 +317,30 @@ class TelegramMonitorBot:
             except Exception as exc:
                 log.warning("telegram_subscriptions_load_failed", error=str(exc))
 
-        await app.initialize()
-        await app.start()
-        if app.updater is None:
-            raise RuntimeError("Telegram updater was not created")
-        # allowed_updates=[] means "all types"; error_callback suppresses the
-        # one-time Conflict error that fires during rolling redeploys on Render
-        # (old instance is still alive for a few seconds while new one starts).
-        await app.updater.start_polling(
-            drop_pending_updates=True,
-            error_callback=self._polling_error_callback,
-        )
-        self._app = app
-        self._started_at = datetime.now(tz=UTC)
-        log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
+        try:
+            await app.initialize()
+            await app.start()
+            if app.updater is None:
+                raise RuntimeError("Telegram updater was not created")
+            # allowed_updates=[] means "all types"; error_callback records
+            # conflicts, but the Redis lock prevents normal rolling deploys from
+            # running two getUpdates pollers at once.
+            await app.updater.start_polling(
+                drop_pending_updates=True,
+                error_callback=self._polling_error_callback,
+            )
+            self._app = app
+            self._started_at = datetime.now(tz=UTC)
+            self._polling_disabled_reason = None
+            log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
+            return True
+        except Exception:
+            await self._release_polling_lock()
+            raise
 
     async def stop(self) -> None:
         if self._app is None:
+            await self._release_polling_lock()
             return
         app = self._app
         self._app = None
@@ -327,7 +348,142 @@ class TelegramMonitorBot:
             await app.updater.stop()
         await app.stop()
         await app.shutdown()
+        await self._release_polling_lock()
         log.info("telegram_bot_stopped")
+
+    async def _acquire_polling_lock(self) -> bool:
+        """Acquire a distributed Telegram polling lease when Redis is configured."""
+        redis_url = self._config.redis_url.strip().strip("\"'")
+        if not redis_url:
+            log.info("telegram_polling_lock_disabled", reason="redis_url_empty")
+            return True
+
+        try:
+            import redis.asyncio as aioredis
+
+            client = aioredis.from_url(redis_url, socket_connect_timeout=2.0, socket_timeout=2.0)
+            token_hash = hashlib.sha256(self._config.token.encode("utf-8")).hexdigest()[:16]
+            key = f"{_POLLING_LOCK_KEY_PREFIX}:{token_hash}"
+            owner = secrets.token_hex(16)
+            ttl = max(10, int(self._config.polling_lock_ttl_s))
+            wait_s = max(0, int(self._config.polling_lock_wait_s))
+            deadline = asyncio.get_running_loop().time() + wait_s
+            while True:
+                acquired = await client.set(key, owner, nx=True, ex=ttl)
+                if acquired:
+                    self._redis_client = client
+                    self._polling_lock_key = key
+                    self._polling_lock_token = owner
+                    self._polling_lock_refresh_task = asyncio.create_task(
+                        self._refresh_polling_lock(ttl),
+                        name="telegram-polling-lock-refresh",
+                    )
+                    log.info("telegram_polling_lock_acquired", ttl_s=ttl)
+                    return True
+                if asyncio.get_running_loop().time() >= deadline:
+                    self._polling_disabled_reason = "polling_lock_timeout"
+                    log.warning("telegram_polling_lock_timeout", wait_s=wait_s, ttl_s=ttl)
+                    await self._close_redis_client(client)
+                    return False
+                await asyncio.sleep(min(2.0, max(0.25, ttl / 10)))
+        except Exception as exc:
+            # Telegram remains usable even if optional Redis is unavailable; the
+            # conflict counter will still expose any duplicate pollers.
+            self._polling_disabled_reason = f"polling_lock_error:{exc}"
+            log.warning("telegram_polling_lock_failed_open", error=str(exc))
+            return True
+
+    async def _refresh_polling_lock(self, ttl_s: int) -> None:
+        assert self._redis_client is not None
+        assert self._polling_lock_key is not None
+        assert self._polling_lock_token is not None
+        script = """
+        if redis.call('get', KEYS[1]) == ARGV[1] then
+            return redis.call('expire', KEYS[1], ARGV[2])
+        end
+        return 0
+        """
+        interval = max(3.0, ttl_s / 3)
+        while True:
+            await asyncio.sleep(interval)
+            try:
+                refreshed = await self._redis_client.eval(
+                    script,
+                    1,
+                    self._polling_lock_key,
+                    self._polling_lock_token,
+                    int(ttl_s),
+                )
+                if not refreshed:
+                    self._polling_disabled_reason = "polling_lock_lost"
+                    log.warning("telegram_polling_lock_lost")
+                    self._polling_lock_key = None
+                    self._polling_lock_token = None
+                    await self._stop_app_after_lock_loss()
+                    return
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                self._polling_disabled_reason = f"polling_lock_refresh_failed:{exc}"
+                log.warning("telegram_polling_lock_refresh_failed", error=str(exc))
+                self._polling_lock_key = None
+                self._polling_lock_token = None
+                await self._stop_app_after_lock_loss()
+                return
+
+    async def _stop_app_after_lock_loss(self) -> None:
+        """Stop Telegram polling when the distributed lock is lost."""
+        app = self._app
+        if app is None:
+            return
+        self._app = None
+        try:
+            if app.updater is not None and getattr(app.updater, "running", False):
+                await app.updater.stop()
+            if getattr(app, "running", False):
+                await app.stop()
+            await app.shutdown()
+            log.warning("telegram_bot_stopped_lock_lost")
+        except Exception as exc:
+            log.warning("telegram_bot_stop_after_lock_loss_failed", error=str(exc))
+
+    async def _release_polling_lock(self) -> None:
+        task = self._polling_lock_refresh_task
+        self._polling_lock_refresh_task = None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+        client = self._redis_client
+        key = self._polling_lock_key
+        owner = self._polling_lock_token
+        self._redis_client = None
+        self._polling_lock_key = None
+        self._polling_lock_token = None
+        if client is None:
+            return
+        try:
+            if key and owner:
+                script = """
+                if redis.call('get', KEYS[1]) == ARGV[1] then
+                    return redis.call('del', KEYS[1])
+                end
+                return 0
+                """
+                await client.eval(script, 1, key, owner)
+        except Exception as exc:
+            log.debug("telegram_polling_lock_release_failed", error=str(exc))
+        finally:
+            await self._close_redis_client(client)
+
+    @staticmethod
+    async def _close_redis_client(client: Any) -> None:
+        close = getattr(client, "aclose", None) or getattr(client, "close", None)
+        if not callable(close):
+            return
+        result = close()
+        if inspect.isawaitable(result):
+            await result
 
     def _polling_error_callback(self, error: Exception) -> None:
         """Suppress Conflict errors during rolling redeploys; log the rest."""
@@ -577,6 +733,8 @@ class TelegramMonitorBot:
             "last_polling_error": self._last_polling_error,
             "polling_conflict_count": self._polling_conflict_count,
             "polling_network_error_count": self._polling_network_error_count,
+            "polling_disabled_reason": self._polling_disabled_reason,
+            "polling_lock_owner": bool(self._polling_lock_token),
             "subscribed_chats": len(self._subscribed),
         }
 

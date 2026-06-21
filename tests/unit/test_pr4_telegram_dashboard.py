@@ -804,6 +804,39 @@ def test_telegram_health_snapshot_records_polling_conflicts() -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_polling_lock_acquire_and_release(monkeypatch: pytest.MonkeyPatch) -> None:
+    import redis.asyncio as aioredis
+
+    class FakeRedis:
+        def __init__(self) -> None:
+            self.closed = False
+            self.eval_calls = 0
+
+        async def set(self, *_args: object, **_kwargs: object) -> bool:
+            return True
+
+        async def eval(self, *_args: object) -> int:
+            self.eval_calls += 1
+            return 1
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    fake = FakeRedis()
+    monkeypatch.setattr(aioredis, "from_url", lambda *_args, **_kwargs: fake)
+    bot = _make_bot()
+    bot._config.redis_url = "redis://localhost:6379/0"
+
+    assert await bot._acquire_polling_lock() is True
+    assert bot.health_snapshot()["polling_lock_owner"] is True
+
+    await bot._release_polling_lock()
+
+    assert fake.closed is True
+    assert bot.health_snapshot()["polling_lock_owner"] is False
+
+
+@pytest.mark.asyncio
 async def test_db_model_screen_uses_model_gate_horizon() -> None:
     bot = _make_bot()
     assert bot._controller is not None

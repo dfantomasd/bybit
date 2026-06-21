@@ -169,6 +169,9 @@ class ExecutionEngine:
         self._pending_entry_count: int = 0
         # Per-session diagnostic counters (cumulative, not windowed)
         self._diag_skip_pending: int = 0
+        self._diag_skipped_startup_warmup: int = 0
+        self._diag_skipped_rate_limit: int = 0
+        self._diag_signal_qty_adjustment_rejected: int = 0
         self._diag_order_placed: int = 0
         self._diag_shadow_order_would_be_placed: int = 0
         self._diag_order_failed: int = 0
@@ -920,6 +923,10 @@ class ExecutionEngine:
         # 1b. Startup warmup + burst rate limits ───────────────────────
         reject_reason = self._check_rate_limits(symbol, proposal.side.value)
         if reject_reason:
+            if reject_reason.startswith("startup_warmup_active"):
+                self._diag_skipped_startup_warmup += 1
+            else:
+                self._diag_skipped_rate_limit += 1
             log.info("execution.skipped_rate_limit", symbol=symbol, reason=reject_reason)
             return None
 
@@ -1242,33 +1249,52 @@ class ExecutionEngine:
 
             qty_step = instrument_info.qty_step
             adjusted_qty = (adjusted_qty / qty_step).to_integral_value(rounding=_RD) * qty_step
+            adjustment_skipped_reason: str | None = None
             if adjusted_qty < instrument_info.min_order_qty:
-                log.warning(
-                    "execution.signal_qty_adjustment_below_min_qty",
+                adjustment_skipped_reason = (
+                    f"adjusted qty {adjusted_qty} < min_order_qty {instrument_info.min_order_qty}"
+                )
+            elif proposal.entry_price is not None and proposal.entry_price > Decimal("0"):
+                adjusted_notional = adjusted_qty * proposal.entry_price
+                if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
+                    required_notional = instrument_info.min_notional * (
+                        Decimal("1") + self._min_notional_buffer / Decimal("100")
+                    )
+                    if adjusted_notional < required_notional:
+                        adjustment_skipped_reason = (
+                            f"post-signal notional {adjusted_notional:.4f} < required {required_notional:.4f}"
+                        )
+
+            if adjustment_skipped_reason is not None:
+                log.info(
+                    "execution.signal_qty_adjustment_skipped",
+                    symbol=symbol,
+                    multiplier=str(signal_qty_multiplier),
+                    approved_qty=str(decision.approved_qty),
+                    adjusted_qty=str(adjusted_qty),
+                    reason=adjustment_skipped_reason,
+                )
+            else:
+                can_reserve, reserve_reason = self._reserve_adjusted_exposure(proposal, adjusted_qty, instrument_info)
+                if not can_reserve:
+                    self._diag_signal_qty_adjustment_rejected += 1
+                    log.warning(
+                        "execution.signal_qty_adjustment_rejected",
+                        symbol=symbol,
+                        multiplier=str(signal_qty_multiplier),
+                        adjusted_qty=str(adjusted_qty),
+                        reason=reserve_reason,
+                    )
+                    return None
+                decision = decision.model_copy(
+                    update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED}
+                )
+                log.info(
+                    "execution.signal_qty_adjusted",
                     symbol=symbol,
                     multiplier=str(signal_qty_multiplier),
                     adjusted_qty=str(adjusted_qty),
-                    min_order_qty=str(instrument_info.min_order_qty),
                 )
-                self._release_exposure_reservation(proposal)
-                return None
-            can_reserve, reserve_reason = self._reserve_adjusted_exposure(proposal, adjusted_qty, instrument_info)
-            if not can_reserve:
-                log.warning(
-                    "execution.signal_qty_adjustment_rejected",
-                    symbol=symbol,
-                    multiplier=str(signal_qty_multiplier),
-                    adjusted_qty=str(adjusted_qty),
-                    reason=reserve_reason,
-                )
-                return None
-            decision = decision.model_copy(update={"approved_qty": adjusted_qty, "status": RiskDecisionStatus.RESIZED})
-            log.info(
-                "execution.signal_qty_adjusted",
-                symbol=symbol,
-                multiplier=str(signal_qty_multiplier),
-                adjusted_qty=str(adjusted_qty),
-            )
 
         # 5. Build OrderIntent ─────────────────────────────────────────
         assert decision.approved_qty is not None
@@ -2050,6 +2076,9 @@ class ExecutionEngine:
         """Return cumulative diagnostic counters since startup."""
         return {
             "skipped_pending_entries": self._diag_skip_pending,
+            "skipped_startup_warmup": self._diag_skipped_startup_warmup,
+            "skipped_rate_limit": self._diag_skipped_rate_limit,
+            "signal_qty_adjustment_rejected": self._diag_signal_qty_adjustment_rejected,
             "order_placed": self._diag_order_placed,
             "shadow_order_would_be_placed": self._diag_shadow_order_would_be_placed,
             "order_failed": self._diag_order_failed,

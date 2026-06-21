@@ -240,14 +240,27 @@ class PreflightChecker:
             all_perms = all_perm_keys | all_perm_values
 
             warning = None
+            dangerous_permission = False
             if _DANGEROUS_PERMISSIONS & all_perm_keys:
+                dangerous_permission = True
                 warning = (
                     "API key has WITHDRAWAL permission (Wallet category) — this is dangerous for a trading bot. "
                     "Revoke it immediately."
                 )
             elif any(p.lower() in ("withdraw", "withdrawal") for p in all_perm_values):
+                dangerous_permission = True
                 warning = (
                     "API key has WITHDRAWAL permission — this is dangerous for a trading bot. Revoke it immediately."
+                )
+            active_trading_mode = self._trading_mode in {"TESTNET", "CANARY_LIVE", "LIVE"}
+            if dangerous_permission and active_trading_mode:
+                return CheckResult(
+                    name="api_key_permissions",
+                    passed=False,
+                    critical=True,
+                    message=warning or "API key has dangerous withdrawal permissions",
+                    details={"permissions": list(all_perms)},
+                    warning=warning,
                 )
 
             return CheckResult(
