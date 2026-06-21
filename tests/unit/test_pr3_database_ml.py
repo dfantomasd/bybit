@@ -548,17 +548,24 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     journal._enabled = True
 
     async def mock_fetch(query: str, *args: Any) -> list[dict]:
-        del args
         if "FROM market_candles GROUP BY interval" in query:
             return [{"interval": "1", "cnt": 1000}, {"interval": "15", "cnt": 250}]
         if "MAX(open_time)" in query:
             return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
-        if "AS pool" in query:
+        if "GROUP BY feature_schema_hash" in query:
             return [
-                {"pool": "scalp_micro_v1", "samples": 177},
+                {
+                    "feature_schema_hash": "abc1234567890def",
+                    "sample_count": 777,
+                    "latest_at": datetime(2026, 1, 1, 12, 0, tzinfo=UTC),
+                }
             ]
-        if "FROM feature_snapshots fs" in query:
-            return [{"feature_schema_hash": "abc1234567890def", "cnt": 777}]
+        if "GROUP BY pool" in query and "label_schema_version = $1" in query:
+            return [{"pool": "scalp_micro_v1", "samples": 177}]
+        if "GROUP BY pool" in query:
+            return [{"pool": "scalp_micro_v1", "sample_count": 777}]
+        if "GROUP BY label_threshold_bps" in query:
+            return [{"threshold": "2.0", "sample_count": 777}]
         if "FROM feature_snapshots" in query:
             return [{"cnt": 1200}]
         if "GROUP BY horizon_minutes" in query:
@@ -659,30 +666,31 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
     journal._enabled = True
 
     async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
-        del args
+        if "GROUP BY feature_schema_hash" in query:
+            horizon = int(args[0]) if args else 5
+            if horizon == 5:
+                return [
+                    {
+                        "feature_schema_hash": "schema5",
+                        "sample_count": 900,
+                        "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
+                    }
+                ]
+            return [
+                {
+                    "feature_schema_hash": "schema15",
+                    "sample_count": 100,
+                    "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
+                }
+            ]
+        if "GROUP BY pool" in query:
+            return [{"pool": "scalp_micro_v1", "sample_count": 0}]
+        if "GROUP BY label_threshold_bps" in query:
+            return [{"threshold": "2.0", "sample_count": 0}]
         if "AS pool" in query:
             return []
         if "GROUP BY horizon_minutes" in query and "feature_schema_hash" not in query:
             return [{"horizon_minutes": 5, "cnt": 900}, {"horizon_minutes": 15, "cnt": 100}]
-        if "GROUP BY horizon_minutes, feature_schema_hash" in query:
-            return [
-                {
-                    "horizon_minutes": 5,
-                    "feature_schema_hash": "schema5",
-                    "cnt": 900,
-                    "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
-                },
-                {
-                    "horizon_minutes": 15,
-                    "feature_schema_hash": "schema15",
-                    "cnt": 100,
-                    "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
-                },
-            ]
-        if "FROM feature_snapshots fs" in query:
-            return [
-                {"feature_schema_hash": "schema5", "cnt": 900, "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC)}
-            ]
         if "FROM model_versions" in query:
             return []
         return []
@@ -694,6 +702,7 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
     assert diag["training_eligible_by_horizon"] == {"5": 900, "15": 100}
     assert diag["newest_training_schema_by_horizon"]["5"]["feature_schema_hash"] == "schema5"
     assert diag["newest_training_schema_by_horizon"]["15"]["sample_count"] == 100
+    assert diag["newest_training_schema_by_horizon"]["5"]["best_schema_count"] == 900
 
 
 def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
@@ -710,6 +719,7 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     assert "training_samples_compatible" in src
     assert "label_schema_mismatch" in src
     assert "enough_label_schema_change" in src
+    assert "preflight_blocked" in src
     assert "trainable_15m=" not in src
 
 
@@ -765,6 +775,12 @@ async def test_db_diagnostics_reports_legacy_challenger_fallback() -> None:
 
     async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
         nonlocal directional_latest_queries
+        if "GROUP BY feature_schema_hash" in query:
+            return []
+        if "GROUP BY pool" in query:
+            return []
+        if "GROUP BY label_threshold_bps" in query:
+            return []
         del args
         if "FROM prediction_outcomes" in query:
             return []

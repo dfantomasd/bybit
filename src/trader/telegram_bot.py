@@ -2558,9 +2558,11 @@ class TelegramMonitorBot:
                 f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
             )
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
-            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
             training_config = db_diag.get("training_config", {}) or {}
             pool_breakdown = db_diag.get("training_pool_breakdown", {}) or {}
+            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
+            filtered_total_5m = int(pool_breakdown.get("filtered_total_5m", 0) or 0)
+            loose_v2_5m = int((db_diag.get("prediction_outcomes_by_horizon", {}) or {}).get(str(model_horizon), 0) or 0)
             train_allowlist = training_config.get("strategy_allowlist") or []
             train_include_candle = training_config.get("include_candle_baseline")
             train_label_schema = training_config.get("label_schema_version") or db_diag.get("label_schema_version", "n/a")
@@ -2638,6 +2640,18 @@ class TelegramMonitorBot:
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
+            ]
+            if loose_v2_5m and labelled_model_horizon < loose_v2_5m:
+                lines.append(
+                    f"Размечено v2 без фильтра scalp: <code>{loose_v2_5m}</code> "
+                    f"(в пуле allowlist всего: <code>{filtered_total_5m}</code>)"
+                )
+            if scalp_active == 0 and labelled_model_horizon < 1000:
+                lines.append(
+                    "⚠️ <i>Scalp-пул пуст: обучение ждёт сигналы scalp_micro_v1. "
+                    "Сейчас v2-метки в основном от candle_sampler (не входит в allowlist).</i>"
+                )
+            lines += [
                 f"Фильтр обучения: schema=<code>{html.escape(str(train_label_schema))}</code>, "
                 f"allowlist=<code>{html.escape(allowlist_display)}</code>, "
                 f"candle_baseline=<code>{include_candle_display}</code>",

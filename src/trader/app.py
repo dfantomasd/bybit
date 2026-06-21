@@ -760,7 +760,9 @@ class TradingApplication:
                 )
             else:
                 self._last_training_message = stderr or stdout or f"exit code {proc.returncode}"
-                self._training_failed_at = time.monotonic()
+                failure_text = self._last_training_message or ""
+                if "Insufficient compatible samples" not in failure_text:
+                    self._training_failed_at = time.monotonic()
                 text = "❌ <b>Training failed</b>\n" + f"<code>{code_text(self._last_training_message)}</code>"
             log.info(
                 "model_training.finished",
@@ -843,11 +845,19 @@ class TradingApplication:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
+                newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
+                horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
                 trainable = int(
-                    training_by_horizon.get(
-                        str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0))
+                    horizon_schema.get(
+                        "best_schema_count",
+                        training_by_horizon.get(
+                            str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0))
+                        ),
                     )
                     or 0
+                )
+                trainable_filtered_total = int(
+                    (diag.get("training_filtered_total_by_horizon", {}) or {}).get(str(horizon), 0) or 0
                 )
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_run = diag.get("latest_training_run", {}) or {}
@@ -864,8 +874,6 @@ class TradingApplication:
                 # Schema-mismatch trigger: if current model uses an outdated feature schema,
                 # fire as soon as the new schema has min_samples — don't wait for increment_samples.
                 # This eliminates the silent multi-hour window where predict() always returns None.
-                newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
-                horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
                 newest_schema_hash = str(
                     horizon_schema.get("feature_schema_hash", diag.get("newest_training_schema_hash", "")) or ""
                 )
@@ -966,6 +974,17 @@ class TradingApplication:
                     if enough_schema_change
                     else min_samples
                 )
+                if trainable < effective_min_samples:
+                    log.warning(
+                        "model_auto_training.preflight_blocked",
+                        trainable=trainable,
+                        trainable_filtered_total=trainable_filtered_total,
+                        min_samples=effective_min_samples,
+                        horizon_minutes=horizon,
+                        label_schema_mismatch=label_schema_mismatch,
+                    )
+                    continue
+
                 msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
