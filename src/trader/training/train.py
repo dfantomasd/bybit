@@ -452,6 +452,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 WHERE po.horizon_minutes = $1
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $2
+                  AND po.label_threshold_bps = $6
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
@@ -504,6 +505,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             min_samples,
             strategy_allowlist or None,
             include_candle_baseline,
+            float(label_bps_threshold),
         )
 
         if len(rows) < min_samples:
@@ -520,6 +522,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 WHERE po.horizon_minutes = $1
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $2
+                  AND po.label_threshold_bps = $5
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
@@ -532,6 +535,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 label_schema_version,
                 strategy_allowlist or None,
                 include_candle_baseline,
+                float(label_bps_threshold),
             )
             total_labelled = sum(int(r["cnt"]) for r in schema_rows)
             top = ", ".join(f"{str(r['feature_schema_hash'])[:8]}:{r['cnt']}" for r in schema_rows[:4])

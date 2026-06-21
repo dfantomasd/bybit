@@ -26,6 +26,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from trader.ml.challenger import ChallengerModel, ModelRegistry, ModelStatus
+from trader.training.labels import LABEL_SCHEMA_VERSION_TPSL
 
 # ---------------------------------------------------------------------------
 # Challenger model: partial_fit and prediction
@@ -106,7 +107,7 @@ def test_model_cannot_change_live_decision_before_promotion() -> None:
 
 def test_can_promote_insufficient_samples() -> None:
     """can_promote should return False when samples < minimum."""
-    model = ChallengerModel(version="v_test")
+    model = ChallengerModel(version="v_test", label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
     model.training_samples = 100
     can, reason = model.can_promote(min_samples=500)
     assert not can
@@ -115,7 +116,7 @@ def test_can_promote_insufficient_samples() -> None:
 
 def test_can_promote_negative_expectancy() -> None:
     """can_promote should return False when walk-forward expectancy <= 0."""
-    model = ChallengerModel(version="v_test")
+    model = ChallengerModel(version="v_test", label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
     model.training_samples = 1000
     can, reason = model.can_promote(min_samples=500, walk_forward_expectancy=-0.01)
     assert not can
@@ -124,7 +125,7 @@ def test_can_promote_negative_expectancy() -> None:
 
 def test_can_promote_success() -> None:
     """can_promote should return True when all criteria met."""
-    model = ChallengerModel(version="v_test")
+    model = ChallengerModel(version="v_test", label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
     model.training_samples = 1000
     can, reason = model.can_promote(min_samples=500, walk_forward_expectancy=0.05)
     assert can
@@ -554,8 +555,7 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
         if "AS pool" in query:
             return [
-                {"label_schema_version": "directional_net_v1", "pool": "candle_baseline", "samples": 600},
-                {"label_schema_version": "directional_net_v1", "pool": "scalp_micro_v1", "samples": 177},
+                {"pool": "scalp_micro_v1", "samples": 177},
             ]
         if "FROM feature_snapshots fs" in query:
             return [{"feature_schema_hash": "abc1234567890def", "cnt": 777}]
@@ -708,6 +708,8 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     assert "training_by_horizon.get(str(horizon)" in compact_src
     assert "actual_training_samples" in src
     assert "training_samples_compatible" in src
+    assert "label_schema_mismatch" in src
+    assert "enough_label_schema_change" in src
     assert "trainable_15m=" not in src
 
 

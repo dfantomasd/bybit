@@ -648,9 +648,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["newest_training_schema_by_horizon"] = newest_schema_by_horizon
 
         breakdown_rows = await self._fetch(
-            """
+            f"""
             SELECT
-                label_schema_version,
                 CASE
                     WHEN metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
                     WHEN metadata->>'strategy_id' IS NULL
@@ -666,7 +665,6 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                            fs.candle_open_time,
                            fs.feature_schema_hash
                        )
-                       po.label_schema_version,
                        pe.metadata,
                        pe.decision
                 FROM feature_snapshots fs
@@ -674,7 +672,52 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                 WHERE po.horizon_minutes = 5
                   AND po.label IS NOT NULL
-                  AND po.label_threshold_bps = $1
+                  AND po.label_schema_version = $1
+                  AND po.label_threshold_bps = $2
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                  AND {strategy_filter}
+                ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
+                         fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
+            ) deduped
+            GROUP BY pool
+            ORDER BY pool
+            """,
+            label_schema,
+            label_threshold,
+            allowlist,
+            include_candle,
+        )
+        active_pool = {str(row["pool"]): int(row["samples"]) for row in breakdown_rows}
+        legacy_breakdown_rows = await self._fetch(
+            """
+            SELECT
+                CASE
+                    WHEN metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
+                    WHEN metadata->>'strategy_id' IS NULL
+                         AND COALESCE(decision, '') IN ('SHADOW_CANDLE', 'HISTORICAL_REAL')
+                        THEN 'candle_baseline'
+                    ELSE COALESCE(metadata->>'strategy_id', 'other')
+                END AS pool,
+                count(*) AS samples
+            FROM (
+                SELECT DISTINCT ON (
+                           fs.symbol,
+                           fs.interval,
+                           fs.candle_open_time,
+                           fs.feature_schema_hash
+                       )
+                       pe.metadata,
+                       pe.decision
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = 5
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $1
+                  AND po.label_threshold_bps = $2
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
@@ -682,26 +725,27 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
                          fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
             ) deduped
-            GROUP BY label_schema_version, pool
-            ORDER BY label_schema_version, pool
+            GROUP BY pool
+            ORDER BY pool
             """,
+            LABEL_SCHEMA_VERSION,
             label_threshold,
         )
-        pool_by_schema: dict[str, dict[str, int]] = {}
-        for row in breakdown_rows:
-            schema_key = str(row["label_schema_version"])
-            pool_key = str(row["pool"])
-            pool_by_schema.setdefault(schema_key, {})[pool_key] = int(row["samples"])
-        active_pool = pool_by_schema.get(label_schema, {})
-        legacy_v1 = pool_by_schema.get(LABEL_SCHEMA_VERSION, {})
+        legacy_v1 = {str(row["pool"]): int(row["samples"]) for row in legacy_breakdown_rows}
+        other_active = sum(
+            count for pool_name, count in active_pool.items() if pool_name not in {"scalp_micro_v1", "candle_baseline"}
+        )
         result["training_pool_breakdown"] = {
             "active_schema": label_schema,
             "eligible_filtered_5m": int(training_by_horizon.get("5", 0) or 0),
             "scalp_micro_v1_active_schema": int(active_pool.get("scalp_micro_v1", 0)),
             "candle_baseline_active_schema": int(active_pool.get("candle_baseline", 0)),
+            "candle_sampler_v1_active_schema": int(active_pool.get("candle_sampler_v1", 0)),
+            "other_active_schema": int(other_active),
             "legacy_v1_candle_baseline": int(legacy_v1.get("candle_baseline", 0)),
             "legacy_v1_scalp_micro_v1": int(legacy_v1.get("scalp_micro_v1", 0)),
-            "by_schema": pool_by_schema,
+            "active_pools": active_pool,
+            "legacy_v1_pools": legacy_v1,
         }
 
         rows = await self._fetch(

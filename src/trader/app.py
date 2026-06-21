@@ -876,7 +876,12 @@ class TradingApplication:
                 schema_mismatch = bool(
                     newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash
                 )
-                if min_train_interval_s > 0 and latest_success_samples > 0:
+                label_schema_compatible = bool(latest_model.get("schema_compatible", True))
+                label_schema_mismatch = bool(latest_model) and not label_schema_compatible
+                bypass_train_cooldown = label_schema_mismatch or (
+                    schema_mismatch and newest_schema_samples >= schema_change_min_samples
+                )
+                if min_train_interval_s > 0 and latest_success_samples > 0 and not bypass_train_cooldown:
                     latest_finished_at = latest_model.get("training_finished_at") or latest_model.get("created_at")
                     if latest_finished_at is None:
                         latest_finished_at = latest_run.get("finished_at")
@@ -897,24 +902,42 @@ class TradingApplication:
                                 latest_run_samples=latest_run_samples,
                                 latest_compatible_samples=compatible_latest_samples,
                                 schema_mismatch=schema_mismatch,
+                                label_schema_mismatch=label_schema_mismatch,
                             )
                             continue
 
                 enough_initial = latest_success_samples == 0 and trainable >= min_samples
                 enough_increment = (
                     not schema_mismatch
+                    and not label_schema_mismatch
                     and compatible_latest_samples > 0
                     and (trainable - compatible_latest_samples) >= increment_samples
                 )
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
+                enough_label_schema_change = label_schema_mismatch and trainable >= min_samples
 
                 enough_weak_retrain = bool(
                     getattr(self._settings, "MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK", True)
+                    and not label_schema_mismatch
+                    and compatible_latest_samples > 0
                     and str(self._model_gate_quality.get("quality") or "WEAK").upper() in {"WEAK", ""}
                     and trainable >= min_samples
                 )
-                if not (enough_initial or enough_increment or enough_schema_change or enough_weak_retrain):
-                    if schema_mismatch and newest_schema_samples > 0:
+                if not (
+                    enough_initial
+                    or enough_increment
+                    or enough_schema_change
+                    or enough_label_schema_change
+                    or enough_weak_retrain
+                ):
+                    if label_schema_mismatch and trainable > 0:
+                        log.warning(
+                            "model_auto_training.label_schema_mismatch_accumulating",
+                            trainable=trainable,
+                            min_samples=min_samples,
+                            compatible_latest_samples=compatible_latest_samples,
+                        )
+                    elif schema_mismatch and newest_schema_samples > 0:
                         log.warning(
                             "model_auto_training.schema_mismatch_accumulating",
                             current_schema=current_schema_hash,
@@ -926,11 +949,23 @@ class TradingApplication:
                     continue
 
                 trigger_reason = (
-                    "schema_change"
-                    if enough_schema_change
-                    else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
+                    "label_schema_change"
+                    if enough_label_schema_change
+                    else (
+                        "schema_change"
+                        if enough_schema_change
+                        else (
+                            "weak_retrain"
+                            if enough_weak_retrain
+                            else ("initial" if enough_initial else "increment")
+                        )
+                    )
                 )
-                effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
+                effective_min_samples = (
+                    schema_change_min_samples
+                    if enough_schema_change
+                    else min_samples
+                )
                 msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
@@ -943,6 +978,7 @@ class TradingApplication:
                     increment_samples=increment_samples,
                     trigger_reason=trigger_reason,
                     schema_mismatch=schema_mismatch,
+                    label_schema_mismatch=label_schema_mismatch,
                 )
                 if self._telegram_bot is not None:
                     await self._telegram_bot.notify(
