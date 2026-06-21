@@ -89,6 +89,7 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     journal._pool = cast(Any, pool)
 
     await journal._ensure_schema()
+    await journal._ensure_model_registry_indexes_deferred()
     await journal._ensure_feature_snapshot_unique_index_deferred()
 
     sql = "\n".join(pool.conn.executed_sql)
@@ -108,6 +109,7 @@ async def test_feature_snapshot_duplicates_are_invalidated_before_unique_index()
     journal._pool = cast(Any, pool)
 
     await journal._ensure_schema()
+    await journal._ensure_model_registry_indexes_deferred()
     await journal._ensure_feature_snapshot_unique_index_deferred()
 
     sql = "\n".join(pool.conn.executed_sql)
@@ -125,6 +127,7 @@ async def test_model_version_schema_hash_is_repaired_from_source_schema_metric()
     journal._pool = cast(Any, pool)
 
     await journal._ensure_schema()
+    await journal._ensure_model_registry_indexes_deferred()
 
     sql = "\n".join(pool.conn.executed_sql)
     assert "SET feature_schema_hash = metrics->>'source_feature_schema_hash'" in sql

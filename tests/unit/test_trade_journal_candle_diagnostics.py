@@ -180,7 +180,7 @@ async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
     journal._pool = object()  # type: ignore[assignment]
     latest = datetime.now(tz=UTC) - timedelta(seconds=30)
     journal.get_latest_candle_time = AsyncMock(return_value=latest)  # type: ignore[method-assign]
-    journal.get_candle_readiness_counts = AsyncMock(side_effect=AssertionError("lite must skip"))  # type: ignore[method-assign]
+    journal.get_candle_readiness_counts = AsyncMock(return_value={"1": 100, "5": 20, "15": 0, "60": 0})  # type: ignore[method-assign]
     journal.get_feature_snapshot_readiness_count = AsyncMock(side_effect=AssertionError("lite must skip"))  # type: ignore[method-assign]
 
     async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
@@ -199,6 +199,7 @@ async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
 
     assert diag["lite"] is True
     assert diag["latest_candle_1m"] == latest
+    assert diag["candles_by_interval"] == {"1": 100, "5": 20, "15": 0, "60": 0}
     assert diag["latest_model_version"]["version"] == "v1"
     assert diag["active_model_version"]["status"] == "CHAMPION"
 
