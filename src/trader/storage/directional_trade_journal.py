@@ -650,24 +650,22 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         breakdown_rows = await self._fetch(
             """
             SELECT
-                po.label_schema_version,
+                label_schema_version,
                 CASE
-                    WHEN pe.metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
-                    WHEN pe.metadata->>'strategy_id' IS NULL
-                         AND COALESCE(pe.decision, '') IN ('SHADOW_CANDLE', 'HISTORICAL_REAL')
+                    WHEN metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
+                    WHEN metadata->>'strategy_id' IS NULL
+                         AND COALESCE(decision, '') IN ('SHADOW_CANDLE', 'HISTORICAL_REAL')
                         THEN 'candle_baseline'
-                    ELSE COALESCE(pe.metadata->>'strategy_id', 'other')
+                    ELSE COALESCE(metadata->>'strategy_id', 'other')
                 END AS pool,
                 count(*) AS samples
             FROM (
                 SELECT DISTINCT ON (
-                           po.horizon_minutes,
                            fs.symbol,
                            fs.interval,
                            fs.candle_open_time,
                            fs.feature_schema_hash
                        )
-                       po.horizon_minutes,
                        po.label_schema_version,
                        pe.metadata,
                        pe.decision
@@ -681,11 +679,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
+                ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
                          fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
             ) deduped
-            GROUP BY po.label_schema_version, pool
-            ORDER BY po.label_schema_version, pool
+            GROUP BY label_schema_version, pool
+            ORDER BY label_schema_version, pool
             """,
             label_threshold,
         )
