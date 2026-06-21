@@ -160,3 +160,26 @@ SCALP_DISABLE_TREND_STRATEGY=true
 SCALP_STRICT_SHADOW=true
 MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT=1.0
 ```
+
+---
+
+## 10. Обучение модели на реальных данных
+
+Добавлен пайплайн, который **не ждёт накопления live-сэмплов**:
+
+```bash
+# 1. Загрузить исторические свечи Bybit в Postgres
+python3 -m trader.training.backfill --symbols BTCUSDT,ETHUSDT,ADAUSDT --intervals 1 --days 14
+
+# 2. Сгенерировать feature_snapshots + labels из market_candles
+python3 -m trader.training.historical_seed --symbols BTCUSDT,ETHUSDT,ADAUSDT --interval 1 --horizons 5
+
+# 3. Обучить challenger на разрешённых исходах
+python3 -m trader.training.train --min-samples 500 --horizon 5 --label-bps 5
+
+# Или одной командой через worker:
+python3 -m trader.workers.trainer --once --backfill-days 14 --symbols BTCUSDT,ETHUSDT
+```
+
+`historical_seed` прогоняет реальные `market_candles` через тот же `FeaturePipeline`, что и live-бот,
+записывает `RULE_BASELINE_V1` + `HISTORICAL_REAL` и сразу резолвит исходы по forward-свечам.
