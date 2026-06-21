@@ -96,6 +96,18 @@ async def test_db_diagnostics_uses_capped_readiness_counts() -> None:
     journal.get_latest_candle_time = AsyncMock(return_value=None)  # type: ignore[method-assign]
 
     async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        if "GROUP BY feature_schema_hash" in query:
+            return [
+                {
+                    "feature_schema_hash": "schema",
+                    "sample_count": 1000,
+                    "latest_at": datetime.now(tz=UTC),
+                }
+            ]
+        if "GROUP BY pool" in query:
+            return [{"pool": "scalp_micro_v1", "sample_count": 1000}]
+        if "GROUP BY label_threshold_bps" in query:
+            return [{"threshold": "2.0", "sample_count": 1000}]
         if "FROM feature_snapshots" in query and "LIMIT $1" in query:
             assert "LIMIT $1" in query
             assert args == (1000,)
@@ -132,6 +144,20 @@ async def test_db_diagnostics_preserves_partial_results_when_one_section_times_o
     journal.get_labelled_15m_readiness_count = AsyncMock(return_value=123)  # type: ignore[method-assign]
 
     async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        if "GROUP BY feature_schema_hash" in query:
+            horizon = int(args[0]) if args else 15
+            sample_count = 123 if horizon == 15 else 0
+            return [
+                {
+                    "feature_schema_hash": "schema",
+                    "sample_count": sample_count,
+                    "latest_at": datetime.now(tz=UTC),
+                }
+            ]
+        if "GROUP BY pool" in query:
+            return []
+        if "GROUP BY label_threshold_bps" in query:
+            return []
         del query, args
         return []
 

@@ -58,6 +58,7 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
     allowlist = [item.strip() for item in settings.TRAIN_STRATEGY_ALLOWLIST.split(",") if item.strip()] or None
     include_candle = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
     label_schema = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
+    label_threshold = float(settings.MODEL_AUTO_TRAIN_LABEL_BPS)
     rows = await pool.fetch(
         f"""
         SELECT po.horizon_minutes, count(DISTINCT fs.snapshot_id) AS sample_count
@@ -66,6 +67,7 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
         JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
         WHERE po.label IS NOT NULL
           AND po.label_schema_version = $1
+          AND po.label_threshold_bps = $4
           AND fs.feature_values IS NOT NULL
           AND fs.training_eligible = true
           AND pe.model_version = 'RULE_BASELINE_V1'
@@ -77,6 +79,7 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
         label_schema,
         allowlist,
         include_candle,
+        label_threshold,
     )
     return [
         TrainableSnapshot(horizon_minutes=int(row["horizon_minutes"]), sample_count=int(row["sample_count"]))

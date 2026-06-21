@@ -2558,14 +2558,19 @@ class TelegramMonitorBot:
                 f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
             )
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
-            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
             training_config = db_diag.get("training_config", {}) or {}
             pool_breakdown = db_diag.get("training_pool_breakdown", {}) or {}
+            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
+            filtered_total_5m = int(pool_breakdown.get("filtered_total_5m", 0) or 0)
+            loose_v2_5m = int((db_diag.get("prediction_outcomes_by_horizon", {}) or {}).get(str(model_horizon), 0) or 0)
             train_allowlist = training_config.get("strategy_allowlist") or []
             train_include_candle = training_config.get("include_candle_baseline")
             train_label_schema = training_config.get("label_schema_version") or db_diag.get("label_schema_version", "n/a")
             scalp_active = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
             legacy_candle_v1 = int(pool_breakdown.get("legacy_v1_candle_baseline", 0) or 0)
+            other_active = int(pool_breakdown.get("other_active_schema", 0) or 0)
+            candle_sampler_active = int(pool_breakdown.get("candle_sampler_v1_active_schema", 0) or 0)
+            schema_compatible = bool((db_diag.get("latest_model_version") or {}).get("schema_compatible", False))
             allowlist_display = ",".join(train_allowlist) if train_allowlist else "ALL"
             include_candle_display = (
                 "true" if train_include_candle is True else "false" if train_include_candle is False else "n/a"
@@ -2635,11 +2640,35 @@ class TelegramMonitorBot:
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
+            ]
+            if loose_v2_5m and labelled_model_horizon < loose_v2_5m:
+                lines.append(
+                    f"Размечено v2 без фильтра scalp: <code>{loose_v2_5m}</code> "
+                    f"(в пуле allowlist всего: <code>{filtered_total_5m}</code>)"
+                )
+            if scalp_active == 0 and labelled_model_horizon < 1000:
+                lines.append(
+                    "⚠️ <i>Scalp-пул пуст: обучение ждёт сигналы scalp_micro_v1. "
+                    "Сейчас v2-метки в основном от candle_sampler (не входит в allowlist).</i>"
+                )
+            lines += [
                 f"Фильтр обучения: schema=<code>{html.escape(str(train_label_schema))}</code>, "
                 f"allowlist=<code>{html.escape(allowlist_display)}</code>, "
                 f"candle_baseline=<code>{include_candle_display}</code>",
                 f"Пул scalp (активная schema): <code>{scalp_active}</code> | "
                 f"legacy candle v1 (исключён): <code>{legacy_candle_v1}</code>",
+            ]
+            if candle_sampler_active or other_active:
+                lines.append(
+                    f"Прочие пулы v2 (не в allowlist): candle_sampler=<code>{candle_sampler_active}</code>, "
+                    f"другое=<code>{other_active}</code>"
+                )
+            if db_model_version and not schema_compatible:
+                lines.append(
+                    "⚠️ <i>Модель в БД устарела (другая schema разметки). "
+                    "Ждём авто-переобучение на v2+scalp — метрики 7451/dnv1 не актуальны.</i>"
+                )
+            lines += [
                 "",
                 "<b>Простыми словами</b>",
                 f"Данные: <code>{data_note}</code>",
@@ -3739,6 +3768,8 @@ class TelegramMonitorBot:
                 precision = metrics.get("precision")
                 best_thresh = metrics.get("best_threshold")
                 samples = int(latest.get("training_samples") or 0)
+                actual_samples = int(latest.get("actual_training_samples", samples) or samples)
+                compatible_samples = int(latest.get("training_samples_compatible", 0) or 0)
                 schema_ok = bool(latest.get("schema_compatible", False))
 
                 lift_str = f"{float(lift):+.1f} bps" if lift is not None else "нет"
@@ -3755,9 +3786,20 @@ class TelegramMonitorBot:
                     f"Статус: <code>{status}</code>  Качество: <code>{quality}</code>",
                     f"Lift (val-split): <code>{lift_str}</code>",
                     f"Precision: <code>{prec_str}</code>  Порог: <code>{thresh_str}</code>",
-                    f"Обучено: <code>{samples}</code> образцов",
-                    f"Схема совместима: <code>{'да' if schema_ok else 'нет'}</code>",
-                    "",
+                    f"Обучено: <code>{samples}</code> образцов"
+                    + (
+                        f" (актуально для schema: <code>{compatible_samples}</code>)"
+                        if not schema_ok and actual_samples
+                        else ""
+                    ),
+                    f"Схема совместима: <code>{'да' if schema_ok else 'нет — ждём переобучение'}</code>",
+                ]
+                if not schema_ok and actual_samples:
+                    lines.append(
+                        f"⚠️ Последний запуск на старой schema: <code>{actual_samples}</code> образцов "
+                        f"(<code>{version}</code>)"
+                    )
+                lines += [
                     f"<b>Shadow gate ({model_horizon}m):</b>",
                     f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
                     f"Gate lift: <code>{gate_lift_str}</code>",

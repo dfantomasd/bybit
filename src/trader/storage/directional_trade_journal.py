@@ -22,6 +22,7 @@ from trader.features.source_candle_guard import source_candle_for_feature
 from trader.storage import trade_journal as _base_module
 from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
 from trader.training.eligibility import training_strategy_filter_sql
+from trader.training.sample_counts import fetch_training_snapshots_for_horizons
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
@@ -517,140 +518,81 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
             result["prediction_outcomes"] = min(1000, sum(result["prediction_outcomes_by_horizon"].values()))
 
-        # Mirror the training query's eligibility exactly (threshold, signal,
-        # training_eligible, one sample per candle). Order by most-recent schema
-        # first so that when a new feature schema is introduced, the newest schema
-        # becomes current_feature_schema_hash and the mismatch is detected immediately.
-        # Summing across schemas would overstate progress and fire the auto-trainer
-        # prematurely on stale data.
-        # Check horizons 5 and 15 so that the schema-change trigger fires even when
-        # the 15-min resolver hasn't yet produced labels (e.g. after a feature pipeline
-        # change) but the 5-min resolver already has labeled data for the new schema.
-        rows = await self._fetch(
-            f"""
-            SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
-            FROM (
-                SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
-                       fs.snapshot_id, fs.feature_schema_hash, fs.created_at AS latest_at
-                FROM feature_snapshots fs
-                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
-                  AND po.label IS NOT NULL
-                  AND po.label_schema_version = $1
-                  AND po.label_threshold_bps = $4
-                  AND fs.feature_values IS NOT NULL
-                  AND fs.training_eligible = true
-                  AND pe.model_version = 'RULE_BASELINE_V1'
-                  AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND {strategy_filter}
-            ) deduped
-            GROUP BY feature_schema_hash
-            ORDER BY latest_at DESC
-            """,
-            label_schema,
-            allowlist,
-            include_candle,
-            label_threshold,
+        min_train_samples = 1000
+        settings = _optional_settings()
+        if settings is not None:
+            min_train_samples = max(50, int(settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
+
+        snapshots = await fetch_training_snapshots_for_horizons(
+            self._fetch,
+            horizons=(5, 15),
+            label_schema_version=label_schema,
+            label_threshold_bps=label_threshold,
+            strategy_allowlist=allowlist,
+            include_candle_baseline=include_candle,
+            min_samples=min_train_samples,
         )
-        # newest schema = most recently seen feature schema (rows[0] after ORDER BY latest_at DESC)
-        newest_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
-        newest_feature_schema_samples = int(rows[0]["cnt"]) if rows else int(result.get("labelled_samples_15m") or 0)
-        # dominant schema = schema with most samples (needed for mismatch check reference)
-        rows_by_count = sorted(rows, key=lambda r: int(r["cnt"]), reverse=True)
-        current_feature_schema_hash = (
-            str(dict(rows_by_count[0]).get("feature_schema_hash") or "") if rows_by_count else ""
-        )
-        # Report newest-schema sample count for training_eligible_15m so the auto-trainer
-        # only fires when the current pipeline schema has enough samples. Firing early would
-        # cause the trainer to fall back to the old (dominant) schema, perpetuating the mismatch.
+        snapshot_5 = snapshots.get("5")
+        snapshot_15 = snapshots.get("15")
+
+        training_by_horizon: dict[str, int] = {}
+        filtered_total_by_horizon: dict[str, int] = {}
+        newest_schema_by_horizon: dict[str, dict[str, Any]] = {}
+        label_thresholds_by_horizon: dict[str, dict[str, int]] = {}
+        for horizon_key, snapshot in snapshots.items():
+            # Auto-train and train.py require one feature schema to reach min_samples.
+            training_by_horizon[horizon_key] = snapshot.best_schema_count
+            filtered_total_by_horizon[horizon_key] = snapshot.filtered_distinct_candles
+            label_thresholds_by_horizon[horizon_key] = snapshot.by_label_threshold
+            newest_schema_by_horizon[horizon_key] = {
+                "feature_schema_hash": snapshot.newest_schema_hash,
+                "sample_count": snapshot.newest_schema_count,
+                "best_schema_count": snapshot.best_schema_count,
+                "best_schema_hash": snapshot.best_schema_hash,
+                "horizon_minutes": horizon_key,
+                "label_schema_version": label_schema,
+                "label_threshold_bps": label_threshold,
+            }
+
+        newest_feature_schema_hash = snapshot_15.newest_schema_hash if snapshot_15 else ""
+        newest_feature_schema_samples = snapshot_15.newest_schema_count if snapshot_15 else 0
+        if snapshot_5 and snapshot_5.newest_schema_hash:
+            newest_feature_schema_hash = snapshot_5.newest_schema_hash
+            newest_feature_schema_samples = snapshot_5.newest_schema_count
+
+        dominant_schema_hash = ""
+        dominant_schema_samples = 0
+        if snapshot_5 and snapshot_5.by_schema:
+            dominant_schema_hash = snapshot_5.best_schema_hash
+            dominant_schema_samples = snapshot_5.best_schema_count
+
         result["labelled_samples_15m"] = newest_feature_schema_samples
         result["training_eligible_schema_15m"] = {
             "feature_schema_hash": newest_feature_schema_hash,
             "sample_count": newest_feature_schema_samples,
+            "best_schema_count": snapshot_15.best_schema_count if snapshot_15 else 0,
             "horizon_minutes": "5_or_15",
             "label_schema_version": label_schema,
             "label_threshold_bps": label_threshold,
         }
         result["labelled_samples_15m_by_schema"] = (
-            {str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows}
-            if rows
-            else result.get("labelled_samples_15m_by_schema", {})
+            {key[:8]: value for key, value in (snapshot_15.by_schema if snapshot_15 else {}).items()}
+            or result.get("labelled_samples_15m_by_schema", {})
         )
-        # Expose newest-schema fields so app.py's schema-change trigger can fire
-        # when the feature pipeline changes but the loaded model still uses the old schema.
         result["newest_training_schema_hash"] = newest_feature_schema_hash
         result["newest_training_schema_samples"] = newest_feature_schema_samples
-        # The auto-trainer gate reads training_eligible_15m; keep it in sync
-        # with the per-schema maximum, not the base class's cross-schema union.
-        result["training_eligible_15m"] = result["labelled_samples_15m"]
-
-        horizon_rows = []
-        if rows:
-            horizon_rows = await self._fetch(
-                f"""
-                SELECT horizon_minutes, feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
-                FROM (
-                    SELECT DISTINCT ON (
-                               po.horizon_minutes,
-                               fs.symbol,
-                               fs.interval,
-                               fs.candle_open_time,
-                               fs.feature_schema_hash
-                           )
-                           po.horizon_minutes,
-                           fs.snapshot_id,
-                           fs.feature_schema_hash,
-                           fs.created_at AS latest_at
-                    FROM feature_snapshots fs
-                    JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                    WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
-                      AND po.label IS NOT NULL
-                      AND po.label_schema_version = $1
-                      AND po.label_threshold_bps = $4
-                      AND fs.feature_values IS NOT NULL
-                      AND fs.training_eligible = true
-                      AND pe.model_version = 'RULE_BASELINE_V1'
-                      AND pe.strategy_signal IN ('Buy', 'Sell')
-                      AND {strategy_filter}
-                    ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
-                             fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
-                ) deduped
-                GROUP BY horizon_minutes, feature_schema_hash
-                ORDER BY horizon_minutes, latest_at DESC
-                """,
-                label_schema,
-                allowlist,
-                include_candle,
-                label_threshold,
-            )
-        training_by_horizon: dict[str, int] = {}
-        newest_schema_by_horizon: dict[str, dict[str, Any]] = {}
-        for row in horizon_rows:
-            row_dict = dict(row)
-            if "horizon_minutes" not in row_dict:
-                continue
-            horizon_key = str(row_dict["horizon_minutes"])
-            if horizon_key in newest_schema_by_horizon:
-                continue
-            samples = int(row_dict.get("cnt") or 0)
-            schema_hash = str(row_dict.get("feature_schema_hash") or "")
-            training_by_horizon[horizon_key] = samples
-            newest_schema_by_horizon[horizon_key] = {
-                "feature_schema_hash": schema_hash,
-                "sample_count": samples,
-                "horizon_minutes": horizon_key,
-                "label_schema_version": label_schema,
-                "label_threshold_bps": label_threshold,
-            }
+        result["training_eligible_15m"] = training_by_horizon.get("15", newest_feature_schema_samples)
         result["training_eligible_by_horizon"] = training_by_horizon
+        result["training_filtered_total_by_horizon"] = filtered_total_by_horizon
+        result["training_label_thresholds_by_horizon"] = label_thresholds_by_horizon
         result["newest_training_schema_by_horizon"] = newest_schema_by_horizon
+        result["dominant_training_schema_hash"] = dominant_schema_hash
+        result["dominant_training_schema_samples"] = dominant_schema_samples
 
-        breakdown_rows = await self._fetch(
+        active_pool = snapshot_5.by_strategy_pool if snapshot_5 else {}
+        legacy_breakdown_rows = await self._fetch(
             """
             SELECT
-                label_schema_version,
                 CASE
                     WHEN metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
                     WHEN metadata->>'strategy_id' IS NULL
@@ -666,7 +608,6 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                            fs.candle_open_time,
                            fs.feature_schema_hash
                        )
-                       po.label_schema_version,
                        pe.metadata,
                        pe.decision
                 FROM feature_snapshots fs
@@ -674,7 +615,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                 WHERE po.horizon_minutes = 5
                   AND po.label IS NOT NULL
-                  AND po.label_threshold_bps = $1
+                  AND po.label_schema_version = $1
+                  AND po.label_threshold_bps = $2
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
@@ -682,26 +624,30 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 ORDER BY fs.symbol, fs.interval, fs.candle_open_time,
                          fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
             ) deduped
-            GROUP BY label_schema_version, pool
-            ORDER BY label_schema_version, pool
+            GROUP BY pool
+            ORDER BY pool
             """,
+            LABEL_SCHEMA_VERSION,
             label_threshold,
         )
-        pool_by_schema: dict[str, dict[str, int]] = {}
-        for row in breakdown_rows:
-            schema_key = str(row["label_schema_version"])
-            pool_key = str(row["pool"])
-            pool_by_schema.setdefault(schema_key, {})[pool_key] = int(row["samples"])
-        active_pool = pool_by_schema.get(label_schema, {})
-        legacy_v1 = pool_by_schema.get(LABEL_SCHEMA_VERSION, {})
+        legacy_v1 = {
+            str(row["pool"]): int(row.get("samples", row.get("sample_count", 0)) or 0) for row in legacy_breakdown_rows
+        }
+        other_active = sum(
+            count for pool_name, count in active_pool.items() if pool_name not in {"scalp_micro_v1", "candle_baseline"}
+        )
         result["training_pool_breakdown"] = {
             "active_schema": label_schema,
             "eligible_filtered_5m": int(training_by_horizon.get("5", 0) or 0),
+            "filtered_total_5m": int(filtered_total_by_horizon.get("5", 0) or 0),
             "scalp_micro_v1_active_schema": int(active_pool.get("scalp_micro_v1", 0)),
             "candle_baseline_active_schema": int(active_pool.get("candle_baseline", 0)),
+            "candle_sampler_v1_active_schema": int(active_pool.get("candle_sampler_v1", 0)),
+            "other_active_schema": int(other_active),
             "legacy_v1_candle_baseline": int(legacy_v1.get("candle_baseline", 0)),
             "legacy_v1_scalp_micro_v1": int(legacy_v1.get("scalp_micro_v1", 0)),
-            "by_schema": pool_by_schema,
+            "active_pools": active_pool,
+            "legacy_v1_pools": legacy_v1,
         }
 
         rows = await self._fetch(
@@ -753,7 +699,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         latest_model_schema_hash = str(latest_model.get("feature_schema_hash") or "")
         # Compare against the NEWEST schema (what the pipeline is currently producing),
         # not the dominant schema (which may still be the old schema with more historical samples).
-        _mismatch_reference = newest_feature_schema_hash or current_feature_schema_hash
+        _mismatch_reference = newest_feature_schema_hash or dominant_schema_hash
         if latest_model and _mismatch_reference and latest_model_schema_hash != _mismatch_reference:
             latest_model["actual_training_samples"] = int(latest_model.get("training_samples", 0) or 0)
             latest_model["training_samples"] = 0

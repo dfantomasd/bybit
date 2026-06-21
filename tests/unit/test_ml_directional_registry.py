@@ -10,7 +10,7 @@ import pytest
 
 from trader.ml import challenger as challenger_module
 from trader.ml.challenger import ChallengerModel, ModelPrediction, ModelRegistry, ModelStatus
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import LABEL_SCHEMA_VERSION, LABEL_SCHEMA_VERSION_TPSL
 
 
 @dataclass
@@ -92,7 +92,7 @@ def test_promotion_rejects_legacy_schema() -> None:
 
 
 def test_promotion_requires_resolved_shadow_observations() -> None:
-    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION)
+    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
 
     allowed, reason = model.can_promote(
         min_samples=500,
@@ -108,7 +108,7 @@ def test_promotion_requires_resolved_shadow_observations() -> None:
 
 
 def test_promotion_requires_good_quality_and_positive_expectancy() -> None:
-    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION)
+    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
 
     weak_allowed, weak_reason = model.can_promote(
         min_samples=500,
@@ -134,7 +134,7 @@ def test_promotion_requires_good_quality_and_positive_expectancy() -> None:
 
 
 def test_promotion_accepts_compatible_good_model() -> None:
-    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION)
+    model = ChallengerModel(training_samples=1000, label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
 
     allowed, reason = model.can_promote(
         min_samples=500,
@@ -185,4 +185,5 @@ async def test_load_champion_uses_standard_logging_arguments(monkeypatch: pytest
     registry = ModelRegistry(trade_journal=journal)
 
     assert await registry.load_champion() is None
-    assert warning_calls == [("model_registry.no_compatible_champion required_schema=%s", (LABEL_SCHEMA_VERSION,))]
+    required_schema = challenger_module._required_label_schema_version()
+    assert warning_calls == [("model_registry.no_compatible_champion required_schema=%s", (required_schema,))]

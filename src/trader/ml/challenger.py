@@ -22,12 +22,23 @@ import joblib
 import numpy as np
 import structlog
 
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import LABEL_SCHEMA_VERSION, active_label_schema_version
 
 log = structlog.get_logger(__name__)
 
 LEGACY_LABEL_SCHEMA_VERSION = "legacy_unknown"
 DEFAULT_CHAMPION_MIN_PAPER_GATE_COUNT = 50
+
+
+def _required_label_schema_version() -> str:
+    """Return the label schema the runtime expects for champion/challenger loads."""
+    try:
+        from trader.config import Settings
+
+        settings = Settings()
+        return active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
+    except Exception:
+        return LABEL_SCHEMA_VERSION
 
 # Encrypted artifact marker. joblib payloads are pickle, and pickle from a
 # compromised database is remote code execution inside the trader process —
@@ -462,10 +473,11 @@ class ChallengerModel:
     ) -> tuple[bool, str]:
         """Check conservative offline and shadow-observation promotion criteria."""
 
-        if self.label_schema_version != LABEL_SCHEMA_VERSION:
+        if self.label_schema_version != _required_label_schema_version():
+            required = _required_label_schema_version()
             return (
                 False,
-                f"incompatible_label_schema: {self.label_schema_version!r} != {LABEL_SCHEMA_VERSION!r}",
+                f"incompatible_label_schema: {self.label_schema_version!r} != {required!r}",
             )
         if self.training_samples < min_samples:
             return (
@@ -574,7 +586,7 @@ class ModelRegistry:
                 self._champion = None
                 log.warning(
                     "model_registry.no_compatible_champion required_schema=%s",
-                    LABEL_SCHEMA_VERSION,
+                    _required_label_schema_version(),
                 )
                 return None
             metrics = _parse_metrics(_row_get(row, "metrics", {}))
@@ -610,6 +622,7 @@ class ModelRegistry:
             return None
 
         min_paper_gate_count = _champion_min_paper_gate_count()
+        required_schema = _required_label_schema_version()
         rows = await self._journal._fetch(
             """
             SELECT version, artifact, training_samples, metrics, training_finished_at, created_at,
@@ -682,7 +695,7 @@ class ModelRegistry:
                 created_at DESC
             LIMIT 1
             """,
-            LABEL_SCHEMA_VERSION,
+            required_schema,
             min_paper_gate_count,
         )
         if rows:
@@ -702,13 +715,13 @@ class ModelRegistry:
                   ) IS NOT NULL
             LIMIT 1
             """,
-            LABEL_SCHEMA_VERSION,
+            required_schema,
         )
         if evidence_rows:
             log.warning(
                 "model_registry.no_paper_ready_walk_forward_champion min_paper_gate_count=%s required_schema=%s",
                 min_paper_gate_count,
-                LABEL_SCHEMA_VERSION,
+                required_schema,
             )
             return None
 
@@ -725,13 +738,13 @@ class ModelRegistry:
                 created_at DESC
             LIMIT 1
             """,
-            LABEL_SCHEMA_VERSION,
+            required_schema,
         )
         if fallback_rows:
             log.warning(
                 "model_registry.champion_walk_forward_fallback min_paper_gate_count=%s required_schema=%s",
                 min_paper_gate_count,
-                LABEL_SCHEMA_VERSION,
+                required_schema,
             )
             return fallback_rows[0]
         return None
@@ -747,6 +760,7 @@ class ModelRegistry:
 
         if self._journal is None or not self._journal.is_enabled:
             return None
+        required_schema = _required_label_schema_version()
         try:
             rows = await self._journal._fetch(
                 """
@@ -758,7 +772,7 @@ class ModelRegistry:
                 ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
                 LIMIT 1
                 """,
-                LABEL_SCHEMA_VERSION,
+                required_schema,
             )
             if not rows:
                 # Fallback: load best-quality artifact regardless of schema version tag.
@@ -779,7 +793,7 @@ class ModelRegistry:
                     log.warning(
                         "model_registry.challenger_schema_mismatch_fallback version=%s required_schema=%s",
                         row_ver,
-                        LABEL_SCHEMA_VERSION,
+                        required_schema,
                     )
             if not rows:
                 self._challenger = None
