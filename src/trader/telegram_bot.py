@@ -190,7 +190,9 @@ class TelegramBotConfig:
     redis_url: str = ""
     polling_lock_ttl_s: int = 45
     polling_lock_wait_s: int = 90
-    polling_conflict_recovery_wait_s: int = 20
+    polling_conflict_recovery_wait_s: int = 10
+    polling_watchdog_interval_s: float = 30.0
+    polling_zombie_silence_s: float = 180.0
 
 
 # ---------------------------------------------------------------------------
@@ -234,6 +236,7 @@ class TelegramMonitorBot:
         self._dashboard_chat_id: int | None = None
         self._started_at: datetime | None = None
         self._last_callback_at: datetime | None = None
+        self._last_handler_at: datetime | None = None
         self._last_polling_error_at: datetime | None = None
         self._last_polling_error: str | None = None
         self._polling_conflict_count: int = 0
@@ -244,6 +247,8 @@ class TelegramMonitorBot:
         self._polling_lock_refresh_task: asyncio.Task[None] | None = None
         self._polling_conflict_stop_task: asyncio.Task[None] | None = None
         self._polling_recovery_task: asyncio.Task[None] | None = None
+        self._polling_recovery_pending: bool = False
+        self._polling_watchdog_task: asyncio.Task[None] | None = None
         self._redis_client: Any | None = None
 
     # ------------------------------------------------------------------
@@ -260,6 +265,9 @@ class TelegramMonitorBot:
             return False
         if not await self._acquire_polling_lock():
             return False
+
+        if self._app is not None:
+            await self._teardown_app()
 
         app = Application.builder().token(self._config.token).build()
 
@@ -326,7 +334,10 @@ class TelegramMonitorBot:
             await self._start_polling(app)
             self._app = app
             self._started_at = datetime.now(tz=UTC)
+            self._polling_conflict_count = 0
             self._polling_disabled_reason = None
+            self._polling_recovery_pending = False
+            self._start_polling_watchdog()
             log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
             return True
         except Exception:
@@ -334,6 +345,11 @@ class TelegramMonitorBot:
             raise
 
     async def stop(self) -> None:
+        watchdog_task = self._polling_watchdog_task
+        self._polling_watchdog_task = None
+        if watchdog_task is not None:
+            watchdog_task.cancel()
+            await asyncio.gather(watchdog_task, return_exceptions=True)
         recovery_task = self._polling_recovery_task
         self._polling_recovery_task = None
         if recovery_task is not None:
@@ -344,17 +360,24 @@ class TelegramMonitorBot:
         if conflict_stop_task is not None:
             conflict_stop_task.cancel()
             await asyncio.gather(conflict_stop_task, return_exceptions=True)
-        if self._app is None:
-            await self._release_polling_lock()
-            return
-        app = self._app
-        self._app = None
-        if app.updater is not None:
-            await app.updater.stop()
-        await app.stop()
-        await app.shutdown()
+        await self._teardown_app()
         await self._release_polling_lock()
         log.info("telegram_bot_stopped")
+
+    async def _teardown_app(self) -> None:
+        """Stop updater/application without releasing the optional Redis lock."""
+        app = self._app
+        self._app = None
+        if app is None:
+            return
+        try:
+            if app.updater is not None and getattr(app.updater, "running", False):
+                await app.updater.stop()
+            if getattr(app, "running", False):
+                await app.stop()
+            await app.shutdown()
+        except Exception as exc:
+            log.warning("telegram_bot_teardown_failed", error=str(exc))
 
     async def _acquire_polling_lock(self) -> bool:
         """Acquire a distributed Telegram polling lease when Redis is configured."""
@@ -438,19 +461,10 @@ class TelegramMonitorBot:
 
     async def _stop_app_after_lock_loss(self) -> None:
         """Stop Telegram polling when the distributed lock is lost."""
-        app = self._app
-        if app is None:
+        if self._app is None:
             return
-        self._app = None
-        try:
-            if app.updater is not None and getattr(app.updater, "running", False):
-                await app.updater.stop()
-            if getattr(app, "running", False):
-                await app.stop()
-            await app.shutdown()
-            log.warning("telegram_bot_stopped_lock_lost")
-        except Exception as exc:
-            log.warning("telegram_bot_stop_after_lock_loss_failed", error=str(exc))
+        await self._teardown_app()
+        log.warning("telegram_bot_stopped_lock_lost")
 
     async def _release_polling_lock(self) -> None:
         task = self._polling_lock_refresh_task
@@ -493,10 +507,21 @@ class TelegramMonitorBot:
     async def _start_polling(self, app: Application[Any, Any, Any, Any, Any, Any]) -> None:
         if app.updater is None:
             raise RuntimeError("Telegram updater was not created")
+        try:
+            await app.bot.delete_webhook(drop_pending_updates=True)
+        except Exception as exc:
+            log.debug("telegram_delete_webhook_failed", error=str(exc))
         await app.updater.start_polling(
             drop_pending_updates=True,
             error_callback=self._polling_error_callback,
         )
+
+    async def _stop_polling_only(self) -> None:
+        app = self._app
+        if app is None or app.updater is None:
+            return
+        if getattr(app.updater, "running", False):
+            await app.updater.stop()
 
     async def _restart_polling(self) -> bool:
         app = self._app
@@ -513,6 +538,7 @@ class TelegramMonitorBot:
     async def _recover_polling_after_conflicts(self) -> None:
         """Wait for rolling-deploy overlap to end, then resume getUpdates."""
         wait_s = max(5.0, float(self._config.polling_conflict_recovery_wait_s))
+        await self._stop_polling_only()
         log.warning("telegram_polling_recovery_scheduled", wait_seconds=wait_s)
         try:
             await asyncio.sleep(wait_s)
@@ -531,30 +557,89 @@ class TelegramMonitorBot:
         except Exception as exc:
             self._polling_disabled_reason = f"polling_recovery_failed:{exc}"
             log.warning("telegram_polling_recovery_failed", error=str(exc))
+            started = await self.start()
+            if started:
+                log.info("telegram_polling_recovered_via_full_restart_after_failure")
+
+    def _polling_looks_zombie(self) -> bool:
+        """Detect updater.running=True while no user interaction is flowing."""
+        if self._app is None or self._started_at is None:
+            return False
+        uptime_s = (datetime.now(tz=UTC) - self._started_at).total_seconds()
+        silence_s = max(60.0, float(self._config.polling_zombie_silence_s))
+        if uptime_s < silence_s:
+            return False
+        updater = getattr(self._app, "updater", None)
+        if updater is None or not getattr(updater, "running", False):
+            return False
+        if self._polling_conflict_count > 0 and self._last_handler_at is None:
+            return True
+        if self._last_handler_at is None:
+            return False
+        return (datetime.now(tz=UTC) - self._last_handler_at).total_seconds() >= silence_s
 
     async def ensure_polling_running(self) -> None:
         """Restart polling if a deploy conflict or crash left the bot deaf."""
         if not self.enabled:
             return
+        if self._polling_recovery_pending and (
+            self._polling_recovery_task is None or self._polling_recovery_task.done()
+        ):
+            self._polling_recovery_pending = False
+            self._schedule_polling_recovery_after_conflicts()
         snap = self.health_snapshot()
-        if snap.get("polling_running"):
+        zombie = self._polling_looks_zombie()
+        if snap.get("polling_running") and not zombie:
             return
         if self._polling_recovery_task is not None and not self._polling_recovery_task.done():
             return
         reason = snap.get("polling_disabled_reason")
-        log.warning("telegram_polling_not_running", reason=reason)
-        if self._app is not None:
+        if zombie:
+            reason = "polling_zombie"
+            log.warning("telegram_polling_zombie_detected", last_handler_at=self._last_handler_at)
+        else:
+            log.warning("telegram_polling_not_running", reason=reason)
+        if self._app is not None and not zombie:
             try:
                 if await self._restart_polling():
                     log.info("telegram_polling_restarted_by_watchdog")
                     return
             except Exception as exc:
                 log.warning("telegram_polling_watchdog_restart_failed", error=str(exc))
+        elif self._app is not None and zombie:
+            await self._teardown_app()
         started = await self.start()
         if started:
             log.info("telegram_polling_restarted_by_watchdog_full_start")
         else:
             log.warning("telegram_polling_watchdog_full_start_failed", health=self.health_snapshot())
+
+    def _start_polling_watchdog(self) -> None:
+        task = self._polling_watchdog_task
+        if task is not None and not task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        self._polling_watchdog_task = loop.create_task(
+            self._polling_watchdog_loop(),
+            name="telegram-polling-watchdog",
+        )
+
+    async def _polling_watchdog_loop(self) -> None:
+        interval = max(10.0, float(self._config.polling_watchdog_interval_s))
+        while True:
+            try:
+                await asyncio.sleep(interval)
+                await self.ensure_polling_running()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                log.debug("telegram_polling_watchdog_tick_failed", error=str(exc))
+
+    def _touch_handler_activity(self) -> None:
+        self._last_handler_at = datetime.now(tz=UTC)
 
     def _schedule_polling_recovery_after_conflicts(self) -> None:
         """Rolling deploys briefly run two pollers; recover instead of staying deaf."""
@@ -565,7 +650,8 @@ class TelegramMonitorBot:
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
-            log.warning("telegram_polling_conflict_no_running_loop")
+            self._polling_recovery_pending = True
+            log.warning("telegram_polling_conflict_recovery_deferred")
             return
         self._polling_recovery_task = loop.create_task(
             self._recover_polling_after_conflicts(),
@@ -590,6 +676,10 @@ class TelegramMonitorBot:
             )
             if self._polling_conflict_count >= 3:
                 self._schedule_polling_recovery_after_conflicts()
+            elif self._started_at is not None:
+                uptime_s = (now - self._started_at).total_seconds()
+                if uptime_s <= 180.0 and self._polling_conflict_count >= 1:
+                    self._schedule_polling_recovery_after_conflicts()
             return
         if isinstance(error, NetworkError):
             self._polling_network_error_count += 1
@@ -676,6 +766,7 @@ class TelegramMonitorBot:
                 await self._send_direct_message(chat_id, f"Доступ запрещен. Chat ID: {chat_id}")
             log.warning("telegram_unauthorised_chat", chat_id=chat_id)
             return False
+        self._touch_handler_activity()
         return True
 
     async def _reply(
@@ -817,6 +908,7 @@ class TelegramMonitorBot:
             "app_running": running,
             "polling_running": polling,
             "started_at": self._started_at.isoformat() if self._started_at else None,
+            "last_handler_at": self._last_handler_at.isoformat() if self._last_handler_at else None,
             "last_callback_at": self._last_callback_at.isoformat() if self._last_callback_at else None,
             "last_polling_error_at": (self._last_polling_error_at.isoformat() if self._last_polling_error_at else None),
             "last_polling_error": self._last_polling_error,

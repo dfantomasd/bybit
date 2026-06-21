@@ -828,6 +828,60 @@ async def test_telegram_polling_conflicts_schedule_recovery_after_threshold() ->
 
 
 @pytest.mark.asyncio
+async def test_telegram_early_deploy_conflict_schedules_recovery() -> None:
+    from telegram.error import Conflict
+
+    bot = _make_bot()
+    bot._started_at = datetime.now(tz=UTC)
+
+    bot._polling_error_callback(Conflict("terminated by other getUpdates request"))
+
+    await asyncio.sleep(0)
+    assert bot._polling_recovery_task is not None
+    assert bot.health_snapshot()["polling_disabled_reason"] == "polling_conflict_recovery_pending"
+
+
+def test_telegram_conflict_recovery_deferred_without_event_loop(monkeypatch: pytest.MonkeyPatch) -> None:
+    from telegram.error import Conflict
+
+    bot = _make_bot()
+
+    def _no_loop() -> asyncio.AbstractEventLoop:
+        raise RuntimeError("no running event loop")
+
+    monkeypatch.setattr(asyncio, "get_running_loop", _no_loop)
+    for _ in range(3):
+        bot._polling_error_callback(Conflict("terminated by other getUpdates request"))
+
+    assert bot._polling_recovery_pending is True
+    assert bot._polling_recovery_task is None
+
+
+@pytest.mark.asyncio
+async def test_telegram_zombie_polling_triggers_full_restart(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    bot._started_at = datetime.now(tz=UTC) - timedelta(seconds=300)
+    bot._polling_conflict_count = 2
+    bot._config.polling_zombie_silence_s = 60
+
+    fake_updater = MagicMock()
+    fake_updater.running = True
+    fake_app = MagicMock()
+    fake_app.updater = fake_updater
+    bot._app = fake_app
+
+    teardown = AsyncMock()
+    start = AsyncMock(return_value=True)
+    monkeypatch.setattr(bot, "_teardown_app", teardown)
+    monkeypatch.setattr(bot, "start", start)
+
+    await bot.ensure_polling_running()
+
+    teardown.assert_awaited_once()
+    start.assert_awaited_once()
+
+
+@pytest.mark.asyncio
 async def test_telegram_polling_lock_acquire_and_release(monkeypatch: pytest.MonkeyPatch) -> None:
     import redis.asyncio as aioredis
 

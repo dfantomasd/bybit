@@ -264,8 +264,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: SecretStr = SecretStr("")
     TELEGRAM_ALLOWED_CHAT_IDS: Annotated[list[int], NoDecode] = []
-    TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS: float = 20.0
+    TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS: float = 10.0
     """Seconds to wait after repeated getUpdates conflicts before resuming polling."""
+    TELEGRAM_POLLING_WATCHDOG_INTERVAL_SECONDS: float = 30.0
+    """How often the in-bot polling watchdog checks Telegram health."""
+    TELEGRAM_POLLING_ZOMBIE_SILENCE_SECONDS: float = 180.0
+    """Force-restart polling when updater claims running but no handler activity."""
 
     # ------------------------------------------------------------------
     # LLM (optional, disabled by default)
