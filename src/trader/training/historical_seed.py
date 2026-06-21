@@ -29,7 +29,7 @@ from typing import Any
 import click
 
 from trader.data.candles import Candle, CandleStore
-from trader.features.pipeline import FeaturePipeline, _MIN_BARS
+from trader.features.pipeline import _MIN_BARS, FeaturePipeline
 from trader.storage.directional_trade_journal import default_cost_model
 from trader.training.feature_side import feature_values_for_side
 from trader.training.labels import LABEL_SCHEMA_VERSION, build_directional_outcome

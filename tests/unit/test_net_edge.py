@@ -31,9 +31,10 @@ def test_net_edge_allows_wide_tp() -> None:
 
 
 def test_market_making_rejects_low_atr_setup() -> None:
-    from trader.domain.models import FeatureVector
     import uuid
     from datetime import UTC, datetime
+
+    from trader.domain.models import FeatureVector
 
     strategy = MarketMakingStrategy(
         spread_provider=lambda _s: 2.0,
