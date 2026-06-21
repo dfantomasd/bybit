@@ -30,7 +30,7 @@ import signal
 import sys
 import time
 from collections import deque
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any, cast
 
@@ -141,6 +141,7 @@ class TradingApplication:
         # Operator control state
         self._trading_paused: bool = False
         self._current_risk_profile_str: str = ""
+        self._last_daily_reset_date: date | None = None
         self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None
@@ -444,6 +445,24 @@ class TradingApplication:
     # Operator control callbacks (wired into TradingController)
     # ------------------------------------------------------------------
 
+    def _execution_max_open_positions(self) -> int:
+        """Return the execution position cap aligned with the active risk profile."""
+        assert self._settings is not None
+        from trader.risk.profiles import get_risk_limits
+
+        profile_max = get_risk_limits(self._settings.RISK_PROFILE).max_simultaneous_positions
+        configured = int(self._settings.MAX_POSITIONS)
+        # Legacy default MAX_POSITIONS=2 is below every profile — use profile cap instead.
+        if configured <= 2:
+            return profile_max
+        return min(configured, profile_max)
+
+    def _sync_execution_max_open_positions(self) -> None:
+        """Keep ExecutionEngine position cap aligned with profile + runtime settings."""
+        if self._execution_engine is None:
+            return
+        self._execution_engine._max_open_positions = self._execution_max_open_positions()
+
     async def _pause_trading(self) -> None:
         self._trading_paused = True
         log.info("trading.paused")
@@ -519,6 +538,7 @@ class TradingApplication:
         # Rewire execution engine to the new risk manager
         if self._execution_engine is not None:
             self._execution_engine._risk_manager = self._risk_manager
+            self._sync_execution_max_open_positions()
         self._current_risk_profile_str = profile.value
         log.info("risk_profile.changed", old=old, new=profile.value)
         if self._telegram_bot is not None:
@@ -534,10 +554,17 @@ class TradingApplication:
                 reason="operator emergency stop via Telegram",
                 operator="telegram",
             )
-        log.critical("emergency_stop.activated", source="telegram")
+        cancelled = 0
+        if self._execution_engine is not None:
+            try:
+                cancelled = await self._execution_engine.cancel_all_open_orders()
+            except Exception as exc:
+                log.error("emergency_stop.cancel_orders_failed", error=str(exc))
+        log.critical("emergency_stop.activated", source="telegram", orders_cancelled=cancelled)
         if self._telegram_bot is not None:
+            cancel_note = f" Cancelled {cancelled} open order(s)." if cancelled else ""
             await self._telegram_bot.notify(
-                "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
+                f"🚨 <b>Emergency stop activated.</b> No new trades.{cancel_note} Manual restart required."
             )
 
     async def _start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:
@@ -1570,10 +1597,14 @@ class TradingApplication:
             ivalue = int(value)
             if not 1 <= ivalue <= 10:
                 raise ValueError("max_positions must be 1..10")
+            from trader.risk.profiles import get_risk_limits
+
+            profile_max = get_risk_limits(self._settings.RISK_PROFILE).max_simultaneous_positions
+            if ivalue > profile_max:
+                raise ValueError(f"max_positions cannot exceed profile limit ({profile_max})")
             self._settings.MAX_POSITIONS = ivalue
-            if self._execution_engine is not None:
-                self._execution_engine._max_open_positions = ivalue
-            return f"Max simultaneous positions set to {ivalue}"
+            self._sync_execution_max_open_positions()
+            return f"Max simultaneous positions set to {self._execution_max_open_positions()}"
         if key == "price_cap":
             fvalue = float(value)
             if fvalue < 0 or fvalue > 100_000:
@@ -1960,7 +1991,7 @@ class TradingApplication:
             max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
             max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
-            max_open_positions=self._settings.MAX_POSITIONS,
+            max_open_positions=self._execution_max_open_positions(),
             startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
             is_canary=is_canary,
             fee_provider=self._fee_provider,
@@ -3012,6 +3043,23 @@ class TradingApplication:
 
         while not self._shutdown_event.is_set():
             try:
+                # Ops kill-switch file flag (~/.bybit_trader_kill.flag)
+                if self._kill_switch is not None:
+                    try:
+                        await self._kill_switch.check_file_flag()
+                        if self._kill_switch.is_active:
+                            self._trading_paused = True
+                    except Exception as exc:
+                        log.debug("risk_monitor.kill_switch_file_check_failed", error=str(exc))
+
+                # UTC midnight reset for daily PnL when journal sync is unavailable
+                today = datetime.now(tz=UTC).date()
+                if self._last_daily_reset_date != today:
+                    if self._risk_manager is not None:
+                        await self._risk_manager.reset_daily_stats()
+                    self._last_daily_reset_date = today
+                    log.info("risk_monitor.daily_stats_reset", day=str(today))
+
                 # Refresh balance and update DrawdownTracker with current equity
                 if (
                     self._bybit_adapter is not None

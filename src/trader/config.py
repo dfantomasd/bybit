@@ -612,6 +612,11 @@ class Settings(BaseSettings):
                     f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
                     "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
                 )
+            if self.MODEL_ALLOW_LIVE_DECISIONS and not self.MODEL_ENCRYPT_KEY.get_secret_value().strip():
+                raise ValueError(
+                    "MODEL_ENCRYPT_KEY must be set when MODEL_ALLOW_LIVE_DECISIONS=true in LIVE/CANARY_LIVE. "
+                    "Model artifacts are pickle — encrypt at rest to prevent RCE from a compromised database."
+                )
 
         # Hybrid ML mode sanity check: live model decisions without the canary
         # gate means the model can replace signals but nothing blocks weak ones.
