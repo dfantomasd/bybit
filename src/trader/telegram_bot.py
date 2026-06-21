@@ -168,6 +168,7 @@ class TradingController:
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    enrich_db_diag_fallbacks: Callable[[dict[str, Any]], None] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
     remove_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -256,6 +257,7 @@ class TelegramMonitorBot:
         self._polling_watchdog_task: asyncio.Task[None] | None = None
         self._webhook_route_mounted: bool = False
         self._redis_client: Any | None = None
+        self._model_performance_cache: list[dict[str, Any]] = []
 
     def _uses_webhook(self) -> bool:
         return self._config.delivery_mode == "webhook"
@@ -1427,8 +1429,15 @@ class TelegramMonitorBot:
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
-    _DB_DIAG_TIMEOUT_LITE_S = 8.0
-    _DB_DIAG_TIMEOUT_FULL_S = 20.0
+    _DB_DIAG_TIMEOUT_LITE_S = 15.0
+    _DB_DIAG_TIMEOUT_FULL_S = 25.0
+
+    def _apply_db_diag_fallbacks(self, diag: dict[str, Any]) -> None:
+        if self._controller is not None and self._controller.enrich_db_diag_fallbacks is not None:
+            try:
+                self._controller.enrich_db_diag_fallbacks(diag)
+            except Exception as exc:
+                log.debug("telegram.db_diag_fallback_failed", error=str(exc))
 
     async def _load_db_diag(self, *, lite: bool = True) -> dict[str, Any]:
         """Load DB diagnostics with timeout; lite mode avoids heavy Postgres scans."""
@@ -1441,17 +1450,23 @@ class TelegramMonitorBot:
                 coro = provider(lite=lite)
             except TypeError:
                 coro = provider()
-            return await asyncio.wait_for(coro, timeout=timeout)
+            diag = await asyncio.wait_for(coro, timeout=timeout)
+            self._apply_db_diag_fallbacks(diag)
+            return diag
         except TimeoutError:
             log.warning("telegram.db_diagnostics_timeout", lite=lite, timeout_s=timeout)
-            return {
+            diag = {
                 "connected": False,
                 "error": "db_diagnostics_timeout",
                 "lite": lite,
             }
+            self._apply_db_diag_fallbacks(diag)
+            return diag
         except Exception as exc:
             log.warning("telegram.db_diagnostics_failed", lite=lite, error=str(exc))
-            return {"connected": False, "error": str(exc), "lite": lite}
+            diag = {"connected": False, "error": str(exc), "lite": lite}
+            self._apply_db_diag_fallbacks(diag)
+            return diag
 
     async def _respond(
         self,
@@ -1848,7 +1863,7 @@ class TelegramMonitorBot:
         if taker_pct > 80:
             text += "\n\n⚠️ <b>Большинство исполнений taker.</b>\nДля скальпинга комиссии критичны."
 
-        await self._reply(update, text, reply_markup=self._main_menu())
+        await self._respond(update, text, reply_markup=self._main_menu())
 
     async def _cmd_costs_detailed(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show paper-strategy gross/net edge and maker share diagnostics."""
@@ -2106,31 +2121,42 @@ class TelegramMonitorBot:
         if not await self._authorised(update):
             return
         if self._controller is None or self._controller.model_performance_provider is None:
-            await self._reply(
+            await self._respond(
                 update,
                 "<b>История моделей</b>\nПока недоступна.",
                 reply_markup=self._main_menu(),
             )
             return
+        stale_note = ""
         try:
-            rows = await self._controller.model_performance_provider()
+            rows = await asyncio.wait_for(self._controller.model_performance_provider(), timeout=15.0)
+        except TimeoutError:
+            log.warning("telegram.model_performance_timeout")
+            rows = list(self._model_performance_cache)
+            stale_note = "⚠️ Postgres медленный — показан последний успешный снимок.\n\n"
         except Exception as exc:
             log.warning("telegram.model_performance_failed", error=str(exc))
-            await self._reply(
-                update,
-                f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
-                reply_markup=self._main_menu(),
-            )
-            return
+            rows = list(self._model_performance_cache)
+            if rows:
+                stale_note = "⚠️ Ошибка чтения — показан последний успешный снимок.\n\n"
+            else:
+                await self._respond(
+                    update,
+                    f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
+                    reply_markup=self._main_menu(),
+                )
+                return
+        if rows:
+            self._model_performance_cache = rows
         if not rows:
-            await self._reply(
+            await self._respond(
                 update,
                 "<b>История моделей</b>\nВерсий модели пока нет.",
                 reply_markup=self._main_menu(),
             )
             return
         lines = [
-            "📉 <b>История моделей</b>",
+            stale_note + "📉 <b>История моделей</b>",
             "<code>date UTC          q        score    n   lift   wf</code>",
         ]
         for row in rows:
@@ -2148,7 +2174,7 @@ class TelegramMonitorBot:
                 f"<code>{ts[:16]:16} {quality:8} {score_text} {paper_count:4d} {lift_text} {wf_text}</code>"
                 + (f"\n<code>  {reason}</code>" if reason else "")
             )
-        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+        await self._respond(update, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_champion_health(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -2374,7 +2400,27 @@ class TelegramMonitorBot:
                 f"Проверка stale pending выполняется автоматически при старте."
             )
 
-        await self._reply(update, "\n".join(lines))
+        signals = int(diag.get("hour_signals_emitted") or 0)
+        rejections = sum(
+            int(diag.get(key) or 0)
+            for key in (
+                "hour_risk_rejected",
+                "hour_api_rejected",
+                "hour_model_gate_canary_blocked",
+                "hour_spread_rejected",
+                "hour_imbalance_rejected",
+                "hour_scalp_net_edge_rejected",
+                "hour_bucket_blocked",
+                "hour_net_edge_rejected",
+            )
+        )
+        if signals == 0 and rejections == 0:
+            lines.append(
+                "\nℹ️ Сигналов нет — scalp ждёт свежий EMA-cross + объём + spread + imbalance.\n"
+                "Это нормально в тихом рынке; отклонения появятся только после кандидата на вход."
+            )
+
+        await self._respond(update, "\n".join(lines))
 
     async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show whether the system is ready for a tiny CANARY_LIVE test."""
@@ -4203,7 +4249,25 @@ class TelegramMonitorBot:
             if info.get("error") and info.get("error") != "db_diagnostics_timeout":
                 lines.append(f"Ошибка: <code>{html.escape(str(info['error']))}</code>")
             else:
-                latest = info.get("latest_model_version") or {}
+                latest = info.get("latest_model_version") or info.get("active_model_version") or {}
+                if not latest.get("version") and self._controller and self._controller.diagnostics_provider:
+                    try:
+                        runtime = self._controller.diagnostics_provider()
+                        model_info = runtime.get("model") or {}
+                        challenger_ver = model_info.get("challenger_version")
+                        if challenger_ver not in (None, "", "none"):
+                            latest = {
+                                "version": challenger_ver,
+                                "status": "SHADOW_CHALLENGER",
+                                "training_samples": model_info.get("training_samples", 0),
+                                "metrics": {
+                                    "quality": model_info.get("quality"),
+                                    "lift_bps": model_info.get("lift_bps"),
+                                    "walk_forward_expectancy_bps": model_info.get("walk_forward_expectancy"),
+                                },
+                            }
+                    except Exception as exc:
+                        log.debug("telegram.model_runtime_fallback_failed", error=str(exc))
 
                 metrics: dict[str, Any] = latest.get("metrics") or {}
                 if isinstance(metrics, str):

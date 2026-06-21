@@ -62,7 +62,11 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     POSTGRES_DSN: SecretStr = SecretStr("postgresql+asyncpg://trader:trader@postgres:5432/trader")
     TRADE_JOURNAL_ENABLED: bool = True
-    """Persist signals, risk decisions, order events, and closed PnL in Postgres."""
+    TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS: float = 30.0
+    """Per-query read timeout for Postgres diagnostics and journal reads."""
+    TRADE_JOURNAL_POOL_MAX_SIZE: int = 5
+    """Connection pool size for asyncpg (Render/Supabase free tier)."""
+    # Persist signals, risk decisions, order events, and closed PnL in Postgres.
     PERFORMANCE_FILTER_ENABLED: bool = True
     """Use stored closed PnL to temporarily skip recently losing symbols."""
     PERFORMANCE_MIN_CLOSED_TRADES: int = 5

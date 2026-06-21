@@ -26,7 +26,9 @@ log = structlog.get_logger(__name__)
 
 _MODEL_PROMOTION_ADVISORY_LOCK_ID = 926_202_606
 _POOL_CLOSE_TIMEOUT_SECONDS = 5.0
-_FETCH_TIMEOUT_SECONDS = 5.0
+_DEFAULT_FETCH_TIMEOUT_SECONDS = 30.0
+_DEFAULT_POOL_MAX_SIZE = 5
+_FETCH_TIMEOUT_LOG_INTERVAL_SECONDS = 60.0
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -80,10 +82,24 @@ def _dt_from_ms(value: Any) -> datetime:
 class TradeJournal:
     """Best-effort journal that never blocks trading when storage is unhealthy."""
 
-    def __init__(self, postgres_dsn: str, enabled: bool = True) -> None:
+    def __init__(
+        self,
+        postgres_dsn: str,
+        enabled: bool = True,
+        *,
+        fetch_timeout_seconds: float | None = None,
+        pool_max_size: int | None = None,
+    ) -> None:
         self._dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._enabled = enabled and bool(postgres_dsn)
+        self._fetch_timeout_seconds = max(
+            1.0,
+            float(fetch_timeout_seconds if fetch_timeout_seconds is not None else _DEFAULT_FETCH_TIMEOUT_SECONDS),
+        )
+        self._pool_max_size = max(1, int(pool_max_size if pool_max_size is not None else _DEFAULT_POOL_MAX_SIZE))
         self._pool: asyncpg.Pool | None = None
+        self._diag_lock = asyncio.Lock()
+        self._last_fetch_timeout_log_at: datetime | None = None
         self._last_connect_attempt_at: datetime | None = None
         self._last_connect_error_at: datetime | None = None
         self._last_connect_error: str | None = None
@@ -133,7 +149,7 @@ class TradeJournal:
             self._pool = await asyncpg.create_pool(
                 dsn=self._dsn,
                 min_size=1,
-                max_size=3,
+                max_size=self._pool_max_size,
                 statement_cache_size=0,
             )
             self._last_connect_error_at = None
@@ -2766,6 +2782,10 @@ class TradeJournal:
 
     async def get_db_diagnostics(self, *, lite: bool = False) -> dict[str, Any]:
         """Return read-only diagnostics for Telegram 🗄 screen."""
+        async with self._diag_lock:
+            return await self._get_db_diagnostics_unlocked(lite=lite)
+
+    async def _get_db_diagnostics_unlocked(self, *, lite: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
             "connected": self.is_enabled,
             "configured": self.is_configured,
@@ -2816,52 +2836,55 @@ class TradeJournal:
             self._last_read_error_at = None
 
             if lite:
-                latest_candle_1m = await _read_or_default(
-                    "latest_candle_1m",
-                    None,
-                    lambda: self.get_latest_candle_time("1"),
+                latest_candle_1m, candles_by_interval, training_rows, model_rows, champion_rows = await asyncio.gather(
+                    _read_or_default(
+                        "latest_candle_1m",
+                        None,
+                        lambda: self.get_latest_candle_time("1"),
+                    ),
+                    _read_or_default(
+                        "candle_readiness_counts",
+                        {},
+                        self.get_candle_readiness_counts,
+                    ),
+                    self._fetch(
+                        """
+                        SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
+                        FROM training_runs
+                        ORDER BY started_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    self._fetch(
+                        """
+                        SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                        FROM model_versions
+                        WHERE artifact IS NOT NULL
+                        ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
+                    self._fetch(
+                        """
+                        SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                        FROM model_versions
+                        WHERE status = 'CHAMPION'
+                          AND artifact IS NOT NULL
+                        ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                        LIMIT 1
+                        """
+                    ),
                 )
                 result["latest_candle_1m"] = latest_candle_1m
                 if latest_candle_1m is not None:
                     result["last_confirmed_candle_age_s"] = max(
                         0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                     )
-                result["candles_by_interval"] = await _read_or_default(
-                    "candle_readiness_counts",
-                    {},
-                    self.get_candle_readiness_counts,
-                )
-                rows = await self._fetch(
-                    """
-                    SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
-                    FROM training_runs
-                    ORDER BY started_at DESC
-                    LIMIT 1
-                    """
-                )
-                if rows:
-                    result["latest_training_run"] = dict(rows[0])
-                rows = await self._fetch(
-                    """
-                    SELECT version, status, training_samples, metrics, training_finished_at, created_at
-                    FROM model_versions
-                    WHERE artifact IS NOT NULL
-                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
-                    LIMIT 1
-                    """
-                )
-                if rows:
-                    result["latest_model_version"] = dict(rows[0])
-                champion_rows = await self._fetch(
-                    """
-                    SELECT version, status, training_samples, metrics, training_finished_at, created_at
-                    FROM model_versions
-                    WHERE status = 'CHAMPION'
-                      AND artifact IS NOT NULL
-                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
-                    LIMIT 1
-                    """
-                )
+                result["candles_by_interval"] = candles_by_interval
+                if training_rows:
+                    result["latest_training_run"] = dict(training_rows[0])
+                if model_rows:
+                    result["latest_model_version"] = dict(model_rows[0])
                 if champion_rows:
                     result["active_model_version"] = dict(champion_rows[0])
                 else:
@@ -3393,13 +3416,19 @@ class TradeJournal:
                 return list(
                     await asyncio.wait_for(
                         conn.fetch(query, *args),
-                        timeout=_FETCH_TIMEOUT_SECONDS,
+                        timeout=self._fetch_timeout_seconds,
                     )
                 )
         except TimeoutError:
             self._last_read_error_at = datetime.now(tz=UTC)
-            self._last_read_error = f"query timeout after {_FETCH_TIMEOUT_SECONDS}s"
-            log.warning("trade_journal.fetch_timeout", timeout_s=_FETCH_TIMEOUT_SECONDS)
+            self._last_read_error = f"query timeout after {self._fetch_timeout_seconds}s"
+            now = datetime.now(tz=UTC)
+            if (
+                self._last_fetch_timeout_log_at is None
+                or (now - self._last_fetch_timeout_log_at).total_seconds() >= _FETCH_TIMEOUT_LOG_INTERVAL_SECONDS
+            ):
+                self._last_fetch_timeout_log_at = now
+                log.warning("trade_journal.fetch_timeout", timeout_s=self._fetch_timeout_seconds)
             return []
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
