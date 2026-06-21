@@ -205,11 +205,9 @@ async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_fetch_timeout_returns_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
-    import trader.storage.trade_journal as tj_mod
-
+async def test_fetch_timeout_returns_empty_list() -> None:
     journal = TradeJournal("postgresql://example/db")
-    monkeypatch.setattr(tj_mod, "_FETCH_TIMEOUT_SECONDS", 0.05)
+    journal._fetch_timeout_seconds = 0.05
 
     class _SlowConn:
         async def fetch(self, *_args: Any, **_kwargs: Any) -> list[Any]:

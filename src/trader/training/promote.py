@@ -113,6 +113,8 @@ async def _promote(version: str, confirm: bool) -> None:
     journal = TradeJournal(
         postgres_dsn=settings.POSTGRES_DSN.get_secret_value(),
         enabled=settings.TRADE_JOURNAL_ENABLED,
+        fetch_timeout_seconds=settings.TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS,
+        pool_max_size=settings.TRADE_JOURNAL_POOL_MAX_SIZE,
     )
     await journal.connect()
 

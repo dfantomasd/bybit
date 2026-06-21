@@ -80,6 +80,10 @@ services:
         value: "6"
       - key: PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS
         value: "2.0"
+      - key: TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS
+        value: "30"
+      - key: TRADE_JOURNAL_POOL_MAX_SIZE
+        value: "5"
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"

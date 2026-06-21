@@ -194,6 +194,7 @@ class ChallengerModel:
     status: str = ModelStatus.SHADOW_CHALLENGER
     feature_names: list[str] = field(default_factory=list)
     training_samples: int = 0
+    metrics: dict[str, Any] = field(default_factory=dict)
     created_at: datetime = field(default_factory=lambda: datetime.now(tz=UTC))
     allow_live_decisions: bool = False
     label_schema_version: str = LABEL_SCHEMA_VERSION
@@ -598,6 +599,7 @@ class ModelRegistry:
             )
             model.allow_live_decisions = True
             model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
+            model.metrics = metrics
             self._champion = model
             log.info(
                 "model_registry.champion_loaded version=%s samples=%s",
@@ -808,6 +810,7 @@ class ModelRegistry:
             )
             model.allow_live_decisions = False
             model.label_schema_version = str(metrics.get("label_schema_version") or model.label_schema_version)
+            model.metrics = metrics
             self._challenger = model
             log.info(
                 "model_registry.challenger_loaded version=%s samples=%s",

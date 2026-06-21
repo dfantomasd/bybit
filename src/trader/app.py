@@ -109,6 +109,8 @@ class TradingApplication:
         self._db_diagnostics_cache_at: float = 0.0
         self._db_diagnostics_lite_cache: dict[str, Any] | None = None
         self._db_diagnostics_lite_cache_at: float = 0.0
+        self._model_performance_cache: list[dict[str, Any]] = []
+        self._model_performance_cache_at: datetime | None = None
         self._ws_public: Any | None = None
         self._candle_store: Any | None = None
         self._orderbook_tracker: Any | None = None
@@ -286,6 +288,8 @@ class TradingApplication:
         self._trade_journal = TradeJournal(
             postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
             enabled=self._settings.TRADE_JOURNAL_ENABLED,
+            fetch_timeout_seconds=self._settings.TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS,
+            pool_max_size=self._settings.TRADE_JOURNAL_POOL_MAX_SIZE,
         )
         await self._trade_journal.connect()
         task = asyncio.create_task(self._run_trade_journal_reconnector(), name="trade-journal-reconnector")
@@ -1831,11 +1835,13 @@ class TradingApplication:
             cache = self._db_diagnostics_lite_cache if lite else self._db_diagnostics_cache
             cache_at = self._db_diagnostics_lite_cache_at if lite else self._db_diagnostics_cache_at
             if cache is not None and (now - cache_at) < cache_ttl:
-                return dict(cache)
+                cached_copy = dict(cache)
+                self._merge_runtime_db_diag_fallbacks(cached_copy)
+                return cached_copy
             try:
                 diag = await asyncio.wait_for(
                     self._trade_journal.get_db_diagnostics(lite=lite),
-                    timeout=8.0 if lite else 15.0,
+                    timeout=15.0 if lite else 25.0,
                 )
             except TimeoutError:
                 log.warning("db_diagnostics_timeout", lite=lite)
@@ -1970,8 +1976,26 @@ class TradingApplication:
 
         async def _model_performance_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
-                return []
-            return cast(list[dict[str, Any]], await self._trade_journal.get_model_performance_history())
+                return list(self._model_performance_cache)
+            try:
+                rows = cast(
+                    list[dict[str, Any]],
+                    await asyncio.wait_for(
+                        self._trade_journal.get_model_performance_history(),
+                        timeout=15.0,
+                    ),
+                )
+            except TimeoutError:
+                log.warning("model_performance_history.timeout")
+                rows = []
+            except Exception as exc:
+                log.warning("model_performance_history.failed", error=str(exc))
+                rows = []
+            if rows:
+                self._model_performance_cache = rows
+                self._model_performance_cache_at = datetime.now(tz=UTC)
+                return rows
+            return list(self._model_performance_cache)
 
         async def _champion_health_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
@@ -2023,6 +2047,7 @@ class TradingApplication:
             costs_detailed_provider=_costs_detailed_provider,
             model_performance_provider=_model_performance_provider,
             champion_health_provider=_champion_health_provider,
+            enrich_db_diag_fallbacks=self._merge_runtime_db_diag_fallbacks,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
             load_subscriptions=_load_subscriptions,
@@ -4147,7 +4172,8 @@ class TradingApplication:
         if self._model_registry is not None:
             challenger = self._model_registry.challenger
             champion = self._model_registry.champion
-            if challenger is not None and not (diag.get("latest_model_version") or {}):
+            latest = diag.get("latest_model_version") or {}
+            if challenger is not None and not latest.get("version"):
                 diag["latest_model_version"] = {
                     "version": challenger.version,
                     "status": "SHADOW_CHALLENGER",
@@ -4161,7 +4187,7 @@ class TradingApplication:
                     "training_samples": champion.training_samples,
                     "metrics": getattr(champion, "metrics", {}) or {},
                 }
-            elif challenger is not None and not diag.get("active_model_version"):
+            elif challenger is not None and not (diag.get("active_model_version") or {}).get("version"):
                 diag["active_model_version"] = diag.get("latest_model_version", {})
 
     def get_diagnostics(self) -> dict[str, Any]:
@@ -4305,8 +4331,45 @@ class TradingApplication:
                     if self._model_registry is not None and self._model_registry.challenger is not None
                     else "none"
                 ),
-                "walk_forward_expectancy": "n/a",
+                "quality": (
+                    str(
+                        (
+                            getattr(self._model_registry.champion, "metrics", {})
+                            if self._model_registry is not None and self._model_registry.champion is not None
+                            else (
+                                getattr(self._model_registry.challenger, "metrics", {})
+                                if self._model_registry is not None and self._model_registry.challenger is not None
+                                else {}
+                            )
+                        ).get("quality")
+                        or self._model_gate_quality.get("quality")
+                        or "n/a"
+                    )
+                ),
+                "lift_bps": (
+                    (
+                        getattr(self._model_registry.champion, "metrics", {})
+                        if self._model_registry is not None and self._model_registry.champion is not None
+                        else (
+                            getattr(self._model_registry.challenger, "metrics", {})
+                            if self._model_registry is not None and self._model_registry.challenger is not None
+                            else {}
+                        )
+                    ).get("lift_bps")
+                ),
+                "walk_forward_expectancy": (
+                    (
+                        getattr(self._model_registry.champion, "metrics", {})
+                        if self._model_registry is not None and self._model_registry.champion is not None
+                        else (
+                            getattr(self._model_registry.challenger, "metrics", {})
+                            if self._model_registry is not None and self._model_registry.challenger is not None
+                            else {}
+                        )
+                    ).get("walk_forward_expectancy_bps", "n/a")
+                ),
                 "drift_status": "n/a",
+                "gate_quality": self._model_gate_quality.get("quality"),
             },
         }
 
