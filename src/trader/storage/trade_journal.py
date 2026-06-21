@@ -2103,12 +2103,16 @@ class TradeJournal:
         )
         return dict(rows[0]) if rows else {}
 
-    async def get_strategy_pnl_analysis(self, horizon_minutes: int = 15) -> dict[str, Any]:
+    async def get_strategy_pnl_analysis(
+        self,
+        horizon_minutes: int = 15,
+        label_schema_version: str = LABEL_SCHEMA_VERSION,
+    ) -> dict[str, Any]:
         """Aggregate baseline strategy expectancy by common operator slices."""
         if not self.is_enabled:
             return {"connected": False}
         try:
-            args = (LABEL_SCHEMA_VERSION, int(horizon_minutes))
+            args = (label_schema_version, int(horizon_minutes))
             symbol_rows = await self._fetch(
                 """
                 SELECT pe.symbol,
@@ -2195,7 +2199,9 @@ class TradeJournal:
             return {
                 "connected": True,
                 "horizon_minutes": int(horizon_minutes),
-                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "label_schema_version": label_schema_version,
+                "symbols_best": symbols[:5],
+                "symbols_worst": list(reversed(symbols[-5:])),
                 "top_symbols": symbols[:5],
                 "worst_symbols": list(reversed(symbols[-5:])),
                 "hours": [row_dict(row) for row in hour_rows],
@@ -2208,7 +2214,11 @@ class TradeJournal:
             log.warning("trade_journal.strategy_pnl_analysis_failed", error=str(exc))
             return {"connected": self.is_enabled, "error": str(exc)}
 
-    async def get_model_compare_analysis(self, horizon_minutes: int = 15) -> dict[str, Any]:
+    async def get_model_compare_analysis(
+        self,
+        horizon_minutes: int = 15,
+        label_schema_version: str = LABEL_SCHEMA_VERSION,
+    ) -> dict[str, Any]:
         """Compare baseline, model gate pass, and same-size random baseline sample."""
         if not self.is_enabled:
             return {"connected": False}
@@ -2228,7 +2238,7 @@ class TradeJournal:
                 ORDER BY pe.created_at ASC
                 LIMIT 5000
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema_version,
                 int(horizon_minutes),
             )
             baseline = [float(row["net_return_bps"] or 0.0) for row in baseline_rows]
@@ -2248,7 +2258,7 @@ class TradeJournal:
                     LIMIT 5000
                     """,
                     model_version,
-                    LABEL_SCHEMA_VERSION,
+                    label_schema_version,
                     int(horizon_minutes),
                 )
                 gate = [float(row["net_return_bps"] or 0.0) for row in gate_rows]
@@ -2267,7 +2277,7 @@ class TradeJournal:
                     ORDER BY random()
                     LIMIT $3
                     """,
-                    LABEL_SCHEMA_VERSION,
+                    label_schema_version,
                     int(horizon_minutes),
                     len(gate),
                 )
@@ -2283,7 +2293,7 @@ class TradeJournal:
             return {
                 "connected": True,
                 "horizon_minutes": int(horizon_minutes),
-                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "label_schema_version": label_schema_version,
                 "model_version": model_version or None,
                 "model_status": model.get("status"),
                 "baseline": stats(baseline),
@@ -2372,7 +2382,11 @@ class TradeJournal:
             log.warning("trade_journal.worst_prediction_outcomes_failed", error=str(exc))
             return []
 
-    async def get_detailed_costs(self, horizon_minutes: int = 15) -> dict[str, Any]:
+    async def get_detailed_costs(
+        self,
+        horizon_minutes: int = 15,
+        label_schema_version: str = LABEL_SCHEMA_VERSION,
+    ) -> dict[str, Any]:
         """Return bps-level gross/net outcome costs plus maker share when available."""
         if not self.is_enabled:
             return {"connected": False}
@@ -2393,7 +2407,7 @@ class TradeJournal:
                   AND po.net_return_bps IS NOT NULL
                   AND pe.created_at >= $3
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema_version,
                 int(horizon_minutes),
                 day_start,
             )
@@ -2411,7 +2425,7 @@ class TradeJournal:
                   AND po.horizon_minutes = $2
                   AND po.net_return_bps IS NOT NULL
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema_version,
                 int(horizon_minutes),
             )
 
@@ -2441,9 +2455,10 @@ class TradeJournal:
             return {
                 "connected": True,
                 "horizon_minutes": int(horizon_minutes),
-                "label_schema_version": LABEL_SCHEMA_VERSION,
+                "label_schema_version": label_schema_version,
                 "today": outcome_stats(today_rows),
                 "all": outcome_stats(all_rows),
+                "all_time": outcome_stats(all_rows),
                 "maker_fill_pct": (maker_count / known_count * 100.0) if known_count else None,
                 "maker_fill_count": maker_count,
                 "known_fill_count": known_count,

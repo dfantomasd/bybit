@@ -40,6 +40,7 @@ def _required_label_schema_version() -> str:
     except Exception:
         return LABEL_SCHEMA_VERSION
 
+
 # Encrypted artifact marker. joblib payloads are pickle, and pickle from a
 # compromised database is remote code execution inside the trader process —
 # so artifacts are encrypted at rest when MODEL_ENCRYPT_KEY is set.

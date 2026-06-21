@@ -5,9 +5,9 @@ from __future__ import annotations
 import pytest
 
 from trader.training.labels import (
-    CostModelBps,
     LABEL_SCHEMA_VERSION,
     LABEL_SCHEMA_VERSION_TPSL,
+    CostModelBps,
     active_label_schema_version,
     build_directional_outcome,
     directional_excursions_bps,

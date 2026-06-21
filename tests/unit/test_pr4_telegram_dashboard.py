@@ -33,6 +33,12 @@ def _make_bot() -> TelegramMonitorBot:
         selected_symbols=lambda: ["ETHUSDT"],
         diagnostics_provider=lambda: {},
         db_diagnostics_provider=None,
+        runtime_settings=lambda: {
+            "model_auto_train_min_samples": 1000,
+            "model_auto_train_horizon_minutes": 5,
+            "model_auto_train_label_bps": 2.0,
+            "label_schema_version": "directional_net_v2",
+        },
     )
 
     config = TelegramBotConfig(
@@ -230,8 +236,8 @@ def test_control_menu_has_training_and_limits() -> None:
     bot = _make_bot()
     markup = bot._control_menu()
     all_callbacks = [btn.callback_data for row in markup.inline_keyboard for btn in row]
-    assert "train:500:15:5" in all_callbacks
-    assert "train:1000:15:5" in all_callbacks
+    assert bot._train_callback(500) in all_callbacks
+    assert bot._train_callback() in all_callbacks
     assert "control:limits" in all_callbacks
     assert "view:db_model" in all_callbacks
     assert "view:canary" in all_callbacks
@@ -250,7 +256,7 @@ async def test_control_train_button_requires_confirm() -> None:
     bot._controller.start_training.assert_not_awaited()
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    _confirm_callback(callbacks, "train:500:15:5")
+    _confirm_callback(callbacks, bot._train_callback(500))
 
 
 def _confirm_callback(callbacks: list[str], action: str) -> str:
@@ -268,11 +274,11 @@ async def test_confirm_train_button_starts_training() -> None:
     bot._controller.start_training = AsyncMock(return_value="✅ started")
     update = _fake_update()
 
-    markup = bot._confirm_menu("train:500:15:5")
+    markup = bot._confirm_menu(bot._train_callback(500))
     payload = markup.inline_keyboard[0][0].callback_data.removeprefix("confirm:")
     await bot._handle_confirm_button(update, payload)
 
-    bot._controller.start_training.assert_awaited_once_with(500, 15, 5.0)
+    bot._controller.start_training.assert_awaited_once_with(500, 5, 2.0)
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "started" in reply_text
 
@@ -442,7 +448,7 @@ async def test_train_command_requires_confirm() -> None:
     assert bot._controller is not None
     bot._controller.start_training = AsyncMock(return_value="training started")
     update = _fake_update()
-    ctx = type("_Ctx", (), {"args": ["500", "15", "5"]})()
+    ctx = type("_Ctx", (), {"args": ["500", "5", "2"]})()
 
     await bot._cmd_train(update, ctx)  # type: ignore[arg-type]
 
@@ -451,7 +457,7 @@ async def test_train_command_requires_confirm() -> None:
     assert "Запустить обучение" in reply_text
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    _confirm_callback(callbacks, "train:500:15:5")
+    _confirm_callback(callbacks, "train:500:5:2")
 
 
 @pytest.mark.asyncio
@@ -566,14 +572,14 @@ async def test_train_button_requires_confirm() -> None:
     bot._controller.start_training = AsyncMock(return_value="training started")
     update = _fake_update()
 
-    await bot._handle_train_button(update, "1000:15:5")
+    await bot._handle_train_button(update, "1000:5:2")
 
     bot._controller.start_training.assert_not_awaited()
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Запустить обучение" in reply_text
     reply_markup = update.effective_message.reply_text.call_args.kwargs["reply_markup"]
     callbacks = [btn.callback_data for row in reply_markup.inline_keyboard for btn in row]
-    _confirm_callback(callbacks, "train:1000:15:5")
+    _confirm_callback(callbacks, "train:1000:5:2")
 
 
 @pytest.mark.asyncio

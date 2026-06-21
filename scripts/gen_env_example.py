@@ -7,6 +7,7 @@ Run:
 CI check:
     python scripts/gen_env_example.py | diff - .env.example
 """
+
 from __future__ import annotations
 
 import sys

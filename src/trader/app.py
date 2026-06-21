@@ -962,18 +962,10 @@ class TradingApplication:
                     else (
                         "schema_change"
                         if enough_schema_change
-                        else (
-                            "weak_retrain"
-                            if enough_weak_retrain
-                            else ("initial" if enough_initial else "increment")
-                        )
+                        else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
                     )
                 )
-                effective_min_samples = (
-                    schema_change_min_samples
-                    if enough_schema_change
-                    else min_samples
-                )
+                effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
                 if trainable < effective_min_samples:
                     log.warning(
                         "model_auto_training.preflight_blocked",
@@ -1133,6 +1125,8 @@ class TradingApplication:
                 continue
 
             try:
+                from trader.training.labels import active_label_schema_version
+
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
 
@@ -1156,17 +1150,20 @@ class TradingApplication:
                 gate: dict[str, Any] = {}
                 gate_events: dict[str, Any] = {}
                 if version and version != "—" and self._trade_journal is not None:
+                    report_label_schema = active_label_schema_version(
+                        use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT)
+                    )
                     gate = await self._trade_journal.get_shadow_gate_stats(
                         version,
                         report_horizon,
-                        "directional_net_v1",
+                        report_label_schema,
                     )
                     gate_event_counter = getattr(self._trade_journal, "get_shadow_gate_event_counts", None)
                     if gate_event_counter is not None:
                         gate_events = await gate_event_counter(
                             version,
                             report_horizon,
-                            "directional_net_v1",
+                            report_label_schema,
                         )
                 else:
                     gate = diag.get("shadow_gate_15m", {}) or {}
@@ -1608,6 +1605,8 @@ class TradingApplication:
         return feature_values_for_side(vec, side)
 
     def _runtime_settings(self) -> dict[str, Any]:
+        from trader.training.labels import active_label_schema_version
+
         return {
             "paused": self._trading_paused,
             "shadow": self._execution_engine._shadow_mode if self._execution_engine is not None else True,
@@ -1633,6 +1632,20 @@ class TradingApplication:
             ),
             "model_gate_threshold": self._settings.MODEL_SHADOW_GATE_THRESHOLD if self._settings is not None else None,
             "model_gate_quality": self._model_gate_quality,
+            "model_auto_train_min_samples": (
+                self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES if self._settings is not None else 1000
+            ),
+            "model_auto_train_horizon_minutes": (
+                self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES if self._settings is not None else 5
+            ),
+            "model_auto_train_label_bps": (
+                self._settings.MODEL_AUTO_TRAIN_LABEL_BPS if self._settings is not None else 2.0
+            ),
+            "label_schema_version": (
+                active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
+                if self._settings is not None
+                else "directional_net_v1"
+            ),
         }
 
     async def _set_runtime_setting(self, key: str, value: Any) -> str:
@@ -1844,12 +1857,32 @@ class TradingApplication:
         async def _pnl_analysis_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return cast(dict[str, Any], await self._trade_journal.get_strategy_pnl_analysis())
+            from trader.training.labels import active_label_schema_version
+
+            horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            return cast(
+                dict[str, Any],
+                await self._trade_journal.get_strategy_pnl_analysis(
+                    horizon_minutes=horizon,
+                    label_schema_version=label_schema,
+                ),
+            )
 
         async def _compare_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return cast(dict[str, Any], await self._trade_journal.get_model_compare_analysis())
+            from trader.training.labels import active_label_schema_version
+
+            horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            return cast(
+                dict[str, Any],
+                await self._trade_journal.get_model_compare_analysis(
+                    horizon_minutes=horizon,
+                    label_schema_version=label_schema,
+                ),
+            )
 
         async def _worst_trades_provider(limit: int) -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
@@ -1859,7 +1892,17 @@ class TradingApplication:
         async def _costs_detailed_provider() -> dict[str, Any]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
                 return {"connected": False, "error": "trade_journal_unavailable"}
-            return cast(dict[str, Any], await self._trade_journal.get_detailed_costs())
+            from trader.training.labels import active_label_schema_version
+
+            horizon = int(self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            return cast(
+                dict[str, Any],
+                await self._trade_journal.get_detailed_costs(
+                    horizon_minutes=horizon,
+                    label_schema_version=label_schema,
+                ),
+            )
 
         async def _model_performance_provider() -> list[dict[str, Any]]:
             if self._trade_journal is None or not self._trade_journal.is_enabled:
