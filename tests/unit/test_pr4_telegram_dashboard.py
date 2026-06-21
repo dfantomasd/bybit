@@ -324,6 +324,11 @@ async def test_canary_readiness_reports_ready_with_good_inputs() -> None:
             "labelled_samples_15m": 2500,
             "latest_training_run": {"status": "COMPLETED"},
             "latest_model_version": {
+                "version": "v_candidate",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "WEAK", "walk_forward_expectancy_bps": -2.5},
+            },
+            "active_model_version": {
                 "version": "v1",
                 "status": "CHAMPION",
                 "metrics": {"quality": "GOOD", "walk_forward_expectancy_bps": 2.5},

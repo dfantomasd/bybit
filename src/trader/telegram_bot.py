@@ -1845,8 +1845,10 @@ class TelegramMonitorBot:
         runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
         latest_run = db_diag.get("latest_training_run", {}) or {}
         latest_model = db_diag.get("latest_model_version", {}) or {}
+        active_model = db_diag.get("active_model_version", {}) or latest_model
+        readiness_model = active_model or latest_model
         model_info = diag.get("model", {}) or {}
-        model_metrics = latest_model.get("metrics") or latest_run.get("metrics") or {}
+        model_metrics = readiness_model.get("metrics") or latest_run.get("metrics") or {}
         if isinstance(model_metrics, str):
             try:
                 model_metrics = json.loads(model_metrics)
@@ -1896,11 +1898,11 @@ class TelegramMonitorBot:
         paper_gate_count = int(paper_gate.get("count") or 0)
         paper_gate_bps = _as_float(paper_gate.get("total_bps")) or 0.0
         paper_base_count = int(paper_baseline.get("count") or 0)
-        model_version = latest_model.get("version")
+        model_version = readiness_model.get("version")
         model_quality = str(model_metrics.get("quality") or "n/a")
         walk_forward_bps = _as_float(model_metrics.get("walk_forward_expectancy_bps"))
         champion_ver = model_info.get("champion_version", "none")
-        if champion_ver == "none" and latest_model.get("status") == "CHAMPION":
+        if champion_ver == "none" and readiness_model.get("status") == "CHAMPION":
             champion_ver = model_version or "none"
         model_quality_ok = bool(model_version) and model_quality in ("GOOD", "ХОРОШО")
         walk_forward_ok = walk_forward_bps is not None and walk_forward_bps > 0
