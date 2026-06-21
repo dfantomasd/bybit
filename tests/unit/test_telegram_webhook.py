@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -99,4 +100,5 @@ async def test_telegram_webhook_processes_update() -> None:
         )
 
     assert response.status_code == 200
+    await asyncio.sleep(0)
     mock_app.process_update.assert_awaited_once()

@@ -678,12 +678,15 @@ async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() ->
     bot = _make_bot()
     update = _fake_callback_update()
     update.callback_query.edit_message_text = AsyncMock(side_effect=RuntimeError("edit timeout"))
+    sent = MagicMock(message_id=99, chat_id=12345)
+    bot._app = MagicMock()
+    bot._app.bot.send_message = AsyncMock(return_value=sent)
 
     await bot._button_reply(update, "✅ Готово", reply_markup=bot._main_menu())
 
-    update.callback_query.message.reply_text.assert_awaited()
-    reply_text = update.callback_query.message.reply_text.await_args.args[0]
-    assert "Готово" in reply_text
+    bot._app.bot.send_message.assert_awaited()
+    kwargs = bot._app.bot.send_message.await_args.kwargs
+    assert "Готово" in kwargs.get("text", "")
 
 
 @pytest.mark.asyncio

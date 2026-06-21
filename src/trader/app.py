@@ -5320,6 +5320,12 @@ class TradingApplication:
             load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
             self._background_tasks.append(load_governor_task)
 
+            if self._telegram_bot is not None and hasattr(self._telegram_bot, "refresh_delivery"):
+                try:
+                    await self._telegram_bot.refresh_delivery()
+                except Exception as tg_refresh_exc:
+                    log.warning("telegram.refresh_delivery_failed", error=str(tg_refresh_exc))
+
             try:
                 await self._main_loop()
             finally:
