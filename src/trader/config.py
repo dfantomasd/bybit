@@ -453,18 +453,26 @@ class Settings(BaseSettings):
     """CSV list of model families considered by offline walk-forward selection."""
     MODEL_WF_FOLDS: int = 5
     MODEL_WF_MIN_TRAIN_SAMPLES: int = 500
-    MODEL_THRESHOLD_GRID: str = "0,2,5"
+    MODEL_THRESHOLD_GRID: str = "0,2,5,8,12"
     """CSV label thresholds in bps evaluated during offline selection.
-    0 bps = break-even after costs (net-cost-aware label already deducts fees).
-    20 bps removed: too demanding for 5-min bars, leaves almost no positive labels."""
+    0 bps = break-even after costs (net-cost-aware label already deducts fees)."""
     MODEL_LABEL_HORIZON: int = 5
     """Bars ahead to measure label outcome. Use 5 for SCALP, 15-30 for swing."""
+    MODEL_LABEL_USE_TPSL_EXIT: bool = True
+    """Resolve training labels using scalp TP/SL first-touch exits instead of horizon close."""
+    MODEL_LABEL_TP_ATR_MULT: float = 1.0
+    """Take-profit distance as ATR(14) multiple for TP/SL label resolution."""
+    MODEL_LABEL_SL_ATR_MULT: float = 0.5
+    """Stop-loss distance as ATR(14) multiple for TP/SL label resolution."""
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
-    TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
-    TRAIN_STRATEGY_ALLOWLIST: str = ""
-    """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels, including
-    candle-sampling baselines that do not carry strategy_id metadata."""
+    TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
+    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1"
+    """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
+    TRAIN_INCLUDE_CANDLE_BASELINE: bool = False
+    """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines."""
+    TRAIN_LABEL_SPREAD_BPS: float = 4.0
+    """Spread component in the training label cost model (scalp max spread is ~5 bps)."""
     TRAIN_MIN_BUCKET_SAMPLES: int = 50
     TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
     """Optional training filter: remove regime/hour buckets with stable negative expectancy."""
@@ -485,7 +493,7 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = True
     """Retrain automatically when the latest model quality is WEAK/missing."""
-    MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
+    MODEL_AUTO_TRAIN_LABEL_BPS: float = 2.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion
     AND the lift is statistically significant (bootstrap p-value).

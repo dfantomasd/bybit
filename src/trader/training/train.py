@@ -27,7 +27,7 @@ import numpy as np
 
 from trader.ml.model_selection import model_selection_metrics
 from trader.training.eligibility import training_strategy_filter_sql
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import active_label_schema_version
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -405,8 +405,15 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
     settings = Settings()
     strategy_allowlist = _parse_str_csv(settings.TRAIN_STRATEGY_ALLOWLIST)
-    strategy_filter = training_strategy_filter_sql("$4")
-    log.info("Training strategy allowlist: %s", strategy_allowlist or "ALL")
+    include_candle_baseline = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
+    label_schema_version = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
+    strategy_filter = training_strategy_filter_sql("$4", "$5")
+    log.info(
+        "Training strategy allowlist: %s include_candle_baseline=%s label_schema=%s",
+        strategy_allowlist or "ALL",
+        include_candle_baseline,
+        label_schema_version,
+    )
     dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
 
@@ -493,9 +500,10 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             ORDER BY created_at ASC
             """,
             horizon_minutes,
-            LABEL_SCHEMA_VERSION,
+            label_schema_version,
             min_samples,
             strategy_allowlist or None,
+            include_candle_baseline,
         )
 
         if len(rows) < min_samples:
@@ -516,20 +524,21 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND {strategy_filter.replace("$4", "$3")}
+                  AND {training_strategy_filter_sql("$3", "$4")}
                 GROUP BY fs.feature_schema_hash
                 ORDER BY cnt DESC
                 """,
                 horizon_minutes,
-                LABEL_SCHEMA_VERSION,
+                label_schema_version,
                 strategy_allowlist or None,
+                include_candle_baseline,
             )
             total_labelled = sum(int(r["cnt"]) for r in schema_rows)
             top = ", ".join(f"{str(r['feature_schema_hash'])[:8]}:{r['cnt']}" for r in schema_rows[:4])
             msg = (
                 f"Insufficient compatible samples: no feature schema has {min_samples} yet "
                 f"(unique labelled candles={total_labelled}, per-schema=[{top or 'none'}]); "
-                f"schema={LABEL_SCHEMA_VERSION}, "
+                f"schema={label_schema_version}, "
                 f"horizon={horizon_minutes}m, "
                 f"strategy_allowlist={strategy_allowlist or 'ALL'}"
             )
@@ -542,7 +551,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             return 1
 
         click.echo(
-            f"Training on {len(rows)} compatible samples (schema={LABEL_SCHEMA_VERSION}, horizon={horizon_minutes}m)"
+            f"Training on {len(rows)} compatible samples (schema={label_schema_version}, horizon={horizon_minutes}m)"
         )
 
         x_list: list[list[float]] = []
@@ -807,7 +816,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             "horizon_minutes": horizon_minutes,
             "label_bps_threshold": selected_label_threshold,
             "requested_label_bps_threshold": label_bps_threshold,
-            "label_schema_version": LABEL_SCHEMA_VERSION,
+            "label_schema_version": label_schema_version,
             "sample_count": int(len(x_arr)),
             "train_samples": int(len(x_arr)),
             "run_id": run_id,

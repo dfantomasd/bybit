@@ -21,15 +21,54 @@ from trader.domain.models import FeatureVector, RegimeContext, TradeProposal
 from trader.features.source_candle_guard import source_candle_for_feature
 from trader.storage import trade_journal as _base_module
 from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
-from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps, build_directional_outcome
+from trader.training.eligibility import training_strategy_filter_sql
+from trader.training.labels import (
+    LABEL_SCHEMA_VERSION,
+    CostModelBps,
+    active_label_schema_version,
+    atr_pct_from_feature_payload,
+    build_directional_outcome,
+)
 
 log = structlog.get_logger(__name__)
 
 DEFAULT_TAKER_FEE_BPS = 5.5  # 0.055% taker x 2 legs = 11 bps round trip
-DEFAULT_SPREAD_BPS = 8.0  # max_spread_bps from config
+DEFAULT_SPREAD_BPS = 4.0  # aligned with scalp max spread (~5 bps), not screener wide max
 DEFAULT_SLIPPAGE_PER_SIDE_BPS = 3.0  # expected_slippage_pct x 2 legs = 6 bps
 DEFAULT_FUNDING_BPS = 1.0  # funding_buffer_pct
 DEFAULT_SAFETY_MARGIN_BPS = 5.0  # mirrors net_edge_safety_margin_pct in engine
+
+
+def _optional_settings() -> Any | None:
+    try:
+        from trader.config import Settings
+
+        return Settings()
+    except Exception as exc:
+        log.debug("directional_trade_journal.settings_unavailable", error=str(exc))
+        return None
+
+
+def default_cost_model() -> CostModelBps:
+    """Return the round-trip cost model used by the outcome resolver.
+
+    Spread defaults to ``TRAIN_LABEL_SPREAD_BPS`` when settings are available so
+    training labels match scalp execution conditions more closely than the legacy
+    screener-wide 8 bps assumption.
+    """
+    spread_bps = DEFAULT_SPREAD_BPS
+    settings = _optional_settings()
+    if settings is not None:
+        spread_bps = float(settings.TRAIN_LABEL_SPREAD_BPS)
+    return CostModelBps(
+        entry_fee_bps=DEFAULT_TAKER_FEE_BPS,
+        exit_fee_bps=DEFAULT_TAKER_FEE_BPS,
+        spread_bps=spread_bps,
+        entry_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
+        exit_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
+        funding_bps=DEFAULT_FUNDING_BPS,
+        safety_margin_bps=DEFAULT_SAFETY_MARGIN_BPS,
+    )
 
 _SourceBinding = tuple[str, str, datetime]
 _CURRENT_SOURCE_BINDING: ContextVar[_SourceBinding | None] = ContextVar(
@@ -42,22 +81,35 @@ def _normalise_symbol(symbol: str) -> str:
     return str(symbol).strip().upper()
 
 
-def default_cost_model() -> CostModelBps:
-    """Return the conservative round-trip cost model used by the resolver.
+def _label_resolution_settings() -> tuple[bool, float, float, float, str]:
+    """Return TP/SL label settings and the active label schema version."""
+    use_tpsl = True
+    tp_mult = 1.0
+    sl_mult = 0.5
+    label_threshold = 2.0
+    settings = _optional_settings()
+    if settings is not None:
+        use_tpsl = bool(settings.MODEL_LABEL_USE_TPSL_EXIT)
+        tp_mult = float(settings.MODEL_LABEL_TP_ATR_MULT)
+        sl_mult = float(settings.MODEL_LABEL_SL_ATR_MULT)
+        label_threshold = float(settings.MODEL_AUTO_TRAIN_LABEL_BPS)
+    return use_tpsl, tp_mult, sl_mult, label_threshold, active_label_schema_version(use_tpsl_exit=use_tpsl)
 
-    Values match the current production defaults: two taker fees, full spread,
-    per-side slippage, and a small funding buffer. A later configuration wiring
-    step may inject symbol-specific values without changing the label formula.
-    """
-    return CostModelBps(
-        entry_fee_bps=DEFAULT_TAKER_FEE_BPS,
-        exit_fee_bps=DEFAULT_TAKER_FEE_BPS,
-        spread_bps=DEFAULT_SPREAD_BPS,
-        entry_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
-        exit_slippage_bps=DEFAULT_SLIPPAGE_PER_SIDE_BPS,
-        funding_bps=DEFAULT_FUNDING_BPS,
-        safety_margin_bps=DEFAULT_SAFETY_MARGIN_BPS,
-    )
+
+def _training_eligibility_params() -> tuple[list[str] | None, bool, str, float]:
+    """Return strategy allowlist, candle flag, label schema, and label threshold."""
+    allowlist: list[str] | None = None
+    include_candle = False
+    label_schema = LABEL_SCHEMA_VERSION
+    label_threshold = 2.0
+    settings = _optional_settings()
+    if settings is not None:
+        parsed = [item.strip() for item in settings.TRAIN_STRATEGY_ALLOWLIST.split(",") if item.strip()]
+        allowlist = parsed or None
+        include_candle = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
+        label_schema = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
+        label_threshold = float(settings.MODEL_AUTO_TRAIN_LABEL_BPS)
+    return allowlist, include_candle, label_schema, label_threshold
 
 
 class DirectionalTradeJournal(_BaseTradeJournal):
@@ -287,26 +339,34 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         self,
         *,
         horizon_minutes: int,
-        label_bps_threshold: float = 5.0,
+        label_bps_threshold: float | None = None,
         limit: int = 200,
         cost_model: CostModelBps | None = None,
     ) -> int:
         """Resolve Buy and Sell outcomes from complete confirmed 1-minute paths.
 
         Legacy long-only outcomes are recalculated because the lookup joins only
-        rows carrying the current ``LABEL_SCHEMA_VERSION``. The existing primary
+        rows carrying the current label schema version. The existing primary
         key then updates the old row in place. MFE and MAE use every confirmed
         candle inside the full horizon rather than only the final bar.
+
+        When ``MODEL_LABEL_USE_TPSL_EXIT`` is enabled, exit price is the first
+        TP/SL touch using ATR from the feature snapshot (scalp_micro aligned).
         """
 
         costs = cost_model or default_cost_model()
+        use_tpsl, tp_mult, sl_mult, default_label_bps, label_schema = _label_resolution_settings()
+        if label_bps_threshold is None:
+            label_bps_threshold = default_label_bps
         rows = await self._fetch(
             """
             SELECT
                 pe.prediction_id,
                 pe.symbol,
                 pe.strategy_signal,
-                fs.candle_open_time AS entry_time
+                fs.candle_open_time AS entry_time,
+                fs.feature_names,
+                fs.feature_values
             FROM prediction_events pe
             JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
             LEFT JOIN prediction_outcomes po
@@ -326,7 +386,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             horizon_minutes,
             limit,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
             label_bps_threshold,
         )
 
@@ -378,6 +438,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             if path_rows[-1]["open_time"] != horizon_time:
                 continue
 
+            atr_pct = atr_pct_from_feature_payload(row.get("feature_names"), row.get("feature_values"))
             outcome = build_directional_outcome(
                 side=side,
                 entry_price=entry_close,
@@ -386,6 +447,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 lows=[float(item["low"]) for item in path_rows],
                 cost_model=costs,
                 label_threshold_bps=label_bps_threshold,
+                atr_pct=atr_pct,
+                tp_atr_mult=tp_mult,
+                sl_atr_mult=sl_mult,
+                use_tpsl_exit=use_tpsl and atr_pct is not None,
             )
             await self.resolve_prediction_outcomes(
                 prediction_id=prediction_id,
@@ -397,7 +462,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 max_favorable_excursion_bps=outcome.max_favorable_excursion_bps,
                 max_adverse_excursion_bps=outcome.max_adverse_excursion_bps,
                 label=outcome.label,
-                label_schema_version=outcome.label_schema_version,
+                label_schema_version=label_schema,
             )
             resolved += 1
 
@@ -423,6 +488,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             return result
 
     async def _get_db_diagnostics_directional(self, result: dict[str, Any]) -> dict[str, Any]:
+        allowlist, include_candle, label_schema, label_threshold = _training_eligibility_params()
+        strategy_filter = training_strategy_filter_sql("$2", "$3")
+        result["label_schema_version"] = label_schema
+        result["training_label_threshold_bps"] = label_threshold
         rows = await self._fetch(
             """
             SELECT horizon_minutes, count(*) AS cnt
@@ -436,7 +505,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             GROUP BY horizon_minutes
             ORDER BY horizon_minutes
             """,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
         )
         if rows:
             result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
@@ -452,7 +521,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         # the 15-min resolver hasn't yet produced labels (e.g. after a feature pipeline
         # change) but the 5-min resolver already has labeled data for the new schema.
         rows = await self._fetch(
-            """
+            f"""
             SELECT feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
             FROM (
                 SELECT DISTINCT ON (fs.symbol, fs.interval, fs.candle_open_time, fs.feature_schema_hash)
@@ -463,16 +532,20 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
                   AND po.label IS NOT NULL
                   AND po.label_schema_version = $1
-                  AND po.label_threshold_bps = 5.0
+                  AND po.label_threshold_bps = $4
                   AND fs.feature_values IS NOT NULL
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
+                  AND {strategy_filter}
             ) deduped
             GROUP BY feature_schema_hash
             ORDER BY latest_at DESC
             """,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
+            allowlist,
+            include_candle,
+            label_threshold,
         )
         # newest schema = most recently seen feature schema (rows[0] after ORDER BY latest_at DESC)
         newest_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
@@ -490,8 +563,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "feature_schema_hash": newest_feature_schema_hash,
             "sample_count": newest_feature_schema_samples,
             "horizon_minutes": "5_or_15",
-            "label_schema_version": LABEL_SCHEMA_VERSION,
-            "label_threshold_bps": 5.0,
+            "label_schema_version": label_schema,
+            "label_threshold_bps": label_threshold,
         }
         result["labelled_samples_15m_by_schema"] = (
             {str(dict(row).get("feature_schema_hash", "?"))[:8]: int(row["cnt"]) for row in rows}
@@ -509,7 +582,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         horizon_rows = []
         if rows:
             horizon_rows = await self._fetch(
-                """
+                f"""
                 SELECT horizon_minutes, feature_schema_hash, count(*) AS cnt, max(latest_at) AS latest_at
                 FROM (
                     SELECT DISTINCT ON (
@@ -529,18 +602,22 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                     WHERE po.horizon_minutes = ANY(ARRAY[5, 15])
                       AND po.label IS NOT NULL
                       AND po.label_schema_version = $1
-                      AND po.label_threshold_bps = 5.0
+                      AND po.label_threshold_bps = $4
                       AND fs.feature_values IS NOT NULL
                       AND fs.training_eligible = true
                       AND pe.model_version = 'RULE_BASELINE_V1'
                       AND pe.strategy_signal IN ('Buy', 'Sell')
+                      AND {strategy_filter}
                     ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
                              fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
                 ) deduped
                 GROUP BY horizon_minutes, feature_schema_hash
                 ORDER BY horizon_minutes, latest_at DESC
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema,
+                allowlist,
+                include_candle,
+                label_threshold,
             )
         training_by_horizon: dict[str, int] = {}
         newest_schema_by_horizon: dict[str, dict[str, Any]] = {}
@@ -558,8 +635,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 "feature_schema_hash": schema_hash,
                 "sample_count": samples,
                 "horizon_minutes": horizon_key,
-                "label_schema_version": LABEL_SCHEMA_VERSION,
-                "label_threshold_bps": 5.0,
+                "label_schema_version": label_schema,
+                "label_threshold_bps": label_threshold,
             }
         result["training_eligible_by_horizon"] = training_by_horizon
         result["newest_training_schema_by_horizon"] = newest_schema_by_horizon
@@ -585,7 +662,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
             LIMIT 1
             """,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
         )
         if not rows:
             rows = await self._fetch(
@@ -631,7 +708,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                     _metrics_raw = {}
             _metrics_dict = _metrics_raw if isinstance(_metrics_raw, dict) else {}
             latest_model_schema = str(_metrics_dict.get("label_schema_version") or "")
-            latest_model["schema_compatible"] = latest_model_schema == LABEL_SCHEMA_VERSION
+            latest_model["schema_compatible"] = latest_model_schema == label_schema
             latest_model["training_samples_compatible"] = (
                 latest_model["actual_training_samples"] if latest_model["schema_compatible"] else 0
             )
@@ -659,7 +736,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
             LIMIT 1
             """,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
         )
         # When no CHAMPION exists, fall back to latest_model_version so that
         # diagnostics and the heartbeat can still show which model is loaded.
@@ -673,7 +750,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         analysis_horizon = self._model_horizon_minutes(active_model or latest_model)
         result["model_gate_horizon_minutes"] = analysis_horizon
         if active_version:
-            gate = await self.get_shadow_gate_stats(active_version, analysis_horizon, LABEL_SCHEMA_VERSION)
+            gate = await self.get_shadow_gate_stats(active_version, analysis_horizon, label_schema)
             gate["horizon_minutes"] = analysis_horizon
             paper = await self._paper_pnl_for_model(active_version, analysis_horizon, active_schema_hash)
             if active_schema_hash or gate.get("total_count"):

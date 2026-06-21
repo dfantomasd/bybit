@@ -3010,7 +3010,6 @@ class TradingApplication:
                     try:
                         resolved = await self._trade_journal.resolve_outcomes_from_candles(
                             horizon_minutes=horizon,
-                            label_bps_threshold=5.0,
                             limit=batch_limit,
                         )
                         if resolved > 0:

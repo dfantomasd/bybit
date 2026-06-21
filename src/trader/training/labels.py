@@ -10,8 +10,18 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass
 from math import isfinite
+from typing import Any
 
 LABEL_SCHEMA_VERSION = "directional_net_v1"
+"""Legacy close-at-horizon labels."""
+
+LABEL_SCHEMA_VERSION_TPSL = "directional_net_v2"
+"""TP/SL first-touch path labels aligned with scalp_micro exits."""
+
+
+def active_label_schema_version(*, use_tpsl_exit: bool) -> str:
+    """Return the label schema version for new outcome writes and training."""
+    return LABEL_SCHEMA_VERSION_TPSL if use_tpsl_exit else LABEL_SCHEMA_VERSION
 
 
 @dataclass(frozen=True)
@@ -139,6 +149,80 @@ def directional_excursions_bps(
     return max(0.0, favorable), min(0.0, adverse)
 
 
+def resolve_tpsl_exit_price(
+    *,
+    side: str,
+    entry_price: float,
+    highs: Iterable[float],
+    lows: Iterable[float],
+    atr_pct: float,
+    tp_atr_mult: float,
+    sl_atr_mult: float,
+    horizon_exit_price: float,
+) -> float:
+    """Return the first TP/SL touch price, else the horizon close.
+
+    On each bar SL is checked before TP (conservative intrabar ordering).
+    ``atr_pct`` is ATR as a fraction of price (same units as ``atr_14_pct``).
+    """
+    if not isfinite(atr_pct) or atr_pct <= 0:
+        return horizon_exit_price
+    if not isfinite(tp_atr_mult) or tp_atr_mult <= 0:
+        return horizon_exit_price
+    if not isfinite(sl_atr_mult) or sl_atr_mult <= 0:
+        return horizon_exit_price
+
+    high_values = list(highs)
+    low_values = list(lows)
+    if not high_values or not low_values:
+        return horizon_exit_price
+
+    normalized_side = normalize_side(side)
+    tp_distance = entry_price * atr_pct * tp_atr_mult
+    sl_distance = entry_price * atr_pct * sl_atr_mult
+
+    if normalized_side == "Buy":
+        tp_price = entry_price + tp_distance
+        sl_price = entry_price - sl_distance
+        for high, low in zip(high_values, low_values, strict=True):
+            if low <= sl_price:
+                return sl_price
+            if high >= tp_price:
+                return tp_price
+    else:
+        tp_price = entry_price - tp_distance
+        sl_price = entry_price + sl_distance
+        for high, low in zip(high_values, low_values, strict=True):
+            if high >= sl_price:
+                return sl_price
+            if low <= tp_price:
+                return tp_price
+
+    return horizon_exit_price
+
+
+def atr_pct_from_feature_payload(
+    feature_names: Any,
+    feature_values: Any,
+) -> float | None:
+    """Extract ``atr_14_pct`` from a feature snapshot payload."""
+    import json
+
+    if feature_names is None or feature_values is None:
+        return None
+    try:
+        names = json.loads(feature_names) if isinstance(feature_names, str) else list(feature_names)
+        vals = json.loads(feature_values) if isinstance(feature_values, str) else list(feature_values)
+        features = dict(zip(names, vals, strict=False))
+        raw = features.get("atr_14_pct")
+        if raw is None:
+            return None
+        atr_pct = float(raw)
+        return atr_pct if isfinite(atr_pct) and atr_pct > 0 else None
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return None
+
+
 def build_directional_outcome(
     *,
     side: str,
@@ -148,12 +232,28 @@ def build_directional_outcome(
     lows: Iterable[float],
     cost_model: CostModelBps,
     label_threshold_bps: float,
+    atr_pct: float | None = None,
+    tp_atr_mult: float = 1.0,
+    sl_atr_mult: float = 0.5,
+    use_tpsl_exit: bool = False,
 ) -> DirectionalOutcome:
     """Build one canonical cost-aware ML outcome."""
     if not isfinite(label_threshold_bps):
         raise ValueError("label_threshold_bps must be finite")
     normalized_side = normalize_side(side)
-    gross_bps = directional_return_bps(side=normalized_side, entry_price=entry_price, exit_price=exit_price)
+    resolved_exit = exit_price
+    if use_tpsl_exit and atr_pct is not None:
+        resolved_exit = resolve_tpsl_exit_price(
+            side=normalized_side,
+            entry_price=entry_price,
+            highs=highs,
+            lows=lows,
+            atr_pct=atr_pct,
+            tp_atr_mult=tp_atr_mult,
+            sl_atr_mult=sl_atr_mult,
+            horizon_exit_price=exit_price,
+        )
+    gross_bps = directional_return_bps(side=normalized_side, entry_price=entry_price, exit_price=resolved_exit)
     mfe_bps, mae_bps = directional_excursions_bps(
         side=normalized_side,
         entry_price=entry_price,

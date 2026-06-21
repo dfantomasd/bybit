@@ -12,7 +12,7 @@ import pytest
 from trader.domain.enums import MarketRegime, MarketType, OrderSide
 from trader.domain.models import FeatureVector, TradeProposal
 from trader.storage.directional_trade_journal import DirectionalTradeJournal
-from trader.training.labels import LABEL_SCHEMA_VERSION, CostModelBps
+from trader.training.labels import LABEL_SCHEMA_VERSION_TPSL, CostModelBps
 
 
 class _FakeDirectionalJournal(DirectionalTradeJournal):
@@ -48,6 +48,8 @@ def _prediction(entry_time: datetime, *, side: str = "Sell") -> dict[str, Any]:
         "symbol": "BTCUSDT",
         "strategy_signal": side,
         "entry_time": entry_time,
+        "feature_names": json.dumps(["atr_14_pct"]),
+        "feature_values": json.dumps([0.01]),
     }
 
 
@@ -154,7 +156,7 @@ async def test_profitable_sell_is_persisted_as_positive_directional_outcome() ->
     assert saved["net_return_bps"] == pytest.approx(100.0)
     assert saved["max_favorable_excursion_bps"] == pytest.approx(150.0)
     assert saved["label"] == 1
-    assert saved["label_schema_version"] == LABEL_SCHEMA_VERSION
+    assert saved["label_schema_version"] == LABEL_SCHEMA_VERSION_TPSL
 
 
 @pytest.mark.asyncio
