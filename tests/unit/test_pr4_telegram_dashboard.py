@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
@@ -807,6 +808,21 @@ def test_telegram_health_snapshot_records_polling_conflicts() -> None:
     assert health["enabled"] is True
     assert health["polling_conflict_count"] == 1
     assert "getUpdates" in health["last_polling_error"]
+
+
+@pytest.mark.asyncio
+async def test_telegram_polling_conflicts_disable_polling_after_threshold() -> None:
+    from telegram.error import Conflict
+
+    bot = _make_bot()
+
+    for _ in range(3):
+        bot._polling_error_callback(Conflict("terminated by other getUpdates request"))
+
+    await asyncio.sleep(0)
+    health = bot.health_snapshot()
+    assert health["polling_conflict_count"] == 3
+    assert health["polling_disabled_reason"] == "polling_conflict"
 
 
 @pytest.mark.asyncio

@@ -241,6 +241,7 @@ class TelegramMonitorBot:
         self._polling_lock_key: str | None = None
         self._polling_lock_token: str | None = None
         self._polling_lock_refresh_task: asyncio.Task[None] | None = None
+        self._polling_conflict_stop_task: asyncio.Task[None] | None = None
         self._redis_client: Any | None = None
 
     # ------------------------------------------------------------------
@@ -339,6 +340,11 @@ class TelegramMonitorBot:
             raise
 
     async def stop(self) -> None:
+        conflict_stop_task = self._polling_conflict_stop_task
+        self._polling_conflict_stop_task = None
+        if conflict_stop_task is not None:
+            conflict_stop_task.cancel()
+            await asyncio.gather(conflict_stop_task, return_exceptions=True)
         if self._app is None:
             await self._release_polling_lock()
             return
@@ -485,6 +491,28 @@ class TelegramMonitorBot:
         if inspect.isawaitable(result):
             await result
 
+    def _schedule_stop_after_polling_conflicts(self) -> None:
+        """Fail closed after repeated getUpdates conflicts.
+
+        Without a distributed lock (REDIS_URL empty), rolling deploy overlap can
+        leave one process in a conflict loop where health appears alive but
+        updates are never handled. Stopping polling makes the state explicit and
+        allows the service supervisor/redeploy to recover cleanly.
+        """
+        task = self._polling_conflict_stop_task
+        if task is not None and not task.done():
+            return
+        self._polling_disabled_reason = "polling_conflict"
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            log.warning("telegram_polling_conflict_no_running_loop")
+            return
+        self._polling_conflict_stop_task = loop.create_task(
+            self._stop_app_after_lock_loss(),
+            name="telegram-polling-conflict-stop",
+        )
+
     def _polling_error_callback(self, error: Exception) -> None:
         """Suppress Conflict errors during rolling redeploys; log the rest."""
         from telegram.error import Conflict, NetworkError
@@ -501,6 +529,8 @@ class TelegramMonitorBot:
                 conflicts=self._polling_conflict_count,
                 error=str(error),
             )
+            if self._polling_conflict_count >= 3:
+                self._schedule_stop_after_polling_conflicts()
             return
         if isinstance(error, NetworkError):
             self._polling_network_error_count += 1
