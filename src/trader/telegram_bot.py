@@ -190,6 +190,7 @@ class TelegramBotConfig:
     redis_url: str = ""
     polling_lock_ttl_s: int = 45
     polling_lock_wait_s: int = 90
+    polling_conflict_recovery_wait_s: int = 20
 
 
 # ---------------------------------------------------------------------------
@@ -242,6 +243,7 @@ class TelegramMonitorBot:
         self._polling_lock_token: str | None = None
         self._polling_lock_refresh_task: asyncio.Task[None] | None = None
         self._polling_conflict_stop_task: asyncio.Task[None] | None = None
+        self._polling_recovery_task: asyncio.Task[None] | None = None
         self._redis_client: Any | None = None
 
     # ------------------------------------------------------------------
@@ -321,15 +323,7 @@ class TelegramMonitorBot:
         try:
             await app.initialize()
             await app.start()
-            if app.updater is None:
-                raise RuntimeError("Telegram updater was not created")
-            # allowed_updates=[] means "all types"; error_callback records
-            # conflicts, but the Redis lock prevents normal rolling deploys from
-            # running two getUpdates pollers at once.
-            await app.updater.start_polling(
-                drop_pending_updates=True,
-                error_callback=self._polling_error_callback,
-            )
+            await self._start_polling(app)
             self._app = app
             self._started_at = datetime.now(tz=UTC)
             self._polling_disabled_reason = None
@@ -340,6 +334,11 @@ class TelegramMonitorBot:
             raise
 
     async def stop(self) -> None:
+        recovery_task = self._polling_recovery_task
+        self._polling_recovery_task = None
+        if recovery_task is not None:
+            recovery_task.cancel()
+            await asyncio.gather(recovery_task, return_exceptions=True)
         conflict_stop_task = self._polling_conflict_stop_task
         self._polling_conflict_stop_task = None
         if conflict_stop_task is not None:
@@ -491,26 +490,86 @@ class TelegramMonitorBot:
         if inspect.isawaitable(result):
             await result
 
-    def _schedule_stop_after_polling_conflicts(self) -> None:
-        """Fail closed after repeated getUpdates conflicts.
+    async def _start_polling(self, app: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        if app.updater is None:
+            raise RuntimeError("Telegram updater was not created")
+        await app.updater.start_polling(
+            drop_pending_updates=True,
+            error_callback=self._polling_error_callback,
+        )
 
-        Without a distributed lock (REDIS_URL empty), rolling deploy overlap can
-        leave one process in a conflict loop where health appears alive but
-        updates are never handled. Stopping polling makes the state explicit and
-        allows the service supervisor/redeploy to recover cleanly.
-        """
-        task = self._polling_conflict_stop_task
+    async def _restart_polling(self) -> bool:
+        app = self._app
+        if app is None or app.updater is None:
+            return False
+        updater = app.updater
+        if getattr(updater, "running", False):
+            await updater.stop()
+        await self._start_polling(app)
+        self._polling_conflict_count = 0
+        self._polling_disabled_reason = None
+        return True
+
+    async def _recover_polling_after_conflicts(self) -> None:
+        """Wait for rolling-deploy overlap to end, then resume getUpdates."""
+        wait_s = max(5.0, float(self._config.polling_conflict_recovery_wait_s))
+        log.warning("telegram_polling_recovery_scheduled", wait_seconds=wait_s)
+        try:
+            await asyncio.sleep(wait_s)
+        except asyncio.CancelledError:
+            raise
+        if self._app is None:
+            started = await self.start()
+            if started:
+                log.info("telegram_polling_recovered_via_full_restart")
+            else:
+                log.warning("telegram_polling_recovery_full_restart_failed")
+            return
+        try:
+            await self._restart_polling()
+            log.info("telegram_polling_recovered_after_conflicts")
+        except Exception as exc:
+            self._polling_disabled_reason = f"polling_recovery_failed:{exc}"
+            log.warning("telegram_polling_recovery_failed", error=str(exc))
+
+    async def ensure_polling_running(self) -> None:
+        """Restart polling if a deploy conflict or crash left the bot deaf."""
+        if not self.enabled:
+            return
+        snap = self.health_snapshot()
+        if snap.get("polling_running"):
+            return
+        if self._polling_recovery_task is not None and not self._polling_recovery_task.done():
+            return
+        reason = snap.get("polling_disabled_reason")
+        log.warning("telegram_polling_not_running", reason=reason)
+        if self._app is not None:
+            try:
+                if await self._restart_polling():
+                    log.info("telegram_polling_restarted_by_watchdog")
+                    return
+            except Exception as exc:
+                log.warning("telegram_polling_watchdog_restart_failed", error=str(exc))
+        started = await self.start()
+        if started:
+            log.info("telegram_polling_restarted_by_watchdog_full_start")
+        else:
+            log.warning("telegram_polling_watchdog_full_start_failed", health=self.health_snapshot())
+
+    def _schedule_polling_recovery_after_conflicts(self) -> None:
+        """Rolling deploys briefly run two pollers; recover instead of staying deaf."""
+        task = self._polling_recovery_task
         if task is not None and not task.done():
             return
-        self._polling_disabled_reason = "polling_conflict"
+        self._polling_disabled_reason = "polling_conflict_recovery_pending"
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
             log.warning("telegram_polling_conflict_no_running_loop")
             return
-        self._polling_conflict_stop_task = loop.create_task(
-            self._stop_app_after_lock_loss(),
-            name="telegram-polling-conflict-stop",
+        self._polling_recovery_task = loop.create_task(
+            self._recover_polling_after_conflicts(),
+            name="telegram-polling-conflict-recovery",
         )
 
     def _polling_error_callback(self, error: Exception) -> None:
@@ -530,7 +589,7 @@ class TelegramMonitorBot:
                 error=str(error),
             )
             if self._polling_conflict_count >= 3:
-                self._schedule_stop_after_polling_conflicts()
+                self._schedule_polling_recovery_after_conflicts()
             return
         if isinstance(error, NetworkError):
             self._polling_network_error_count += 1
