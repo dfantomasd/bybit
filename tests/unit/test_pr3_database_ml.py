@@ -714,7 +714,7 @@ def test_auto_trainer_uses_latest_training_run_for_success_cooldown() -> None:
     assert "latest_run_samples" in src
     assert "latest_success_samples = max(actual_latest_samples, latest_run_samples)" in src
     assert "enough_initial = latest_success_samples == 0" in src
-    assert "latest_finished_at = latest_run.get(\"finished_at\")" in src
+    assert 'latest_finished_at = latest_run.get("finished_at")' in src
 
 
 def test_model_progress_reporter_uses_configured_gate_horizon() -> None:

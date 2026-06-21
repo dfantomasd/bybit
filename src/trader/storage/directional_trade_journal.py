@@ -77,8 +77,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
     def _model_horizon_minutes(cls, model_row: dict[str, Any], default: int = 15) -> int:
         metrics = cls._model_metrics_dict(model_row)
         for key in ("horizon_minutes", "model_horizon_minutes"):
+            raw_horizon = metrics.get(key)
+            if raw_horizon is None:
+                continue
             try:
-                horizon = int(metrics.get(key))
+                horizon = int(raw_horizon)
             except (TypeError, ValueError):
                 continue
             if horizon > 0:
@@ -473,9 +476,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
         # newest schema = most recently seen feature schema (rows[0] after ORDER BY latest_at DESC)
         newest_feature_schema_hash = str(dict(rows[0]).get("feature_schema_hash") or "") if rows else ""
-        newest_feature_schema_samples = (
-            int(rows[0]["cnt"]) if rows else int(result.get("labelled_samples_15m") or 0)
-        )
+        newest_feature_schema_samples = int(rows[0]["cnt"]) if rows else int(result.get("labelled_samples_15m") or 0)
         # dominant schema = schema with most samples (needed for mismatch check reference)
         rows_by_count = sorted(rows, key=lambda r: int(r["cnt"]), reverse=True)
         current_feature_schema_hash = (

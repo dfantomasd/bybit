@@ -812,9 +812,7 @@ class TradingApplication:
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_run = diag.get("latest_training_run", {}) or {}
                 latest_run_status = str(latest_run.get("status") or "").upper()
-                latest_run_samples = (
-                    int(latest_run.get("sample_count") or 0) if latest_run_status == "COMPLETED" else 0
-                )
+                latest_run_samples = int(latest_run.get("sample_count") or 0) if latest_run_status == "COMPLETED" else 0
                 actual_latest_samples = int(
                     latest_model.get("actual_training_samples", latest_model.get("training_samples", 0)) or 0
                 )
@@ -1053,8 +1051,8 @@ class TradingApplication:
                 # Fetch gate stats for the latest model (challenger), not the active champion.
                 # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
                 # be a different version — producing a misleading "0 signals" for the challenger.
-                gate: dict = {}
-                gate_events: dict = {}
+                gate: dict[str, Any] = {}
+                gate_events: dict[str, Any] = {}
                 if version and version != "—" and self._trade_journal is not None:
                     gate = await self._trade_journal.get_shadow_gate_stats(
                         version,
@@ -3685,7 +3683,9 @@ class TradingApplication:
         if stats is None:
             return False
         avg_bps, count = stats
-        return count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
+        return bool(
+            count >= self._settings.SYMBOL_SIDE_MIN_SAMPLES and avg_bps < self._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
+        )
 
     def _record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
         """Track shadow TP/SL results and arm a cooldown after poor recent outcomes."""
@@ -4187,7 +4187,7 @@ class TradingApplication:
                 return None
             for scored in self._screener.wide_universe:
                 if scored.symbol == symbol:
-                    return scored.spread_bps
+                    return float(scored.spread_bps)
             return None
 
         priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]

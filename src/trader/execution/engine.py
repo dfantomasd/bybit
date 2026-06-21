@@ -364,11 +364,12 @@ class ExecutionEngine:
         can_add = getattr(type(self._exposure), "can_add_position", None)
         if can_add is None:
             return True, ""
-        return self._exposure.can_add_position(
+        allowed, reason = self._exposure.can_add_position(
             proposal.symbol,
             notional,
             order_id=str(proposal.proposal_id),
         )
+        return bool(allowed), str(reason)
 
     def has_pending_order_for_symbol(self, symbol: str) -> bool:
         """Return True if there is a pending (unresolved) entry for this symbol."""
@@ -1119,7 +1120,7 @@ class ExecutionEngine:
                 log.debug("execution.prediction_event_failed", error=str(_pred_exc))
 
         if not approved:
-            return cast(RiskDecision, decision)
+            return decision
         exposure_reserved = True
 
         # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
@@ -1535,7 +1536,7 @@ class ExecutionEngine:
             self._trailing_stop_tasks.add(_ts_task)
             _ts_task.add_done_callback(self._trailing_stop_tasks.discard)
 
-        return cast(RiskDecision, decision)
+        return decision
 
     # ------------------------------------------------------------------
     # Maker-first execution

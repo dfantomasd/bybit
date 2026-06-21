@@ -573,9 +573,7 @@ class TelegramMonitorBot:
             "polling_running": polling,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "last_callback_at": self._last_callback_at.isoformat() if self._last_callback_at else None,
-            "last_polling_error_at": (
-                self._last_polling_error_at.isoformat() if self._last_polling_error_at else None
-            ),
+            "last_polling_error_at": (self._last_polling_error_at.isoformat() if self._last_polling_error_at else None),
             "last_polling_error": self._last_polling_error,
             "polling_conflict_count": self._polling_conflict_count,
             "polling_network_error_count": self._polling_network_error_count,
@@ -583,7 +581,10 @@ class TelegramMonitorBot:
         }
 
     @staticmethod
-    def _model_horizon_and_gate(db_diag: dict[str, Any], metrics: dict[str, Any] | None = None) -> tuple[int, dict]:
+    def _model_horizon_and_gate(
+        db_diag: dict[str, Any],
+        metrics: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any]]:
         metrics = metrics or {}
         raw_horizon = (
             db_diag.get("model_gate_horizon_minutes")
@@ -1753,9 +1754,7 @@ class TelegramMonitorBot:
         telegram_health = diag.get("telegram") or {}
         if telegram_health:
             tg_state = (
-                "ok"
-                if telegram_health.get("app_running") and telegram_health.get("polling_running")
-                else "problem"
+                "ok" if telegram_health.get("app_running") and telegram_health.get("polling_running") else "problem"
             )
             lines += [
                 f"Telegram: <code>{tg_state}</code> polling=<code>{telegram_health.get('polling_running')}</code>",
@@ -1763,9 +1762,7 @@ class TelegramMonitorBot:
                 f"net errors=<code>{telegram_health.get('polling_network_error_count', 0)}</code>",
             ]
             if telegram_health.get("last_polling_error_at"):
-                lines.append(
-                    f"Последняя ошибка Telegram: <code>{telegram_health.get('last_polling_error_at')}</code>"
-                )
+                lines.append(f"Последняя ошибка Telegram: <code>{telegram_health.get('last_polling_error_at')}</code>")
 
         lines += [
             "",
@@ -2403,9 +2400,7 @@ class TelegramMonitorBot:
                 f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
             )
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
-            labelled_model_horizon = int(
-                training_by_horizon.get(str(model_horizon), labelled_15m) or 0
-            )
+            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
             gate_total = gate.get("total_count", 0) or 0
             gate_pass = gate.get("pass_count", 0) or 0
             gate_block = gate.get("block_count", 0) or 0
@@ -3337,23 +3332,23 @@ class TelegramMonitorBot:
                     self._dashboard_chat_id = msg.chat_id
                 except Exception as _exc:
                     log.debug("telegram.fallback_send_failed", error=str(_exc))
-                    msg = await self._send_direct_message(
+                    sent_msg = await self._send_direct_message(
                         self._message_chat_id(query.message) or self._dashboard_chat_id,
                         text,
                         reply_markup=reply_markup,
                     )
-                    if msg is not None:
-                        self._dashboard_message_id = getattr(msg, "message_id", self._dashboard_message_id)
-                        self._dashboard_chat_id = getattr(msg, "chat_id", self._dashboard_chat_id)
+                    if sent_msg is not None:
+                        self._dashboard_message_id = getattr(sent_msg, "message_id", self._dashboard_message_id)
+                        self._dashboard_chat_id = getattr(sent_msg, "chat_id", self._dashboard_chat_id)
             else:
-                msg = await self._send_direct_message(
+                sent_msg = await self._send_direct_message(
                     self._message_chat_id(query.message) or self._dashboard_chat_id,
                     text,
                     reply_markup=reply_markup,
                 )
-                if msg is not None:
-                    self._dashboard_message_id = getattr(msg, "message_id", self._dashboard_message_id)
-                    self._dashboard_chat_id = getattr(msg, "chat_id", self._dashboard_chat_id)
+                if sent_msg is not None:
+                    self._dashboard_message_id = getattr(sent_msg, "message_id", self._dashboard_message_id)
+                    self._dashboard_chat_id = getattr(sent_msg, "chat_id", self._dashboard_chat_id)
 
     async def _render_home(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the main dashboard text and keyboard."""
@@ -3561,9 +3556,7 @@ class TelegramMonitorBot:
                         metrics = {}
                 model_horizon, gate = self._model_horizon_and_gate(info, metrics)
                 training_by_horizon = info.get("training_eligible_by_horizon", {}) or {}
-                eligible = int(
-                    training_by_horizon.get(str(model_horizon), info.get("training_eligible_15m", 0)) or 0
-                )
+                eligible = int(training_by_horizon.get(str(model_horizon), info.get("training_eligible_15m", 0)) or 0)
 
                 version = html.escape(str(latest.get("version") or "нет"))
                 status = html.escape(self._ru(str(latest.get("status") or "—")))
