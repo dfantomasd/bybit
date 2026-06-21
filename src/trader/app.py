@@ -254,6 +254,8 @@ class TradingApplication:
             trading_mode=self._settings.TRADING_MODE,
             system_status=self._status,
             model_enabled=self._settings.MODEL_ENABLED,
+            postgres_retry_attempts=self._settings.PREFLIGHT_POSTGRES_RETRY_ATTEMPTS,
+            postgres_retry_delay_s=self._settings.PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS,
         )
 
         result = await self._health_checker.run_preflight()
