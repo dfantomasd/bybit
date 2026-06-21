@@ -482,6 +482,23 @@ class TradingApplication:
             return True
         return not self._active_execution_allowed()
 
+    def _is_scalp_profile(self) -> bool:
+        from trader.domain.enums import RiskProfile
+
+        assert self._settings is not None
+        return self._settings.RISK_PROFILE == RiskProfile.SCALP
+
+    def _scalp_strict_shadow(self) -> bool:
+        """SCALP paper-trading should mirror LIVE quality gates."""
+        assert self._settings is not None
+        return self._is_scalp_profile() and self._settings.SCALP_STRICT_SHADOW and self._initial_shadow_mode()
+
+    def _expectancy_gates_apply(self) -> bool:
+        """True when bucket/symbol-side gates should block entries."""
+        if self._scalp_strict_shadow():
+            return True
+        return not self._initial_shadow_mode()
+
     async def _change_risk_profile(self, profile: Any) -> None:
         """Hot-swap the risk profile without restarting — preserves all risk state.
 
@@ -1957,10 +1974,13 @@ class TradingApplication:
             risk_manager=self._risk_manager,
             exposure_tracker=self._exposure_tracker,
             shadow_mode=shadow,
+            shadow_apply_net_edge_gate=self._scalp_strict_shadow(),
             cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
             min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
+            micro_account_balance_usd=self._settings.MICRO_ACCOUNT_BALANCE_USD,
+            micro_account_min_notional_buffer_pct=self._settings.MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT,
             max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
             max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
@@ -3652,9 +3672,10 @@ class TradingApplication:
         A bucket blocks only with >= BUCKET_MIN_SAMPLES resolved outcomes and an
         average net return below BUCKET_BLOCK_AVG_BPS — small samples never block.
         In shadow mode the gate is skipped so virtual orders can accumulate training data.
+        SCALP strict shadow keeps the gate enabled to avoid paper-trading toxic pairs.
         """
         assert self._settings is not None
-        if self._initial_shadow_mode():
+        if not self._expectancy_gates_apply():
             return False
         if not self._settings.BUCKET_BLOCK_ENABLED or not self._bucket_stats:
             return False
@@ -3679,10 +3700,11 @@ class TradingApplication:
         """True when a symbol+side pair has proven negative expectancy.
 
         In shadow mode the gate is skipped so virtual orders can accumulate training data.
+        SCALP strict shadow keeps the gate enabled to avoid paper-trading toxic pairs.
         """
 
         assert self._settings is not None
-        if self._initial_shadow_mode():
+        if not self._expectancy_gates_apply():
             return False
         if not self._settings.SYMBOL_SIDE_BLOCK_ENABLED or not self._symbol_side_stats:
             return False
@@ -4188,20 +4210,28 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies: list[Any] = [
-            EMAcrossoverStrategy(
-                symbol=None,  # None = evaluate any symbol passed in
-                allow_short=True,
-                min_qty_usd=5.0,  # Bybit minimum notional is $5
-                max_risk_pct=0.01,  # 1% of balance per trade
-                min_adx=self._settings.TREND_MIN_ADX,
-                block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
-                taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
-                expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
-                max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
-                min_net_return_pct=self._settings.MIN_NET_TREND_RETURN_PCT,
+        strategies: list[Any] = []
+        is_scalp = self._is_scalp_profile()
+        include_trend = self._settings.TREND_STRATEGY_ENABLED and not (
+            is_scalp and self._settings.SCALP_DISABLE_TREND_STRATEGY
+        )
+        if include_trend:
+            strategies.append(
+                EMAcrossoverStrategy(
+                    symbol=None,  # None = evaluate any symbol passed in
+                    allow_short=True,
+                    min_qty_usd=5.0,  # Bybit minimum notional is $5
+                    max_risk_pct=0.01,  # 1% of balance per trade
+                    min_adx=self._settings.TREND_MIN_ADX,
+                    block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
+                    taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                    expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                    max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+                    min_net_return_pct=self._settings.MIN_NET_TREND_RETURN_PCT,
+                )
             )
-        ]
+        elif is_scalp:
+            log.info("scalp_profile.trend_strategy_disabled")
 
         def _spread_for(symbol: str) -> float | None:
             """Latest screener spread for the symbol; None when unknown."""
@@ -4212,7 +4242,14 @@ class TradingApplication:
                     return float(scored.spread_bps)
             return None
 
-        priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]
+        if is_scalp:
+            priority_order = [
+                sid.strip() for sid in self._settings.SCALP_STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()
+            ]
+        else:
+            priority_order = [
+                sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()
+            ]
         strategy_priorities = {
             strategy_id: len(priority_order) - index for index, strategy_id in enumerate(priority_order)
         }

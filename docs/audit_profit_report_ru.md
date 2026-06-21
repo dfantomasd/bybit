@@ -139,4 +139,24 @@ python3 -m trader.backtest.run --bars 1000 --min-net-return 0.10
 
 ---
 
-*Дисклеймер: прошлые результаты бэктеста не гарантируют будущую доходность. Все изменения сохраняют fail-closed поведение при сбоях.*
+## 9. Анализ production-логов (SCALP, SHADOW, 2026-06-21)
+
+По предоставленным логам выявлено:
+
+| Наблюдение | Проблема | Исправление в PR |
+|---|---|---|
+| Сигнал `ema_crossover_v1` на ADAUSDT | Для SCALP сработала trend-стратегия с широким TP/SL вместо scalp | `SCALP_DISABLE_TREND_STRATEGY=true` |
+| ADAUSDT в `blocked_symbol_sides` | SHADOW пропускал toxic pairs | `SCALP_STRICT_SHADOW=true` → expectancy gates |
+| Net edge ~0.12% < 0.25% порога LIVE | SHADOW не применял net-edge gate | net-edge gate в strict shadow |
+| `post-signal notional 5.1456 < required 5.1500` | 3% buffer на счёте $23.5 | `MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT=1.0` |
+| `portfolio_heat: 22.58%` при лимите 8% | Trend sizing на дешёвой монете | отключение trend для SCALP |
+| 0 сигналов `scalp_micro_v1` | Условия не выполнены (cross/spread/imbalance) | приоритет scalp в `SCALP_STRATEGY_PRIORITY_ORDER` |
+| `model_gate_quality: WEAK` | ML gate не готов к live | без изменений — ждать promotion |
+
+**Рекомендуемые env для вашего инстанса (SCALP + SHADOW):**
+```env
+RISK_PROFILE=SCALP
+SCALP_DISABLE_TREND_STRATEGY=true
+SCALP_STRICT_SHADOW=true
+MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT=1.0
+```

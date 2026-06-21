@@ -118,7 +118,17 @@ class Settings(BaseSettings):
     SCALP_MIN_OB_IMBALANCE: float = 0.15
     """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
     >= +value, SELL needs <= -value). Missing/stale book data fails closed."""
-    TREND_MIN_ADX: float = 0.25
+    SCALP_DISABLE_TREND_STRATEGY: bool = True
+    """When RISK_PROFILE=SCALP, skip the slow EMA trend strategy (wide TP/SL)."""
+    SCALP_STRATEGY_PRIORITY_ORDER: str = (
+        "scalp_micro_v1,order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
+    )
+    """Strategy priority override used when RISK_PROFILE=SCALP."""
+    SCALP_STRICT_SHADOW: bool = True
+    """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
+    TREND_STRATEGY_ENABLED: bool = True
+    """Enable the EMA crossover trend strategy in the ensemble."""
     """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
     TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
     """Block fragile trend entries when funding and open interest context disagrees."""
@@ -304,6 +314,10 @@ class Settings(BaseSettings):
     MIN_NOTIONAL_SAFETY_BUFFER_PCT: float = 3.0
     """Safety buffer applied on top of exchange min-notional (e.g. 3% → $5 min becomes $5.15).
     Prevents near-limit orders from being rejected by code=110094."""
+    MICRO_ACCOUNT_BALANCE_USD: float = 50.0
+    """Balances below this use MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT instead."""
+    MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT: float = 1.0
+    """Reduced min-notional buffer for micro accounts (e.g. ~$23 testnet wallets)."""
     LIVE_REQUIRE_LIQUIDITY_FOR_SIZING: bool = True
     """Require fresh turnover_24h data before sizing entries in LIVE/CANARY_LIVE."""
 
