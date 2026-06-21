@@ -573,10 +573,12 @@ def test_telegram_db_model_handler_registered():
     # Track registered handlers without actually starting the bot
     registered: dict[str, Any] = {}
 
-    bot = TelegramMonitorBot.__new__(TelegramMonitorBot)
-    bot._config = config
-    bot._controller = None
-    bot._app = None
+    bot = TelegramMonitorBot(
+        config=config,
+        health_provider=AsyncMock(),
+        adapter_factory=lambda: None,
+        controller=None,
+    )
 
     with patch("trader.telegram_bot.Application") as mock_app_cls:
         mock_app = MagicMock()
@@ -590,10 +592,14 @@ def test_telegram_db_model_handler_registered():
         mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
         mock_app.initialize = AsyncMock()
         mock_app.start = AsyncMock()
+        mock_app.bot.delete_webhook = AsyncMock()
         mock_app.updater = MagicMock()
         mock_app.updater.start_polling = AsyncMock()
+        mock_app.updater.running = False
 
         asyncio.run(bot.start())
+        if bot._polling_watchdog_task is not None:
+            bot._polling_watchdog_task.cancel()
 
     assert "db" in registered, "/db handler not registered"
     assert "model" in registered, "/model handler not registered"

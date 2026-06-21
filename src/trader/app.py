@@ -1977,6 +1977,8 @@ class TradingApplication:
                 default_category=self._settings.DEFAULT_MARKET_CATEGORY,
                 redis_url=self._settings.REDIS_URL.get_secret_value(),
                 polling_conflict_recovery_wait_s=self._settings.TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS,
+                polling_watchdog_interval_s=self._settings.TELEGRAM_POLLING_WATCHDOG_INTERVAL_SECONDS,
+                polling_zombie_silence_s=self._settings.TELEGRAM_POLLING_ZOMBIE_SILENCE_SECONDS,
             ),
             health_provider=self._health_checker.overall_health,
             adapter_factory=lambda: self._bybit_adapter,
