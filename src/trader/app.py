@@ -1383,11 +1383,6 @@ class TradingApplication:
         if feature_snapshots < 1000:
             issues.append(f"insufficient_feature_snapshots:{feature_snapshots}")
 
-        trainable_15m = int(db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")) or 0)
-        metrics["training_eligible_15m"] = trainable_15m
-        if trainable_15m < 1000:
-            issues.append(f"insufficient_labelled_15m:{trainable_15m}")
-
         prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
         metrics["prediction_outcomes"] = prediction_outcomes
         if prediction_outcomes < 1000:
@@ -1396,6 +1391,29 @@ class TradingApplication:
         active_model = self._dict_or_empty(db_diag.get("active_model_version"))
         model_metrics = self._dict_or_empty(active_model.get("metrics"))
         model_status = str(active_model.get("status") or "")
+        try:
+            model_horizon = int(
+                db_diag.get("model_gate_horizon_minutes")
+                or model_metrics.get("horizon_minutes")
+                or model_metrics.get("label_horizon_minutes")
+                or getattr(self._settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 15)
+                or 15
+            )
+        except (TypeError, ValueError):
+            model_horizon = 15
+        metrics["model_horizon_minutes"] = model_horizon
+        training_by_horizon = self._dict_or_empty(db_diag.get("training_eligible_by_horizon"))
+        raw_trainable = training_by_horizon.get(str(model_horizon))
+        if raw_trainable is None:
+            raw_trainable = db_diag.get(f"training_eligible_{model_horizon}m")
+        if raw_trainable is None:
+            raw_trainable = db_diag.get("training_eligible_15m")
+        if raw_trainable is None:
+            raw_trainable = db_diag.get("labelled_samples_15m")
+        trainable = int(raw_trainable or 0)
+        metrics["training_eligible_model_horizon"] = trainable
+        if trainable < 1000:
+            issues.append(f"insufficient_labelled_{model_horizon}m:{trainable}")
         metrics["active_model_version"] = active_model.get("version")
         metrics["active_model_status"] = model_status or None
         if not active_model.get("version"):
@@ -1414,7 +1432,13 @@ class TradingApplication:
         if walk_forward is None or walk_forward <= 0:
             issues.append(f"non_positive_walk_forward_bps:{walk_forward}")
 
-        gate = self._dict_or_empty(db_diag.get("shadow_gate_15m"))
+        gate_by_horizon = self._dict_or_empty(db_diag.get("shadow_gate_by_horizon"))
+        raw_gate = gate_by_horizon.get(str(model_horizon))
+        if raw_gate is None:
+            raw_gate = db_diag.get(f"shadow_gate_{model_horizon}m")
+        if raw_gate is None:
+            raw_gate = db_diag.get("shadow_gate_15m")
+        gate = self._dict_or_empty(raw_gate)
         gate_total = int(gate.get("total_count") or 0)
         metrics["gate_total_count"] = gate_total
         if gate_total < int(self._settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS):
@@ -1424,7 +1448,13 @@ class TradingApplication:
         if gate_lift is None or gate_lift < float(self._settings.MODEL_GATE_CANARY_MIN_LIFT_BPS):
             issues.append(f"insufficient_gate_lift_bps:{gate_lift}")
 
-        paper = self._dict_or_empty(db_diag.get("paper_pnl_15m"))
+        paper_by_horizon = self._dict_or_empty(db_diag.get("paper_pnl_by_horizon"))
+        raw_paper = paper_by_horizon.get(str(model_horizon))
+        if raw_paper is None:
+            raw_paper = db_diag.get(f"paper_pnl_{model_horizon}m")
+        if raw_paper is None:
+            raw_paper = db_diag.get("paper_pnl_15m")
+        paper = self._dict_or_empty(raw_paper)
         paper_gate = self._dict_or_empty(paper.get("model_gate"))
         paper_count = int(paper_gate.get("count") or 0)
         paper_total_bps = self._float_or_none(paper_gate.get("total_bps"))

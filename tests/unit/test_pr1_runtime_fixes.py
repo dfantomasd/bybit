@@ -155,6 +155,7 @@ def _active_settings() -> MagicMock:
     settings.MODEL_GATE_CANARY_MIN_QUALITY = "GOOD"
     settings.MODEL_GATE_CANARY_MIN_OBSERVATIONS = 50
     settings.MODEL_GATE_CANARY_MIN_LIFT_BPS = 0.0
+    settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES = 5
     return settings
 
 
@@ -219,6 +220,75 @@ async def test_economic_readiness_allows_canary_with_proven_edge() -> None:
     )
 
     await app._enforce_economic_readiness_for_active()
+
+
+def test_economic_readiness_uses_model_horizon_stats() -> None:
+    """A 5m model must be evaluated against 5m training/gate/paper stats."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+
+    report = app._economic_readiness_report(
+        db_diag={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_by_horizon": {"5": 2500, "15": 0},
+            "active_model_version": {
+                "version": "v_good_5m",
+                "status": "CHAMPION",
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 2.5,
+                },
+            },
+            "shadow_gate_by_horizon": {"5": {"total_count": 120, "lift_vs_all_bps": 1.2}},
+            "shadow_gate_15m": {"total_count": 0, "lift_vs_all_bps": None},
+            "paper_pnl_by_horizon": {"5": {"model_gate": {"count": 35, "total_bps": 18.0}}},
+            "paper_pnl_15m": {"model_gate": {"count": 0, "total_bps": 0.0}},
+        },
+        runtime_diag={"active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"]},
+    )
+
+    assert report["ready"] is True
+    assert report["metrics"]["model_horizon_minutes"] == 5
+    assert report["metrics"]["training_eligible_model_horizon"] == 2500
+
+
+def test_economic_readiness_does_not_fallback_when_model_horizon_is_zero() -> None:
+    """Explicit 5m=0 must not be masked by legacy 15m sample counts."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+
+    report = app._economic_readiness_report(
+        db_diag={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_by_horizon": {"5": 0, "15": 2500},
+            "active_model_version": {
+                "version": "v_good_5m",
+                "status": "CHAMPION",
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 2.5,
+                },
+            },
+            "shadow_gate_by_horizon": {"5": {"total_count": 120, "lift_vs_all_bps": 1.2}},
+            "paper_pnl_by_horizon": {"5": {"model_gate": {"count": 35, "total_bps": 18.0}}},
+        },
+        runtime_diag={"active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"]},
+    )
+
+    assert report["ready"] is False
+    assert "insufficient_labelled_5m:0" in report["issues"]
 
 
 def _instrument(min_notional: str = "5") -> InstrumentInfo:
