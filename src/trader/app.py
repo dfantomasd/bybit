@@ -105,6 +105,10 @@ class TradingApplication:
         self._fastapi_app: Any | None = None
         self._bybit_adapter: Any | None = None
         self._telegram_bot: Any | None = None
+        self._db_diagnostics_cache: dict[str, Any] | None = None
+        self._db_diagnostics_cache_at: float = 0.0
+        self._db_diagnostics_lite_cache: dict[str, Any] | None = None
+        self._db_diagnostics_lite_cache_at: float = 0.0
         self._ws_public: Any | None = None
         self._candle_store: Any | None = None
         self._orderbook_tracker: Any | None = None
@@ -1812,21 +1816,55 @@ class TradingApplication:
             except Exception:
                 return None
 
-        async def _db_diagnostics_provider() -> dict[str, Any]:
+        async def _db_diagnostics_provider(*, lite: bool = False) -> dict[str, Any]:
             if self._trade_journal is None:
                 return {
                     "connected": False,
                     "configured": False,
                     "error": "trade_journal_not_started",
+                    "lite": lite,
                 }
             if not self._trade_journal.is_enabled:
                 await self._trade_journal.reconnect_if_needed(force=True)
-            diag = await self._trade_journal.get_db_diagnostics()
-            self._update_model_gate_quality_from_diag(diag)
+            now = time.monotonic()
+            cache_ttl = 30.0 if lite else 10.0
+            cache = self._db_diagnostics_lite_cache if lite else self._db_diagnostics_cache
+            cache_at = self._db_diagnostics_lite_cache_at if lite else self._db_diagnostics_cache_at
+            if cache is not None and (now - cache_at) < cache_ttl:
+                return dict(cache)
+            try:
+                diag = await asyncio.wait_for(
+                    self._trade_journal.get_db_diagnostics(lite=lite),
+                    timeout=8.0 if lite else 15.0,
+                )
+            except asyncio.TimeoutError:
+                log.warning("db_diagnostics_timeout", lite=lite)
+                return {
+                    "connected": self._trade_journal.is_enabled,
+                    "configured": self._trade_journal.is_configured,
+                    "error": "db_diagnostics_timeout",
+                    "schema_degraded": bool(
+                        getattr(self._trade_journal, "_last_connect_error", None)
+                        and "schema bootstrap degraded"
+                        in str(getattr(self._trade_journal, "_last_connect_error", "")).lower()
+                    ),
+                    "lite": lite,
+                }
+            except Exception as exc:
+                return {"connected": False, "error": str(exc), "lite": lite}
+            if not lite:
+                self._update_model_gate_quality_from_diag(diag)
             diag["paper_notional_usd"] = (
                 float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
             )
-            return cast(dict[str, Any], diag)
+            cached = dict(diag)
+            if lite:
+                self._db_diagnostics_lite_cache = cached
+                self._db_diagnostics_lite_cache_at = now
+            else:
+                self._db_diagnostics_cache = cached
+                self._db_diagnostics_cache_at = now
+            return diag
 
         async def _healthcheck_provider() -> dict[str, Any]:
             diag = self.get_diagnostics()

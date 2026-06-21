@@ -26,6 +26,7 @@ log = structlog.get_logger(__name__)
 
 _MODEL_PROMOTION_ADVISORY_LOCK_ID = 926_202_606
 _POOL_CLOSE_TIMEOUT_SECONDS = 5.0
+_FETCH_TIMEOUT_SECONDS = 5.0
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -545,13 +546,24 @@ class TradeJournal:
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
             """)
-            await self._ensure_feature_snapshot_unique_index(conn)
-            # This index must be created AFTER ALTER TABLE adds label_schema_version
-            # to avoid CREATE INDEX failing on an existing DB where the column was missing.
             await conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
                 "ON prediction_outcomes (label_schema_version)"
             )
+        asyncio.create_task(
+            self._ensure_feature_snapshot_unique_index_deferred(),
+            name="trade-journal-feature-index",
+        )
+
+    async def _ensure_feature_snapshot_unique_index_deferred(self) -> None:
+        """Run heavy dedupe/index work outside startup-critical schema bootstrap."""
+        if self._pool is None:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await self._ensure_feature_snapshot_unique_index(conn)
+        except Exception as exc:
+            log.warning("trade_journal.feature_snapshot_unique_index_deferred_failed", error=str(exc))
 
     async def _ensure_feature_snapshot_unique_index(self, conn: asyncpg.Connection) -> None:
         """Best-effort index bootstrap; never make the journal unavailable."""
@@ -2737,11 +2749,15 @@ class TradeJournal:
             log.warning("trade_journal.dashboard_data_failed", error=str(exc))
             return {"connected": self.is_enabled, "error": str(exc)}
 
-    async def get_db_diagnostics(self) -> dict[str, Any]:
+    async def get_db_diagnostics(self, *, lite: bool = False) -> dict[str, Any]:
         """Return read-only diagnostics for Telegram 🗄 screen."""
         result: dict[str, Any] = {
             "connected": self.is_enabled,
             "configured": self.is_configured,
+            "lite": lite,
+            "schema_degraded": bool(
+                self._last_connect_error and "schema bootstrap degraded" in str(self._last_connect_error).lower()
+            ),
             "last_connect_error": self._last_connect_error,
             "last_connect_error_at": self._last_connect_error_at,
             "last_read_error": self._last_read_error,
@@ -2783,6 +2799,55 @@ class TradeJournal:
         try:
             self._last_read_error = None
             self._last_read_error_at = None
+
+            if lite:
+                latest_candle_1m = await _read_or_default(
+                    "latest_candle_1m",
+                    None,
+                    lambda: self.get_latest_candle_time("1"),
+                )
+                result["latest_candle_1m"] = latest_candle_1m
+                if latest_candle_1m is not None:
+                    result["last_confirmed_candle_age_s"] = max(
+                        0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
+                    )
+                rows = await self._fetch(
+                    """
+                    SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
+                    FROM training_runs
+                    ORDER BY started_at DESC
+                    LIMIT 1
+                    """
+                )
+                if rows:
+                    result["latest_training_run"] = dict(rows[0])
+                rows = await self._fetch(
+                    """
+                    SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                    FROM model_versions
+                    WHERE artifact IS NOT NULL
+                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """
+                )
+                if rows:
+                    result["latest_model_version"] = dict(rows[0])
+                champion_rows = await self._fetch(
+                    """
+                    SELECT version, status, training_samples, metrics, training_finished_at, created_at
+                    FROM model_versions
+                    WHERE status = 'CHAMPION'
+                      AND artifact IS NOT NULL
+                    ORDER BY training_finished_at DESC NULLS LAST, created_at DESC
+                    LIMIT 1
+                    """
+                )
+                if champion_rows:
+                    result["active_model_version"] = dict(champion_rows[0])
+                else:
+                    result["active_model_version"] = result.get("latest_model_version", {})
+                return result
+
             result["candles_by_interval"] = await _read_or_default(
                 "candle_readiness_counts",
                 {},
@@ -3305,7 +3370,17 @@ class TradeJournal:
         assert self._pool is not None
         try:
             async with self._pool.acquire() as conn:
-                return list(await conn.fetch(query, *args))
+                return list(
+                    await asyncio.wait_for(
+                        conn.fetch(query, *args),
+                        timeout=_FETCH_TIMEOUT_SECONDS,
+                    )
+                )
+        except TimeoutError:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = f"query timeout after {_FETCH_TIMEOUT_SECONDS}s"
+            log.warning("trade_journal.fetch_timeout", timeout_s=_FETCH_TIMEOUT_SECONDS)
+            return []
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

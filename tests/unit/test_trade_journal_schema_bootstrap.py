@@ -79,6 +79,7 @@ async def test_feature_snapshot_eligible_unique_index_is_bootstrapped_after_colu
     journal._pool = cast(Any, _FakePool())
 
     await journal._ensure_schema()
+    await journal._ensure_feature_snapshot_unique_index_deferred()
 
 
 @pytest.mark.asyncio
@@ -88,6 +89,7 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     journal._pool = cast(Any, pool)
 
     await journal._ensure_schema()
+    await journal._ensure_feature_snapshot_unique_index_deferred()
 
     sql = "\n".join(pool.conn.executed_sql)
     assert "idx_prediction_events_model_time" in sql
@@ -106,6 +108,7 @@ async def test_feature_snapshot_duplicates_are_invalidated_before_unique_index()
     journal._pool = cast(Any, pool)
 
     await journal._ensure_schema()
+    await journal._ensure_feature_snapshot_unique_index_deferred()
 
     sql = "\n".join(pool.conn.executed_sql)
     repair_pos = sql.find("duplicate_snapshot_same_candle")
