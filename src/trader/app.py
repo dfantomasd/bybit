@@ -885,7 +885,12 @@ class TradingApplication:
                 )
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
 
-                if not (enough_initial or enough_increment or enough_schema_change):
+                enough_weak_retrain = bool(
+                    getattr(self._settings, "MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK", True)
+                    and str(self._model_gate_quality.get("quality") or "WEAK").upper() in {"WEAK", ""}
+                    and trainable >= min_samples
+                )
+                if not (enough_initial or enough_increment or enough_schema_change or enough_weak_retrain):
                     if schema_mismatch and newest_schema_samples > 0:
                         log.warning(
                             "model_auto_training.schema_mismatch_accumulating",
@@ -898,7 +903,9 @@ class TradingApplication:
                     continue
 
                 trigger_reason = (
-                    "schema_change" if enough_schema_change else ("initial" if enough_initial else "increment")
+                    "schema_change"
+                    if enough_schema_change
+                    else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
                 )
                 effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
                 msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
@@ -3584,7 +3591,7 @@ class TradingApplication:
                 strategy_signal=side,
                 decision="SHADOW_CANDLE",
                 feature_snapshot_id=snapshot_id,
-                metadata={"source": "candle_sampler"},
+                metadata={"source": "candle_sampler", "strategy_id": "candle_sampler_v1"},
             )
 
             self._candle_sampler_total += 1

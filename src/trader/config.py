@@ -457,16 +457,14 @@ class Settings(BaseSettings):
     """CSV label thresholds in bps evaluated during offline selection.
     0 bps = break-even after costs (net-cost-aware label already deducts fees).
     20 bps removed: too demanding for 5-min bars, leaves almost no positive labels."""
-    MODEL_LABEL_HORIZON: int = 30
-    """Bars ahead to measure label outcome; 30 bars on 5m = 2.5h horizon."""
+    MODEL_LABEL_HORIZON: int = 5
+    """Bars ahead to measure label outcome. Use 5 for SCALP, 15-30 for swing."""
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
-    TRAIN_STRATEGY_ALLOWLIST: str = (
-        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
-        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
-    )
-    """CSV strategy ids eligible for model training from prediction metadata."""
+    TRAIN_STRATEGY_ALLOWLIST: str = ""
+    """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels, including
+    candle-sampling baselines that do not carry strategy_id metadata."""
     TRAIN_MIN_BUCKET_SAMPLES: int = 50
     TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
     """Optional training filter: remove regime/hour buckets with stable negative expectancy."""
@@ -485,6 +483,8 @@ class Settings(BaseSettings):
     """Minimum time between successful auto-training runs. Prevents checkpoint churn
     while a challenger has not yet accumulated shadow evidence."""
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
+    MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = True
+    """Retrain automatically when the latest model quality is WEAK/missing."""
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion

@@ -731,15 +731,17 @@ def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
     )
 
 
-def test_training_allowlist_excludes_unattributed_candle_sampler_rows() -> None:
-    """Configured strategy allowlists must not be bypassed by NULL strategy_id rows."""
+def test_training_allowlist_includes_candle_sampler_baselines() -> None:
+    """Candle-sampling baselines without strategy_id must remain trainable."""
     import inspect
 
-    from trader.training import train
+    from trader.training import eligibility, train
 
     src = inspect.getsource(train._train)
-    assert "OR pe.metadata->>'strategy_id' IS NULL" not in src
-    assert "OR pe.metadata->>'strategy_id' = ANY" in src
+    assert "training_strategy_filter_sql" in src
+    eligibility_src = inspect.getsource(eligibility)
+    assert "SHADOW_CANDLE" in eligibility_src
+    assert "strategy_id' IS NULL" in eligibility_src
 
 
 @pytest.mark.asyncio

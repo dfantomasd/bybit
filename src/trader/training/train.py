@@ -26,6 +26,7 @@ import click
 import numpy as np
 
 from trader.ml.model_selection import model_selection_metrics
+from trader.training.eligibility import training_strategy_filter_sql
 from trader.training.labels import LABEL_SCHEMA_VERSION
 
 log = logging.getLogger(__name__)
@@ -404,6 +405,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
     settings = Settings()
     strategy_allowlist = _parse_str_csv(settings.TRAIN_STRATEGY_ALLOWLIST)
+    strategy_filter = training_strategy_filter_sql("$4")
     log.info("Training strategy allowlist: %s", strategy_allowlist or "ALL")
     dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
     pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
@@ -418,7 +420,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         )
 
         rows = await pool.fetch(
-            """
+            f"""
             WITH eligible_samples AS (
                 SELECT
                     fs.symbol,
@@ -447,7 +449,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND ($4::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($4::text[]))
+                  AND {strategy_filter}
             ),
             schema_counts AS (
                 SELECT
@@ -501,7 +503,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             # min_samples, so "0" alone is misleading — report the real
             # accumulation progress per feature schema.
             schema_rows = await pool.fetch(
-                """
+                f"""
                 SELECT fs.feature_schema_hash,
                        count(DISTINCT (fs.symbol, fs.interval, fs.candle_open_time)) AS cnt
                 FROM feature_snapshots fs
@@ -514,7 +516,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                   AND fs.training_eligible = true
                   AND pe.model_version = 'RULE_BASELINE_V1'
                   AND pe.strategy_signal IN ('Buy', 'Sell')
-                  AND ($3::text[] IS NULL OR pe.metadata->>'strategy_id' = ANY($3::text[]))
+                  AND {strategy_filter.replace("$4", "$3")}
                 GROUP BY fs.feature_schema_hash
                 ORDER BY cnt DESC
                 """,
