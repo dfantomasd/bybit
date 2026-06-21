@@ -4248,9 +4248,7 @@ class TradingApplication:
                 sid.strip() for sid in self._settings.SCALP_STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()
             ]
         else:
-            priority_order = [
-                sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()
-            ]
+            priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]
         strategy_priorities = {
             strategy_id: len(priority_order) - index for index, strategy_id in enumerate(priority_order)
         }

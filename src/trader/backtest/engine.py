@@ -130,7 +130,9 @@ class BacktestEngine:
                     open_trade = None
                 continue
 
-            vec = self._build_feature_vector(symbol, closes[: idx + 1], highs[: idx + 1], lows[: idx + 1], volumes[: idx + 1])
+            vec = self._build_feature_vector(
+                symbol, closes[: idx + 1], highs[: idx + 1], lows[: idx + 1], volumes[: idx + 1]
+            )
             if vec is None:
                 continue
 
@@ -269,9 +271,9 @@ class BacktestEngine:
         )
 
 
-def generate_synthetic_trend(n: int = 500, *, start: float = 100.0, drift: float = 0.0008, noise: float = 0.002) -> tuple[
-    list[float], list[float], list[float], list[float]
-]:
+def generate_synthetic_trend(
+    n: int = 500, *, start: float = 100.0, drift: float = 0.0008, noise: float = 0.002
+) -> tuple[list[float], list[float], list[float], list[float]]:
     """Generate synthetic trending OHLCV for backtest smoke tests."""
     closes: list[float] = []
     highs: list[float] = []

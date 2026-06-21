@@ -77,7 +77,9 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
     ]
 
 
-def resolve_training_horizon(snapshots: list[TrainableSnapshot], preferred: int, *, min_samples: int) -> TrainableSnapshot | None:
+def resolve_training_horizon(
+    snapshots: list[TrainableSnapshot], preferred: int, *, min_samples: int
+) -> TrainableSnapshot | None:
     eligible = [item for item in snapshots if item.sample_count >= min_samples]
     if not eligible:
         return None
@@ -207,9 +209,15 @@ async def _auto_train(force: bool, min_samples: int, horizon: int, label_bps: fl
 
 @click.command()
 @click.option("--force", is_flag=True, help="Train even if the latest model is not WEAK")
-@click.option("--min-samples", default=0, type=int, help="Minimum labelled samples (default: MODEL_AUTO_TRAIN_MIN_SAMPLES)")
-@click.option("--horizon", default=0, type=int, help="Preferred horizon minutes (default: MODEL_AUTO_TRAIN_HORIZON_MINUTES)")
-@click.option("--label-bps", default=0.0, type=float, help="Label threshold in bps (default: MODEL_AUTO_TRAIN_LABEL_BPS)")
+@click.option(
+    "--min-samples", default=0, type=int, help="Minimum labelled samples (default: MODEL_AUTO_TRAIN_MIN_SAMPLES)"
+)
+@click.option(
+    "--horizon", default=0, type=int, help="Preferred horizon minutes (default: MODEL_AUTO_TRAIN_HORIZON_MINUTES)"
+)
+@click.option(
+    "--label-bps", default=0.0, type=float, help="Label threshold in bps (default: MODEL_AUTO_TRAIN_LABEL_BPS)"
+)
 def main(force: bool, min_samples: int, horizon: int, label_bps: float) -> None:
     """Train automatically when real labelled samples are ready."""
     raise SystemExit(asyncio.run(_auto_train(force, min_samples, horizon, label_bps)))
