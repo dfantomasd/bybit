@@ -2331,8 +2331,7 @@ class TelegramMonitorBot:
         telegram_health = diag.get("telegram") or {}
         if telegram_health:
             tg_ok = bool(telegram_health.get("app_running")) and (
-                bool(telegram_health.get("polling_running"))
-                or bool(telegram_health.get("webhook_active"))
+                bool(telegram_health.get("polling_running")) or bool(telegram_health.get("webhook_active"))
             )
             tg_mode = "webhook" if telegram_health.get("webhook_active") else "polling"
             lines += [
@@ -2420,7 +2419,9 @@ class TelegramMonitorBot:
 
         candles = db_diag.get("candles_by_interval", {}) or {}
         if not any(int(candles.get(key) or 0) for key in ("1", "5", "15", "60")):
-            runtime_candles = diag.get("runtime_candles_by_interval") or db_diag.get("runtime_candles_by_interval") or {}
+            runtime_candles = (
+                diag.get("runtime_candles_by_interval") or db_diag.get("runtime_candles_by_interval") or {}
+            )
             if runtime_candles:
                 candles = runtime_candles
         latest_1m = db_diag.get("latest_candle_1m")
