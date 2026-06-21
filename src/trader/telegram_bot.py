@@ -1547,9 +1547,7 @@ class TelegramMonitorBot:
         symbol_worst = data.get("symbols_worst") or data.get("worst_symbols") or []
         regimes = data.get("regimes") or []
         weekdays = data.get("weekdays") or []
-        hours = {
-            int(row.get("hour") or row.get("hour_utc") or 0): row for row in data.get("hours") or []
-        }
+        hours = {int(row.get("hour") or row.get("hour_utc") or 0): row for row in data.get("hours") or []}
         horizon = int(data.get("horizon_minutes") or self._train_defaults()[1])
         label_schema = str(data.get("label_schema_version") or "directional_net_v2")
         lines = [
@@ -2597,7 +2595,9 @@ class TelegramMonitorBot:
             loose_v2_5m = int((db_diag.get("prediction_outcomes_by_horizon", {}) or {}).get(str(model_horizon), 0) or 0)
             train_allowlist = training_config.get("strategy_allowlist") or []
             train_include_candle = training_config.get("include_candle_baseline")
-            train_label_schema = training_config.get("label_schema_version") or db_diag.get("label_schema_version", "n/a")
+            train_label_schema = training_config.get("label_schema_version") or db_diag.get(
+                "label_schema_version", "n/a"
+            )
             scalp_active = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
             legacy_candle_v1 = int(pool_breakdown.get("legacy_v1_candle_baseline", 0) or 0)
             other_active = int(pool_breakdown.get("other_active_schema", 0) or 0)

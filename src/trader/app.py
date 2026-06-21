@@ -962,18 +962,10 @@ class TradingApplication:
                     else (
                         "schema_change"
                         if enough_schema_change
-                        else (
-                            "weak_retrain"
-                            if enough_weak_retrain
-                            else ("initial" if enough_initial else "increment")
-                        )
+                        else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
                     )
                 )
-                effective_min_samples = (
-                    schema_change_min_samples
-                    if enough_schema_change
-                    else min_samples
-                )
+                effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
                 if trainable < effective_min_samples:
                     log.warning(
                         "model_auto_training.preflight_blocked",

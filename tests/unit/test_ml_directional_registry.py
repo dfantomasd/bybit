@@ -10,7 +10,7 @@ import pytest
 
 from trader.ml import challenger as challenger_module
 from trader.ml.challenger import ChallengerModel, ModelPrediction, ModelRegistry, ModelStatus
-from trader.training.labels import LABEL_SCHEMA_VERSION, LABEL_SCHEMA_VERSION_TPSL
+from trader.training.labels import LABEL_SCHEMA_VERSION_TPSL
 
 
 @dataclass

@@ -55,11 +55,7 @@ def main() -> int:
         print(f"Add them to {_ENV_EXAMPLE} and re-run this script.")
         return 1
 
-    total = sum(
-        1
-        for _, fi in Settings.model_fields.items()
-        if fi.annotation is not SecretStr
-    )
+    total = sum(1 for _, fi in Settings.model_fields.items() if fi.annotation is not SecretStr)
     print(f"OK — all {total} non-secret Settings fields are present in .env.example")
     return 0
 

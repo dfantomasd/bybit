@@ -21,8 +21,6 @@ from trader.domain.models import FeatureVector, RegimeContext, TradeProposal
 from trader.features.source_candle_guard import source_candle_for_feature
 from trader.storage import trade_journal as _base_module
 from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
-from trader.training.eligibility import training_strategy_filter_sql
-from trader.training.sample_counts import fetch_training_snapshots_for_horizons
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
@@ -30,6 +28,7 @@ from trader.training.labels import (
     atr_pct_from_feature_payload,
     build_directional_outcome,
 )
+from trader.training.sample_counts import fetch_training_snapshots_for_horizons
 
 log = structlog.get_logger(__name__)
 
@@ -70,6 +69,7 @@ def default_cost_model() -> CostModelBps:
         funding_bps=DEFAULT_FUNDING_BPS,
         safety_margin_bps=DEFAULT_SAFETY_MARGIN_BPS,
     )
+
 
 _SourceBinding = tuple[str, str, datetime]
 _CURRENT_SOURCE_BINDING: ContextVar[_SourceBinding | None] = ContextVar(
@@ -490,7 +490,6 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 
     async def _get_db_diagnostics_directional(self, result: dict[str, Any]) -> dict[str, Any]:
         allowlist, include_candle, label_schema, label_threshold = _training_eligibility_params()
-        strategy_filter = training_strategy_filter_sql("$2", "$3")
         result["label_schema_version"] = label_schema
         result["training_label_threshold_bps"] = label_threshold
         result["training_config"] = {
@@ -575,10 +574,9 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "label_schema_version": label_schema,
             "label_threshold_bps": label_threshold,
         }
-        result["labelled_samples_15m_by_schema"] = (
-            {key[:8]: value for key, value in (snapshot_15.by_schema if snapshot_15 else {}).items()}
-            or result.get("labelled_samples_15m_by_schema", {})
-        )
+        result["labelled_samples_15m_by_schema"] = {
+            key[:8]: value for key, value in (snapshot_15.by_schema if snapshot_15 else {}).items()
+        } or result.get("labelled_samples_15m_by_schema", {})
         result["newest_training_schema_hash"] = newest_feature_schema_hash
         result["newest_training_schema_samples"] = newest_feature_schema_samples
         result["training_eligible_15m"] = training_by_horizon.get("15", newest_feature_schema_samples)
