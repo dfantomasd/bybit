@@ -51,6 +51,8 @@ from decimal import Decimal
 from typing import Any, cast
 
 import structlog
+from starlette.requests import Request
+from starlette.responses import Response
 from telegram import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message, Update
 from telegram.constants import ParseMode
 from telegram.ext import (
@@ -188,6 +190,9 @@ class TelegramBotConfig:
     bybit_use_testnet: bool
     default_category: str = "linear"
     redis_url: str = ""
+    delivery_mode: str = "polling"
+    webhook_url: str = ""
+    webhook_secret: str = ""
     polling_lock_ttl_s: int = 45
     polling_lock_wait_s: int = 90
     polling_conflict_recovery_wait_s: int = 10
@@ -249,7 +254,11 @@ class TelegramMonitorBot:
         self._polling_recovery_task: asyncio.Task[None] | None = None
         self._polling_recovery_pending: bool = False
         self._polling_watchdog_task: asyncio.Task[None] | None = None
+        self._webhook_route_mounted: bool = False
         self._redis_client: Any | None = None
+
+    def _uses_webhook(self) -> bool:
+        return self._config.delivery_mode == "webhook"
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -259,12 +268,13 @@ class TelegramMonitorBot:
     def enabled(self) -> bool:
         return bool(self._config.token and self._config.allowed_chat_ids)
 
-    async def start(self) -> bool:
+    async def start(self, http_app: Any | None = None) -> bool:
         if not self.enabled:
             log.info("telegram_bot_disabled")
             return False
-        if not await self._acquire_polling_lock():
-            return False
+        if not self._uses_webhook():
+            if not await self._acquire_polling_lock():
+                return False
 
         if self._app is not None:
             await self._teardown_app()
@@ -331,17 +341,37 @@ class TelegramMonitorBot:
         try:
             await app.initialize()
             await app.start()
-            await self._start_polling(app)
+            if self._uses_webhook():
+                if http_app is None:
+                    self._polling_disabled_reason = "webhook_http_app_missing"
+                    log.error("telegram_webhook_requires_http_app")
+                    await self._teardown_app()
+                    return False
+                self._mount_webhook_route(http_app)
+                await self._activate_webhook(app)
+            else:
+                await self._start_polling(app)
+                self._start_polling_watchdog()
             self._app = app
             self._started_at = datetime.now(tz=UTC)
             self._polling_conflict_count = 0
             self._polling_disabled_reason = None
             self._polling_recovery_pending = False
-            self._start_polling_watchdog()
-            log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
+            log.info(
+                "telegram_bot_started",
+                allowed_chats=len(self._config.allowed_chat_ids),
+                delivery_mode=self._config.delivery_mode,
+            )
             return True
         except Exception:
-            await self._release_polling_lock()
+            try:
+                if getattr(app, "running", False):
+                    await app.stop()
+                await app.shutdown()
+            except Exception as exc:
+                log.debug("telegram_bot_start_cleanup_failed", error=str(exc))
+            if not self._uses_webhook():
+                await self._release_polling_lock()
             raise
 
     async def stop(self) -> None:
@@ -371,13 +401,67 @@ class TelegramMonitorBot:
         if app is None:
             return
         try:
-            if app.updater is not None and getattr(app.updater, "running", False):
+            if self._uses_webhook():
+                try:
+                    await app.bot.delete_webhook(drop_pending_updates=False)
+                except Exception as exc:
+                    log.debug("telegram_delete_webhook_failed", error=str(exc))
+            elif app.updater is not None and getattr(app.updater, "running", False):
                 await app.updater.stop()
             if getattr(app, "running", False):
                 await app.stop()
             await app.shutdown()
         except Exception as exc:
             log.warning("telegram_bot_teardown_failed", error=str(exc))
+
+    def _mount_webhook_route(self, http_app: Any) -> None:
+        if self._webhook_route_mounted:
+            return
+        from fastapi import HTTPException
+
+        bot_ref = self
+
+        @http_app.get("/telegram/livez")
+        async def telegram_livez() -> dict[str, Any]:
+            return bot_ref.health_snapshot()
+
+        @http_app.post("/telegram/webhook")
+        async def telegram_webhook(incoming: Request) -> Response:
+            secret = bot_ref._config.webhook_secret.strip()
+            if secret:
+                provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                if provided != secret:
+                    raise HTTPException(status_code=403, detail="invalid webhook secret")
+            tg_app = bot_ref._app
+            if tg_app is None:
+                raise HTTPException(status_code=503, detail="telegram not ready")
+            try:
+                data = await incoming.json()
+                update = Update.de_json(data, tg_app.bot)
+                if update is not None:
+                    bot_ref._touch_handler_activity()
+                    await tg_app.process_update(update)
+            except HTTPException:
+                raise
+            except Exception as exc:
+                log.warning("telegram_webhook_process_failed", error=str(exc))
+                raise HTTPException(status_code=500, detail="telegram process failed") from exc
+            return Response(status_code=200)
+
+        self._webhook_route_mounted = True
+        log.info("telegram_webhook_route_mounted", path="/telegram/webhook")
+
+    async def _activate_webhook(self, app: Application[Any, Any, Any, Any, Any, Any]) -> None:
+        url = self._config.webhook_url.strip()
+        if not url:
+            raise RuntimeError("telegram webhook URL is empty")
+        secret = self._config.webhook_secret.strip() or None
+        await app.bot.set_webhook(
+            url=url,
+            secret_token=secret,
+            drop_pending_updates=True,
+        )
+        log.info("telegram_webhook_registered", url=url)
 
     async def _acquire_polling_lock(self) -> bool:
         """Acquire a distributed Telegram polling lease when Redis is configured."""
@@ -579,8 +663,11 @@ class TelegramMonitorBot:
         return (datetime.now(tz=UTC) - self._last_handler_at).total_seconds() >= silence_s
 
     async def ensure_polling_running(self) -> None:
-        """Restart polling if a deploy conflict or crash left the bot deaf."""
+        """Restart polling/webhook if a deploy conflict or crash left the bot deaf."""
         if not self.enabled:
+            return
+        if self._uses_webhook():
+            await self._ensure_webhook_active()
             return
         if self._polling_recovery_pending and (
             self._polling_recovery_task is None or self._polling_recovery_task.done()
@@ -613,6 +700,21 @@ class TelegramMonitorBot:
             log.info("telegram_polling_restarted_by_watchdog_full_start")
         else:
             log.warning("telegram_polling_watchdog_full_start_failed", health=self.health_snapshot())
+
+    async def _ensure_webhook_active(self) -> None:
+        app = self._app
+        if app is None:
+            return
+        expected = self._config.webhook_url.strip()
+        if not expected:
+            return
+        try:
+            info = await app.bot.get_webhook_info()
+            if info.url != expected:
+                log.warning("telegram_webhook_mismatch", current=info.url, expected=expected)
+                await self._activate_webhook(app)
+        except Exception as exc:
+            log.warning("telegram_webhook_health_check_failed", error=str(exc))
 
     def _start_polling_watchdog(self) -> None:
         task = self._polling_watchdog_task
@@ -903,10 +1005,14 @@ class TelegramMonitorBot:
         updater = getattr(self._app, "updater", None)
         running = bool(getattr(self._app, "running", False))
         polling = bool(getattr(updater, "running", False)) if updater is not None else False
+        webhook_mode = self._uses_webhook()
         return {
             "enabled": self.enabled,
+            "delivery_mode": self._config.delivery_mode,
+            "webhook_url": self._config.webhook_url if webhook_mode else None,
             "app_running": running,
-            "polling_running": polling,
+            "polling_running": polling if not webhook_mode else None,
+            "webhook_active": webhook_mode and running,
             "started_at": self._started_at.isoformat() if self._started_at else None,
             "last_handler_at": self._last_handler_at.isoformat() if self._last_handler_at else None,
             "last_callback_at": self._last_callback_at.isoformat() if self._last_callback_at else None,

@@ -264,6 +264,12 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: SecretStr = SecretStr("")
     TELEGRAM_ALLOWED_CHAT_IDS: Annotated[list[int], NoDecode] = []
+    TELEGRAM_DELIVERY_MODE: str = "auto"
+    """Telegram update delivery: auto (webhook on Render), polling, or webhook."""
+    TELEGRAM_WEBHOOK_URL: str = ""
+    """Full webhook URL. When empty, auto uses RENDER_EXTERNAL_URL + /telegram/webhook."""
+    TELEGRAM_WEBHOOK_SECRET: SecretStr = SecretStr("")
+    """Optional X-Telegram-Bot-Api-Secret-Token for webhook requests."""
     TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS: float = 10.0
     """Seconds to wait after repeated getUpdates conflicts before resuming polling."""
     TELEGRAM_POLLING_WATCHDOG_INTERVAL_SECONDS: float = 30.0
