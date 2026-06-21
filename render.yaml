@@ -74,6 +74,10 @@ services:
         value: "3"
       - key: CANDLE_SEED_RETRY_BASE_DELAY_SECONDS
         value: "1.0"
+      - key: PREFLIGHT_POSTGRES_RETRY_ATTEMPTS
+        value: "6"
+      - key: PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS
+        value: "2.0"
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"

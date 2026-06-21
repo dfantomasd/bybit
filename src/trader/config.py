@@ -254,6 +254,10 @@ class Settings(BaseSettings):
     REDIS_URL: SecretStr = SecretStr("")
     REDIS_REQUIRED: bool = False
     """When True, Redis must pass preflight. Render Free monitoring can run without Redis."""
+    PREFLIGHT_POSTGRES_RETRY_ATTEMPTS: int = 6
+    """Startup Postgres health retries before failing deploy (Supabase cold start / transient SSL)."""
+    PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS: float = 2.0
+    """Base delay between Postgres preflight retries (linear backoff)."""
 
     # ------------------------------------------------------------------
     # Telegram notifications

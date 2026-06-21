@@ -53,6 +53,8 @@ class HealthChecker:
         trading_mode: TradingMode = TradingMode.TESTNET,
         system_status: SystemStatus = SystemStatus.STOPPED,
         model_enabled: bool = False,
+        postgres_retry_attempts: int = 6,
+        postgres_retry_delay_s: float = 2.0,
     ) -> None:
         self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._redis_url = redis_url.strip().strip("\"'")
@@ -62,6 +64,8 @@ class HealthChecker:
         self._trading_mode = trading_mode
         self._system_status = system_status
         self._model_enabled = model_enabled
+        self._postgres_retry_attempts = max(1, int(postgres_retry_attempts))
+        self._postgres_retry_delay_s = max(0.0, float(postgres_retry_delay_s))
 
         # Mutable state updated by the trading system
         self._ws_connected: bool = False
@@ -94,14 +98,9 @@ class HealthChecker:
     # Individual checks
     # ------------------------------------------------------------------
 
-    async def check_postgres(self) -> tuple[bool, float | None]:
-        """Ping PostgreSQL.
-
-        Returns:
-            (is_healthy, latency_ms)
-        """
+    async def _postgres_ping(self) -> tuple[bool, float | None, str | None]:
         if not self._postgres_dsn:
-            return True, None
+            return True, None, None
 
         start = time.monotonic()
         try:
@@ -114,10 +113,43 @@ class HealthChecker:
             finally:
                 await conn.close()
             latency = (time.monotonic() - start) * 1000
-            return True, latency
+            return True, latency, None
         except Exception as exc:
-            log.warning("postgres_health_check_failed", error=str(exc))
-            return False, None
+            return False, None, str(exc)
+
+    async def check_postgres(self) -> tuple[bool, float | None]:
+        """Ping PostgreSQL.
+
+        Returns:
+            (is_healthy, latency_ms)
+        """
+        ok, latency, error = await self._postgres_ping()
+        if not ok:
+            log.warning("postgres_health_check_failed", error=error)
+        return ok, latency
+
+    async def check_postgres_with_retries(self) -> tuple[bool, float | None]:
+        """Ping PostgreSQL with startup retries for transient cloud DB blips."""
+        last_error: str | None = None
+        for attempt in range(1, self._postgres_retry_attempts + 1):
+            ok, latency, error = await self._postgres_ping()
+            if ok:
+                if attempt > 1:
+                    log.info("postgres_health_check_recovered", attempt=attempt)
+                return True, latency
+            last_error = error
+            if attempt < self._postgres_retry_attempts:
+                wait_s = self._postgres_retry_delay_s * attempt
+                log.warning(
+                    "postgres_health_check_retrying",
+                    attempt=attempt,
+                    max_attempts=self._postgres_retry_attempts,
+                    wait_seconds=round(wait_s, 2),
+                    error=error,
+                )
+                await asyncio.sleep(wait_s)
+        log.warning("postgres_health_check_failed", error=last_error)
+        return False, None
 
     async def check_redis(self) -> tuple[bool, float | None]:
         """Ping Redis.
@@ -279,7 +311,7 @@ class HealthChecker:
 
         Suitable for the startup preflight sequence.
         """
-        pg_ok, _ = await self.check_postgres()
+        pg_ok, _ = await self.check_postgres_with_retries()
         redis_ok, _ = await self.check_redis()
         bybit_ok, _ = await self.check_bybit_connectivity()
 
