@@ -561,6 +561,32 @@ class TradeJournal:
         try:
             await conn.execute(
                 """
+                WITH ranked AS (
+                    SELECT
+                        snapshot_id,
+                        ROW_NUMBER() OVER (
+                            PARTITION BY
+                                symbol,
+                                interval,
+                                candle_open_time,
+                                feature_schema_hash
+                            ORDER BY created_at ASC, snapshot_id ASC
+                        ) AS rn
+                    FROM feature_snapshots
+                    WHERE training_eligible = true
+                )
+                UPDATE feature_snapshots fs
+                SET
+                    training_eligible = false,
+                    invalid_reason = 'duplicate_snapshot_same_candle',
+                    invalidated_at = now()
+                FROM ranked
+                WHERE fs.snapshot_id = ranked.snapshot_id
+                  AND ranked.rn > 1
+                """
+            )
+            await conn.execute(
+                """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
                     ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
                     WHERE training_eligible = true

@@ -96,7 +96,23 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     assert "idx_order_pending_state_symbol_unresolved" in sql
     assert "uq_model_versions_one_champion" in sql
     assert "idx_feature_snapshots_unique_eligible" in sql
-    assert "duplicate_snapshot_same_candle" not in sql
+    assert "duplicate_snapshot_same_candle" in sql
+
+
+@pytest.mark.asyncio
+async def test_feature_snapshot_duplicates_are_invalidated_before_unique_index() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    sql = "\n".join(pool.conn.executed_sql)
+    repair_pos = sql.find("duplicate_snapshot_same_candle")
+    index_pos = sql.find("idx_feature_snapshots_unique_eligible")
+    assert repair_pos >= 0
+    assert index_pos >= 0
+    assert repair_pos < index_pos
 
 
 @pytest.mark.asyncio
@@ -140,4 +156,5 @@ async def test_feature_snapshot_unique_index_bootstrap_is_best_effort() -> None:
     await journal._ensure_feature_snapshot_unique_index(cast(Any, conn))
 
     sql = "\n".join(conn.executed_sql)
+    assert "duplicate_snapshot_same_candle" in sql
     assert "idx_feature_snapshots_unique_eligible" not in sql

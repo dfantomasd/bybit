@@ -160,6 +160,80 @@ async def _report(pool: object, *, apply: bool) -> None:
         for r in rows:
             click.echo(f"    reason={r['invalid_reason']}  count={r['cnt']}")
 
+    duplicate_rows = await pool.fetch(
+        """
+        SELECT
+            symbol,
+            interval,
+            candle_open_time,
+            feature_schema_hash,
+            count(*) AS dup_count
+        FROM feature_snapshots
+        WHERE training_eligible = true
+        GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+        HAVING count(*) > 1
+        ORDER BY dup_count DESC, candle_open_time ASC
+        """
+    )
+    duplicate_groups = len(duplicate_rows)
+    total_duplicate_snapshots = sum(int(r["dup_count"]) - 1 for r in duplicate_rows)
+    click.echo("\n--- duplicate eligible snapshots (same candle/schema) ---")
+    click.echo(f"  duplicate groups: {duplicate_groups}")
+    click.echo(f"  extra snapshots to invalidate: {total_duplicate_snapshots}")
+
+    if not apply and duplicate_rows:
+        duplicate_bounds = await pool.fetch(
+            """
+            SELECT min(candle_open_time) AS min_open,
+                   max(candle_open_time) AS max_open
+            FROM feature_snapshots
+            WHERE training_eligible = true
+              AND (symbol, interval, candle_open_time, feature_schema_hash) IN (
+                  SELECT symbol, interval, candle_open_time, feature_schema_hash
+                  FROM feature_snapshots
+                  WHERE training_eligible = true
+                  GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+                  HAVING count(*) > 1
+              )
+            """
+        )
+        if duplicate_bounds and duplicate_bounds[0]["min_open"]:
+            click.echo(f"  min candle_open_time: {duplicate_bounds[0]['min_open']}")
+            click.echo(f"  max candle_open_time: {duplicate_bounds[0]['max_open']}")
+
+        by_symbol = await pool.fetch(
+            """
+            SELECT symbol,
+                   count(*) AS dup_group_count,
+                   sum(dup_count) AS total_rows
+            FROM (
+                SELECT symbol,
+                       interval,
+                       candle_open_time,
+                       feature_schema_hash,
+                       count(*) AS dup_count
+                FROM feature_snapshots
+                WHERE training_eligible = true
+                GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+                HAVING count(*) > 1
+            ) sub
+            GROUP BY symbol
+            ORDER BY total_rows DESC
+            """
+        )
+        click.echo("  breakdown by symbol:")
+        for r in by_symbol:
+            click.echo(f"    symbol={r['symbol']:<12} groups={r['dup_group_count']:<4} total_rows={r['total_rows']}")
+
+        for r in duplicate_rows[:10]:
+            click.echo(
+                f"    symbol={r['symbol']} interval={r['interval']} "
+                f"candle_open_time={r['candle_open_time']} schema={r['feature_schema_hash']} "
+                f"count={r['dup_count']}"
+            )
+        if len(duplicate_rows) > 10:
+            click.echo(f"    ... and {len(duplicate_rows) - 10} more groups")
+
     click.echo(f"\n  to-be-invalidated in this run: {suspicious}")
 
     # ------------------------------------------------------------------
@@ -184,6 +258,50 @@ async def _report(pool: object, *, apply: bool) -> None:
         click.echo(f"[APPLY] Done: {result}")
     elif not apply and suspicious > 0:
         click.echo("\n[DRY-RUN] No changes made. Re-run with --apply to invalidate.")
+
+    if apply and total_duplicate_snapshots > 0:
+        click.echo("\n[APPLY] Marking duplicate eligible snapshots training_eligible=false ...")
+        result = await pool.execute(
+            """
+            WITH ranked AS (
+                SELECT snapshot_id,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY symbol, interval, candle_open_time, feature_schema_hash
+                           ORDER BY created_at ASC, snapshot_id ASC
+                       ) AS rn
+                FROM feature_snapshots
+                WHERE training_eligible = true
+            )
+            UPDATE feature_snapshots fs
+            SET training_eligible = false,
+                invalid_reason    = 'duplicate_snapshot_same_candle',
+                invalidated_at    = now()
+            FROM ranked
+            WHERE fs.snapshot_id = ranked.snapshot_id
+              AND ranked.rn > 1
+            """
+        )
+        click.echo(f"[APPLY] Done: {result}")
+
+        verify = await pool.fetch(
+            """
+            SELECT count(*) AS remaining_duplicate_groups
+            FROM (
+                SELECT symbol, interval, candle_open_time, feature_schema_hash
+                FROM feature_snapshots
+                WHERE training_eligible = true
+                GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+                HAVING count(*) > 1
+            ) duplicates
+            """
+        )
+        remaining = int(verify[0]["remaining_duplicate_groups"])
+        click.echo(f"\n  remaining duplicate eligible groups: {remaining}")
+        if remaining != 0:
+            click.echo("\n[ERROR] Duplicate elimination incomplete — remaining groups > 0", err=True)
+            sys.exit(1)
+    elif not apply and total_duplicate_snapshots > 0:
+        click.echo("\n[DRY-RUN] No duplicate changes made. Re-run with --apply to invalidate duplicates.")
 
     # ------------------------------------------------------------------
     # 5. Final eligible snapshot count
@@ -222,6 +340,14 @@ GROUP BY invalid_reason ORDER BY cnt DESC;
 -- 4. Eligible snapshots for training
 SELECT count(*) AS eligible_snapshots
 FROM feature_snapshots WHERE training_eligible = true;
+
+-- 5. Duplicate eligible snapshots by source candle/schema
+SELECT symbol, interval, candle_open_time, feature_schema_hash, count(*) AS dup_count
+FROM feature_snapshots
+WHERE training_eligible = true
+GROUP BY symbol, interval, candle_open_time, feature_schema_hash
+HAVING count(*) > 1
+ORDER BY dup_count DESC, candle_open_time ASC;
 """)
 
 
