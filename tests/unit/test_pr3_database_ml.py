@@ -552,6 +552,11 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
             return [{"interval": "1", "cnt": 1000}, {"interval": "15", "cnt": 250}]
         if "MAX(open_time)" in query:
             return [{"ts": datetime(2026, 1, 1, 12, 0, tzinfo=UTC)}]
+        if "AS pool" in query:
+            return [
+                {"label_schema_version": "directional_net_v1", "pool": "candle_baseline", "samples": 600},
+                {"label_schema_version": "directional_net_v1", "pool": "scalp_micro_v1", "samples": 177},
+            ]
         if "FROM feature_snapshots fs" in query:
             return [{"feature_schema_hash": "abc1234567890def", "cnt": 777}]
         if "FROM feature_snapshots" in query:
@@ -655,6 +660,8 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
 
     async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
         del args
+        if "AS pool" in query:
+            return []
         if "GROUP BY horizon_minutes" in query and "feature_schema_hash" not in query:
             return [{"horizon_minutes": 5, "cnt": 900}, {"horizon_minutes": 15, "cnt": 100}]
         if "GROUP BY horizon_minutes, feature_schema_hash" in query:

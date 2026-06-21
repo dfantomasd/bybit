@@ -492,6 +492,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         strategy_filter = training_strategy_filter_sql("$2", "$3")
         result["label_schema_version"] = label_schema
         result["training_label_threshold_bps"] = label_threshold
+        result["training_config"] = {
+            "strategy_allowlist": allowlist or [],
+            "include_candle_baseline": include_candle,
+            "label_schema_version": label_schema,
+            "label_threshold_bps": label_threshold,
+        }
         rows = await self._fetch(
             """
             SELECT horizon_minutes, count(*) AS cnt
@@ -640,6 +646,65 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             }
         result["training_eligible_by_horizon"] = training_by_horizon
         result["newest_training_schema_by_horizon"] = newest_schema_by_horizon
+
+        breakdown_rows = await self._fetch(
+            """
+            SELECT
+                po.label_schema_version,
+                CASE
+                    WHEN pe.metadata->>'strategy_id' = 'scalp_micro_v1' THEN 'scalp_micro_v1'
+                    WHEN pe.metadata->>'strategy_id' IS NULL
+                         AND COALESCE(pe.decision, '') IN ('SHADOW_CANDLE', 'HISTORICAL_REAL')
+                        THEN 'candle_baseline'
+                    ELSE COALESCE(pe.metadata->>'strategy_id', 'other')
+                END AS pool,
+                count(*) AS samples
+            FROM (
+                SELECT DISTINCT ON (
+                           po.horizon_minutes,
+                           fs.symbol,
+                           fs.interval,
+                           fs.candle_open_time,
+                           fs.feature_schema_hash
+                       )
+                       po.horizon_minutes,
+                       po.label_schema_version,
+                       pe.metadata,
+                       pe.decision
+                FROM feature_snapshots fs
+                JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE po.horizon_minutes = 5
+                  AND po.label IS NOT NULL
+                  AND po.label_threshold_bps = $1
+                  AND fs.feature_values IS NOT NULL
+                  AND fs.training_eligible = true
+                  AND pe.model_version = 'RULE_BASELINE_V1'
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                ORDER BY po.horizon_minutes, fs.symbol, fs.interval, fs.candle_open_time,
+                         fs.feature_schema_hash, fs.created_at DESC, pe.created_at DESC
+            ) deduped
+            GROUP BY po.label_schema_version, pool
+            ORDER BY po.label_schema_version, pool
+            """,
+            label_threshold,
+        )
+        pool_by_schema: dict[str, dict[str, int]] = {}
+        for row in breakdown_rows:
+            schema_key = str(row["label_schema_version"])
+            pool_key = str(row["pool"])
+            pool_by_schema.setdefault(schema_key, {})[pool_key] = int(row["samples"])
+        active_pool = pool_by_schema.get(label_schema, {})
+        legacy_v1 = pool_by_schema.get(LABEL_SCHEMA_VERSION, {})
+        result["training_pool_breakdown"] = {
+            "active_schema": label_schema,
+            "eligible_filtered_5m": int(training_by_horizon.get("5", 0) or 0),
+            "scalp_micro_v1_active_schema": int(active_pool.get("scalp_micro_v1", 0)),
+            "candle_baseline_active_schema": int(active_pool.get("candle_baseline", 0)),
+            "legacy_v1_candle_baseline": int(legacy_v1.get("candle_baseline", 0)),
+            "legacy_v1_scalp_micro_v1": int(legacy_v1.get("scalp_micro_v1", 0)),
+            "by_schema": pool_by_schema,
+        }
 
         rows = await self._fetch(
             """

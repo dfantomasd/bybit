@@ -27,7 +27,7 @@ import numpy as np
 
 from trader.ml.model_selection import model_selection_metrics
 from trader.training.eligibility import training_strategy_filter_sql
-from trader.training.labels import active_label_schema_version
+from trader.training.labels import active_label_schema_version, label_schema_tag
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -745,7 +745,10 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         selected_label_threshold = float(best["selected_label_threshold_bps"])
         y = (returns_bps > selected_label_threshold).astype(np.int32)
-        version = f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m_dnv1"
+        version = (
+            f"v{datetime.now(tz=UTC).strftime('%Y%m%d_%H%M')}_h{horizon_minutes}m_"
+            f"{label_schema_tag(label_schema_version)}"
+        )
         model = ChallengerModel(
             version=version,
             feature_names=feature_names,

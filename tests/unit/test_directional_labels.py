@@ -6,9 +6,13 @@ import pytest
 
 from trader.training.labels import (
     CostModelBps,
+    LABEL_SCHEMA_VERSION,
+    LABEL_SCHEMA_VERSION_TPSL,
+    active_label_schema_version,
     build_directional_outcome,
     directional_excursions_bps,
     directional_return_bps,
+    label_schema_tag,
 )
 
 
@@ -161,7 +165,10 @@ def test_tpsl_exit_hits_take_profit_when_stop_not_touched() -> None:
 
 
 def test_active_label_schema_version_switches_with_tpsl_flag() -> None:
-    from trader.training.labels import LABEL_SCHEMA_VERSION, LABEL_SCHEMA_VERSION_TPSL, active_label_schema_version
-
     assert active_label_schema_version(use_tpsl_exit=False) == LABEL_SCHEMA_VERSION
     assert active_label_schema_version(use_tpsl_exit=True) == LABEL_SCHEMA_VERSION_TPSL
+
+
+def test_label_schema_tag_maps_versions() -> None:
+    assert label_schema_tag(LABEL_SCHEMA_VERSION) == "dnv1"
+    assert label_schema_tag(LABEL_SCHEMA_VERSION_TPSL) == "dnv2"

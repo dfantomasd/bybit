@@ -2559,6 +2559,17 @@ class TelegramMonitorBot:
             )
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
             labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
+            training_config = db_diag.get("training_config", {}) or {}
+            pool_breakdown = db_diag.get("training_pool_breakdown", {}) or {}
+            train_allowlist = training_config.get("strategy_allowlist") or []
+            train_include_candle = training_config.get("include_candle_baseline")
+            train_label_schema = training_config.get("label_schema_version") or db_diag.get("label_schema_version", "n/a")
+            scalp_active = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
+            legacy_candle_v1 = int(pool_breakdown.get("legacy_v1_candle_baseline", 0) or 0)
+            allowlist_display = ",".join(train_allowlist) if train_allowlist else "ALL"
+            include_candle_display = (
+                "true" if train_include_candle is True else "false" if train_include_candle is False else "n/a"
+            )
             gate_total = gate.get("total_count", 0) or 0
             gate_pass = gate.get("pass_count", 0) or 0
             gate_block = gate.get("block_count", 0) or 0
@@ -2624,6 +2635,11 @@ class TelegramMonitorBot:
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
+                f"Фильтр обучения: schema=<code>{html.escape(str(train_label_schema))}</code>, "
+                f"allowlist=<code>{html.escape(allowlist_display)}</code>, "
+                f"candle_baseline=<code>{include_candle_display}</code>",
+                f"Пул scalp (активная schema): <code>{scalp_active}</code> | "
+                f"legacy candle v1 (исключён): <code>{legacy_candle_v1}</code>",
                 "",
                 "<b>Простыми словами</b>",
                 f"Данные: <code>{data_note}</code>",

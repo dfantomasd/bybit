@@ -217,12 +217,20 @@ class TradingApplication:
             log_format=self._settings.LOG_FORMAT,
         )
         self._current_risk_profile_str = self._settings.RISK_PROFILE.value
+        from trader.training.labels import active_label_schema_version
+
         log.info(
             "settings_loaded",
             trading_mode=self._settings.TRADING_MODE,
             risk_profile=self._settings.RISK_PROFILE,
             bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
             live_mode=self._settings.LIVE_MODE,
+            train_strategy_allowlist=self._settings.TRAIN_STRATEGY_ALLOWLIST,
+            train_include_candle_baseline=self._settings.TRAIN_INCLUDE_CANDLE_BASELINE,
+            model_label_use_tpsl_exit=self._settings.MODEL_LABEL_USE_TPSL_EXIT,
+            active_label_schema=active_label_schema_version(
+                use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT)
+            ),
         )
 
     async def _run_preflight(self) -> None:
@@ -664,12 +672,21 @@ class TradingApplication:
             "--label-bps",
             str(label_bps),
         ]
+        from trader.training.labels import active_label_schema_version
+
+        _settings = self._settings
         log.info(
             "model_training.started",
             min_samples=min_samples,
             horizon=horizon,
             label_bps=label_bps,
-            strategy_allowlist=self._settings.TRAIN_STRATEGY_ALLOWLIST if self._settings is not None else "",
+            strategy_allowlist=_settings.TRAIN_STRATEGY_ALLOWLIST if _settings is not None else "",
+            include_candle_baseline=_settings.TRAIN_INCLUDE_CANDLE_BASELINE if _settings is not None else None,
+            label_schema=(
+                active_label_schema_version(use_tpsl_exit=bool(_settings.MODEL_LABEL_USE_TPSL_EXIT))
+                if _settings is not None
+                else None
+            ),
         )
         started_at = datetime.now(tz=UTC)
 
@@ -685,6 +702,12 @@ class TradingApplication:
                     **os.environ,
                     "TRAIN_STRATEGY_ALLOWLIST": (
                         self._settings.TRAIN_STRATEGY_ALLOWLIST if self._settings is not None else ""
+                    ),
+                    "TRAIN_INCLUDE_CANDLE_BASELINE": (
+                        "true" if self._settings and self._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
+                    ),
+                    "MODEL_LABEL_USE_TPSL_EXIT": (
+                        "true" if self._settings and self._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
                     ),
                 },
             )

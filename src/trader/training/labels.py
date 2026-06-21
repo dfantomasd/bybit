@@ -24,6 +24,11 @@ def active_label_schema_version(*, use_tpsl_exit: bool) -> str:
     return LABEL_SCHEMA_VERSION_TPSL if use_tpsl_exit else LABEL_SCHEMA_VERSION
 
 
+def label_schema_tag(label_schema_version: str) -> str:
+    """Short tag for model version strings (e.g. ``dnv2``)."""
+    return "dnv2" if label_schema_version == LABEL_SCHEMA_VERSION_TPSL else "dnv1"
+
+
 @dataclass(frozen=True)
 class CostModelBps:
     """Estimated round-trip trading costs expressed in basis points.
