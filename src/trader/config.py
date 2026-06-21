@@ -264,6 +264,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: SecretStr = SecretStr("")
     TELEGRAM_ALLOWED_CHAT_IDS: Annotated[list[int], NoDecode] = []
+    TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS: float = 20.0
+    """Seconds to wait after repeated getUpdates conflicts before resuming polling."""
 
     # ------------------------------------------------------------------
     # LLM (optional, disabled by default)

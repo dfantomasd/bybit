@@ -1976,6 +1976,7 @@ class TradingApplication:
                 bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
                 default_category=self._settings.DEFAULT_MARKET_CATEGORY,
                 redis_url=self._settings.REDIS_URL.get_secret_value(),
+                polling_conflict_recovery_wait_s=self._settings.TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS,
             ),
             health_provider=self._health_checker.overall_health,
             adapter_factory=lambda: self._bybit_adapter,
@@ -4214,6 +4215,11 @@ class TradingApplication:
                         fat = self._health_checker._last_feature_computed_at
                         if fat is not None:
                             feat_age = (now - fat).total_seconds()
+                    if self._telegram_bot is not None and hasattr(self._telegram_bot, "ensure_polling_running"):
+                        try:
+                            await self._telegram_bot.ensure_polling_running()
+                        except Exception as tg_watch_exc:
+                            log.debug("supervisor.telegram_watchdog_failed", error=str(tg_watch_exc))
                     telegram_health: dict[str, Any] = {}
                     if self._telegram_bot is not None and hasattr(self._telegram_bot, "health_snapshot"):
                         try:

@@ -811,7 +811,7 @@ def test_telegram_health_snapshot_records_polling_conflicts() -> None:
 
 
 @pytest.mark.asyncio
-async def test_telegram_polling_conflicts_disable_polling_after_threshold() -> None:
+async def test_telegram_polling_conflicts_schedule_recovery_after_threshold() -> None:
     from telegram.error import Conflict
 
     bot = _make_bot()
@@ -822,7 +822,9 @@ async def test_telegram_polling_conflicts_disable_polling_after_threshold() -> N
     await asyncio.sleep(0)
     health = bot.health_snapshot()
     assert health["polling_conflict_count"] == 3
-    assert health["polling_disabled_reason"] == "polling_conflict"
+    assert health["polling_disabled_reason"] == "polling_conflict_recovery_pending"
+    assert bot._polling_recovery_task is not None
+    assert not bot._polling_recovery_task.done()
 
 
 @pytest.mark.asyncio
