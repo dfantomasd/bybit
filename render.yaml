@@ -110,7 +110,17 @@ services:
       - key: STRATEGY_PRIORITY_ORDER
         value: "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
       - key: TRAIN_STRATEGY_ALLOWLIST
-        value: "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+        value: "scalp_micro_v1"
+      - key: TRAIN_INCLUDE_CANDLE_BASELINE
+        value: "false"
+      - key: TRAIN_EXCLUDE_NEGATIVE_BUCKETS
+        value: "true"
+      - key: TRAIN_LABEL_SPREAD_BPS
+        value: "4.0"
+      - key: MODEL_LABEL_USE_TPSL_EXIT
+        value: "true"
+      - key: MODEL_AUTO_TRAIN_LABEL_BPS
+        value: "2.0"
       # DB safety gates
       - key: TRADE_JOURNAL_REQUIRED_FOR_ACTIVE
         value: "true"

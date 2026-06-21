@@ -93,6 +93,7 @@ ignore = [
 "tests/**" = ["S", "ANN"]
 "migrations/**" = ["ANN"]
 "src/trader/training/**" = ["S608", "S603"]
+"src/trader/storage/directional_trade_journal.py" = ["S608"]
 "src/trader/workers/**" = ["S603"]
 
 [tool.ruff.format]

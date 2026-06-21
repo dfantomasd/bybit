@@ -6,18 +6,30 @@ from __future__ import annotations
 _CANDLE_BASELINE_DECISIONS = ("SHADOW_CANDLE", "HISTORICAL_REAL")
 
 
-def training_strategy_filter_sql(param: str = "$4") -> str:
-    """Return SQL predicate for optional TRAIN_STRATEGY_ALLOWLIST.
+def training_strategy_filter_sql(
+    allowlist_param: str = "$4",
+    include_candle_baseline_param: str = "$5",
+) -> str:
+    """Return SQL predicate for TRAIN_STRATEGY_ALLOWLIST / TRAIN_INCLUDE_CANDLE_BASELINE.
 
-    When an allowlist is configured, candle-sampling baselines without
-    ``strategy_id`` remain eligible because they carry most of the labelled data.
+    When the allowlist is empty, all RULE_BASELINE_V1 Buy/Sell labels are eligible.
+
+    When the allowlist is set and ``TRAIN_INCLUDE_CANDLE_BASELINE`` is false, only
+    rows whose ``metadata.strategy_id`` is in the allowlist are used. This keeps
+    training aligned with the live scalp (or other) strategy instead of the EMA
+    candle sampler.
+
+    When the allowlist is set and ``TRAIN_INCLUDE_CANDLE_BASELINE`` is true, candle
+    baselines without ``strategy_id`` are also included (legacy mixed training).
     """
     decisions = ", ".join(f"'{item}'" for item in _CANDLE_BASELINE_DECISIONS)
     return f"""(
-        {param}::text[] IS NULL
-        OR pe.metadata->>'strategy_id' = ANY({param}::text[])
+        {allowlist_param}::text[] IS NULL
+        OR cardinality({allowlist_param}::text[]) = 0
+        OR pe.metadata->>'strategy_id' = ANY({allowlist_param}::text[])
         OR (
-            pe.metadata->>'strategy_id' IS NULL
+            {include_candle_baseline_param}::boolean IS TRUE
+            AND pe.metadata->>'strategy_id' IS NULL
             AND COALESCE(pe.decision, '') IN ({decisions})
         )
     )"""

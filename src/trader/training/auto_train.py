@@ -17,12 +17,12 @@ from typing import Any
 import click
 
 from trader.training.eligibility import training_strategy_filter_sql
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import active_label_schema_version
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-_STRATEGY_FILTER = training_strategy_filter_sql("$2")
+_STRATEGY_FILTER = training_strategy_filter_sql("$2", "$3")
 _CANDIDATE_HORIZONS = (5, 15, 30, 60)
 
 
@@ -52,6 +52,12 @@ async def _pool() -> Any:
 
 
 async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
+    from trader.config import Settings
+
+    settings = Settings()
+    allowlist = [item.strip() for item in settings.TRAIN_STRATEGY_ALLOWLIST.split(",") if item.strip()] or None
+    include_candle = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
+    label_schema = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
     rows = await pool.fetch(
         f"""
         SELECT po.horizon_minutes, count(DISTINCT fs.snapshot_id) AS sample_count
@@ -68,8 +74,9 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
         GROUP BY po.horizon_minutes
         ORDER BY sample_count DESC
         """,
-        LABEL_SCHEMA_VERSION,
-        None,
+        label_schema,
+        allowlist,
+        include_candle,
     )
     return [
         TrainableSnapshot(horizon_minutes=int(row["horizon_minutes"]), sample_count=int(row["sample_count"]))

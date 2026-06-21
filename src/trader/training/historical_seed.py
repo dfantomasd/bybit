@@ -32,7 +32,10 @@ from trader.data.candles import Candle, CandleStore
 from trader.features.pipeline import _MIN_BARS, FeaturePipeline
 from trader.storage.directional_trade_journal import default_cost_model
 from trader.training.feature_side import feature_values_for_side
-from trader.training.labels import LABEL_SCHEMA_VERSION, build_directional_outcome
+from trader.training.labels import (
+    active_label_schema_version,
+    build_directional_outcome,
+)
 
 _INTERVAL_MINUTES = {
     "1": 1,
@@ -112,6 +115,10 @@ def seed_candles_for_symbol(
     label_bps_threshold: float,
     skip_existing: bool,
     store_max_bars: int = 500,
+    use_tpsl_exit: bool = True,
+    tp_atr_mult: float = 1.0,
+    sl_atr_mult: float = 0.5,
+    label_schema_version: str | None = None,
 ) -> tuple[list[dict[str, Any]], SeedStats]:
     """Pure replay: compute features and pending DB rows without I/O."""
     if interval != "1":
@@ -120,6 +127,7 @@ def seed_candles_for_symbol(
     store = CandleStore(max_bars=store_max_bars)
     pipeline = FeaturePipeline(store)
     costs = default_cost_model()
+    schema_version = label_schema_version or active_label_schema_version(use_tpsl_exit=use_tpsl_exit)
     max_horizon = max(horizons)
     pending_rows: list[dict[str, Any]] = []
     samples_written = 0
@@ -165,6 +173,9 @@ def seed_candles_for_symbol(
 
         outcomes: list[dict[str, Any]] = []
         entry_close = candles[idx].close
+        feature_map = dict(zip(vec.feature_names, vec.values, strict=True))
+        atr_pct = feature_map.get("atr_14_pct")
+        atr_value = float(atr_pct) if atr_pct is not None else None
         for horizon in horizons:
             path = _forward_path(candles, idx, horizon)
             if path is None or entry_close <= 0:
@@ -177,6 +188,10 @@ def seed_candles_for_symbol(
                 lows=[item.low for item in path],
                 cost_model=costs,
                 label_threshold_bps=label_bps_threshold,
+                atr_pct=atr_value,
+                tp_atr_mult=tp_atr_mult,
+                sl_atr_mult=sl_atr_mult,
+                use_tpsl_exit=use_tpsl_exit and atr_value is not None,
             )
             outcomes.append(
                 {
@@ -188,7 +203,7 @@ def seed_candles_for_symbol(
                     "max_favorable_excursion_bps": outcome.max_favorable_excursion_bps,
                     "max_adverse_excursion_bps": outcome.max_adverse_excursion_bps,
                     "label": outcome.label,
-                    "label_schema_version": LABEL_SCHEMA_VERSION,
+                    "label_schema_version": schema_version,
                 }
             )
             outcomes_resolved += 1
@@ -372,6 +387,13 @@ async def _seed_symbol(
     label_bps_threshold: float,
     skip_existing: bool,
 ) -> SeedStats:
+    from trader.config import Settings
+
+    settings = Settings()
+    use_tpsl = bool(settings.MODEL_LABEL_USE_TPSL_EXIT)
+    tp_mult = float(settings.MODEL_LABEL_TP_ATR_MULT)
+    sl_mult = float(settings.MODEL_LABEL_SL_ATR_MULT)
+    label_schema = active_label_schema_version(use_tpsl_exit=use_tpsl)
     candles = await _load_candles(pool, symbol=symbol, interval=interval)
     if len(candles) < _MIN_BARS + max(horizons):
         return SeedStats(
@@ -394,6 +416,10 @@ async def _seed_symbol(
         horizons=horizons,
         label_bps_threshold=label_bps_threshold,
         skip_existing=False,
+        use_tpsl_exit=use_tpsl,
+        tp_atr_mult=tp_mult,
+        sl_atr_mult=sl_mult,
+        label_schema_version=label_schema,
     )
 
     written = 0

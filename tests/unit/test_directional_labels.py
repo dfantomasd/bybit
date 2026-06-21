@@ -121,3 +121,47 @@ def test_label_threshold_must_be_finite() -> None:
             cost_model=CostModelBps(),
             label_threshold_bps=float("nan"),
         )
+
+
+def test_tpsl_exit_prefers_stop_before_take_profit_on_buy() -> None:
+    costs = CostModelBps(spread_bps=4.0)
+    outcome = build_directional_outcome(
+        side="Buy",
+        entry_price=100.0,
+        exit_price=100.5,
+        highs=[100.8, 101.2],
+        lows=[99.4, 100.6],
+        cost_model=costs,
+        label_threshold_bps=0.0,
+        atr_pct=0.01,
+        tp_atr_mult=1.0,
+        sl_atr_mult=0.5,
+        use_tpsl_exit=True,
+    )
+    # SL at 99.5 is touched on bar 1 before TP at 101.0
+    assert outcome.gross_return_bps == pytest.approx(-50.0)
+
+
+def test_tpsl_exit_hits_take_profit_when_stop_not_touched() -> None:
+    costs = CostModelBps(spread_bps=4.0)
+    outcome = build_directional_outcome(
+        side="Buy",
+        entry_price=100.0,
+        exit_price=100.2,
+        highs=[100.8, 101.2],
+        lows=[99.8, 100.4],
+        cost_model=costs,
+        label_threshold_bps=0.0,
+        atr_pct=0.01,
+        tp_atr_mult=1.0,
+        sl_atr_mult=0.5,
+        use_tpsl_exit=True,
+    )
+    assert outcome.gross_return_bps == pytest.approx(100.0)
+
+
+def test_active_label_schema_version_switches_with_tpsl_flag() -> None:
+    from trader.training.labels import LABEL_SCHEMA_VERSION, LABEL_SCHEMA_VERSION_TPSL, active_label_schema_version
+
+    assert active_label_schema_version(use_tpsl_exit=False) == LABEL_SCHEMA_VERSION
+    assert active_label_schema_version(use_tpsl_exit=True) == LABEL_SCHEMA_VERSION_TPSL
