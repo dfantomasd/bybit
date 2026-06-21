@@ -74,9 +74,10 @@ services:
         max-file: "5"
 
   # ---------------------------------------------------------------------------
-  # Background workers
+  # Background workers (optional — Render uses in-app auto-trainer in app.py)
   # ---------------------------------------------------------------------------
   trainer-worker:
+    profiles: ["workers"]
     image: bybit-trader:latest
     container_name: trainer-worker
     restart: unless-stopped
@@ -106,34 +107,6 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-
-  reporter-worker:
-    image: bybit-trader:latest
-    container_name: reporter-worker
-    restart: unless-stopped
-    command: ["python", "-m", "trader.workers.reporter"]
-    env_file:
-      - .env
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - backend
-      - monitoring
-    volumes:
-      - ./config:/app/config:ro
-    deploy:
-      resources:
-        limits:
-          memory: 512M
-          cpus: "0.5"
-    security_opt:
-      - no-new-privileges:true
-    logging:
-      driver: json-file
-      options:
-        max-size: "20m"
-        max-file: "3"
 
   # ---------------------------------------------------------------------------
   # PostgreSQL 16
@@ -209,9 +182,11 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
-  # Prometheus
+  # Monitoring stack (optional — requires ./monitoring/ config files)
+  # Usage: docker compose --profile monitoring up
   # ---------------------------------------------------------------------------
   prometheus:
+    profiles: ["monitoring"]
     image: prom/prometheus:latest
     container_name: trader-prometheus
     restart: unless-stopped
@@ -242,6 +217,7 @@ services:
   # Grafana (only externally exposed port)
   # ---------------------------------------------------------------------------
   grafana:
+    profiles: ["monitoring"]
     image: grafana/grafana:latest
     container_name: trader-grafana
     restart: unless-stopped
@@ -280,6 +256,7 @@ services:
   # Loki (log aggregation)
   # ---------------------------------------------------------------------------
   loki:
+    profiles: ["monitoring"]
     image: grafana/loki:latest
     container_name: trader-loki
     restart: unless-stopped
@@ -301,6 +278,7 @@ services:
   # Promtail (log shipper: Docker logs → Loki)
   # ---------------------------------------------------------------------------
   promtail:
+    profiles: ["monitoring"]
     image: grafana/promtail:latest
     container_name: trader-promtail
     restart: unless-stopped

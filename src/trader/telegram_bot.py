@@ -767,6 +767,19 @@ class TelegramMonitorBot:
             pass
         return horizon, gate if isinstance(gate, dict) else {}
 
+    def _train_defaults(self) -> tuple[int, int, float]:
+        """Return (min_samples, horizon_minutes, label_bps) aligned with auto-trainer config."""
+        runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
+        min_samples = int(runtime.get("model_auto_train_min_samples") or 1000)
+        horizon = int(runtime.get("model_auto_train_horizon_minutes") or 5)
+        label_bps = float(runtime.get("model_auto_train_label_bps") or 2.0)
+        return min_samples, horizon, label_bps
+
+    def _train_callback(self, min_samples: int | None = None) -> str:
+        default_min, horizon, label_bps = self._train_defaults()
+        samples = min_samples if min_samples is not None else default_min
+        return f"train:{samples}:{horizon}:{label_bps:g}"
+
     def _mode_indicator(self) -> str:
         """Compact current-mode line for menu headers."""
         mode = (self._config.trading_mode or "SHADOW").upper()
@@ -875,7 +888,10 @@ class TelegramMonitorBot:
                 ],
                 [InlineKeyboardButton("🏆 Champion health", callback_data="view:champion_health")],
                 [
-                    InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
+                    InlineKeyboardButton(
+                        f"🧠 Обучить {self._train_defaults()[0]}",
+                        callback_data=self._train_callback(),
+                    ),
                     InlineKeyboardButton("🏆 Промоутить", callback_data="control:promote"),
                 ],
                 [
@@ -936,8 +952,11 @@ class TelegramMonitorBot:
                 )
             ],
             [
-                InlineKeyboardButton("🧠 Обучить 500", callback_data="train:500:15:5"),
-                InlineKeyboardButton("🧠 Обучить 1000", callback_data="train:1000:15:5"),
+                InlineKeyboardButton("🧠 Обучить 500", callback_data=self._train_callback(500)),
+                InlineKeyboardButton(
+                    f"🧠 Обучить {self._train_defaults()[0]}",
+                    callback_data=self._train_callback(),
+                ),
             ],
             [
                 InlineKeyboardButton(
@@ -1465,19 +1484,25 @@ class TelegramMonitorBot:
             return
 
         def _period_line(title: str, row: dict[str, Any]) -> str:
+            gross = row.get("avg_gross_bps") or row.get("avg_gross_return_bps")
+            net = row.get("avg_net_bps") or row.get("avg_net_return_bps")
+            cost = row.get("avg_cost_bps")
             return (
                 f"<b>{title}</b>\n"
                 f"Сделок: <code>{int(row.get('count') or 0)}</code>\n"
-                f"Gross avg: <code>{float(row.get('avg_gross_bps') or 0.0):+.2f} bps</code>\n"
-                f"Net avg:   <code>{float(row.get('avg_net_bps') or 0.0):+.2f} bps</code>\n"
-                f"Cost avg:  <code>{float(row.get('avg_cost_bps') or 0.0):+.2f} bps</code>"
+                f"Gross avg: <code>{float(gross or 0.0):+.2f} bps</code>\n"
+                f"Net avg:   <code>{float(net or 0.0):+.2f} bps</code>\n"
+                f"Cost avg:  <code>{float(cost or 0.0):+.2f} bps</code>"
             )
 
         today = data.get("today") or {}
-        total = data.get("all_time") or {}
+        total = data.get("all_time") or data.get("all") or {}
+        horizon = int(data.get("horizon_minutes") or self._train_defaults()[1])
+        label_schema = str(data.get("label_schema_version") or "directional_net_v2")
         lines = [
             "🧾 <b>Издержки детально</b>",
-            "База: <code>RULE_BASELINE_V1</code>, horizon 15m",
+            f"База: <code>RULE_BASELINE_V1</code>, "
+            f"<code>{html.escape(label_schema)}</code>, horizon <code>{horizon}m</code>",
             "",
             _period_line("Сегодня UTC", today),
             "",
@@ -1518,14 +1543,19 @@ class TelegramMonitorBot:
             total_part = f", Σ <code>{float(total or 0.0):+.1f}</code>" if total is not None else ""
             return f"{label}: <code>{int(count or 0)}</code>, avg <code>{float(avg or 0.0):+.2f}</code>{total_part}"
 
-        symbol_best = data.get("symbols_best") or []
-        symbol_worst = data.get("symbols_worst") or []
+        symbol_best = data.get("symbols_best") or data.get("top_symbols") or []
+        symbol_worst = data.get("symbols_worst") or data.get("worst_symbols") or []
         regimes = data.get("regimes") or []
         weekdays = data.get("weekdays") or []
-        hours = {int(row.get("hour") or 0): row for row in data.get("hours") or []}
+        hours = {
+            int(row.get("hour") or row.get("hour_utc") or 0): row for row in data.get("hours") or []
+        }
+        horizon = int(data.get("horizon_minutes") or self._train_defaults()[1])
+        label_schema = str(data.get("label_schema_version") or "directional_net_v2")
         lines = [
             "🔬 <b>PnL-анализ baseline</b>",
-            "Фильтр: <code>directional_net_v1</code>, <code>RULE_BASELINE_V1</code>, horizon 15m",
+            f"Фильтр: <code>{html.escape(label_schema)}</code>, "
+            f"<code>RULE_BASELINE_V1</code>, horizon <code>{horizon}m</code>",
             "",
             "<b>Топ-5 прибыльных символов</b>",
         ]
@@ -1533,8 +1563,8 @@ class TelegramMonitorBot:
             _row(
                 f"<code>{row.get('symbol', '?')}</code>",
                 row.get("count"),
-                row.get("avg_net_bps"),
-                row.get("total_net_bps"),
+                row.get("avg_net_bps") or row.get("avg_net_return_bps"),
+                row.get("total_net_bps") or row.get("total_net_return_bps"),
             )
             for row in symbol_best[:5]
         )
@@ -1543,8 +1573,8 @@ class TelegramMonitorBot:
             _row(
                 f"<code>{row.get('symbol', '?')}</code>",
                 row.get("count"),
-                row.get("avg_net_bps"),
-                row.get("total_net_bps"),
+                row.get("avg_net_bps") or row.get("avg_net_return_bps"),
+                row.get("total_net_bps") or row.get("total_net_return_bps"),
             )
             for row in symbol_worst[:5]
         )
@@ -1553,7 +1583,8 @@ class TelegramMonitorBot:
         for hour in range(24):
             row = hours.get(hour, {})
             label = f"{hour:02d}-{(hour + 1) % 24:02d}"
-            hour_chunks.append(f"{label}:{float(row.get('avg_net_bps') or 0.0):+.1f}/{int(row.get('count') or 0)}")
+            avg = row.get("avg_net_bps") or row.get("avg_net_return_bps")
+            hour_chunks.append(f"{label}:{float(avg or 0.0):+.1f}/{int(row.get('count') or 0)}")
         lines.extend("<code>" + "  ".join(hour_chunks[i : i + 4]) + "</code>" for i in range(0, 24, 4))
         lines.append("\n<b>По режимам</b>")
         lines.extend(
@@ -2436,6 +2467,7 @@ class TelegramMonitorBot:
         await self._reply(update, self._model_help_text(), reply_markup=self._control_menu())
 
     def _model_help_text(self) -> str:
+        min_samples, horizon, label_bps = self._train_defaults()
         return (
             "<b>❓ Что означают метрики и как добраться до реальных денег</b>\n\n"
             "<b>Метрики модели (в «База и модель»)</b>\n\n"
@@ -2452,9 +2484,9 @@ class TelegramMonitorBot:
             "  Baseline = все сигналы, Gate = только пропущенные моделью.\n\n"
             "<b>🛣 Путь к реальным деньгам (CANARY)</b>\n\n"
             "<b>Шаг 1 — Накопить данные</b>\n"
-            "✓ Примеры 15m ≥ 1000 (сейчас уже есть)\n\n"
+            f"✓ Scalp v2 примеры {horizon}m ≥ {min_samples} (с pool <code>scalp_micro_v1</code>)\n\n"
             "<b>Шаг 2 — Обучить модель</b>\n"
-            "✓ Нажать «Обучить ВСЕ» или «Обучить 1000»\n"
+            f"✓ «Обучить {min_samples}» или авто-train ({horizon}m / {label_bps:g} bps)\n"
             "✓ Качество = ХОРОШО, Walk-forward > 0 bps\n\n"
             "<b>Шаг 3 — Промоутировать кандидата</b>\n"
             "✓ Нажать «🏆 Промоутировать кандидата → CHAMPION»\n"
@@ -3084,10 +3116,11 @@ class TelegramMonitorBot:
             await self._reply(update, "Запуск обучения сейчас недоступен.")
             return
         args = context.args or []
+        default_min, default_horizon, default_label_bps = self._train_defaults()
         try:
-            min_samples = int(args[0]) if len(args) >= 1 else 500
-            horizon = int(args[1]) if len(args) >= 2 else 15
-            label_bps = float(args[2]) if len(args) >= 3 else 5.0
+            min_samples = int(args[0]) if len(args) >= 1 else default_min
+            horizon = int(args[1]) if len(args) >= 2 else default_horizon
+            label_bps = float(args[2]) if len(args) >= 3 else default_label_bps
         except ValueError:
             await self._reply(update, "Формат: /train [примеров] [горизонт_минут] [порог_bps]")
             return
@@ -4241,8 +4274,9 @@ class TelegramMonitorBot:
             await self._button_reply(
                 update,
                 "🧠 <b>Запустить обучение?</b>\n\n"
-                "Примеры: <code>500</code>, горизонт: <code>15m</code>, порог: <code>5 bps</code>.",
-                reply_markup=self._confirm_menu("train:500:15:5"),
+                f"Примеры: <code>500</code>, горизонт: <code>{self._train_defaults()[1]}m</code>, "
+                f"порог: <code>{self._train_defaults()[2]:g} bps</code>.",
+                reply_markup=self._confirm_menu(self._train_callback(500)),
             )
             return
         if action == "limits":

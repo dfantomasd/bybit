@@ -64,13 +64,7 @@ services:
     # No password in dev for convenience
 
   trainer-worker:
-    environment:
-      LOG_FORMAT: console
-      LOG_LEVEL: DEBUG
-    volumes:
-      - ./src:/app/src:ro
-
-  reporter-worker:
+    profiles: ["workers"]
     environment:
       LOG_FORMAT: console
       LOG_LEVEL: DEBUG
