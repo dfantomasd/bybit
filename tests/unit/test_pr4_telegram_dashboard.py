@@ -641,6 +641,64 @@ async def test_dashboard_action_pause_button_is_routed() -> None:
 
 
 @pytest.mark.asyncio
+async def test_render_model_uses_lite_db_diag(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value={"connected": True})
+    load_diag = AsyncMock(
+        return_value={
+            "lite": True,
+            "latest_model_version": {
+                "version": "v-lite",
+                "status": "SHADOW_CHALLENGER",
+                "training_samples": 500,
+                "metrics": {"quality": "GOOD", "lift_bps": 1.5, "precision": 0.55},
+            },
+            "training_eligible_15m": 500,
+        }
+    )
+    monkeypatch.setattr(bot, "_load_db_diag", load_diag)
+
+    text, _markup = await bot._render_model()
+
+    load_diag.assert_awaited_once_with(lite=True)
+    assert "v-lite" in text
+
+
+@pytest.mark.asyncio
+async def test_canary_button_uses_respond_not_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value={"connected": True, "lite": True})
+    bot._controller.diagnostics_provider = MagicMock(return_value={"active_symbols": ["BTCUSDT"]})
+    respond = AsyncMock()
+    monkeypatch.setattr(bot, "_respond", respond)
+    update = _fake_callback_update()
+    update.callback_query.data = "action:canary"
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    respond.assert_awaited()
+
+
+@pytest.mark.asyncio
+async def test_load_db_diag_timeout_returns_error() -> None:
+    bot = _make_bot()
+
+    async def _slow(*, lite: bool = False) -> dict[str, object]:
+        del lite
+        await asyncio.sleep(0.2)
+        return {"connected": True}
+
+    assert bot._controller is not None
+    bot._controller.db_diagnostics_provider = _slow
+    bot._DB_DIAG_TIMEOUT_LITE_S = 0.05
+
+    diag = await bot._load_db_diag(lite=True)
+
+    assert diag["error"] == "db_diagnostics_timeout"
+
+
+@pytest.mark.asyncio
 async def test_dashboard_action_canary_button_is_routed() -> None:
     bot = _make_bot()
     bot._db_diagnostics_provider = AsyncMock(return_value={"connected": True})

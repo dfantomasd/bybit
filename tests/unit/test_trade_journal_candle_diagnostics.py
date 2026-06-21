@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from unittest.mock import AsyncMock
@@ -171,3 +172,62 @@ async def test_db_diagnostics_preserves_partial_results_when_one_section_times_o
     assert diag["prediction_outcomes"] == 321
     assert diag["training_eligible_15m"] == 123
     assert "feature_snapshot_readiness_count" in str(diag["last_read_error"])
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = object()  # type: ignore[assignment]
+    latest = datetime.now(tz=UTC) - timedelta(seconds=30)
+    journal.get_latest_candle_time = AsyncMock(return_value=latest)  # type: ignore[method-assign]
+    journal.get_candle_readiness_counts = AsyncMock(side_effect=AssertionError("lite must skip"))  # type: ignore[method-assign]
+    journal.get_feature_snapshot_readiness_count = AsyncMock(side_effect=AssertionError("lite must skip"))  # type: ignore[method-assign]
+
+    async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del args
+        if "training_runs" in query:
+            return [{"status": "COMPLETED", "model_version": "v1", "sample_count": 100}]
+        if "CHAMPION" in query:
+            return [{"version": "v1", "status": "CHAMPION", "training_samples": 100}]
+        if "model_versions" in query:
+            return [{"version": "v1", "status": "SHADOW_CHALLENGER", "training_samples": 100}]
+        return []
+
+    journal._fetch = fake_fetch  # type: ignore[method-assign]
+
+    diag = await journal.get_db_diagnostics(lite=True)
+
+    assert diag["lite"] is True
+    assert diag["latest_candle_1m"] == latest
+    assert diag["latest_model_version"]["version"] == "v1"
+    assert diag["active_model_version"]["status"] == "CHAMPION"
+
+
+@pytest.mark.asyncio
+async def test_fetch_timeout_returns_empty_list(monkeypatch: pytest.MonkeyPatch) -> None:
+    import trader.storage.trade_journal as tj_mod
+
+    journal = TradeJournal("postgresql://example/db")
+    monkeypatch.setattr(tj_mod, "_FETCH_TIMEOUT_SECONDS", 0.05)
+
+    class _SlowConn:
+        async def fetch(self, *_args: Any, **_kwargs: Any) -> list[Any]:
+            await asyncio.sleep(0.2)
+            return []
+
+    class _Pool:
+        def acquire(self) -> _Acquire:
+            return _Acquire()
+
+    class _Acquire:
+        async def __aenter__(self) -> _SlowConn:
+            return _SlowConn()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            return None
+
+    journal._pool = _Pool()  # type: ignore[assignment]
+    rows = await journal._fetch("SELECT 1")
+
+    assert rows == []
+    assert "timeout" in str(journal._last_read_error).lower()

@@ -147,7 +147,7 @@ class TradingController:
     # Optional diagnostics provider (returns dict from TradingApplication.get_diagnostics)
     diagnostics_provider: Callable[[], dict[str, Any]] | None = None
     # Optional async DB diagnostics provider
-    db_diagnostics_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    db_diagnostics_provider: Callable[..., Awaitable[dict[str, Any]]] | None = None
     start_training: Callable[[int, int, float], Awaitable[str]] | None = None
     start_training_all: Callable[[], Awaitable[str]] | None = None
     promote_model: Callable[[str], Awaitable[str]] | None = None
@@ -1427,6 +1427,53 @@ class TelegramMonitorBot:
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
+    _DB_DIAG_TIMEOUT_LITE_S = 8.0
+    _DB_DIAG_TIMEOUT_FULL_S = 20.0
+
+    async def _load_db_diag(self, *, lite: bool = True) -> dict[str, Any]:
+        """Load DB diagnostics with timeout; lite mode avoids heavy Postgres scans."""
+        if self._controller is None or self._controller.db_diagnostics_provider is None:
+            return {"connected": False, "error": "db_diagnostics_unavailable", "lite": lite}
+        provider = self._controller.db_diagnostics_provider
+        timeout = self._DB_DIAG_TIMEOUT_LITE_S if lite else self._DB_DIAG_TIMEOUT_FULL_S
+        try:
+            try:
+                coro = provider(lite=lite)
+            except TypeError:
+                coro = provider()
+            return await asyncio.wait_for(coro, timeout=timeout)
+        except TimeoutError:
+            log.warning("telegram.db_diagnostics_timeout", lite=lite, timeout_s=timeout)
+            return {
+                "connected": False,
+                "error": "db_diagnostics_timeout",
+                "lite": lite,
+            }
+        except Exception as exc:
+            log.warning("telegram.db_diagnostics_failed", lite=lite, error=str(exc))
+            return {"connected": False, "error": str(exc), "lite": lite}
+
+    async def _respond(
+        self,
+        update: Update,
+        text: str,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> None:
+        """Reply via edit for callback buttons, otherwise send a new message."""
+        if update.callback_query is not None:
+            await self._button_reply(update, text, reply_markup=reply_markup)
+            return
+        await self._reply(update, text, reply_markup=reply_markup)
+
+    def _db_diag_banner(self, db_diag: dict[str, Any]) -> str | None:
+        if db_diag.get("error") == "db_diagnostics_timeout":
+            return "⚠️ Postgres отвечает медленно — показаны быстрые данные без gate/paper."
+        if db_diag.get("schema_degraded"):
+            return "⚠️ Схема БД инициализируется в фоне — часть метрик может быть неполной."
+        if db_diag.get("lite"):
+            return None
+        return None
+
     # ------------------------------------------------------------------
     # Observability commands
     # ------------------------------------------------------------------
@@ -2330,19 +2377,15 @@ class TelegramMonitorBot:
         if not await self._authorised(update):
             return
 
-        await self._reply(
+        text = await self._render_canary_readiness_text(lite=True)
+        await self._respond(
             update,
-            await self._render_canary_readiness_text(),
+            text,
             reply_markup=self._canary_menu(),
         )
 
-    async def _render_canary_readiness_text(self) -> str:
-        db_diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
-            try:
-                db_diag = await self._controller.db_diagnostics_provider()
-            except Exception as exc:
-                db_diag = {"connected": False, "error": str(exc)}
+    async def _render_canary_readiness_text(self, *, lite: bool = True) -> str:
+        db_diag = await self._load_db_diag(lite=lite)
 
         diag: dict[str, Any] = {}
         if self._controller is not None and self._controller.diagnostics_provider is not None:
@@ -2351,7 +2394,11 @@ class TelegramMonitorBot:
             except Exception as exc:
                 diag = {"error": str(exc)}
 
-        return self._canary_readiness_text(db_diag=db_diag, diag=diag)
+        text = self._canary_readiness_text(db_diag=db_diag, diag=diag)
+        banner = self._db_diag_banner(db_diag)
+        if banner:
+            text = f"{banner}\n\n{text}"
+        return text
 
     def _canary_readiness_text(self, *, db_diag: dict[str, Any], diag: dict[str, Any]) -> str:
         checks: list[tuple[str, bool, str, str, str]] = []
@@ -2850,13 +2897,7 @@ class TelegramMonitorBot:
         if not await self._authorised(update):
             return
         try:
-            db_diag: dict[str, Any] = {}
-            if self._controller is not None and self._controller.db_diagnostics_provider is not None:
-                try:
-                    db_diag = await self._controller.db_diagnostics_provider()
-                except Exception as exc:
-                    db_diag = {"error": str(exc)}
-
+            db_diag = await self._load_db_diag(lite=update.callback_query is not None)
             diag: dict[str, Any] = {}
             if self._controller is not None and self._controller.diagnostics_provider is not None:
                 try:
@@ -3004,6 +3045,12 @@ class TelegramMonitorBot:
             lines = [
                 "<b>🗄 БАЗА И МОДЕЛЬ</b>",
                 "",
+            ]
+            banner = self._db_diag_banner(db_diag)
+            if banner:
+                lines.append(banner)
+                lines.append("")
+            lines += [
                 f"БД: {db_icon} {db_status}",
                 f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
                 f"Последняя свеча 1m: <code>{latest_str}</code>",
@@ -3152,12 +3199,12 @@ class TelegramMonitorBot:
             if db_diag.get("error"):
                 lines.append(f"\n<i>Ошибка: {html.escape(str(db_diag['error']))}</i>")
 
-            await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+            await self._respond(update, "\n".join(lines), reply_markup=self._main_menu())
         except Exception as exc:
             log.warning("telegram.db_model_render_failed", error=str(exc), exc_info=True)
             err_text = html.escape(str(exc))[:200]
             try:
-                await self._reply(
+                await self._respond(
                     update,
                     f"<b>База и модель</b>\nНе удалось отправить диагностику.\nОшибка: <code>{err_text}</code>",
                     reply_markup=self._main_menu(),
@@ -3555,17 +3602,22 @@ class TelegramMonitorBot:
 
     async def _show_canary_model_metrics(self, update: Update) -> None:
         """Second /canary screen: model quality metrics (lift, precision, gate stats)."""
-        db_diag: dict[str, Any] = {}
-        if self._controller is not None and self._controller.db_diagnostics_provider is not None:
-            try:
-                db_diag = await self._controller.db_diagnostics_provider()
-            except Exception as exc:
-                await self._button_reply(
-                    update,
-                    f"❌ Не удалось получить метрики: <code>{html.escape(str(exc))}</code>",
-                    reply_markup=self._canary_menu(),
-                )
-                return
+        db_diag = await self._load_db_diag(lite=True)
+        if db_diag.get("error") == "db_diagnostics_timeout":
+            await self._button_reply(
+                update,
+                "⚠️ Postgres отвечает медленно — метрики модели временно недоступны.\n"
+                "Попробуйте через минуту или откройте /canary снова.",
+                reply_markup=self._canary_menu(),
+            )
+            return
+        if db_diag.get("error"):
+            await self._button_reply(
+                update,
+                f"❌ Не удалось получить метрики: <code>{html.escape(str(db_diag['error']))}</code>",
+                reply_markup=self._canary_menu(),
+            )
+            return
         latest_model = db_diag.get("latest_model_version", {}) or {}
         metrics = latest_model.get("metrics") or {}
         if isinstance(metrics, str):
@@ -4124,8 +4176,14 @@ class TelegramMonitorBot:
         ctrl = self._controller
         lines: list[str] = ["🧠 <b>Модель и обучение</b>\n"]
         if ctrl and hasattr(ctrl, "db_diagnostics_provider") and ctrl.db_diagnostics_provider:
-            try:
-                info = await ctrl.db_diagnostics_provider()
+            info = await self._load_db_diag(lite=True)
+            banner = self._db_diag_banner(info)
+            if banner:
+                lines.append(banner)
+                lines.append("")
+            if info.get("error") and info.get("error") != "db_diagnostics_timeout":
+                lines.append(f"Ошибка: <code>{html.escape(str(info['error']))}</code>")
+            else:
                 latest = info.get("latest_model_version") or {}
 
                 metrics: dict[str, Any] = latest.get("metrics") or {}
@@ -4176,15 +4234,19 @@ class TelegramMonitorBot:
                         f"⚠️ Последний запуск на старой schema: <code>{actual_samples}</code> образцов "
                         f"(<code>{version}</code>)"
                     )
+                if gate_total or gate_pass or gate_lift is not None:
+                    lines += [
+                        f"<b>Shadow gate ({model_horizon}m):</b>",
+                        f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
+                        f"Gate lift: <code>{gate_lift_str}</code>",
+                        "",
+                    ]
+                elif info.get("lite"):
+                    lines.append("Shadow gate: <code>загружается в фоне</code>")
+                    lines.append("")
                 lines += [
-                    f"<b>Shadow gate ({model_horizon}m):</b>",
-                    f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
-                    f"Gate lift: <code>{gate_lift_str}</code>",
-                    "",
                     f"Данных для обучения ({model_horizon}m): <code>{eligible}</code>",
                 ]
-            except Exception as exc:
-                lines.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
             lines.append("Данные недоступны")
         keyboard = InlineKeyboardMarkup(
@@ -4302,11 +4364,8 @@ class TelegramMonitorBot:
             await self._button_reply(update, text, reply_markup=markup)
             return
         if action == "canary":
-            await self._button_reply(
-                update,
-                await self._render_canary_readiness_text(),
-                reply_markup=self._canary_menu(),
-            )
+            fake_context = type("_Context", (), {"args": []})()
+            await self._cmd_canary_ready(update, fake_context)
             return
         await self._button_reply(update, f"Неизвестное действие: {action}", reply_markup=self._main_menu())
 
@@ -4584,12 +4643,9 @@ class TelegramMonitorBot:
             if self._controller.promote_model is None:
                 await self._button_reply(update, "Промоут сейчас недоступен.", reply_markup=self._main_menu())
                 return
-            db_diag: dict[str, Any] = {}
-            if self._controller.db_diagnostics_provider is not None:
-                try:
-                    db_diag = await self._controller.db_diagnostics_provider()
-                except Exception as exc:
-                    log.warning("telegram.promote.db_diag_failed", error=str(exc))
+            db_diag = await self._load_db_diag(lite=True)
+            if db_diag.get("error"):
+                log.warning("telegram.promote.db_diag_failed", error=str(db_diag.get("error")))
             latest_model = db_diag.get("latest_model_version", {}) or {}
             version = latest_model.get("version") or ""
             if not version:

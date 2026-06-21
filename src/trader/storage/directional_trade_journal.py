@@ -469,12 +469,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 
         return resolved
 
-    async def get_db_diagnostics(self) -> dict[str, Any]:
+    async def get_db_diagnostics(self, *, lite: bool = False) -> dict[str, Any]:
         """Expose only current-schema labels and models to diagnostics."""
 
-        result = await super().get_db_diagnostics()
+        result = await super().get_db_diagnostics(lite=lite)
         result["label_schema_version"] = LABEL_SCHEMA_VERSION
-        if not self.is_enabled:
+        if not self.is_enabled or lite:
             return result
 
         try:
