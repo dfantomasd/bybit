@@ -439,8 +439,25 @@ class TelegramMonitorBot:
                 data = await incoming.json()
                 update = Update.de_json(data, tg_app.bot)
                 if update is not None:
-                    bot_ref._touch_handler_activity()
-                    await tg_app.process_update(update)
+                    kind = "message" if update.message else "callback_query" if update.callback_query else "other"
+                    log.info(
+                        "telegram_webhook_update_received",
+                        update_id=update.update_id,
+                        kind=kind,
+                    )
+
+                    async def _process() -> None:
+                        try:
+                            await tg_app.process_update(update)
+                            log.info("telegram_webhook_update_processed", update_id=update.update_id)
+                        except Exception as proc_exc:
+                            log.warning(
+                                "telegram_webhook_background_process_failed",
+                                update_id=update.update_id,
+                                error=str(proc_exc),
+                            )
+
+                    asyncio.create_task(_process(), name=f"telegram-update-{update.update_id}")
             except HTTPException:
                 raise
             except Exception as exc:
@@ -700,6 +717,16 @@ class TelegramMonitorBot:
             log.info("telegram_polling_restarted_by_watchdog_full_start")
         else:
             log.warning("telegram_polling_watchdog_full_start_failed", health=self.health_snapshot())
+
+    async def refresh_delivery(self) -> None:
+        """Re-register webhook after long startup or deploy."""
+        if not self.enabled or self._app is None:
+            return
+        if self._uses_webhook():
+            await self._activate_webhook(self._app)
+            log.info("telegram_webhook_refreshed")
+            return
+        await self.ensure_polling_running()
 
     async def _ensure_webhook_active(self) -> None:
         app = self._app
@@ -1356,6 +1383,7 @@ class TelegramMonitorBot:
         from telegram.error import BadRequest
 
         query = update.callback_query
+        chat_id = self._chat_id(update)
         if query is not None and query.message is not None:
             message = cast(Any, query.message)
             chunks = self._split_message(text)
@@ -1371,9 +1399,19 @@ class TelegramMonitorBot:
                 if len(chunks) == 1:
                     return
             except BadRequest as exc:
-                log.debug("telegram.edit_message_failed_fallback_to_reply", error=str(exc))
+                err = str(exc).lower()
+                if reply_markup is not None and "message is not modified" in err:
+                    try:
+                        await query.edit_message_reply_markup(reply_markup=reply_markup)
+                        return
+                    except Exception as markup_exc:
+                        log.debug("telegram.edit_markup_failed", error=str(markup_exc))
+                log.info("telegram.edit_message_failed_sending_new", error=str(exc))
             except Exception as exc:
-                log.debug("telegram.edit_message_unavailable_fallback_to_reply", error=str(exc))
+                log.info("telegram.edit_message_unavailable_sending_new", error=str(exc))
+            if not edited and chat_id is not None:
+                await self._send_direct_message(chat_id, text, reply_markup=reply_markup)
+                return
             start = 1 if edited and len(chunks) > 1 else 0
             try:
                 for index, chunk in enumerate(chunks[start:], start=start):
@@ -1384,7 +1422,8 @@ class TelegramMonitorBot:
                     )
             except Exception as exc:
                 log.warning("telegram.button_reply_failed", error=str(exc))
-                await self._send_direct_message(self._chat_id(update), text, reply_markup=reply_markup)
+                if chat_id is not None:
+                    await self._send_direct_message(chat_id, text, reply_markup=reply_markup)
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
@@ -1399,17 +1438,34 @@ class TelegramMonitorBot:
         cid = self._chat_id(update)
         if cid:
             self._subscribed.add(cid)
-        text, markup = await self._render_home()
-        msg = await self._reply(update, text, reply_markup=markup)
-        if msg is not None:
-            self._dashboard_message_id = msg.message_id
-            self._dashboard_chat_id = msg.chat_id
+        try:
+            text, markup = await self._render_home()
+            msg = await self._reply(update, text, reply_markup=markup)
+            if msg is not None:
+                self._dashboard_message_id = msg.message_id
+                self._dashboard_chat_id = msg.chat_id
+        except Exception as exc:
+            log.warning("telegram.start_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"⚠️ Меню не загрузилось: <code>{html.escape(str(exc))[:300]}</code>",
+                reply_markup=self._main_menu(),
+            )
 
     async def _cmd_menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
             return
-        await self._reply(update, self._menu_text(), reply_markup=self._main_menu())
+        try:
+            text, markup = await self._render_home()
+            await self._reply(update, text, reply_markup=markup)
+        except Exception as exc:
+            log.warning("telegram.menu_failed", error=str(exc))
+            await self._reply(
+                update,
+                f"⚠️ Меню не загрузилось: <code>{html.escape(str(exc))[:300]}</code>",
+                reply_markup=self._main_menu(),
+            )
 
     async def _cmd_help(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
@@ -3878,7 +3934,7 @@ class TelegramMonitorBot:
         ctrl = self._controller
         mode = "SHADOW" if (ctrl is not None and ctrl.is_shadow()) else "ACTIVE"
         paused = ctrl.is_paused() if ctrl is not None else False
-        risk = getattr(ctrl, "current_risk_profile", "—") if ctrl else "—"
+        risk = ctrl.current_profile() if ctrl is not None else "—"
         positions = 0
         if ctrl and hasattr(ctrl, "exposure") and ctrl.exposure is not None:
             positions = getattr(ctrl.exposure, "position_count", 0)
@@ -3918,6 +3974,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🧠 Модель", callback_data="view:model"),
                     InlineKeyboardButton("❓ Помощь", callback_data="view:help"),
                 ],
+                [InlineKeyboardButton("📋 Разделы меню", callback_data="view:menu")],
                 [InlineKeyboardButton("🔄 Обновить", callback_data="view:home")],
             ]
         )

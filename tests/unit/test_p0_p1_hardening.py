@@ -773,11 +773,16 @@ async def test_button_refresh_falls_back_to_reply_on_bad_request() -> None:
     query.message = MagicMock()
     query.edit_message_text = AsyncMock(side_effect=BadRequest("message not modified"))
     query.message.reply_text = AsyncMock(return_value=None)
+    query.message.chat_id = 123
 
     update = MagicMock()
     update.callback_query = query
+    update.effective_chat = None
+
+    bot._app = MagicMock()
+    bot._app.bot.send_message = AsyncMock(return_value=MagicMock(message_id=1, chat_id=123))
 
     await bot._button_reply(update, "Hello", reply_markup=None)
 
     query.edit_message_text.assert_called_once()
-    query.message.reply_text.assert_called_once()
+    bot._app.bot.send_message.assert_awaited_once()
