@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
     MIN_NET_SCALP_RETURN_PCT: float = 0.08
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
+    MIN_NET_TREND_RETURN_PCT: float = 0.10
+    """Minimum expected NET return (percent) for EMA trend entries after costs."""
+    MIN_NET_ALPHA_RETURN_PCT: float = 0.08
+    """Minimum expected NET return (percent) for advanced-alpha entries after costs."""
     SCALP_COOLDOWN_SECONDS: int = 60
     """Minimum seconds between scalp signals per symbol."""
     SCALP_MAX_TRADES_PER_MINUTE: int = 10

@@ -4199,7 +4199,7 @@ class TradingApplication:
                 taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
                 expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
                 max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
-                min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+                min_net_return_pct=self._settings.MIN_NET_TREND_RETURN_PCT,
             )
         ]
 
@@ -4255,6 +4255,7 @@ class TradingApplication:
             or self._settings.MARKET_MAKING_STRATEGY_ENABLED
             or self._settings.STAT_ARB_STRATEGY_ENABLED
         ):
+            from trader.risk.net_edge import NetEdgeParams
             from trader.strategies.advanced_alpha import (
                 FundingArbitrageStrategy,
                 LiquidationHuntingStrategy,
@@ -4262,6 +4263,15 @@ class TradingApplication:
                 OrderFlowStrategy,
                 StatisticalArbitrageStrategy,
             )
+
+            alpha_cost_params = NetEdgeParams(
+                taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+                funding_buffer_pct=self._settings.FUNDING_BUFFER_PCT,
+                safety_margin_pct=0.01,
+            )
+            alpha_min_net = self._settings.MIN_NET_ALPHA_RETURN_PCT
 
             if self._settings.ORDER_FLOW_STRATEGY_ENABLED and self._flow_tracker is not None:
                 strategies.append(
@@ -4271,6 +4281,8 @@ class TradingApplication:
                         min_flow_imbalance=self._settings.ORDER_FLOW_MIN_IMBALANCE,
                         min_book_imbalance=self._settings.ORDER_FLOW_MIN_BOOK_IMBALANCE,
                         max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="order_flow_v1")
@@ -4281,7 +4293,13 @@ class TradingApplication:
                     reason="flow_tracker_missing",
                 )
             if self._settings.FUNDING_ARB_STRATEGY_ENABLED:
-                strategies.append(FundingArbitrageStrategy(min_abs_funding_bps=self._settings.FUNDING_ARB_MIN_ABS_BPS))
+                strategies.append(
+                    FundingArbitrageStrategy(
+                        min_abs_funding_bps=self._settings.FUNDING_ARB_MIN_ABS_BPS,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
                 log.info("advanced_alpha.strategy_active", strategy_id="funding_arbitrage_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="funding_arbitrage_v1")
@@ -4291,6 +4309,8 @@ class TradingApplication:
                         flow_tracker=self._flow_tracker,
                         min_liq_notional_usd=self._settings.LIQUIDATION_HUNTING_MIN_NOTIONAL_USD,
                         min_liq_imbalance=self._settings.LIQUIDATION_HUNTING_MIN_IMBALANCE,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="liquidation_hunting_v1")
@@ -4306,13 +4326,21 @@ class TradingApplication:
                         spread_provider=_spread_for,
                         min_spread_bps=self._settings.MARKET_MAKING_MIN_SPREAD_BPS,
                         max_spread_bps=self._settings.MARKET_MAKING_MAX_SPREAD_BPS,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="market_making_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="market_making_v1")
             if self._settings.STAT_ARB_STRATEGY_ENABLED:
-                strategies.append(StatisticalArbitrageStrategy(min_zscore=self._settings.STAT_ARB_MIN_ZSCORE))
+                strategies.append(
+                    StatisticalArbitrageStrategy(
+                        min_zscore=self._settings.STAT_ARB_MIN_ZSCORE,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
                 log.info("advanced_alpha.strategy_active", strategy_id="statistical_arbitrage_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="statistical_arbitrage_v1")

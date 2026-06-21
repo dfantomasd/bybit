@@ -18,8 +18,8 @@ SELL: mirrored.
 
 Exits (fixed, no trailing)
 --------------------------
-  TP = entry +/- ATR(14) * 0.5
-  SL = entry -/+ ATR(14) * 0.25   (reward:risk ~= 2:1)
+  TP = entry +/- ATR(14) * 1.0
+  SL = entry -/+ ATR(14) * 0.5   (reward:risk ~= 2:1)
 
 Rate limits
 -----------
