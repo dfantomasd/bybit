@@ -3882,11 +3882,18 @@ class TradingApplication:
         confirmed_age: float | None = None
         if self._last_confirmed_candle_at is not None:
             confirmed_age = (now - self._last_confirmed_candle_at).total_seconds()
+        telegram_health: dict[str, Any] = {}
+        if self._telegram_bot is not None and hasattr(self._telegram_bot, "health_snapshot"):
+            try:
+                telegram_health = self._telegram_bot.health_snapshot()
+            except Exception as exc:
+                telegram_health = {"enabled": True, "error": str(exc)}
 
         return {
             "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
             "last_ws_message_age_s": ws_age,
             "last_confirmed_candle_age_s": confirmed_age,
+            "telegram": telegram_health,
             "active_symbols": (self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)),
             "open_positions": (
                 list(self._execution_engine._open_positions.keys()) if self._execution_engine is not None else []
@@ -4010,6 +4017,12 @@ class TradingApplication:
                         fat = self._health_checker._last_feature_computed_at
                         if fat is not None:
                             feat_age = (now - fat).total_seconds()
+                    telegram_health: dict[str, Any] = {}
+                    if self._telegram_bot is not None and hasattr(self._telegram_bot, "health_snapshot"):
+                        try:
+                            telegram_health = self._telegram_bot.health_snapshot()
+                        except Exception as tg_exc:
+                            telegram_health = {"error": str(tg_exc)}
                     log.info(
                         "system.heartbeat",
                         status=(self._status.value if hasattr(self._status, "value") else str(self._status)),
@@ -4058,6 +4071,8 @@ class TradingApplication:
                         model_gate_quality=(
                             self._model_gate_quality.get("quality") if self._model_gate_quality else None
                         ),
+                        telegram_polling=telegram_health.get("polling_running"),
+                        telegram_conflicts=telegram_health.get("polling_conflict_count"),
                     )
                 except Exception as _hb_exc:
                     log.debug("supervisor.heartbeat_failed", error=str(_hb_exc))

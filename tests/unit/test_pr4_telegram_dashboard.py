@@ -675,6 +675,38 @@ async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() ->
 
 
 @pytest.mark.asyncio
+async def test_button_reply_uses_direct_send_when_callback_message_unavailable() -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.callback_query.edit_message_text = AsyncMock(side_effect=RuntimeError("edit timeout"))
+    update.callback_query.message.reply_text = AsyncMock(side_effect=RuntimeError("reply timeout"))
+    sent = MagicMock(message_id=99, chat_id=12345)
+    bot._app = MagicMock()
+    bot._app.bot.send_message = AsyncMock(return_value=sent)
+
+    await bot._button_reply(update, "✅ Готово", reply_markup=bot._main_menu())
+
+    bot._app.bot.send_message.assert_awaited()
+    kwargs = bot._app.bot.send_message.await_args.kwargs
+    assert kwargs["chat_id"] == 12345
+    assert "Готово" in kwargs["text"]
+
+
+@pytest.mark.asyncio
+async def test_callback_auth_uses_message_chat_id_when_effective_chat_missing() -> None:
+    bot = _make_bot()
+    update = _fake_callback_update()
+    update.effective_chat = None
+    update.callback_query.data = "view:menu"
+
+    await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
+
+    update.callback_query.edit_message_text.assert_awaited()
+    edited_text = update.callback_query.edit_message_text.await_args.args[0]
+    assert "Bybit AI Trader" in edited_text
+
+
+@pytest.mark.asyncio
 async def test_confirm_button_replay_is_rejected() -> None:
     """A confirm button fires once; the second press must be ignored."""
     bot = _make_bot()
@@ -751,3 +783,74 @@ def test_plain_text_fallback_strips_html_tags() -> None:
     text = "<b>Модель</b> &amp; <code>v1</code>"
 
     assert TelegramMonitorBot._plain_text(text) == "Модель & v1"
+
+
+def test_telegram_health_snapshot_records_polling_conflicts() -> None:
+    from telegram.error import Conflict
+
+    bot = _make_bot()
+
+    bot._polling_error_callback(Conflict("terminated by other getUpdates request"))
+
+    health = bot.health_snapshot()
+    assert health["enabled"] is True
+    assert health["polling_conflict_count"] == 1
+    assert "getUpdates" in health["last_polling_error"]
+
+
+@pytest.mark.asyncio
+async def test_db_model_screen_uses_model_gate_horizon() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "model": {
+                "champion_version": "none",
+                "challenger_version": "v5",
+                "last_training": "never",
+                "training_samples": 1200,
+            }
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "configured": True,
+            "candles_by_interval": {"1": 5000, "5": 1000, "15": 0, "60": 100},
+            "prediction_outcomes_by_horizon": {"5": 1500, "15": 0},
+            "training_eligible_by_horizon": {"5": 1234, "15": 0},
+            "latest_training_run": {"status": "COMPLETED", "sample_count": 1234, "model_version": "v5"},
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "training_samples": 1234,
+                "metrics": {"quality": "GOOD", "horizon_minutes": 5, "lift_bps": 1.2},
+            },
+            "model_gate_horizon_minutes": 5,
+            "shadow_gate_by_horizon": {
+                "5": {
+                    "horizon_minutes": 5,
+                    "total_count": 44,
+                    "pass_count": 12,
+                    "block_count": 32,
+                    "lift_vs_all_bps": 2.5,
+                }
+            },
+            "paper_pnl_by_horizon": {
+                "5": {
+                    "baseline": {"count": 20, "total_bps": -1.0},
+                    "model_gate": {"count": 12, "total_bps": 8.0},
+                }
+            },
+        }
+    )
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_db_model(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Готово для обучения (5m)" in reply_text
+    assert "Фильтр модели 5m" in reply_text
+    assert "+2.50 bps" in reply_text
+    assert "Фильтр модели 15m" not in reply_text

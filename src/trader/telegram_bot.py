@@ -224,6 +224,12 @@ class TelegramMonitorBot:
         # Single dynamic message state
         self._dashboard_message_id: int | None = None
         self._dashboard_chat_id: int | None = None
+        self._started_at: datetime | None = None
+        self._last_callback_at: datetime | None = None
+        self._last_polling_error_at: datetime | None = None
+        self._last_polling_error: str | None = None
+        self._polling_conflict_count: int = 0
+        self._polling_network_error_count: int = 0
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -309,6 +315,7 @@ class TelegramMonitorBot:
             error_callback=self._polling_error_callback,
         )
         self._app = app
+        self._started_at = datetime.now(tz=UTC)
         log.info("telegram_bot_started", allowed_chats=len(self._config.allowed_chat_ids))
 
     async def stop(self) -> None:
@@ -326,12 +333,26 @@ class TelegramMonitorBot:
         """Suppress Conflict errors during rolling redeploys; log the rest."""
         from telegram.error import Conflict, NetworkError
 
+        now = datetime.now(tz=UTC)
+        self._last_polling_error_at = now
+        self._last_polling_error = str(error)
         if isinstance(error, Conflict):
             # Expected during Render rolling deploys — old instance displaced
-            log.debug("telegram_polling_conflict_suppressed")
+            self._polling_conflict_count += 1
+            log_method = log.warning if self._polling_conflict_count >= 3 else log.debug
+            log_method(
+                "telegram_polling_conflict_suppressed",
+                conflicts=self._polling_conflict_count,
+                error=str(error),
+            )
             return
         if isinstance(error, NetworkError):
-            log.warning("telegram_polling_network_error", error=str(error))
+            self._polling_network_error_count += 1
+            log.warning(
+                "telegram_polling_network_error",
+                count=self._polling_network_error_count,
+                error=str(error),
+            )
             return
         log.error("telegram_polling_error", error=str(error))
 
@@ -401,12 +422,14 @@ class TelegramMonitorBot:
     # ------------------------------------------------------------------
 
     async def _authorised(self, update: Update) -> bool:
-        chat = update.effective_chat
-        if chat is None or chat.id not in self._config.allowed_chat_ids:
+        chat_id = self._chat_id(update)
+        if chat_id is None or chat_id not in self._config.allowed_chat_ids:
             if update.effective_message is not None:
-                suffix = f" Chat ID: {chat.id}" if chat else ""
+                suffix = f" Chat ID: {chat_id}" if chat_id is not None else ""
                 await update.effective_message.reply_text(f"Доступ запрещен.{suffix}")
-            log.warning("telegram_unauthorised_chat", chat_id=chat.id if chat else None)
+            elif chat_id is not None:
+                await self._send_direct_message(chat_id, f"Доступ запрещен. Chat ID: {chat_id}")
+            log.warning("telegram_unauthorised_chat", chat_id=chat_id)
             return False
         return True
 
@@ -473,6 +496,40 @@ class TelegramMonitorBot:
                 reply_markup=reply_markup,
             )
 
+    async def _send_direct_message(
+        self,
+        chat_id: int | None,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+    ) -> Any | None:
+        """Send via bot API when callback message edit/reply is unavailable."""
+        if chat_id is None or self._app is None:
+            return None
+        from telegram.error import BadRequest
+
+        chunks = self._split_message(text)
+        sent = None
+        for index, chunk in enumerate(chunks):
+            markup = reply_markup if index == len(chunks) - 1 else None
+            try:
+                sent = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=chunk,
+                    parse_mode=ParseMode.HTML,
+                    disable_web_page_preview=True,
+                    reply_markup=markup,
+                )
+            except BadRequest as exc:
+                log.debug("telegram.direct_send_html_failed_plaintext_fallback", error=str(exc))
+                sent = await self._app.bot.send_message(
+                    chat_id=chat_id,
+                    text=self._plain_text(chunk),
+                    disable_web_page_preview=True,
+                    reply_markup=markup,
+                )
+        return sent
+
     async def _reply_chunks(
         self,
         message: Any,
@@ -490,7 +547,66 @@ class TelegramMonitorBot:
         return sent
 
     def _chat_id(self, update: Update) -> int | None:
-        return update.effective_chat.id if update.effective_chat else None
+        chat = getattr(update, "effective_chat", None)
+        chat_id = getattr(chat, "id", None)
+        if chat_id is not None:
+            return int(chat_id)
+        query = getattr(update, "callback_query", None)
+        return self._message_chat_id(getattr(query, "message", None))
+
+    @staticmethod
+    def _message_chat_id(message: Any) -> int | None:
+        chat_id = getattr(message, "chat_id", None)
+        if chat_id is None:
+            msg_chat = getattr(message, "chat", None)
+            chat_id = getattr(msg_chat, "id", None)
+        return int(chat_id) if chat_id is not None else None
+
+    def health_snapshot(self) -> dict[str, Any]:
+        """Return lightweight Telegram polling/callback health for app diagnostics."""
+        updater = getattr(self._app, "updater", None)
+        running = bool(getattr(self._app, "running", False))
+        polling = bool(getattr(updater, "running", False)) if updater is not None else False
+        return {
+            "enabled": self.enabled,
+            "app_running": running,
+            "polling_running": polling,
+            "started_at": self._started_at.isoformat() if self._started_at else None,
+            "last_callback_at": self._last_callback_at.isoformat() if self._last_callback_at else None,
+            "last_polling_error_at": (
+                self._last_polling_error_at.isoformat() if self._last_polling_error_at else None
+            ),
+            "last_polling_error": self._last_polling_error,
+            "polling_conflict_count": self._polling_conflict_count,
+            "polling_network_error_count": self._polling_network_error_count,
+            "subscribed_chats": len(self._subscribed),
+        }
+
+    @staticmethod
+    def _model_horizon_and_gate(db_diag: dict[str, Any], metrics: dict[str, Any] | None = None) -> tuple[int, dict]:
+        metrics = metrics or {}
+        raw_horizon = (
+            db_diag.get("model_gate_horizon_minutes")
+            or metrics.get("horizon_minutes")
+            or metrics.get("label_horizon_minutes")
+            or 15
+        )
+        try:
+            horizon = int(raw_horizon)
+        except (TypeError, ValueError):
+            horizon = 15
+        by_horizon = db_diag.get("shadow_gate_by_horizon", {}) or {}
+        gate = (
+            by_horizon.get(str(horizon))
+            or db_diag.get(f"shadow_gate_{horizon}m")
+            or db_diag.get("shadow_gate_15m")
+            or {}
+        )
+        try:
+            horizon = int(gate.get("horizon_minutes") or horizon)
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return horizon, gate if isinstance(gate, dict) else {}
 
     def _mode_indicator(self) -> str:
         """Compact current-mode line for menu headers."""
@@ -803,6 +919,7 @@ class TelegramMonitorBot:
                     )
             except Exception as exc:
                 log.warning("telegram.button_reply_failed", error=str(exc))
+                await self._send_direct_message(self._chat_id(update), text, reply_markup=reply_markup)
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
@@ -1632,6 +1749,25 @@ class TelegramMonitorBot:
             f"Активные монеты: <code>{len(symbols)}</code>  {' '.join(symbols[:5])}{'…' if len(symbols) > 5 else ''}",
             f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(positions[:5])}{'…' if len(positions) > 5 else ''}",
             f"Риск портфеля: <code>{heat_str}</code>",
+        ]
+        telegram_health = diag.get("telegram") or {}
+        if telegram_health:
+            tg_state = (
+                "ok"
+                if telegram_health.get("app_running") and telegram_health.get("polling_running")
+                else "problem"
+            )
+            lines += [
+                f"Telegram: <code>{tg_state}</code> polling=<code>{telegram_health.get('polling_running')}</code>",
+                f"Telegram conflicts: <code>{telegram_health.get('polling_conflict_count', 0)}</code>, "
+                f"net errors=<code>{telegram_health.get('polling_network_error_count', 0)}</code>",
+            ]
+            if telegram_health.get("last_polling_error_at"):
+                lines.append(
+                    f"Последняя ошибка Telegram: <code>{telegram_health.get('last_polling_error_at')}</code>"
+                )
+
+        lines += [
             "",
             f"Сигналов создано:       <code>{diag.get('hour_signals_emitted', 0)}</code>",
             f"Отклонено риск-менедж.: <code>{diag.get('hour_risk_rejected', 0)}</code>",
@@ -2211,6 +2347,7 @@ class TelegramMonitorBot:
             latest_str = self._fmt_timestamp(latest_1m)
             outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
             labelled_15m = db_diag.get("labelled_samples_15m", 0)
+            training_by_horizon = db_diag.get("training_eligible_by_horizon", {}) or {}
             outcome_parts = [
                 f"{horizon}m={count}"
                 for horizon, count in sorted(outcomes_by_horizon.items(), key=lambda item: int(item[0]))
@@ -2263,7 +2400,10 @@ class TelegramMonitorBot:
             best_threshold_avg_str = (
                 f"{float(best_threshold_avg):+.2f} bps" if best_threshold_avg is not None else "n/a"
             )
-            gate = db_diag.get("shadow_gate_15m", {}) or {}
+            model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
+            labelled_model_horizon = int(
+                training_by_horizon.get(str(model_horizon), labelled_15m) or 0
+            )
             gate_total = gate.get("total_count", 0) or 0
             gate_pass = gate.get("pass_count", 0) or 0
             gate_block = gate.get("block_count", 0) or 0
@@ -2277,7 +2417,13 @@ class TelegramMonitorBot:
             gate_reasons_str = (
                 ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
             )
-            paper = db_diag.get("paper_pnl_15m", {}) or {}
+            paper_by_horizon = db_diag.get("paper_pnl_by_horizon", {}) or {}
+            paper = (
+                paper_by_horizon.get(str(model_horizon))
+                or db_diag.get(f"paper_pnl_{model_horizon}m")
+                or db_diag.get("paper_pnl_15m")
+                or {}
+            )
             paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
             paper_baseline = paper.get("baseline", {}) or {}
             paper_gate = paper.get("model_gate", {}) or {}
@@ -2293,7 +2439,9 @@ class TelegramMonitorBot:
                 )
 
             data_note = (
-                "данные собираются" if connected and labelled_15m >= 1000 else "мало данных для уверенного обучения"
+                "данные собираются"
+                if connected and labelled_model_horizon >= 1000
+                else "мало данных для уверенного обучения"
             )
             training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
             champion_display = str(champion_ver or "none")
@@ -2320,7 +2468,7 @@ class TelegramMonitorBot:
                 f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
-                f"Готово для обучения (горизонт 15м): <code>{labelled_15m}</code>",
+                f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
                 "",
                 "<b>Простыми словами</b>",
                 f"Данные: <code>{data_note}</code>",
@@ -2342,7 +2490,7 @@ class TelegramMonitorBot:
                 f"Улучшение против baseline: <code>{lift_str}</code>",
                 f"Лучший порог модели: <code>{best_threshold_str}</code>, среднее=<code>{best_threshold_avg_str}</code>",
                 f"Ожидание walk-forward: <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
-                f"Фильтр модели 15m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
+                f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
                 f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
                 "Lift фильтра: <code>"
@@ -2362,9 +2510,10 @@ class TelegramMonitorBot:
             # ── Roadmap к реальным деньгам ──────────────────────────────────
             lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
             # 1. Данные
-            lbl_ok = int(labelled_15m or 0) >= 1000
+            lbl_ok = int(labelled_model_horizon or 0) >= 1000
             lines.append(
-                f"{'✅' if lbl_ok else '❌'} Семплов (горизонт 15м) ≥ 1000 → сейчас: <code>{labelled_15m}</code>"
+                f"{'✅' if lbl_ok else '❌'} Семплов ({model_horizon}m) ≥ 1000 → сейчас: "
+                f"<code>{labelled_model_horizon}</code>"
             )
             # 2. Модель обучена, quality GOOD
             trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
@@ -2842,7 +2991,6 @@ class TelegramMonitorBot:
                 )
                 return
         latest_model = db_diag.get("latest_model_version", {}) or {}
-        gate = db_diag.get("shadow_gate_15m", {}) or {}
         metrics = latest_model.get("metrics") or {}
         if isinstance(metrics, str):
             try:
@@ -2851,6 +2999,7 @@ class TelegramMonitorBot:
                 metrics = _json.loads(metrics)
             except Exception:
                 metrics = {}
+        model_horizon, gate = self._model_horizon_and_gate(db_diag, metrics)
 
         def _fmt(value: Any, suffix: str = "") -> str:
             if value is None:
@@ -2873,7 +3022,7 @@ class TelegramMonitorBot:
             f"AUC (val): <code>{_fmt(metrics.get('val_auc') or metrics.get('auc'))}</code>",
             f"Bootstrap p-value: <code>{_fmt(metrics.get('bootstrap_p_value'))}</code>",
             "",
-            "<b>Shadow gate (15m):</b>",
+            f"<b>Shadow gate ({model_horizon}m):</b>",
             f"Решений: <code>{int(gate.get('total_count') or 0)}</code> | "
             f"Pass: <code>{int(gate.get('pass_count') or 0)}</code>",
             f"Gate lift: <code>{_fmt(gate_lift, ' bps')}</code>",
@@ -3102,6 +3251,7 @@ class TelegramMonitorBot:
         query = update.callback_query
         if query is None:
             return
+        self._last_callback_at = datetime.now(tz=UTC)
         try:
             await query.answer()
         except Exception as exc:
@@ -3185,6 +3335,23 @@ class TelegramMonitorBot:
                     self._dashboard_chat_id = msg.chat_id
                 except Exception as _exc:
                     log.debug("telegram.fallback_send_failed", error=str(_exc))
+                    msg = await self._send_direct_message(
+                        self._message_chat_id(query.message) or self._dashboard_chat_id,
+                        text,
+                        reply_markup=reply_markup,
+                    )
+                    if msg is not None:
+                        self._dashboard_message_id = getattr(msg, "message_id", self._dashboard_message_id)
+                        self._dashboard_chat_id = getattr(msg, "chat_id", self._dashboard_chat_id)
+            else:
+                msg = await self._send_direct_message(
+                    self._message_chat_id(query.message) or self._dashboard_chat_id,
+                    text,
+                    reply_markup=reply_markup,
+                )
+                if msg is not None:
+                    self._dashboard_message_id = getattr(msg, "message_id", self._dashboard_message_id)
+                    self._dashboard_chat_id = getattr(msg, "chat_id", self._dashboard_chat_id)
 
     async def _render_home(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the main dashboard text and keyboard."""
@@ -3383,8 +3550,6 @@ class TelegramMonitorBot:
             try:
                 info = await ctrl.db_diagnostics_provider()
                 latest = info.get("latest_model_version") or {}
-                gate = info.get("shadow_gate_15m") or {}
-                eligible = int(info.get("training_eligible_15m") or 0)
 
                 metrics: dict[str, Any] = latest.get("metrics") or {}
                 if isinstance(metrics, str):
@@ -3392,6 +3557,11 @@ class TelegramMonitorBot:
                         metrics = json.loads(metrics) or {}
                     except Exception:
                         metrics = {}
+                model_horizon, gate = self._model_horizon_and_gate(info, metrics)
+                training_by_horizon = info.get("training_eligible_by_horizon", {}) or {}
+                eligible = int(
+                    training_by_horizon.get(str(model_horizon), info.get("training_eligible_15m", 0)) or 0
+                )
 
                 version = html.escape(str(latest.get("version") or "нет"))
                 status = html.escape(self._ru(str(latest.get("status") or "—")))
@@ -3419,11 +3589,11 @@ class TelegramMonitorBot:
                     f"Обучено: <code>{samples}</code> образцов",
                     f"Схема совместима: <code>{'да' if schema_ok else 'нет'}</code>",
                     "",
-                    "<b>Shadow gate (15m):</b>",
+                    f"<b>Shadow gate ({model_horizon}m):</b>",
                     f"Всего решений: <code>{gate_total}</code>  Pass: <code>{gate_pass}</code>",
                     f"Gate lift: <code>{gate_lift_str}</code>",
                     "",
-                    f"Данных для обучения (15m): <code>{eligible}</code>",
+                    f"Данных для обучения ({model_horizon}m): <code>{eligible}</code>",
                 ]
             except Exception as exc:
                 lines.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")

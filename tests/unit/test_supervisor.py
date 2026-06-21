@@ -109,3 +109,18 @@ class TestRuntimeSupervisor:
 
         # Should not raise SystemExit — cancelled tasks are from clean shutdown
         await app._run_supervisor()
+
+    def test_diagnostics_include_telegram_health(self):
+        """Telegram polling health is visible in app diagnostics."""
+        app = TradingApplication()
+        app._telegram_bot = MagicMock()
+        app._telegram_bot.health_snapshot.return_value = {
+            "enabled": True,
+            "app_running": True,
+            "polling_running": True,
+            "polling_conflict_count": 0,
+        }
+
+        diag = app.get_diagnostics()
+
+        assert diag["telegram"]["polling_running"] is True
