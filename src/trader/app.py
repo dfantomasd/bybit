@@ -102,6 +102,7 @@ class TradingApplication:
         self._settings: Any | None = None
         self._health_checker: Any | None = None
         self._uvicorn_server: uvicorn.Server | None = None
+        self._fastapi_app: Any | None = None
         self._bybit_adapter: Any | None = None
         self._telegram_bot: Any | None = None
         self._ws_public: Any | None = None
@@ -372,6 +373,7 @@ class TradingApplication:
             runtime_settings=self._runtime_settings,
             set_runtime_setting=self._set_runtime_setting,
         )
+        self._fastapi_app = fastapi_app
 
         config = uvicorn.Config(
             app=fastapi_app,
@@ -1765,6 +1767,25 @@ class TradingApplication:
 
     # ------------------------------------------------------------------
 
+    def _resolve_telegram_delivery(self) -> tuple[str, str]:
+        """Resolve Telegram delivery mode and webhook URL for the current environment."""
+        assert self._settings is not None
+        mode = self._settings.TELEGRAM_DELIVERY_MODE.strip().lower()
+        webhook_url = self._settings.TELEGRAM_WEBHOOK_URL.strip().rstrip("/")
+        if not webhook_url:
+            render_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+            if render_url:
+                webhook_url = f"{render_url}/telegram/webhook"
+        if mode == "auto":
+            mode = "webhook" if webhook_url else "polling"
+        if mode == "webhook" and not webhook_url:
+            log.warning("telegram_webhook_url_missing_fallback_polling")
+            mode = "polling"
+        if mode not in {"polling", "webhook"}:
+            log.warning("telegram_delivery_mode_unknown_fallback_polling", mode=mode)
+            mode = "polling"
+        return mode, webhook_url
+
     async def _start_telegram_bot(self) -> None:
         from trader.telegram_bot import (
             TelegramBotConfig,
@@ -1967,6 +1988,7 @@ class TradingApplication:
         )
 
         allowed_chat_ids = set(self._settings.TELEGRAM_ALLOWED_CHAT_IDS)
+        delivery_mode, webhook_url = self._resolve_telegram_delivery()
         self._telegram_bot = TelegramMonitorBot(
             config=TelegramBotConfig(
                 token=token,
@@ -1976,6 +1998,9 @@ class TradingApplication:
                 bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
                 default_category=self._settings.DEFAULT_MARKET_CATEGORY,
                 redis_url=self._settings.REDIS_URL.get_secret_value(),
+                delivery_mode=delivery_mode,
+                webhook_url=webhook_url,
+                webhook_secret=self._settings.TELEGRAM_WEBHOOK_SECRET.get_secret_value(),
                 polling_conflict_recovery_wait_s=self._settings.TELEGRAM_POLLING_CONFLICT_RECOVERY_WAIT_SECONDS,
                 polling_watchdog_interval_s=self._settings.TELEGRAM_POLLING_WATCHDOG_INTERVAL_SECONDS,
                 polling_zombie_silence_s=self._settings.TELEGRAM_POLLING_ZOMBIE_SILENCE_SECONDS,
@@ -1985,9 +2010,9 @@ class TradingApplication:
             controller=controller,
             net_results_provider=self._get_net_results,
         )
-        started = await self._telegram_bot.start()
+        started = await self._telegram_bot.start(http_app=self._fastapi_app)
         if started:
-            log.info("telegram_bot_started")
+            log.info("telegram_bot_started", delivery_mode=delivery_mode, webhook_url=webhook_url or None)
         else:
             log.warning("telegram_bot_not_started", health=self._telegram_bot.health_snapshot())
 
@@ -4277,6 +4302,8 @@ class TradingApplication:
                             self._model_gate_quality.get("quality") if self._model_gate_quality else None
                         ),
                         telegram_polling=telegram_health.get("polling_running"),
+                        telegram_webhook=telegram_health.get("webhook_active"),
+                        telegram_delivery_mode=telegram_health.get("delivery_mode"),
                         telegram_conflicts=telegram_health.get("polling_conflict_count"),
                     )
                 except Exception as _hb_exc:
