@@ -16,8 +16,8 @@ Short signal (only if shorting enabled):
   - MACD histogram < 0
   - Volume z-score > -0.5
 
-Stop loss: 1.5 × ATR below entry
-Take profit: 3 × ATR above entry (2:1 R/R minimum)
+Stop loss: 2.0 × ATR from entry
+Take profit: 4 × ATR from entry (2:1 R/R)
 """
 
 from __future__ import annotations

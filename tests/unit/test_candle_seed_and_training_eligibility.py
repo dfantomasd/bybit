@@ -336,11 +336,14 @@ def test_training_sql_contracts() -> None:
     """Training SQL must use eligible, deduped, schema-compatible samples."""
     import inspect
 
-    from trader.training import train
+    from trader.training import eligibility, train
 
     src = inspect.getsource(train)
     assert "WITH eligible_samples AS" in src
     assert "fs.training_eligible = true" in src
+    assert "training_strategy_filter_sql" in src
+    eligibility_src = inspect.getsource(eligibility)
+    assert "SHADOW_CANDLE" in eligibility_src
     assert "count(DISTINCT fs.snapshot_id)" not in src
     assert "DISTINCT ON (fs.snapshot_id)" not in src
     assert "ROW_NUMBER() OVER" in src

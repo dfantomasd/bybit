@@ -12,6 +12,7 @@ import structlog
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide
 from trader.domain.models import FeatureVector, TradeProposal
+from trader.risk.net_edge import NetEdgeParams, passes_min_net_edge
 from trader.strategies.base import BaseStrategy
 
 log = structlog.get_logger(__name__)
@@ -45,11 +46,29 @@ def _proposal(
     tp_mult: float = 1.4,
     sl_mult: float = 0.7,
     max_notional_usd: float = 100.0,
+    cost_params: NetEdgeParams | None = None,
+    min_net_return_pct: float = 0.08,
+    spread_bps: float | None = None,
 ) -> TradeProposal | None:
     if current_price <= 0 or atr_pct <= 0:
         return None
     sl_dist = max(atr_pct * sl_mult, 0.001)
     tp_dist = max(atr_pct * tp_mult, sl_dist * 1.5)
+    if cost_params is not None and not passes_min_net_edge(
+        tp_dist,
+        cost_params,
+        min_net_return_pct,
+        spread_bps=spread_bps,
+    ):
+        _reject(
+            strategy_id,
+            symbol,
+            "net_edge_below_minimum",
+            gross_tp_pct=round(tp_dist * 100.0, 4),
+            min_net_return_pct=min_net_return_pct,
+            spread_bps=spread_bps,
+        )
+        return None
     qty_usd = min(available_balance_usd * risk_pct / sl_dist, available_balance_usd * 0.20, max_notional_usd)
     if qty_usd < 5.0:
         return None
@@ -82,6 +101,18 @@ def _proposal(
     )
 
 
+def _cost_kwargs(
+    strategy: Any,
+    *,
+    spread_bps: float | None = None,
+) -> dict[str, Any]:
+    return {
+        "cost_params": strategy._cost_params,
+        "min_net_return_pct": strategy._min_net_return_pct,
+        "spread_bps": spread_bps,
+    }
+
+
 class OrderFlowStrategy(BaseStrategy):
     """Trade with aligned tape pressure, book imbalance, and microprice."""
 
@@ -92,12 +123,16 @@ class OrderFlowStrategy(BaseStrategy):
         min_flow_imbalance: float = 0.35,
         min_book_imbalance: float = 0.18,
         max_spread_bps: float = 3.0,
+        cost_params: NetEdgeParams | None = None,
+        min_net_return_pct: float = 0.08,
     ) -> None:
         self._flow = flow_tracker
         self._book = orderbook_tracker
         self._min_flow_imbalance = min_flow_imbalance
         self._min_book_imbalance = min_book_imbalance
         self._max_spread_bps = max_spread_bps
+        self._cost_params = cost_params
+        self._min_net_return_pct = min_net_return_pct
 
     @property
     def strategy_id(self) -> str:
@@ -148,6 +183,7 @@ class OrderFlowStrategy(BaseStrategy):
                 confidence=0.58 + min(0.2, abs(stats.imbalance) * 0.2),
                 rationale=f"order flow buy pressure imbalance={stats.imbalance:.2f}",
                 feature_id=feature_vector.feature_id,
+                **_cost_kwargs(self, spread_bps=spread),
             )
         if stats.imbalance <= -self._min_flow_imbalance:
             if book > -self._min_book_imbalance:
@@ -166,6 +202,7 @@ class OrderFlowStrategy(BaseStrategy):
                 confidence=0.58 + min(0.2, abs(stats.imbalance) * 0.2),
                 rationale=f"order flow sell pressure imbalance={stats.imbalance:.2f}",
                 feature_id=feature_vector.feature_id,
+                **_cost_kwargs(self, spread_bps=spread),
             )
         _reject(self.strategy_id, feature_vector.symbol, "flow_imbalance_below_threshold", imbalance=stats.imbalance)
         return None
@@ -174,9 +211,17 @@ class OrderFlowStrategy(BaseStrategy):
 class FundingArbitrageStrategy(BaseStrategy):
     """Position against extreme funding when price momentum is exhausted."""
 
-    def __init__(self, min_abs_funding_bps: float = 5.0, max_abs_return_3: float = 0.003) -> None:
+    def __init__(
+        self,
+        min_abs_funding_bps: float = 5.0,
+        max_abs_return_3: float = 0.003,
+        cost_params: NetEdgeParams | None = None,
+        min_net_return_pct: float = 0.08,
+    ) -> None:
         self._min_abs_funding_bps = min_abs_funding_bps
         self._max_abs_return_3 = max_abs_return_3
+        self._cost_params = cost_params
+        self._min_net_return_pct = min_net_return_pct
 
     @property
     def strategy_id(self) -> str:
@@ -228,6 +273,7 @@ class FundingArbitrageStrategy(BaseStrategy):
             feature_id=feature_vector.feature_id,
             tp_mult=1.0,
             sl_mult=0.65,
+            **_cost_kwargs(self),
         )
 
 
@@ -235,11 +281,18 @@ class LiquidationHuntingStrategy(BaseStrategy):
     """Fade exhaustion after one-sided liquidation bursts."""
 
     def __init__(
-        self, flow_tracker: Any, min_liq_notional_usd: float = 20_000.0, min_liq_imbalance: float = 0.65
+        self,
+        flow_tracker: Any,
+        min_liq_notional_usd: float = 20_000.0,
+        min_liq_imbalance: float = 0.65,
+        cost_params: NetEdgeParams | None = None,
+        min_net_return_pct: float = 0.08,
     ) -> None:
         self._flow = flow_tracker
         self._min_liq_notional_usd = min_liq_notional_usd
         self._min_liq_imbalance = min_liq_imbalance
+        self._cost_params = cost_params
+        self._min_net_return_pct = min_net_return_pct
 
     @property
     def strategy_id(self) -> str:
@@ -281,6 +334,7 @@ class LiquidationHuntingStrategy(BaseStrategy):
             feature_id=feature_vector.feature_id,
             tp_mult=1.1,
             sl_mult=0.75,
+            **_cost_kwargs(self),
         )
 
 
@@ -288,11 +342,18 @@ class MarketMakingStrategy(BaseStrategy):
     """Maker-first mean reversion proxy for the current single-order engine."""
 
     def __init__(
-        self, spread_provider: Callable[[str], float | None], min_spread_bps: float = 1.2, max_spread_bps: float = 4.0
+        self,
+        spread_provider: Callable[[str], float | None],
+        min_spread_bps: float = 1.2,
+        max_spread_bps: float = 4.0,
+        cost_params: NetEdgeParams | None = None,
+        min_net_return_pct: float = 0.08,
     ) -> None:
         self._spread_provider = spread_provider
         self._min_spread_bps = min_spread_bps
         self._max_spread_bps = max_spread_bps
+        self._cost_params = cost_params
+        self._min_net_return_pct = min_net_return_pct
 
     @property
     def strategy_id(self) -> str:
@@ -333,15 +394,24 @@ class MarketMakingStrategy(BaseStrategy):
             tp_mult=0.80,
             sl_mult=0.50,
             max_notional_usd=50.0,
+            **_cost_kwargs(self, spread_bps=spread),
         )
 
 
 class StatisticalArbitrageStrategy(BaseStrategy):
     """Z-score mean reversion using the symbol's own short/medium returns."""
 
-    def __init__(self, min_zscore: float = 2.0, max_adx: float = 0.35) -> None:
+    def __init__(
+        self,
+        min_zscore: float = 2.0,
+        max_adx: float = 0.35,
+        cost_params: NetEdgeParams | None = None,
+        min_net_return_pct: float = 0.08,
+    ) -> None:
         self._min_zscore = min_zscore
         self._max_adx = max_adx
+        self._cost_params = cost_params
+        self._min_net_return_pct = min_net_return_pct
 
     @property
     def strategy_id(self) -> str:
@@ -381,4 +451,5 @@ class StatisticalArbitrageStrategy(BaseStrategy):
             feature_id=feature_vector.feature_id,
             tp_mult=0.9,
             sl_mult=0.65,
+            **_cost_kwargs(self),
         )

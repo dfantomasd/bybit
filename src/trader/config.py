@@ -105,6 +105,10 @@ class Settings(BaseSettings):
     """Maximum bid-ask spread (bps) for scalp entries. Unknown spread fails closed."""
     MIN_NET_SCALP_RETURN_PCT: float = 0.08
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
+    MIN_NET_TREND_RETURN_PCT: float = 0.10
+    """Minimum expected NET return (percent) for EMA trend entries after costs."""
+    MIN_NET_ALPHA_RETURN_PCT: float = 0.08
+    """Minimum expected NET return (percent) for advanced-alpha entries after costs."""
     SCALP_COOLDOWN_SECONDS: int = 60
     """Minimum seconds between scalp signals per symbol."""
     SCALP_MAX_TRADES_PER_MINUTE: int = 10
@@ -114,7 +118,17 @@ class Settings(BaseSettings):
     SCALP_MIN_OB_IMBALANCE: float = 0.15
     """Required L5 orderbook imbalance agreeing with the signal side (BUY needs
     >= +value, SELL needs <= -value). Missing/stale book data fails closed."""
-    TREND_MIN_ADX: float = 0.25
+    SCALP_DISABLE_TREND_STRATEGY: bool = True
+    """When RISK_PROFILE=SCALP, skip the slow EMA trend strategy (wide TP/SL)."""
+    SCALP_STRATEGY_PRIORITY_ORDER: str = (
+        "scalp_micro_v1,order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
+    )
+    """Strategy priority override used when RISK_PROFILE=SCALP."""
+    SCALP_STRICT_SHADOW: bool = True
+    """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
+    TREND_STRATEGY_ENABLED: bool = True
+    """Enable the EMA crossover trend strategy in the ensemble."""
     """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
     TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
     """Block fragile trend entries when funding and open interest context disagrees."""
@@ -300,6 +314,10 @@ class Settings(BaseSettings):
     MIN_NOTIONAL_SAFETY_BUFFER_PCT: float = 3.0
     """Safety buffer applied on top of exchange min-notional (e.g. 3% → $5 min becomes $5.15).
     Prevents near-limit orders from being rejected by code=110094."""
+    MICRO_ACCOUNT_BALANCE_USD: float = 50.0
+    """Balances below this use MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT instead."""
+    MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT: float = 1.0
+    """Reduced min-notional buffer for micro accounts (e.g. ~$23 testnet wallets)."""
     LIVE_REQUIRE_LIQUIDITY_FOR_SIZING: bool = True
     """Require fresh turnover_24h data before sizing entries in LIVE/CANARY_LIVE."""
 
@@ -439,16 +457,14 @@ class Settings(BaseSettings):
     """CSV label thresholds in bps evaluated during offline selection.
     0 bps = break-even after costs (net-cost-aware label already deducts fees).
     20 bps removed: too demanding for 5-min bars, leaves almost no positive labels."""
-    MODEL_LABEL_HORIZON: int = 30
-    """Bars ahead to measure label outcome; 30 bars on 5m = 2.5h horizon."""
+    MODEL_LABEL_HORIZON: int = 5
+    """Bars ahead to measure label outcome. Use 5 for SCALP, 15-30 for swing."""
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = False
-    TRAIN_STRATEGY_ALLOWLIST: str = (
-        "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
-        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
-    )
-    """CSV strategy ids eligible for model training from prediction metadata."""
+    TRAIN_STRATEGY_ALLOWLIST: str = ""
+    """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels, including
+    candle-sampling baselines that do not carry strategy_id metadata."""
     TRAIN_MIN_BUCKET_SAMPLES: int = 50
     TRAIN_BUCKET_MIN_AVG_BPS: float = -5.0
     """Optional training filter: remove regime/hour buckets with stable negative expectancy."""
@@ -467,6 +483,8 @@ class Settings(BaseSettings):
     """Minimum time between successful auto-training runs. Prevents checkpoint churn
     while a challenger has not yet accumulated shadow evidence."""
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
+    MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = True
+    """Retrain automatically when the latest model quality is WEAK/missing."""
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 5.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion

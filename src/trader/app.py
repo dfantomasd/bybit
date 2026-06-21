@@ -482,6 +482,23 @@ class TradingApplication:
             return True
         return not self._active_execution_allowed()
 
+    def _is_scalp_profile(self) -> bool:
+        from trader.domain.enums import RiskProfile
+
+        assert self._settings is not None
+        return self._settings.RISK_PROFILE == RiskProfile.SCALP
+
+    def _scalp_strict_shadow(self) -> bool:
+        """SCALP paper-trading should mirror LIVE quality gates."""
+        assert self._settings is not None
+        return self._is_scalp_profile() and self._settings.SCALP_STRICT_SHADOW and self._initial_shadow_mode()
+
+    def _expectancy_gates_apply(self) -> bool:
+        """True when bucket/symbol-side gates should block entries."""
+        if self._scalp_strict_shadow():
+            return True
+        return not self._initial_shadow_mode()
+
     async def _change_risk_profile(self, profile: Any) -> None:
         """Hot-swap the risk profile without restarting — preserves all risk state.
 
@@ -868,7 +885,12 @@ class TradingApplication:
                 )
                 enough_schema_change = schema_mismatch and newest_schema_samples >= schema_change_min_samples
 
-                if not (enough_initial or enough_increment or enough_schema_change):
+                enough_weak_retrain = bool(
+                    getattr(self._settings, "MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK", True)
+                    and str(self._model_gate_quality.get("quality") or "WEAK").upper() in {"WEAK", ""}
+                    and trainable >= min_samples
+                )
+                if not (enough_initial or enough_increment or enough_schema_change or enough_weak_retrain):
                     if schema_mismatch and newest_schema_samples > 0:
                         log.warning(
                             "model_auto_training.schema_mismatch_accumulating",
@@ -881,7 +903,9 @@ class TradingApplication:
                     continue
 
                 trigger_reason = (
-                    "schema_change" if enough_schema_change else ("initial" if enough_initial else "increment")
+                    "schema_change"
+                    if enough_schema_change
+                    else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
                 )
                 effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
                 msg = await self._start_model_training(effective_min_samples, horizon, label_bps)
@@ -1501,15 +1525,9 @@ class TradingApplication:
 
     @staticmethod
     def _feature_values_for_side(vec: FeatureVector, side: str) -> tuple[list[str], list[float]]:
-        """Return model features augmented with the proposed trade direction."""
-        normalized_side = str(side).strip().lower()
-        if normalized_side not in {"buy", "sell"}:
-            raise ValueError(f"unsupported proposal side for ML features: {side!r}")
-        by_name = dict(zip(vec.feature_names, vec.values, strict=True))
-        by_name["proposal_side"] = 1.0 if normalized_side == "buy" else -1.0
-        names = sorted(by_name.keys())
-        values = [float(by_name[name]) for name in names]
-        return names, values
+        from trader.training.feature_side import feature_values_for_side
+
+        return feature_values_for_side(vec, side)
 
     def _runtime_settings(self) -> dict[str, Any]:
         return {
@@ -1957,10 +1975,13 @@ class TradingApplication:
             risk_manager=self._risk_manager,
             exposure_tracker=self._exposure_tracker,
             shadow_mode=shadow,
+            shadow_apply_net_edge_gate=self._scalp_strict_shadow(),
             cooldown_s=profile_cfg.cooldown_seconds,
             category=self._settings.DEFAULT_MARKET_CATEGORY,
             trade_journal=self._trade_journal,
             min_notional_safety_buffer_pct=self._settings.MIN_NOTIONAL_SAFETY_BUFFER_PCT,
+            micro_account_balance_usd=self._settings.MICRO_ACCOUNT_BALANCE_USD,
+            micro_account_min_notional_buffer_pct=self._settings.MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT,
             max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
             max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
@@ -3570,7 +3591,7 @@ class TradingApplication:
                 strategy_signal=side,
                 decision="SHADOW_CANDLE",
                 feature_snapshot_id=snapshot_id,
-                metadata={"source": "candle_sampler"},
+                metadata={"source": "candle_sampler", "strategy_id": "candle_sampler_v1"},
             )
 
             self._candle_sampler_total += 1
@@ -3652,9 +3673,10 @@ class TradingApplication:
         A bucket blocks only with >= BUCKET_MIN_SAMPLES resolved outcomes and an
         average net return below BUCKET_BLOCK_AVG_BPS — small samples never block.
         In shadow mode the gate is skipped so virtual orders can accumulate training data.
+        SCALP strict shadow keeps the gate enabled to avoid paper-trading toxic pairs.
         """
         assert self._settings is not None
-        if self._initial_shadow_mode():
+        if not self._expectancy_gates_apply():
             return False
         if not self._settings.BUCKET_BLOCK_ENABLED or not self._bucket_stats:
             return False
@@ -3679,10 +3701,11 @@ class TradingApplication:
         """True when a symbol+side pair has proven negative expectancy.
 
         In shadow mode the gate is skipped so virtual orders can accumulate training data.
+        SCALP strict shadow keeps the gate enabled to avoid paper-trading toxic pairs.
         """
 
         assert self._settings is not None
-        if self._initial_shadow_mode():
+        if not self._expectancy_gates_apply():
             return False
         if not self._settings.SYMBOL_SIDE_BLOCK_ENABLED or not self._symbol_side_stats:
             return False
@@ -4188,20 +4211,28 @@ class TradingApplication:
         await self._init_execution_engine()
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
-        strategies: list[Any] = [
-            EMAcrossoverStrategy(
-                symbol=None,  # None = evaluate any symbol passed in
-                allow_short=True,
-                min_qty_usd=5.0,  # Bybit minimum notional is $5
-                max_risk_pct=0.01,  # 1% of balance per trade
-                min_adx=self._settings.TREND_MIN_ADX,
-                block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
-                taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
-                expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
-                max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
-                min_net_return_pct=self._settings.MIN_NET_SCALP_RETURN_PCT,
+        strategies: list[Any] = []
+        is_scalp = self._is_scalp_profile()
+        include_trend = self._settings.TREND_STRATEGY_ENABLED and not (
+            is_scalp and self._settings.SCALP_DISABLE_TREND_STRATEGY
+        )
+        if include_trend:
+            strategies.append(
+                EMAcrossoverStrategy(
+                    symbol=None,  # None = evaluate any symbol passed in
+                    allow_short=True,
+                    min_qty_usd=5.0,  # Bybit minimum notional is $5
+                    max_risk_pct=0.01,  # 1% of balance per trade
+                    min_adx=self._settings.TREND_MIN_ADX,
+                    block_negative_funding_oi=self._settings.TREND_BLOCK_NEGATIVE_FUNDING_OI,
+                    taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                    expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                    max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+                    min_net_return_pct=self._settings.MIN_NET_TREND_RETURN_PCT,
+                )
             )
-        ]
+        elif is_scalp:
+            log.info("scalp_profile.trend_strategy_disabled")
 
         def _spread_for(symbol: str) -> float | None:
             """Latest screener spread for the symbol; None when unknown."""
@@ -4212,7 +4243,12 @@ class TradingApplication:
                     return float(scored.spread_bps)
             return None
 
-        priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]
+        if is_scalp:
+            priority_order = [
+                sid.strip() for sid in self._settings.SCALP_STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()
+            ]
+        else:
+            priority_order = [sid.strip() for sid in self._settings.STRATEGY_PRIORITY_ORDER.split(",") if sid.strip()]
         strategy_priorities = {
             strategy_id: len(priority_order) - index for index, strategy_id in enumerate(priority_order)
         }
@@ -4255,6 +4291,7 @@ class TradingApplication:
             or self._settings.MARKET_MAKING_STRATEGY_ENABLED
             or self._settings.STAT_ARB_STRATEGY_ENABLED
         ):
+            from trader.risk.net_edge import NetEdgeParams
             from trader.strategies.advanced_alpha import (
                 FundingArbitrageStrategy,
                 LiquidationHuntingStrategy,
@@ -4262,6 +4299,15 @@ class TradingApplication:
                 OrderFlowStrategy,
                 StatisticalArbitrageStrategy,
             )
+
+            alpha_cost_params = NetEdgeParams(
+                taker_fee_pct=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                expected_slippage_pct=self._settings.EXPECTED_SLIPPAGE_PCT,
+                max_spread_bps=self._settings.SCREENER_MAX_SPREAD_BPS,
+                funding_buffer_pct=self._settings.FUNDING_BUFFER_PCT,
+                safety_margin_pct=0.01,
+            )
+            alpha_min_net = self._settings.MIN_NET_ALPHA_RETURN_PCT
 
             if self._settings.ORDER_FLOW_STRATEGY_ENABLED and self._flow_tracker is not None:
                 strategies.append(
@@ -4271,6 +4317,8 @@ class TradingApplication:
                         min_flow_imbalance=self._settings.ORDER_FLOW_MIN_IMBALANCE,
                         min_book_imbalance=self._settings.ORDER_FLOW_MIN_BOOK_IMBALANCE,
                         max_spread_bps=self._settings.MAX_SPREAD_BPS_SCALP,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="order_flow_v1")
@@ -4281,7 +4329,13 @@ class TradingApplication:
                     reason="flow_tracker_missing",
                 )
             if self._settings.FUNDING_ARB_STRATEGY_ENABLED:
-                strategies.append(FundingArbitrageStrategy(min_abs_funding_bps=self._settings.FUNDING_ARB_MIN_ABS_BPS))
+                strategies.append(
+                    FundingArbitrageStrategy(
+                        min_abs_funding_bps=self._settings.FUNDING_ARB_MIN_ABS_BPS,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
                 log.info("advanced_alpha.strategy_active", strategy_id="funding_arbitrage_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="funding_arbitrage_v1")
@@ -4291,6 +4345,8 @@ class TradingApplication:
                         flow_tracker=self._flow_tracker,
                         min_liq_notional_usd=self._settings.LIQUIDATION_HUNTING_MIN_NOTIONAL_USD,
                         min_liq_imbalance=self._settings.LIQUIDATION_HUNTING_MIN_IMBALANCE,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="liquidation_hunting_v1")
@@ -4306,13 +4362,21 @@ class TradingApplication:
                         spread_provider=_spread_for,
                         min_spread_bps=self._settings.MARKET_MAKING_MIN_SPREAD_BPS,
                         max_spread_bps=self._settings.MARKET_MAKING_MAX_SPREAD_BPS,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="market_making_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="market_making_v1")
             if self._settings.STAT_ARB_STRATEGY_ENABLED:
-                strategies.append(StatisticalArbitrageStrategy(min_zscore=self._settings.STAT_ARB_MIN_ZSCORE))
+                strategies.append(
+                    StatisticalArbitrageStrategy(
+                        min_zscore=self._settings.STAT_ARB_MIN_ZSCORE,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
                 log.info("advanced_alpha.strategy_active", strategy_id="statistical_arbitrage_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="statistical_arbitrage_v1")

@@ -89,11 +89,14 @@ class ExecutionEngine:
         risk_manager: Any,
         exposure_tracker: Any,
         shadow_mode: bool = True,
+        shadow_apply_net_edge_gate: bool = False,
         cooldown_s: int = _DEFAULT_COOLDOWN_S,
         failure_cooldown_s: int = _DEFAULT_FAILURE_COOLDOWN_S,
         category: str = "linear",
         trade_journal: Any | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
+        micro_account_balance_usd: float = 50.0,
+        micro_account_min_notional_buffer_pct: float = 1.0,
         max_new_entries_per_minute: int = 60,
         max_concurrent_pending_entries: int = 10,
         max_same_side_positions: int = 10,
@@ -121,11 +124,14 @@ class ExecutionEngine:
         self._risk_manager = risk_manager
         self._exposure = exposure_tracker
         self._shadow_mode = shadow_mode
+        self._shadow_apply_net_edge_gate = shadow_apply_net_edge_gate
         self._cooldown = timedelta(seconds=cooldown_s)
         self._failure_cooldown = timedelta(seconds=failure_cooldown_s)
         self._category = category
         self._trade_journal = trade_journal
         self._min_notional_buffer = Decimal(str(min_notional_safety_buffer_pct))
+        self._micro_account_balance = Decimal(str(micro_account_balance_usd))
+        self._micro_account_min_notional_buffer = Decimal(str(micro_account_min_notional_buffer_pct))
         self._is_canary = is_canary
         self._fee_provider = fee_provider
         self._max_spread_bps = max_spread_bps
@@ -208,6 +214,12 @@ class ExecutionEngine:
     def warmup_seconds_remaining(self) -> float:
         elapsed = (datetime.now(tz=UTC) - self._started_at).total_seconds()
         return max(0.0, self._startup_warmup.total_seconds() - elapsed)
+
+    def _min_notional_buffer_for_balance(self, available_balance: Decimal) -> Decimal:
+        """Use a smaller buffer on micro accounts so min-notional sizing can pass."""
+        if available_balance > Decimal("0") and available_balance < self._micro_account_balance:
+            return self._micro_account_min_notional_buffer
+        return self._min_notional_buffer
 
     def _prune_recent_entries(self) -> None:
         cutoff = datetime.now(tz=UTC) - timedelta(seconds=60)
@@ -342,20 +354,21 @@ class ExecutionEngine:
         proposal: TradeProposal,
         qty: Decimal,
         instrument_info: InstrumentInfo,
+        *,
+        min_notional_buffer_pct: Decimal | None = None,
     ) -> tuple[bool, str]:
         """Replace RiskManager's reservation after post-risk execution sizing."""
 
         if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
             return True, ""
         notional = qty * proposal.entry_price
+        buffer_pct = self._min_notional_buffer if min_notional_buffer_pct is None else min_notional_buffer_pct
         # RiskManager reserved exposure for the pre-signal qty. From this point
         # any outcome must release it: successful re-reservation uses the final
         # qty, and rejection must not leave phantom pending exposure behind.
         self._release_exposure_reservation(proposal)
         if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
-            required_notional = instrument_info.min_notional * (
-                Decimal("1") + self._min_notional_buffer / Decimal("100")
-            )
+            required_notional = instrument_info.min_notional * (Decimal("1") + buffer_pct / Decimal("100"))
             if notional < required_notional:
                 return (
                     False,
@@ -875,6 +888,7 @@ class ExecutionEngine:
         """Submit implementation guarded by ``_submit_lock``."""
         symbol = proposal.symbol
         _t_engine_start = datetime.now(UTC)
+        notional_buffer_pct = self._min_notional_buffer_for_balance(available_balance)
 
         # 1. Deduplication ─────────────────────────────────────────────
         if self.has_open_position(symbol):
@@ -1130,8 +1144,9 @@ class ExecutionEngine:
             return decision
         exposure_reserved = True
 
-        # 5b. Cost-aware entry gate (LIVE only) ─────────────────────────────
-        if not self._shadow_mode:
+        # 5b. Cost-aware entry gate (LIVE, or SCALP strict shadow) ─────────
+        apply_net_edge_gate = (not self._shadow_mode) or self._shadow_apply_net_edge_gate
+        if apply_net_edge_gate:
             # Fail-closed: TP required for LIVE entries
             if proposal.take_profit is None:
                 self._diag_no_tp_rejected += 1
@@ -1258,7 +1273,7 @@ class ExecutionEngine:
                 adjusted_notional = adjusted_qty * proposal.entry_price
                 if instrument_info.min_notional is not None and instrument_info.min_notional > Decimal("0"):
                     required_notional = instrument_info.min_notional * (
-                        Decimal("1") + self._min_notional_buffer / Decimal("100")
+                        Decimal("1") + notional_buffer_pct / Decimal("100")
                     )
                     if adjusted_notional < required_notional:
                         adjustment_skipped_reason = (
@@ -1275,7 +1290,12 @@ class ExecutionEngine:
                     reason=adjustment_skipped_reason,
                 )
             else:
-                can_reserve, reserve_reason = self._reserve_adjusted_exposure(proposal, adjusted_qty, instrument_info)
+                can_reserve, reserve_reason = self._reserve_adjusted_exposure(
+                    proposal,
+                    adjusted_qty,
+                    instrument_info,
+                    min_notional_buffer_pct=notional_buffer_pct,
+                )
                 if not can_reserve:
                     self._diag_signal_qty_adjustment_rejected += 1
                     log.warning(
@@ -1340,7 +1360,7 @@ class ExecutionEngine:
                     )
                     executable_notional = intent.qty * conservative_price
                     exchange_min = instrument_info.min_notional  # raw exchange minimum — NO buffer
-                    sizing_target = exchange_min * (Decimal("1") + self._min_notional_buffer / Decimal("100"))
+                    sizing_target = exchange_min * (Decimal("1") + notional_buffer_pct / Decimal("100"))
 
                     if executable_notional < exchange_min:
                         # Below raw exchange minimum → hard reject (would trigger code=110094)
