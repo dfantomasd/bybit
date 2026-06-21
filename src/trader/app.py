@@ -1839,7 +1839,7 @@ class TradingApplication:
                 )
             except TimeoutError:
                 log.warning("db_diagnostics_timeout", lite=lite)
-                return {
+                diag = {
                     "connected": self._trade_journal.is_enabled,
                     "configured": self._trade_journal.is_configured,
                     "error": "db_diagnostics_timeout",
@@ -1850,6 +1850,8 @@ class TradingApplication:
                     ),
                     "lite": lite,
                 }
+                self._merge_runtime_db_diag_fallbacks(diag)
+                return diag
             except Exception as exc:
                 return {"connected": False, "error": str(exc), "lite": lite}
             if not lite:
@@ -1857,6 +1859,7 @@ class TradingApplication:
             diag["paper_notional_usd"] = (
                 float(self._settings.MODEL_PAPER_NOTIONAL_USD) if self._settings is not None else 5.0
             )
+            self._merge_runtime_db_diag_fallbacks(diag)
             cached = dict(diag)
             if lite:
                 self._db_diagnostics_lite_cache = cached
@@ -4113,6 +4116,54 @@ class TradingApplication:
                 auto_soften_enabled=self._settings.AUTO_SOFTEN_FILTERS_ENABLED,
             )
 
+    def _runtime_candle_readiness_counts(self) -> dict[str, int]:
+        """In-memory candle counts when Postgres diagnostics are slow or unavailable."""
+        if self._candle_store is None:
+            return {}
+        symbols = self._screener.active_symbols if self._screener is not None else []
+        if not symbols:
+            return {}
+        targets = {"1": 1000, "5": 200, "15": 200, "60": 100}
+        counts: dict[str, int] = {}
+        for interval, target in targets.items():
+            total = sum(self._candle_store.count(symbol, interval, confirmed_only=True) for symbol in symbols)
+            counts[interval] = min(target, total)
+        return counts
+
+    def _merge_runtime_db_diag_fallbacks(self, diag: dict[str, Any]) -> None:
+        """Fill gaps in DB diagnostics from live runtime state (WS candle store, ML registry)."""
+        runtime_candles = self._runtime_candle_readiness_counts()
+        if runtime_candles:
+            diag["runtime_candles_by_interval"] = runtime_candles
+            if not diag.get("candles_by_interval"):
+                diag["candles_by_interval"] = dict(runtime_candles)
+                diag["candles_source"] = "runtime_fallback"
+        if self._last_confirmed_candle_at is not None and not diag.get("latest_candle_1m"):
+            diag["latest_candle_1m"] = self._last_confirmed_candle_at
+            diag["last_confirmed_candle_age_s"] = max(
+                0.0,
+                (datetime.now(tz=UTC) - self._last_confirmed_candle_at).total_seconds(),
+            )
+        if self._model_registry is not None:
+            challenger = self._model_registry.challenger
+            champion = self._model_registry.champion
+            if challenger is not None and not (diag.get("latest_model_version") or {}):
+                diag["latest_model_version"] = {
+                    "version": challenger.version,
+                    "status": "SHADOW_CHALLENGER",
+                    "training_samples": challenger.training_samples,
+                    "metrics": getattr(challenger, "metrics", {}) or {},
+                }
+            if champion is not None:
+                diag["active_model_version"] = {
+                    "version": champion.version,
+                    "status": "CHAMPION",
+                    "training_samples": champion.training_samples,
+                    "metrics": getattr(champion, "metrics", {}) or {},
+                }
+            elif challenger is not None and not diag.get("active_model_version"):
+                diag["active_model_version"] = diag.get("latest_model_version", {})
+
     def get_diagnostics(self) -> dict[str, Any]:
         """Return a diagnostics snapshot for the /diagnostics Telegram command."""
         now = datetime.now(tz=UTC)
@@ -4141,6 +4192,7 @@ class TradingApplication:
             "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
             "last_ws_message_age_s": ws_age,
             "last_confirmed_candle_age_s": confirmed_age,
+            "runtime_candles_by_interval": self._runtime_candle_readiness_counts(),
             "telegram": telegram_health,
             "active_symbols": (self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)),
             "open_positions": (

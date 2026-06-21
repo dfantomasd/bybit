@@ -2330,11 +2330,12 @@ class TelegramMonitorBot:
         ]
         telegram_health = diag.get("telegram") or {}
         if telegram_health:
-            tg_state = (
-                "ok" if telegram_health.get("app_running") and telegram_health.get("polling_running") else "problem"
+            tg_ok = bool(telegram_health.get("app_running")) and (
+                bool(telegram_health.get("polling_running")) or bool(telegram_health.get("webhook_active"))
             )
+            tg_mode = "webhook" if telegram_health.get("webhook_active") else "polling"
             lines += [
-                f"Telegram: <code>{tg_state}</code> polling=<code>{telegram_health.get('polling_running')}</code>",
+                f"Telegram: <code>{'ok' if tg_ok else 'problem'}</code> mode=<code>{tg_mode}</code>",
                 f"Telegram conflicts: <code>{telegram_health.get('polling_conflict_count', 0)}</code>, "
                 f"net errors=<code>{telegram_health.get('polling_network_error_count', 0)}</code>",
             ]
@@ -2351,6 +2352,10 @@ class TelegramMonitorBot:
             f"Пропущено cooldown:     <code>{diag.get('hour_skipped_entry_cooldown', 0)}</code>",
             f"Пропущено после ошибки: <code>{diag.get('hour_skipped_failure_cooldown', 0)}</code>",
             f"Блоков фильтра модели:  <code>{diag.get('hour_model_gate_canary_blocked', 0)}</code>",
+            f"Отклонено spread (scalp): <code>{diag.get('hour_spread_rejected', 0)}</code>",
+            f"Отклонено imbalance:     <code>{diag.get('hour_imbalance_rejected', 0)}</code>",
+            f"Отклонено net-edge scalp: <code>{diag.get('hour_scalp_net_edge_rejected', 0)}</code>",
+            f"Блок bucket/regime:      <code>{diag.get('hour_bucket_blocked', 0)}</code>",
             f"Пропущено pending-заявка:<code>{diag.get('hour_skipped_pending_entries', 0)}</code>",
             f"Ордеров размещено:      <code>{diag.get('hour_order_placed', 0)}</code>",
             f"Ордеров неудачно:       <code>{diag.get('hour_order_failed', 0)}</code>",
@@ -2413,8 +2418,18 @@ class TelegramMonitorBot:
                 warnings.append((detail, fix))
 
         candles = db_diag.get("candles_by_interval", {}) or {}
+        if not any(int(candles.get(key) or 0) for key in ("1", "5", "15", "60")):
+            runtime_candles = (
+                diag.get("runtime_candles_by_interval") or db_diag.get("runtime_candles_by_interval") or {}
+            )
+            if runtime_candles:
+                candles = runtime_candles
         latest_1m = db_diag.get("latest_candle_1m")
         latest_age_s = self._utc_age_seconds(latest_1m)
+        if latest_age_s is None:
+            runtime_age = diag.get("last_confirmed_candle_age_s")
+            if runtime_age is not None:
+                latest_age_s = float(runtime_age)
         active_symbols = diag.get("active_symbols") or []
         runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
         latest_run = db_diag.get("latest_training_run", {}) or {}
@@ -2914,6 +2929,10 @@ class TelegramMonitorBot:
             if len(db_error_str) > 180:
                 db_error_str = f"{db_error_str[:177]}..."
             candles = db_diag.get("candles_by_interval", {})
+            if db_diag.get("candles_source") == "runtime_fallback":
+                candles_note = " (из памяти WS, Postgres медленный)"
+            else:
+                candles_note = ""
             latest_1m = db_diag.get("latest_candle_1m")
             latest_str = self._fmt_timestamp(latest_1m)
             outcomes_by_horizon = db_diag.get("prediction_outcomes_by_horizon", {}) or {}
@@ -3054,10 +3073,10 @@ class TelegramMonitorBot:
                 f"БД: {db_icon} {db_status}",
                 f"Ошибка БД: <code>{db_error_str or 'нет'}</code>",
                 f"Последняя свеча 1m: <code>{latest_str}</code>",
-                f"Свечей 1m:  <code>{candles.get('1', 0)}</code>",
-                f"Свечей 5m:  <code>{candles.get('5', 0)}</code>",
-                f"Свечей 15m: <code>{candles.get('15', 0)}</code>",
-                f"Свечей 1h:  <code>{candles.get('60', 0)}</code>",
+                f"Свечей 1m:  <code>{candles.get('1', 0)}</code>{candles_note}",
+                f"Свечей 5m:  <code>{candles.get('5', 0)}</code>{candles_note}",
+                f"Свечей 15m: <code>{candles.get('15', 0)}</code>{candles_note}",
+                f"Свечей 1h:  <code>{candles.get('60', 0)}</code>{candles_note}",
                 f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",

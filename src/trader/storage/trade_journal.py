@@ -193,6 +193,7 @@ class TradeJournal:
     async def _ensure_schema(self) -> None:
         assert self._pool is not None
         async with self._pool.acquire() as conn:
+            await conn.execute("SET statement_timeout = '60s'")
             await conn.execute(
                 """
             CREATE TABLE IF NOT EXISTS durable_order_state (
@@ -376,41 +377,6 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
-            UPDATE model_versions
-            SET feature_schema_hash = metrics->>'source_feature_schema_hash'
-            WHERE metrics ? 'source_feature_schema_hash'
-              AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
-              AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash';
-            WITH ranked AS (
-                SELECT model_id,
-                       row_number() OVER (
-                           ORDER BY
-                               CASE WHEN COALESCE(
-                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                   NULLIF(metrics->>'wf_mean_bps', ''),
-                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
-                               )::double precision > 0 THEN 0 ELSE 1 END,
-                               COALESCE(
-                                   NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                   NULLIF(metrics->>'wf_mean_bps', ''),
-                                   NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
-                                   '-1000000'
-                               )::double precision DESC,
-                               COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
-                               training_finished_at DESC NULLS LAST,
-                               created_at DESC
-                       ) AS rn
-                FROM model_versions
-                WHERE status = 'CHAMPION'
-            )
-            UPDATE model_versions mv
-            SET status = 'ARCHIVED'
-            FROM ranked
-            WHERE mv.model_id = ranked.model_id
-              AND ranked.rn > 1;
-            CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
-                ON model_versions ((status))
-                WHERE status = 'CHAMPION';
 
             -- Model promotion audit log. Columns cover both automatic
             -- DB-backed promotion and older manual/pure-eval audit payloads.
@@ -546,14 +512,63 @@ class TradeJournal:
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
             """)
-            await conn.execute(
-                "CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_label_schema "
-                "ON prediction_outcomes (label_schema_version)"
-            )
+        asyncio.create_task(
+            self._ensure_model_registry_indexes_deferred(),
+            name="trade-journal-model-registry-index",
+        )
         asyncio.create_task(
             self._ensure_feature_snapshot_unique_index_deferred(),
             name="trade-journal-feature-index",
         )
+
+    async def _ensure_model_registry_indexes_deferred(self) -> None:
+        """Repair model registry metadata and champion uniqueness outside startup."""
+        if self._pool is None:
+            return
+        try:
+            async with self._pool.acquire() as conn:
+                await conn.execute("SET statement_timeout = '120s'")
+                await conn.execute(
+                    """
+                    UPDATE model_versions
+                    SET feature_schema_hash = metrics->>'source_feature_schema_hash'
+                    WHERE metrics ? 'source_feature_schema_hash'
+                      AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
+                      AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash';
+                    WITH ranked AS (
+                        SELECT model_id,
+                               row_number() OVER (
+                                   ORDER BY
+                                       CASE WHEN COALESCE(
+                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                           NULLIF(metrics->>'wf_mean_bps', ''),
+                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                                       )::double precision > 0 THEN 0 ELSE 1 END,
+                                       COALESCE(
+                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                           NULLIF(metrics->>'wf_mean_bps', ''),
+                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
+                                           '-1000000'
+                                       )::double precision DESC,
+                                       COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                                       training_finished_at DESC NULLS LAST,
+                                       created_at DESC
+                               ) AS rn
+                        FROM model_versions
+                        WHERE status = 'CHAMPION'
+                    )
+                    UPDATE model_versions mv
+                    SET status = 'ARCHIVED'
+                    FROM ranked
+                    WHERE mv.model_id = ranked.model_id
+                      AND ranked.rn > 1;
+                    CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
+                        ON model_versions ((status))
+                        WHERE status = 'CHAMPION';
+                    """
+                )
+        except Exception as exc:
+            log.warning("trade_journal.model_registry_indexes_deferred_failed", error=str(exc))
 
     async def _ensure_feature_snapshot_unique_index_deferred(self) -> None:
         """Run heavy dedupe/index work outside startup-critical schema bootstrap."""
@@ -2811,6 +2826,11 @@ class TradeJournal:
                     result["last_confirmed_candle_age_s"] = max(
                         0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                     )
+                result["candles_by_interval"] = await _read_or_default(
+                    "candle_readiness_counts",
+                    {},
+                    self.get_candle_readiness_counts,
+                )
                 rows = await self._fetch(
                     """
                     SELECT status, model_version, sample_count, error, metrics, started_at, finished_at

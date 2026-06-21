@@ -11,7 +11,7 @@ services:
       - key: TRADING_MODE
         value: SHADOW
       - key: RISK_PROFILE
-        value: CONSERVATIVE
+        value: SCALP
       - key: LIVE_MODE
         value: "false"
       - key: LIVE_ARMED
@@ -115,6 +115,12 @@ services:
         value: "true"
       - key: STRATEGY_PRIORITY_ORDER
         value: "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+      - key: SCALP_STRATEGY_PRIORITY_ORDER
+        value: "scalp_micro_v1,order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
+      - key: ORDERBOOK_FEED_ENABLED
+        value: "true"
+      - key: MODEL_AUTO_TRAIN_HORIZON_MINUTES
+        value: "5"
       - key: TRAIN_STRATEGY_ALLOWLIST
         value: "scalp_micro_v1"
       - key: TRAIN_INCLUDE_CANDLE_BASELINE
