@@ -33,6 +33,21 @@ log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
 
+def _settings_label_bps() -> float:
+    """Return MODEL_AUTO_TRAIN_LABEL_BPS from settings, falling back to 2.0."""
+    try:
+        from trader.config import Settings
+
+        return float(getattr(Settings(), "MODEL_AUTO_TRAIN_LABEL_BPS", 2.0))
+    except Exception:
+        import os
+
+        try:
+            return float(os.environ.get("MODEL_AUTO_TRAIN_LABEL_BPS", 2.0))
+        except (ValueError, TypeError):
+            return 2.0
+
+
 def _settings_horizon() -> int:
     """Return MODEL_LABEL_HORIZON from settings, falling back to 15."""
     try:
@@ -886,7 +901,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
 @click.command()
 @click.option("--min-samples", default=500, type=int, help="Minimum compatible samples required")
-@click.option("--label-bps", default=5.0, type=float, help="Resolved net-return threshold in bps")
+@click.option("--label-bps", default=lambda: _settings_label_bps(), type=float, help="Resolved net-return threshold in bps")
 @click.option(
     "--horizon",
     default=lambda: _settings_horizon(),

@@ -28,6 +28,7 @@ import json
 import os
 import signal
 import sys
+from uuid import UUID
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
@@ -46,6 +47,8 @@ log = get_logger(__name__)
 # Fallback symbols (used only if screener fails); prefer cheap coins for small balance
 _SYMBOLS = ["DOGEUSDT", "XRPUSDT", "ADAUSDT", "WLDUSDT", "NEARUSDT"]
 _WS_INTERVAL = "1"  # 1-minute klines over WS
+# Sentinel UUID for WS fill journal rows when proposal/decision IDs are unknown.
+_JOURNAL_FALLBACK_UUID = UUID(int=0)
 _MIN_SEED_BARS = 250  # bars to fetch from REST at startup (multi_ewma_signal needs 201)
 _STRATEGY_LOOP_INTERVAL = 10.0  # seconds between strategy evaluations
 _FEATURE_INTERVAL = 5.0  # seconds between feature recomputation
@@ -696,7 +699,7 @@ class TradingApplication:
             self._background_tasks.append(self._training_task)
         return (
             "🧠🔁 <b>Обучение ВСЕ запущено</b>\n"
-            "Горизонты: <code>5m, 15m, 30m, 60m</code> | Порог: <code>5 bps</code>\n"
+            f"Горизонты: <code>5m, 15m, 30m, 60m</code> | Порог: <code>{self._settings.MODEL_AUTO_TRAIN_LABEL_BPS} bps</code>\n"
             "Используются все доступные примеры (мин. 100).\n"
             "Результаты придут по мере завершения каждого горизонта."
         )
@@ -704,7 +707,8 @@ class TradingApplication:
     async def _run_model_training_all(self) -> None:
         """Run training sequentially for all horizons using all available labeled data."""
         horizons = [5, 15, 30, 60]
-        label_bps = 5.0
+        assert self._settings is not None
+        label_bps = float(self._settings.MODEL_AUTO_TRAIN_LABEL_BPS)
         min_samples = 100
         results: list[str] = []
         for horizon in horizons:
@@ -3226,8 +3230,8 @@ class TradingApplication:
                                     order_link_id=order_link_id
                                     if order_link_id and not order_link_id.startswith("unknown:")
                                     else event.exec_id,
-                                    proposal_id=None,
-                                    decision_id=None,
+                                    proposal_id=_JOURNAL_FALLBACK_UUID,
+                                    decision_id=_JOURNAL_FALLBACK_UUID,
                                     symbol=event.symbol,
                                     side=event.side.value,
                                     qty=event.exec_qty,

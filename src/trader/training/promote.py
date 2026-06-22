@@ -16,7 +16,7 @@ from typing import Any
 
 import click
 
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import active_label_schema_version
 
 
 def _parse_metrics(raw: Any) -> dict[str, Any]:
@@ -42,6 +42,10 @@ async def _shadow_gate_stats(
     horizon_minutes: int,
 ) -> dict[str, Any]:
     """Return resolved shadow-gate statistics for one exact model version."""
+    from trader.config import Settings
+
+    settings = Settings()
+    label_schema = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
 
     rows = await pool.fetch(
         """
@@ -63,7 +67,7 @@ async def _shadow_gate_stats(
         """,
         version,
         horizon_minutes,
-        LABEL_SCHEMA_VERSION,
+        label_schema,
     )
 
     stats: dict[str, Any] = {

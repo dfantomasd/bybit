@@ -165,7 +165,7 @@ async def get_pnl_attribution(store: RetentionStore, *, days: int = 7) -> list[d
                'shadow' AS source
         FROM prediction_outcomes po
         JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
-        WHERE po.created_at >= now() - ($1::text || ' days')::interval
+        WHERE po.resolved_at >= now() - ($1::text || ' days')::interval
           AND po.net_return_bps IS NOT NULL
         GROUP BY pe.symbol
         ORDER BY avg_bps DESC
