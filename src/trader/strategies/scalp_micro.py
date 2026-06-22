@@ -53,7 +53,9 @@ _EMA_SLOW = 21
 _RSI_OVERBOUGHT = 0.70  # rsi_14 feature is normalised to [0, 1]
 _RSI_OVERSOLD = 0.30
 _ADX_FLAT = 0.20  # adx_14 feature is normalised to [0, 1]; 0.20 == ADX 20
+_ADX_FLAT_SHADOW = 0.15  # shadow: allow slightly flatter markets for data collection
 _VOLUME_IMPULSE_MULT = 1.5
+_VOLUME_IMPULSE_MULT_SHADOW = 1.2
 _BOUNCE_LOOKBACK = 5
 _BOUNCE_ZONE_ATR_MULT = 0.35  # price must be within this many ATRs of the extreme
 _TP_ATR_MULT = 1.0
@@ -189,7 +191,8 @@ class ScalpMicroStrategy(BaseStrategy):
             return None
 
         # Flat-market filter: no scalping when there is no movement to capture
-        if adx14 is None or adx14 < _ADX_FLAT:
+        adx_floor = _ADX_FLAT_SHADOW if self._shadow_relaxed else _ADX_FLAT
+        if adx14 is None or adx14 < adx_floor:
             return None
 
         if atr_pct < _MIN_ATR_PCT or atr_pct > _MAX_ATR_PCT:
@@ -226,8 +229,9 @@ class ScalpMicroStrategy(BaseStrategy):
                 return None
 
         # --- Volume impulse ---
+        vol_mult = _VOLUME_IMPULSE_MULT_SHADOW if self._shadow_relaxed else _VOLUME_IMPULSE_MULT
         vol_sma20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0.0
-        if vol_sma20 <= 0 or volumes[-1] < _VOLUME_IMPULSE_MULT * vol_sma20:
+        if vol_sma20 <= 0 or volumes[-1] < vol_mult * vol_sma20:
             return None
 
         # --- Spread filter (fail closed: unknown spread = no trade) ---
@@ -282,12 +286,13 @@ class ScalpMicroStrategy(BaseStrategy):
         elif imbalance is not None:
             confirms = imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
             if not confirms:
-                if self._shadow_relaxed and abs(imbalance) >= self._min_imbalance * 0.5:
+                if self._shadow_relaxed:
                     log.debug(
-                        "scalp_micro.imbalance_soft_pass_shadow",
+                        "scalp_micro.imbalance_skipped_shadow",
                         symbol=symbol,
                         side=side.value,
                         imbalance=round(imbalance, 3),
+                        min_imbalance=self._min_imbalance,
                     )
                 else:
                     self._diag("imbalance_rejected")
@@ -303,7 +308,7 @@ class ScalpMicroStrategy(BaseStrategy):
         # --- Net edge check: gross edge is the TP distance ---
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0
         net_edge_pct = self._net_edge_pct(gross_edge_pct, spread_bps)
-        if net_edge_pct < self._min_net_return_pct:
+        if not self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
             self._diag("scalp_net_edge_rejected")
             log.debug(
                 "scalp_micro.net_edge_rejected",
@@ -314,6 +319,13 @@ class ScalpMicroStrategy(BaseStrategy):
                 spread_bps=spread_bps,
             )
             return None
+        if self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
+            log.debug(
+                "scalp_micro.net_edge_skipped_shadow",
+                symbol=symbol,
+                net_edge_pct=round(net_edge_pct, 4),
+                min_required_pct=self._min_net_return_pct,
+            )
 
         # --- Position sizing with notional cap ---
         sl_dist_pct = atr_pct * _SL_ATR_MULT

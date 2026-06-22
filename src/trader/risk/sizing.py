@@ -73,6 +73,7 @@ class PositionSizer:
         entry_price: Decimal | None = None,
         remaining_position_budget_usd: Decimal | None = None,
         realized_vol: Decimal | None = None,
+        min_atr_multiple: Decimal | None = None,
     ) -> tuple[Decimal, str]:
         """Compute approved quantity.
 
@@ -107,7 +108,8 @@ class PositionSizer:
             atr_fraction = atr
             if atr_fraction > Decimal("1") and entry_price is not None and entry_price > Decimal("0"):
                 atr_fraction = atr_fraction / entry_price
-            min_stop_distance_pct = _DEFAULT_MIN_ATR_MULTIPLE * atr_fraction
+            atr_mult = min_atr_multiple if min_atr_multiple is not None else _DEFAULT_MIN_ATR_MULTIPLE
+            min_stop_distance_pct = atr_mult * atr_fraction
             if stop_distance_pct < min_stop_distance_pct:
                 return Decimal("0"), (
                     f"stop distance {stop_distance_pct:.6f} < min ATR multiple {min_stop_distance_pct:.6f}"

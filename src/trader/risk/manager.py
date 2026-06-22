@@ -153,6 +153,7 @@ class RiskManager:
         spread: Decimal | None = None,
         atr: Decimal | None = None,
         shadow_mode: bool = False,
+        min_atr_multiple: Decimal | None = None,
     ) -> RiskDecision:
         """Evaluate a trade proposal and return a RiskDecision."""
         triggered_rules: list[str] = []
@@ -392,6 +393,7 @@ class RiskManager:
             entry_price=proposal.entry_price,
             remaining_position_budget_usd=remaining_position_budget_usd,
             realized_vol=realized_vol,
+            min_atr_multiple=min_atr_multiple,
         )
 
         if approved_qty <= Decimal("0"):
