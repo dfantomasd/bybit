@@ -227,7 +227,9 @@ class MarketScreener:
         self._rest = rest_client
         self._wide_max = wide_max_symbols
         self._feature_max = feature_max_symbols
+        self._original_feature_max = feature_max_symbols
         self._exec_candidates = execution_candidates
+        self._original_exec_candidates = execution_candidates
         self._min_volume = min_volume_usd
         self._max_spread_bps = max_spread_bps
         self._min_depth_usd = min_top_book_depth_usd

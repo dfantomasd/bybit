@@ -120,6 +120,7 @@ class RiskManager:
         log: logging.Logger | None = None,
         min_notional_safety_buffer_pct: float = 3.0,
         require_liquidity_for_sizing: bool = False,
+        max_correlated_positions: int = 0,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -132,6 +133,7 @@ class RiskManager:
         self._log = log or logger
         self._require_liquidity_for_sizing = require_liquidity_for_sizing
         self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
+        self._max_correlated_positions = max(0, int(max_correlated_positions))
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -284,6 +286,19 @@ class RiskManager:
                 ["max_positions"],
                 capital,
             )
+
+        # ----------------------------------------------------------------
+        # 7b. Correlated family cap (e.g. multiple BTC-beta alts)
+        # ----------------------------------------------------------------
+        if self._max_correlated_positions > 0:
+            same_family = self._exposure.count_same_family_positions(proposal.symbol)
+            if same_family >= self._max_correlated_positions:
+                return self._reject(
+                    proposal,
+                    f"correlated family positions {same_family} >= limit {self._max_correlated_positions}",
+                    ["max_correlated_positions"],
+                    capital,
+                )
 
         # ----------------------------------------------------------------
         # 8. Preliminary hard blocker: zero budget remaining
