@@ -359,13 +359,15 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 13. Apply LLM risk_multiplier (clamped to [0.0, 1.0])
-        # CRITICAL: LLM multiplier can ONLY reduce, never increase.
-        # expected_risk carries the LLM multiplier when LLM_ENABLED=True;
-        # otherwise fall back to strategy confidence as a sizing proxy.
+        # 13. Apply combined LLM × confidence multiplier (clamped to [0.0, 1.0])
+        # CRITICAL: the product can ONLY reduce, never increase approved_qty.
+        # When LLM_ENABLED: final_mult = llm_mult × confidence.
+        #   llm_mult=1.0 (no LLM reduction) → mult = confidence (same as no-LLM path).
+        #   llm_mult=0.8, confidence=0.6 → mult = 0.48 (both filters applied).
+        # When LLM_ENABLED=False: expected_risk is None → mult = confidence only.
         # ----------------------------------------------------------------
         if proposal.expected_risk is not None:
-            raw_llm_mult = Decimal(str(proposal.expected_risk))
+            raw_llm_mult = Decimal(str(proposal.expected_risk)) * Decimal(str(proposal.confidence))
         else:
             raw_llm_mult = Decimal(str(proposal.confidence))
         llm_multiplier = max(Decimal("0"), min(Decimal("1"), raw_llm_mult))

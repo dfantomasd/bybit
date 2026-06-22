@@ -91,3 +91,39 @@ class TestCountFamilyPositions:
         await tracker.update_position("BTCUSDT", "Buy", Decimal("1000"))
         # Querying for BTCUSDT itself should also count it
         assert tracker.count_family_positions("BTCUSDT") == 1
+
+
+class TestFamilyFalsePositives:
+    """startswith used to cause unrelated tokens to land in the wrong family."""
+
+    @pytest.mark.asyncio
+    async def test_ethfi_not_in_eth_family(self):
+        tracker = _tracker()
+        await tracker.update_position("ETHUSDT", "Buy", Decimal("500"))
+        # ETHFI is a DeFi protocol unrelated to ETH price
+        assert tracker.count_family_positions("ETHFIUSDT") == 0
+
+    @pytest.mark.asyncio
+    async def test_btcdom_not_in_btc_family(self):
+        tracker = _tracker()
+        await tracker.update_position("BTCUSDT", "Buy", Decimal("1000"))
+        # BTCDOM is BTC market dominance index, not the BTC token
+        assert tracker.count_family_positions("BTCDOMUSDT") == 0
+
+    @pytest.mark.asyncio
+    async def test_solv_not_in_sol_family(self):
+        tracker = _tracker()
+        await tracker.update_position("SOLUSDT", "Buy", Decimal("500"))
+        assert tracker.count_family_positions("SOLVUSDT") == 0
+
+    @pytest.mark.asyncio
+    async def test_ethusdt_still_in_eth_family(self):
+        tracker = _tracker()
+        await tracker.update_position("ETHUSDT", "Buy", Decimal("500"))
+        assert tracker.count_family_positions("ETHPERP") == 1
+
+    @pytest.mark.asyncio
+    async def test_wbtcusdt_in_btc_family(self):
+        tracker = _tracker()
+        await tracker.update_position("BTCUSDT", "Buy", Decimal("1000"))
+        assert tracker.count_family_positions("WBTCUSDT") == 1

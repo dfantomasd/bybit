@@ -3857,17 +3857,20 @@ class TradingApplication:
                         ),
                         timeout=_llm_deadline,
                     )
-                    if llm_mult < 1.0:
-                        proposal = proposal.model_copy(update={"expected_risk": llm_mult})
-                        log.debug(
-                            "llm.applied_multiplier",
-                            symbol=proposal.symbol,
-                            multiplier=llm_mult,
-                        )
+                    # Always propagate the LLM verdict (including 1.0 = no reduction).
+                    # The risk manager multiplies llm_mult × confidence; if we skipped
+                    # setting expected_risk at 1.0 the manager would fall back to using
+                    # confidence alone, silently discounting an LLM-approved trade.
+                    proposal = proposal.model_copy(update={"expected_risk": llm_mult})
+                    log.debug(
+                        "llm.applied_multiplier",
+                        symbol=proposal.symbol,
+                        multiplier=llm_mult,
+                    )
                 except TimeoutError:
-                    log.debug("llm.timeout", symbol=symbol, deadline_s=_llm_deadline)
+                    log.debug("llm.timeout", symbol=proposal.symbol, deadline_s=_llm_deadline)
                 except Exception as _llm_exc:
-                    log.debug("llm.scoring_failed", symbol=symbol, error=str(_llm_exc))
+                    log.debug("llm.scoring_failed", symbol=proposal.symbol, error=str(_llm_exc))
 
             # Skip execution if operator paused trading
             if self._trading_paused:
@@ -3979,7 +3982,6 @@ class TradingApplication:
             assert self._settings is not None
 
             while not self._shutdown_event.is_set():
-                _cycle_t0 = asyncio.get_event_loop().time()
                 self._last_strategy_loop_at = datetime.now(tz=UTC)
                 # Refresh balance every N iterations
                 _balance_tick += 1
@@ -3991,7 +3993,9 @@ class TradingApplication:
                 await self._manage_open_positions()
                 self._check_zero_trading()
 
-                # Sync transaction log periodically
+                # Sync transaction log periodically (outside the strategy-cycle timer
+                # so DB I/O latency does not inflate _last_strategy_cycle_ms and
+                # cause the load governor to reduce symbols spuriously).
                 now = datetime.now(tz=UTC)
                 tx_interval = self._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS
                 if (
@@ -4004,6 +4008,8 @@ class TradingApplication:
                     except Exception as _tx_exc:
                         log.debug("strategy_loop.tx_log_sync_failed", error=str(_tx_exc))
 
+                # Timer starts here — measures only pure symbol-processing time.
+                _cycle_t0 = asyncio.get_event_loop().time()
                 balance = self._cached_balance
                 capital = balance
 

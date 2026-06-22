@@ -115,8 +115,12 @@ class LLMClient:
         Returns 1.0 (no reduction) on any error so trading is never blocked
         by LLM unavailability.
         """
-        if not self._check_budget():
-            return 1.0
+        # Budget check + pre-record under lock so concurrent per-symbol calls
+        # cannot all slip past a near-full budget simultaneously.
+        async with self._lock:
+            if not self._check_budget():
+                return 1.0
+            self._record_call()
 
         prompt = _PROMPT_TEMPLATE.format(
             symbol=symbol,
@@ -147,13 +151,36 @@ class LLMClient:
                             status=resp.status,
                             attempt=attempt,
                         )
+                        if attempt < _RETRY_ATTEMPTS - 1:
+                            await asyncio.sleep(0.5)
                         continue
                     data = await resp.json(content_type=None)
+                    # Ollama returns {"error": "..."} with HTTP 200 on model/config errors.
+                    if "error" in data:
+                        log.warning(
+                            "llm.model_error",
+                            error=data["error"],
+                            model=self._model,
+                        )
+                        return 1.0
                     raw = data.get("response") or ""
+                    if not raw:
+                        log.debug("llm.empty_response", attempt=attempt)
+                        if attempt < _RETRY_ATTEMPTS - 1:
+                            await asyncio.sleep(0.5)
+                        continue
                     parsed = json.loads(raw)
+                    if not isinstance(parsed, dict):
+                        log.debug(
+                            "llm.unexpected_json_type",
+                            json_type=type(parsed).__name__,
+                            attempt=attempt,
+                        )
+                        if attempt < _RETRY_ATTEMPTS - 1:
+                            await asyncio.sleep(0.5)
+                        continue
                     mult = float(parsed.get("risk_multiplier", 1.0))
                     mult = max(0.0, min(1.0, mult))
-                    self._record_call()
                     log.debug(
                         "llm.risk_multiplier",
                         symbol=symbol,

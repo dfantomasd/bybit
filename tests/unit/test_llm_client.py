@@ -111,6 +111,82 @@ class TestLLMClientBudgetCap:
         assert client._daily_spend_usd == pytest.approx(0.0)
 
 
+class TestLLMClientBudgetPreRecord:
+    @pytest.mark.asyncio
+    async def test_spend_recorded_even_on_http_failure(self):
+        """Budget slot is pre-reserved; spend is NOT refunded on network failure."""
+        client = _make_client(budget_cap_usd=5.0)
+
+        session = MagicMock()
+        session.post = MagicMock(side_effect=Exception("network down"))
+        session.closed = False
+        client._session = session
+
+        result = await client.get_risk_multiplier("BTCUSDT", "Buy", "RANGING", 0.5, "")
+        assert result == pytest.approx(1.0)
+        assert client._daily_spend_usd == pytest.approx(client._cost_per_call_usd)
+
+    @pytest.mark.asyncio
+    async def test_budget_exhausted_after_many_failures(self):
+        """Repeated pre-records on failure drain the budget, preventing runaway calls."""
+        cost = 0.001
+        cap = cost * 3
+        client = _make_client(budget_cap_usd=cap)
+
+        session = MagicMock()
+        session.post = MagicMock(side_effect=Exception("network down"))
+        session.closed = False
+        client._session = session
+
+        # First 3 calls pre-record spend and exhaust the budget
+        for _ in range(3):
+            await client.get_risk_multiplier("BTCUSDT", "Buy", "RANGING", 0.5, "")
+
+        # 4th call should be blocked by the budget cap
+        session.post.reset_mock()
+        result = await client.get_risk_multiplier("BTCUSDT", "Buy", "RANGING", 0.5, "")
+        assert result == pytest.approx(1.0)
+        session.post.assert_not_called()
+
+
+class TestLLMClientOllamaError:
+    @pytest.mark.asyncio
+    async def test_returns_1_on_ollama_model_error(self):
+        """Ollama returns HTTP 200 with error field when model is misconfigured."""
+        client = _make_client()
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(return_value={"error": "model 'typo-model' not found"})
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+
+        session = MagicMock()
+        session.post = MagicMock(return_value=resp)
+        session.closed = False
+        client._session = session
+
+        result = await client.get_risk_multiplier("BTCUSDT", "Buy", "RANGING", 0.5, "test")
+        assert result == pytest.approx(1.0)
+
+    @pytest.mark.asyncio
+    async def test_returns_1_on_non_dict_json(self):
+        """LLM returning a bare float or list instead of dict falls back safely."""
+        client = _make_client()
+        resp = MagicMock()
+        resp.status = 200
+        resp.json = AsyncMock(return_value={"response": "0.5"})  # bare float string
+        resp.__aenter__ = AsyncMock(return_value=resp)
+        resp.__aexit__ = AsyncMock(return_value=False)
+
+        session = MagicMock()
+        session.post = MagicMock(return_value=resp)
+        session.closed = False
+        client._session = session
+
+        result = await client.get_risk_multiplier("BTCUSDT", "Buy", "RANGING", 0.5, "test")
+        assert result == pytest.approx(1.0)
+
+
 class TestLLMClientFailOpen:
     @pytest.mark.asyncio
     async def test_returns_1_on_non_200_response(self):

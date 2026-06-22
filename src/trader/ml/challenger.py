@@ -623,8 +623,8 @@ class ModelRegistry:
         )
         if evidence_rows:
             # Walk-forward evidence exists but paper_gate_count < threshold.
-            # Pick the best available champion by metrics rather than returning None,
-            # so the bot never falls back to a recency-only selection.
+            # Skip the redundant SELECT 1 pre-check — best_rows uses the identical
+            # filter, so if evidence_rows is non-empty, best_rows will be too.
             best_rows = await self._journal._fetch(
                 """
                 SELECT version, artifact, training_samples, metrics, training_finished_at, created_at,
@@ -672,13 +672,16 @@ class ModelRegistry:
             if best_rows:
                 log.warning(
                     "model_registry.best_available_champion_below_paper_gate "
-                    "min_paper_gate_count=%s required_schema=%s version=%s",
+                    "min_paper_gate_count=%s required_schema=%s version=%s wf_bps=%s lift_bps=%s",
                     min_paper_gate_count,
                     LABEL_SCHEMA_VERSION,
                     best_rows[0]["version"],
+                    best_rows[0].get("walk_forward_bps"),
+                    best_rows[0].get("lift_bps"),
                 )
                 return best_rows[0]
-            return None
+            # best_rows empty is theoretically unreachable (evidence_rows shares the same
+            # filter), but fall through to Tier 3 rather than raising.
 
         fallback_rows = await self._journal._fetch(
             """

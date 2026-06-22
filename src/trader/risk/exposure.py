@@ -20,14 +20,27 @@ _CRYPTO_FAMILIES: dict[str, list[str]] = {
     "SOL": ["SOL", "MSOL", "JSOL", "BSOL"],
 }
 
+# Valid quote/suffix tokens that may follow a base asset name in a trading pair.
+# Used to distinguish e.g. ETHUSDT (ETH family) from ETHFI (unrelated token).
+_PAIR_SUFFIXES = ("USDT", "USDC", "USD", "PERP", "BUSD")
+
 
 def _get_family(symbol: str) -> str | None:
-    """Return the family name for a symbol's base asset, or None."""
+    """Return the family name for a symbol's base asset, or None.
+
+    Matches exact member names (e.g. 'ETH') or member names followed by a
+    known quote suffix (e.g. 'ETHUSDT', 'ETHPERP').  Pure startswith would
+    produce false positives: ETHFI → ETH, BTCDOM → BTC, SOLV → SOL.
+    """
     upper = symbol.upper()
     for family, members in _CRYPTO_FAMILIES.items():
         for member in members:
-            if upper.startswith(member):
+            if upper == member:
                 return family
+            if upper.startswith(member):
+                remainder = upper[len(member) :]
+                if any(remainder.startswith(q) for q in _PAIR_SUFFIXES):
+                    return family
     return None
 
 
