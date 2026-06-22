@@ -188,6 +188,32 @@ class TestMarketStatsFeatures:
         assert vec is not None
         assert "mkt_data_present" not in vec.feature_names
 
+    def test_mtf_pattern_features_on_primary_interval(self):
+        store = CandleStore()
+        for interval in ("1", "5", "15"):
+            for i in range(40):
+                price = 50000.0 + i * 10.0
+                store.add(
+                    "BTCUSDT",
+                    interval,
+                    Candle(
+                        open_time=datetime(2024, 1, 1, 0, i, tzinfo=UTC),
+                        open=price - 5,
+                        high=price + 20,
+                        low=price - 20,
+                        close=price,
+                        volume=1000.0,
+                        confirm=True,
+                    ),
+                )
+        pipeline = FeaturePipeline(store)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        names = set(vec.feature_names)
+        assert "pat5_hammer" in names
+        assert "pat15_morning_star" in names
+        assert vec.feature_names == sorted(vec.feature_names)
+
     def test_source_error_does_not_kill_compute(self):
         class Exploding:
             def market_stats(self, symbol):
