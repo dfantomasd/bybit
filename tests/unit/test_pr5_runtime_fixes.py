@@ -217,9 +217,9 @@ async def test_trade_journal_connect_closes_pool_when_schema_bootstrap_times_out
 def test_load_governor_uses_ws_stale_hysteresis() -> None:
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.market_data import MarketDataModule
 
-    src = inspect.getsource(TradingApplication._run_load_governor)
+    src = inspect.getsource(MarketDataModule.run_load_governor)
     assert "ws_stale_threshold_s = 90.0" in src
     assert "overload_streak >= 2" in src
     assert "restore_streak >= 2" in src
@@ -229,9 +229,9 @@ def test_load_governor_uses_ws_stale_hysteresis() -> None:
 def test_strategy_loop_measures_processing_before_sleep() -> None:
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.trading_loop import TradingLoopModule
 
-    src = inspect.getsource(TradingApplication._start_strategy_loop)
+    src = inspect.getsource(TradingLoopModule.start)
     assert "Measure processing time only" in src
     assert src.index("_last_strategy_cycle_ms =") < src.index("timeout=_STRATEGY_LOOP_INTERVAL")
 
@@ -239,9 +239,9 @@ def test_strategy_loop_measures_processing_before_sleep() -> None:
 def test_model_progress_reports_actual_and_compatible_samples() -> None:
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.training import TrainingModule
 
-    src = inspect.getsource(TradingApplication._run_model_progress_reporter)
+    src = inspect.getsource(TrainingModule.run_model_progress_reporter)
     assert "actual_training_samples" in src
     assert "compatible_training_samples" in src
     assert "Совместимо:" in src
@@ -250,20 +250,20 @@ def test_model_progress_reports_actual_and_compatible_samples() -> None:
 def test_canary_gate_scores_side_aware_model_features() -> None:
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.trading_loop import TradingLoopModule
 
-    src = inspect.getsource(TradingApplication._start_strategy_loop)
-    assert "model_feature_names, model_feature_values = self._feature_values_for_side" in src
-    assert "live_prediction = self._model_registry.score_live(model_feature_values, model_feature_names)" in src
-    assert "live_prediction = self._model_registry.score_live(vec.values, vec.feature_names)" not in src
+    src = inspect.getsource(TradingLoopModule.start)
+    assert "model_feature_names, model_feature_values = self._app._feature_values_for_side" in src
+    assert "self._app._model_registry.score_live(model_feature_values, model_feature_names)" in src
+    assert "self._app._model_registry.score_live(vec.values, vec.feature_names)" not in src
 
 
 def test_enabled_canary_gate_fails_closed_without_compatible_champion() -> None:
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.trading_loop import TradingLoopModule
 
-    src = inspect.getsource(TradingApplication._start_strategy_loop)
+    src = inspect.getsource(TradingLoopModule.start)
     assert "ml_canary.no_compatible_champion" in src
     assert 'await _record_signal("model_gate_no_compatible_champion")' in src
     after = src.split('await _record_signal("model_gate_no_compatible_champion")', maxsplit=1)[1]
