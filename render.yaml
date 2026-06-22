@@ -90,6 +90,24 @@ services:
         value: "3"
       - key: WS_MARKET_DATA_STALE_RECONNECT_SECONDS
         value: "120"
+      - key: DATA_RETENTION_ENABLED
+        value: "true"
+      - key: DATA_RETENTION_INTERVAL_HOURS
+        value: "24"
+      - key: FEATURE_SNAPSHOT_RETENTION_DAYS
+        value: "90"
+      - key: FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS
+        value: "7"
+      - key: PREDICTION_EVENT_ORPHAN_RETENTION_DAYS
+        value: "30"
+      - key: SHADOW_SIGNAL_RETENTION_DAYS
+        value: "30"
+      - key: MODEL_DRIFT_DETECTION_ENABLED
+        value: "true"
+      - key: MODEL_DRIFT_AUTO_RETRAIN
+        value: "true"
+      - key: MODEL_ONLINE_LEARNING_ENABLED
+        value: "false"
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"

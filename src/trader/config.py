@@ -271,6 +271,23 @@ class Settings(BaseSettings):
     """Quick Postgres probes when preflight is optional (SHADOW); avoids long deploy stalls."""
 
     # ------------------------------------------------------------------
+    # Data retention / cold export
+    # ------------------------------------------------------------------
+    DATA_RETENTION_ENABLED: bool = True
+    DATA_RETENTION_INTERVAL_HOURS: float = 24.0
+    DATA_RETENTION_EXPORT_ENABLED: bool = True
+    DATA_RETENTION_EXPORT_DIR: str = "data/retention_exports"
+    CANDLE_RETENTION_DAYS_1M: int = 30
+    CANDLE_RETENTION_DAYS_5M: int = 180
+    CANDLE_RETENTION_DAYS_15M: int = 365
+    CANDLE_RETENTION_DAYS_60M: int = 730
+    FEATURE_SNAPSHOT_RETENTION_DAYS: int = 90
+    FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS: int = 7
+    PREDICTION_EVENT_ORPHAN_RETENTION_DAYS: int = 30
+    SHADOW_SIGNAL_RETENTION_DAYS: int = 30
+    RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS: int = 90
+
+    # ------------------------------------------------------------------
     # Telegram notifications
     # ------------------------------------------------------------------
     TELEGRAM_BOT_TOKEN: SecretStr = SecretStr("")
@@ -400,7 +417,7 @@ class Settings(BaseSettings):
     MAX_SAME_SIDE_POSITIONS: int = 2
     """Maximum open positions on the same side (Buy or Sell)."""
     MAX_CORRELATED_POSITIONS: int = 2
-    """Reserved: correlation-based position limiting (not yet wired into execution)."""
+    """Maximum open positions in the same crypto family (BTC/ETH/SOL cluster)."""
     STARTUP_WARMUP_SECONDS: int = 180
     """Seconds after startup before new entries are allowed (monitoring-only phase)."""
     SHADOW_LOSS_GUARD_ENABLED: bool = False
@@ -429,7 +446,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     MULTITIMEFRAME_ENABLED: bool = True
     MULTITIMEFRAME_INTERVALS: Annotated[list[str], NoDecode] = ["1", "5", "15", "60"]
-    CANDLE_STORE_MAX_BARS_1M: int = 250  # reserved: per-interval candle store capacity (not yet read by CandleStore)
+    CANDLE_STORE_MAX_BARS_1M: int = 250
     CANDLE_STORE_MAX_BARS_5M: int = 250
     CANDLE_STORE_MAX_BARS_15M: int = 200
     CANDLE_STORE_MAX_BARS_1H: int = 120
@@ -439,7 +456,8 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     ORDERBOOK_MODE: str = "ON_DEMAND"
     """ON_DEMAND = fetch only for top candidates; STREAMING = subscribe for all."""
-    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5  # reserved: STREAMING mode symbol cap (not yet enforced)
+    MAX_ORDERBOOK_ACTIVE_SYMBOLS: int = 5
+    """Cap orderbook WS subscriptions in STREAMING mode."""
 
     # ------------------------------------------------------------------
     # Adaptive load governor
@@ -450,12 +468,12 @@ class Settings(BaseSettings):
     """How often to resolve pending prediction outcomes from stored candles."""
     OUTCOME_RESOLVER_BATCH_LIMIT: int = 1000
     """Maximum prediction outcomes to resolve per horizon on each resolver pass."""
-    MAX_FEATURE_CYCLE_MS: int = 8000  # reserved: governor cycle-time thresholds (not yet read)
+    MAX_FEATURE_CYCLE_MS: int = 8000
     MAX_STRATEGY_CYCLE_MS: int = 8000
     MAX_EVENT_LOOP_LAG_MS: int = 500
-    MAX_QUEUE_UTILIZATION_PCT: int = 70  # reserved: queue-utilization gate (not yet enforced)
+    MAX_QUEUE_UTILIZATION_PCT: int = 70
     LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS: int = 10
-    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3  # reserved: load governor floor (not yet enforced)
+    LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES: int = 3
 
     # ------------------------------------------------------------------
     # ML / model
@@ -520,6 +538,14 @@ class Settings(BaseSettings):
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
     MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = True
     """Retrain automatically when the latest model quality is WEAK/missing."""
+    MODEL_DRIFT_DETECTION_ENABLED: bool = True
+    """Monitor feature distribution drift (PSI) and optionally trigger retrain."""
+    MODEL_DRIFT_PSI_THRESHOLD: float = 0.25
+    MODEL_DRIFT_MIN_SAMPLES: int = 200
+    MODEL_DRIFT_AUTO_RETRAIN: bool = True
+    MODEL_ONLINE_LEARNING_ENABLED: bool = False
+    """Apply challenger partial_fit after resolved outcomes (SGD/LOGREG only)."""
+    MODEL_ONLINE_LEARNING_MAX_UPDATES_PER_CYCLE: int = 50
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 2.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion

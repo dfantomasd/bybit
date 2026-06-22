@@ -32,10 +32,14 @@ class CandleStore:
     - Confirmed candles are appended; unconfirmed overwrite the tail.
     """
 
-    def __init__(self, max_bars: int = _DEFAULT_MAXLEN) -> None:
+    def __init__(self, max_bars: int = _DEFAULT_MAXLEN, max_bars_by_interval: dict[str, int] | None = None) -> None:
         self._max_bars = max_bars
+        self._max_bars_by_interval = {str(k): int(v) for k, v in (max_bars_by_interval or {}).items()}
         # key: (symbol, interval) → deque[Candle]
         self._data: dict[tuple[str, str], collections.deque[Candle]] = {}
+
+    def _cap_for_interval(self, interval: str) -> int:
+        return self._max_bars_by_interval.get(interval, self._max_bars)
 
     # ------------------------------------------------------------------
     # Write
@@ -53,8 +57,9 @@ class CandleStore:
         ticks, so concurrent callers cannot interleave.  No lock is needed.
         """
         key = (symbol.upper(), interval)
+        cap = self._cap_for_interval(interval)
         if key not in self._data:
-            self._data[key] = collections.deque(maxlen=self._max_bars)
+            self._data[key] = collections.deque(maxlen=cap)
 
         buf = self._data[key]
         if buf and buf[-1].open_time == candle.open_time:

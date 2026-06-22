@@ -556,6 +556,7 @@ class TradeJournal:
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps DOUBLE PRECISION;
                 ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps DOUBLE PRECISION;
+                ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS online_learned_at timestamptz;
                 -- Persistent pending-entry resolution state: survives restarts so a
                 -- terminal order status seen before a crash never re-blocks the slot.
                 CREATE TABLE IF NOT EXISTS order_pending_state (
@@ -1616,15 +1617,134 @@ class TradeJournal:
         )
         return int(rows[0]["cnt"]) if rows else 0
 
-    async def apply_candle_retention(self) -> None:
+    async def apply_candle_retention(self, retention_days: dict[str, int] | None = None) -> int:
         """Delete old candles according to retention policy."""
-        retention = {"1": 30, "5": 180, "15": 365, "60": 730}
-        for interval, days in retention.items():
-            await self._execute(
-                "DELETE FROM market_candles WHERE interval = $1 AND open_time < now() - ($2::text || ' days')::interval",
-                interval,
-                str(days),
+        from trader.storage.retention import RetentionSettings, run_data_retention
+
+        days = retention_days or {"1": 30, "5": 180, "15": 365, "60": 730}
+        report = await run_data_retention(self, RetentionSettings(candle_retention_days=days))
+        return report.candles_deleted
+
+    async def get_storage_stats(self) -> dict[str, Any]:
+        from trader.storage.retention import get_storage_stats
+
+        return await get_storage_stats(self)
+
+    async def get_pnl_attribution(self, *, days: int = 7) -> list[dict[str, Any]]:
+        from trader.storage.retention import get_pnl_attribution
+
+        return await get_pnl_attribution(self, days=days)
+
+    async def run_data_retention_policy(self, settings: Any) -> dict[str, Any]:
+        from trader.storage.retention import RetentionSettings, run_data_retention
+
+        cfg = RetentionSettings(
+            candle_retention_days={
+                "1": int(settings.CANDLE_RETENTION_DAYS_1M),
+                "5": int(settings.CANDLE_RETENTION_DAYS_5M),
+                "15": int(settings.CANDLE_RETENTION_DAYS_15M),
+                "60": int(settings.CANDLE_RETENTION_DAYS_60M),
+            },
+            feature_snapshot_retention_days=int(settings.FEATURE_SNAPSHOT_RETENTION_DAYS),
+            feature_snapshot_invalid_retention_days=int(settings.FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS),
+            prediction_event_orphan_retention_days=int(settings.PREDICTION_EVENT_ORPHAN_RETENTION_DAYS),
+            shadow_signal_retention_days=int(settings.SHADOW_SIGNAL_RETENTION_DAYS),
+            resolved_snapshot_export_before_delete_days=int(settings.RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS),
+            export_enabled=bool(settings.DATA_RETENTION_EXPORT_ENABLED),
+            export_dir=str(settings.DATA_RETENTION_EXPORT_DIR),
+        )
+        report = await run_data_retention(self, cfg)
+        return report.to_dict()
+
+    async def fetch_feature_drift_samples(
+        self,
+        *,
+        baseline_days: int = 14,
+        current_days: int = 3,
+        limit: int = 500,
+    ) -> tuple[list[list[float]], list[list[float]]]:
+        """Return baseline vs recent feature vectors for PSI drift checks."""
+        baseline_rows = await self._fetch(
+            """
+            SELECT feature_values
+            FROM feature_snapshots
+            WHERE training_eligible = true
+              AND created_at < now() - ($1::text || ' days')::interval
+              AND created_at >= now() - (($1 + $2)::text || ' days')::interval
+            ORDER BY created_at DESC
+            LIMIT $3
+            """,
+            str(current_days),
+            str(baseline_days),
+            int(limit),
+        )
+        current_rows = await self._fetch(
+            """
+            SELECT feature_values
+            FROM feature_snapshots
+            WHERE training_eligible = true
+              AND created_at >= now() - ($1::text || ' days')::interval
+            ORDER BY created_at DESC
+            LIMIT $2
+            """,
+            str(current_days),
+            int(limit),
+        )
+
+        def _parse(rows: list[Any]) -> list[list[float]]:
+            out: list[list[float]] = []
+            for row in rows:
+                raw = row["feature_values"]
+                if isinstance(raw, str):
+                    raw = json.loads(raw)
+                if isinstance(raw, list):
+                    out.append([float(x) for x in raw])
+            return out
+
+        return _parse(baseline_rows), _parse(current_rows)
+
+    async def fetch_online_learning_batch(self, *, limit: int = 50) -> list[dict[str, Any]]:
+        """Resolved outcomes with feature vectors for challenger partial_fit."""
+        rows = await self._fetch(
+            """
+            SELECT po.prediction_id, po.label, fs.feature_values
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+            WHERE po.label IS NOT NULL
+              AND po.online_learned_at IS NULL
+            ORDER BY po.created_at DESC
+            LIMIT $1
+            """,
+            int(limit),
+        )
+        batch: list[dict[str, Any]] = []
+        for row in rows:
+            raw = row["feature_values"]
+            if isinstance(raw, str):
+                raw = json.loads(raw)
+            if not isinstance(raw, list):
+                continue
+            batch.append(
+                {
+                    "prediction_id": str(row["prediction_id"]),
+                    "label": int(row["label"]),
+                    "features": [float(x) for x in raw],
+                }
             )
+        return batch
+
+    async def mark_online_learning_applied(self, prediction_ids: list[str]) -> None:
+        if not prediction_ids:
+            return
+        await self._execute(
+            """
+            UPDATE prediction_outcomes
+            SET online_learned_at = now()
+            WHERE prediction_id = ANY($1::uuid[])
+            """,
+            prediction_ids,
+        )
 
     async def record_feature_snapshot(
         self,
@@ -2860,6 +2980,7 @@ class TradeJournal:
             "active_model_version": {},
             "shadow_gate_15m": {},
             "paper_pnl_15m": {},
+            "storage_stats": {},
         }
         if not self.is_enabled:
             await self.reconnect_if_needed()
@@ -2939,6 +3060,7 @@ class TradeJournal:
                     result["active_model_version"] = dict(champion_rows[0])
                 else:
                     result["active_model_version"] = result.get("latest_model_version", {})
+                result["storage_stats"] = await _read_or_default("storage_stats", {}, self.get_storage_stats)
                 return result
 
             result["candles_by_interval"] = await _read_or_default(
@@ -3186,6 +3308,7 @@ class TradeJournal:
                     "baseline": _paper_stats(paper_baseline_rows),
                     "model_gate": _paper_stats(paper_gate_rows),
                 }
+            result["storage_stats"] = await _read_or_default("storage_stats", {}, self.get_storage_stats)
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)

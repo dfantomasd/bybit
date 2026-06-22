@@ -99,6 +99,7 @@ class ExecutionEngine:
         micro_account_min_notional_buffer_pct: float = 1.0,
         max_new_entries_per_minute: int = 60,
         max_concurrent_pending_entries: int = 10,
+        max_queue_utilization_pct: float = 0.0,
         max_same_side_positions: int = 10,
         startup_warmup_seconds: int = 0,
         is_canary: bool = False,
@@ -161,6 +162,7 @@ class ExecutionEngine:
         # Burst / rate limiting
         self._max_entries_per_minute = max_new_entries_per_minute
         self._max_concurrent_pending = max_concurrent_pending_entries
+        self._max_queue_util_pct = max(0.0, float(max_queue_utilization_pct))
         self._max_same_side = max_same_side_positions
         self._startup_warmup = timedelta(seconds=startup_warmup_seconds)
         self._started_at: datetime = datetime.now(tz=UTC)
@@ -240,6 +242,15 @@ class ExecutionEngine:
             if len(self._recent_entries) >= self._max_entries_per_minute:
                 return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
 
+        if (
+            self._max_queue_util_pct > 0
+            and self._max_concurrent_pending > 0
+            and (self._pending_entry_count / self._max_concurrent_pending) * 100 >= self._max_queue_util_pct
+        ):
+            util = (self._pending_entry_count / self._max_concurrent_pending) * 100
+            return f"queue_utilization: {util:.0f}% >= {self._max_queue_util_pct:.0f}%"
+
+        if not self._shadow_mode:
             if self._pending_entry_count >= self._max_concurrent_pending:
                 return f"pending_limit: {self._pending_entry_count}/{self._max_concurrent_pending} concurrent pending"
 

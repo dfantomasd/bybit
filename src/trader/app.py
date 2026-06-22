@@ -181,6 +181,25 @@ class TradingApplication:
         self._model_gate_block_counter: int = 0
         self._model_gate_quality: dict[str, Any] = {}
         self._model_gate_quality_checked_at: datetime | None = None
+        self._last_strategy_cycle_ms: float = 0.0
+        self._drift_status: dict[str, Any] = {"status": "n/a"}
+        self._last_retention_run_at: datetime | None = None
+
+    def _candle_store_caps(self) -> dict[str, int]:
+        settings = self._settings
+        if settings is None:
+            return {"1": 250, "5": 250, "15": 200, "60": 120}
+        return {
+            "1": int(getattr(settings, "CANDLE_STORE_MAX_BARS_1M", 250)),
+            "5": int(getattr(settings, "CANDLE_STORE_MAX_BARS_5M", 250)),
+            "15": int(getattr(settings, "CANDLE_STORE_MAX_BARS_15M", 200)),
+            "60": int(getattr(settings, "CANDLE_STORE_MAX_BARS_1H", 120)),
+        }
+
+    def _new_candle_store(self) -> Any:
+        from trader.data.candles import CandleStore
+
+        return CandleStore(max_bars=500, max_bars_by_interval=self._candle_store_caps())
 
     def _active_symbols(self) -> list[str]:
         """Return screener's current active symbols, or fallback list if screener is absent/empty."""
@@ -879,6 +898,7 @@ class TradingApplication:
             try:
                 diag = await self._trade_journal.get_db_diagnostics()
                 self._update_model_gate_quality_from_diag(diag)
+                drift_summary = await self._evaluate_feature_drift()
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
                 newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
                 horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
@@ -966,12 +986,18 @@ class TradingApplication:
                     and str(self._model_gate_quality.get("quality") or "WEAK").upper() in {"WEAK", ""}
                     and trainable >= min_samples
                 )
+                enough_drift_retrain = bool(
+                    self._settings.MODEL_DRIFT_AUTO_RETRAIN
+                    and drift_summary.get("drift_detected")
+                    and trainable >= min_samples
+                )
                 if not (
                     enough_initial
                     or enough_increment
                     or enough_schema_change
                     or enough_label_schema_change
                     or enough_weak_retrain
+                    or enough_drift_retrain
                 ):
                     if label_schema_mismatch and trainable > 0:
                         log.warning(
@@ -992,12 +1018,20 @@ class TradingApplication:
                     continue
 
                 trigger_reason = (
-                    "label_schema_change"
-                    if enough_label_schema_change
+                    "drift"
+                    if enough_drift_retrain
                     else (
-                        "schema_change"
-                        if enough_schema_change
-                        else ("weak_retrain" if enough_weak_retrain else ("initial" if enough_initial else "increment"))
+                        "label_schema_change"
+                        if enough_label_schema_change
+                        else (
+                            "schema_change"
+                            if enough_schema_change
+                            else (
+                                "weak_retrain"
+                                if enough_weak_retrain
+                                else ("initial" if enough_initial else "increment")
+                            )
+                        )
                     )
                 )
                 effective_min_samples = schema_change_min_samples if enough_schema_change else min_samples
@@ -2038,6 +2072,11 @@ class TradingApplication:
                 return []
             return cast(list[int], await self._trade_journal.get_telegram_subscriptions())
 
+        async def _attribution_provider(days: int = 7) -> list[dict[str, Any]]:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return []
+            return await self._trade_journal.get_pnl_attribution(days=days)
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -2070,6 +2109,7 @@ class TradingApplication:
             costs_detailed_provider=_costs_detailed_provider,
             model_performance_provider=_model_performance_provider,
             champion_health_provider=_champion_health_provider,
+            attribution_provider=_attribution_provider,
             enrich_db_diag_fallbacks=self._merge_runtime_db_diag_fallbacks,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
@@ -2140,6 +2180,7 @@ class TradingApplication:
                 self._settings.LIVE_REQUIRE_LIQUIDITY_FOR_SIZING
                 and self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
             ),
+            max_correlated_positions=int(self._settings.MAX_CORRELATED_POSITIONS),
         )
         self._kill_switch = kill_switch
         log.info(
@@ -2224,6 +2265,7 @@ class TradingApplication:
             micro_account_min_notional_buffer_pct=self._settings.MICRO_ACCOUNT_MIN_NOTIONAL_BUFFER_PCT,
             max_new_entries_per_minute=self._settings.MAX_NEW_ENTRIES_PER_MINUTE,
             max_concurrent_pending_entries=self._settings.MAX_CONCURRENT_PENDING_ENTRIES,
+            max_queue_utilization_pct=float(self._settings.MAX_QUEUE_UTILIZATION_PCT),
             max_same_side_positions=self._settings.MAX_SAME_SIDE_POSITIONS,
             max_open_positions=self._settings.MAX_POSITIONS,
             startup_warmup_seconds=self._settings.STARTUP_WARMUP_SECONDS,
@@ -2334,13 +2376,13 @@ class TradingApplication:
 
     async def _seed_candle_store(self, symbols: list[str] | None = None) -> None:
         """Fetch recent historical klines via REST to seed the CandleStore."""
-        from trader.data.candles import Candle, CandleStore
+        from trader.data.candles import Candle
 
         assert self._settings is not None
         assert self._bybit_adapter is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars=500)
+            self._candle_store = self._new_candle_store()
 
         has_api_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
@@ -2697,7 +2739,6 @@ class TradingApplication:
 
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
-        from trader.data.candles import CandleStore
         from trader.exchange.bybit_ws_public import BybitPublicWebSocket
         from trader.exchange.endpoint_selector import EndpointSelector
 
@@ -2705,7 +2746,7 @@ class TradingApplication:
         assert self._health_checker is not None
 
         if self._candle_store is None:
-            self._candle_store = CandleStore(max_bars=500)
+            self._candle_store = self._new_candle_store()
 
         selector = EndpointSelector(
             self._settings.BYBIT_REGION,
@@ -2727,6 +2768,11 @@ class TradingApplication:
 
             self._orderbook_tracker = OrderbookTracker()
             ob_symbols = self._screener.execution_candidates if self._screener is not None else symbols[:5]
+            max_ob = max(1, int(self._settings.MAX_ORDERBOOK_ACTIVE_SYMBOLS))
+            if str(self._settings.ORDERBOOK_MODE).upper() == "STREAMING":
+                ob_symbols = symbols[:max_ob]
+            else:
+                ob_symbols = ob_symbols[:max_ob]
             for symbol in ob_symbols:
                 if symbol in symbols:
                     subs.append(f"orderbook.50.{symbol}")
@@ -3172,9 +3218,12 @@ class TradingApplication:
         check_interval = float(self._settings.LOAD_GOVERNOR_CHECK_SECONDS)
         max_lag_ms = float(self._settings.MAX_EVENT_LOOP_LAG_MS)
         min_symbols = int(self._settings.LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS)
+        min_exec = int(self._settings.LOAD_GOVERNOR_MIN_EXECUTION_CANDIDATES)
+        max_feature_cycle_ms = float(self._settings.MAX_FEATURE_CYCLE_MS)
 
         # Original feature_max from screener (set at startup)
         original_max: int | None = None
+        original_exec: int | None = None
         overload_streak = 0
         restore_streak = 0
         ws_stale_threshold_s = 90.0
@@ -3185,7 +3234,9 @@ class TradingApplication:
                 continue
 
             if original_max is None:
-                original_max = self._screener._feature_max
+                original_max = getattr(self._screener, "_original_feature_max", self._screener._feature_max)
+            if original_exec is None:
+                original_exec = getattr(self._screener, "_original_exec_candidates", self._screener._exec_candidates)
 
             # --- Measure event-loop lag ---
             t0 = asyncio.get_event_loop().time()
@@ -3200,7 +3251,8 @@ class TradingApplication:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                 ws_stale = ws_age > ws_stale_threshold_s
 
-            overloaded = lag_ms > max_lag_ms or ws_stale
+            feature_cycle_overload = max_feature_cycle_ms > 0 and self._last_strategy_cycle_ms > max_feature_cycle_ms
+            overloaded = lag_ms > max_lag_ms or ws_stale or feature_cycle_overload
             if overloaded:
                 overload_streak += 1
                 restore_streak = 0
@@ -3208,19 +3260,25 @@ class TradingApplication:
                 restore_streak += 1
                 overload_streak = 0
             current = self._screener._feature_max
+            current_exec = self._screener._exec_candidates
 
             if overloaded and overload_streak >= 2 and current > min_symbols:
                 streak = overload_streak
                 new_max = max(min_symbols, current - 1)
                 self._screener._feature_max = new_max
+                if current_exec > min_exec:
+                    self._screener._exec_candidates = max(min_exec, current_exec - 1)
                 overload_streak = 0
                 log.warning(
                     "load_governor.reducing_symbols",
                     lag_ms=round(lag_ms, 1),
                     ws_stale=ws_stale,
+                    feature_cycle_ms=round(self._last_strategy_cycle_ms, 1),
                     overload_streak=streak,
                     from_max=current,
                     to_max=new_max,
+                    from_exec=current_exec,
+                    to_exec=self._screener._exec_candidates,
                     min_symbols=min_symbols,
                 )
             elif not overloaded and restore_streak >= 2 and current < original_max:
@@ -3228,6 +3286,8 @@ class TradingApplication:
                 streak = restore_streak
                 new_max = min(original_max, current + 1)
                 self._screener._feature_max = new_max
+                if original_exec is not None and current_exec < original_exec:
+                    self._screener._exec_candidates = min(original_exec, current_exec + 1)
                 restore_streak = 0
                 log.info(
                     "load_governor.restoring_symbols",
@@ -3235,7 +3295,83 @@ class TradingApplication:
                     restore_streak=streak,
                     from_max=current,
                     to_max=new_max,
+                    from_exec=current_exec,
+                    to_exec=self._screener._exec_candidates,
                 )
+
+    async def _evaluate_feature_drift(self) -> dict[str, Any]:
+        assert self._settings is not None
+        if not self._settings.MODEL_DRIFT_DETECTION_ENABLED or self._trade_journal is None:
+            return {"status": "disabled"}
+        if not self._trade_journal.is_enabled:
+            return {"status": "journal_unavailable"}
+        try:
+            baseline, current = await self._trade_journal.fetch_feature_drift_samples(limit=500)
+            min_samples = int(self._settings.MODEL_DRIFT_MIN_SAMPLES)
+            if len(baseline) < min_samples or len(current) < 50:
+                return {
+                    "status": "insufficient_samples",
+                    "baseline_count": len(baseline),
+                    "current_count": len(current),
+                }
+            from trader.ml.drift import drift_summary_from_samples
+
+            summary = drift_summary_from_samples(
+                baseline,
+                current,
+                psi_threshold=float(self._settings.MODEL_DRIFT_PSI_THRESHOLD),
+            )
+            summary["status"] = "drift" if summary.get("drift_detected") else "stable"
+            self._drift_status = summary
+            return summary
+        except Exception as exc:
+            self._drift_status = {"status": "error", "error": str(exc)}
+            return self._drift_status
+
+    async def _maybe_apply_online_learning(self) -> None:
+        assert self._settings is not None
+        if not self._settings.MODEL_ONLINE_LEARNING_ENABLED:
+            return
+        if self._trade_journal is None or not self._trade_journal.is_enabled:
+            return
+        if self._model_registry is None:
+            return
+        limit = int(self._settings.MODEL_ONLINE_LEARNING_MAX_UPDATES_PER_CYCLE)
+        batch = await self._trade_journal.fetch_online_learning_batch(limit=limit)
+        if not batch:
+            return
+        applied = 0
+        prediction_ids: list[str] = []
+        for row in batch:
+            try:
+                self._model_registry.partial_fit_challenger(row["features"], int(row["label"]))
+                prediction_ids.append(str(row["prediction_id"]))
+                applied += 1
+            except Exception as exc:
+                log.debug("online_learning.partial_fit_failed", error=str(exc))
+        if prediction_ids:
+            await self._trade_journal.mark_online_learning_applied(prediction_ids)
+        if applied:
+            log.info("online_learning.updated", samples=applied)
+
+    async def _run_data_retention(self) -> None:
+        assert self._settings is not None
+        if not self._settings.DATA_RETENTION_ENABLED:
+            log.info("data_retention.disabled")
+            return
+        interval_h = max(1.0, float(self._settings.DATA_RETENTION_INTERVAL_HOURS))
+        while not self._shutdown_event.is_set():
+            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                try:
+                    report = await self._trade_journal.run_data_retention_policy(self._settings)
+                    self._last_retention_run_at = datetime.now(tz=UTC)
+                    log.info("data_retention.run_complete", **report)
+                except Exception as exc:
+                    log.warning("data_retention.failed", error=str(exc))
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval_h * 3600.0)
+            except TimeoutError:
+                pass
 
     async def _run_outcome_resolver(self) -> None:
         """Resolve prediction outcomes by comparing feature snapshot prices with market_candles."""
@@ -3260,6 +3396,7 @@ class TradingApplication:
                             )
                     except Exception as exc:
                         log.warning("outcome_resolver.error", horizon=horizon, error=str(exc))
+                await self._maybe_apply_online_learning()
 
             try:
                 await asyncio.wait_for(
@@ -4292,6 +4429,11 @@ class TradingApplication:
             "hour_bucket_blocked": hour_counts.get("bucket_blocked", 0),
             "hour_symbol_side_blocked": hour_counts.get("symbol_side_blocked", 0),
             "hour_trend_confirmation_blocked": hour_counts.get("trend_confirmation_blocked", 0),
+            "drift_status": self._drift_status,
+            "strategy_cycle_ms": round(self._last_strategy_cycle_ms, 1),
+            "last_retention_run_at": (
+                self._last_retention_run_at.isoformat() if self._last_retention_run_at is not None else None
+            ),
             "hour_shadow_loss_guard_blocked": hour_counts.get("shadow_loss_guard_blocked", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
@@ -4413,7 +4555,8 @@ class TradingApplication:
                         )
                     ).get("walk_forward_expectancy_bps", "n/a")
                 ),
-                "drift_status": "n/a",
+                "drift_status": self._drift_status.get("status", "n/a"),
+                "drift_psi": self._drift_status.get("psi"),
                 "gate_quality": self._model_gate_quality.get("quality"),
             },
         }
@@ -5271,6 +5414,7 @@ class TradingApplication:
             nonlocal _balance_tick, _effective_blocked_symbols
 
             while not self._shutdown_event.is_set():
+                cycle_start = time.monotonic()
                 self._last_strategy_loop_at = datetime.now(tz=UTC)
                 # Refresh balance every N iterations
                 _balance_tick += 1
@@ -5312,6 +5456,7 @@ class TradingApplication:
                     )
                 except TimeoutError:
                     pass
+                self._last_strategy_cycle_ms = (time.monotonic() - cycle_start) * 1000.0
 
         task = asyncio.create_task(strategy_loop(), name="strategy-loop")
         self._background_tasks.append(task)
@@ -5517,6 +5662,9 @@ class TradingApplication:
             # Adaptive load governor: narrows feature universe under memory/lag pressure
             load_governor_task = asyncio.create_task(self._run_load_governor(), name="load-governor")
             self._background_tasks.append(load_governor_task)
+
+            retention_task = asyncio.create_task(self._run_data_retention(), name="data-retention")
+            self._background_tasks.append(retention_task)
 
             if self._telegram_bot is not None and hasattr(self._telegram_bot, "refresh_delivery"):
                 try:

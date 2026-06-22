@@ -168,6 +168,7 @@ class TradingController:
     costs_detailed_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
+    attribution_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
     enrich_db_diag_fallbacks: Callable[[dict[str, Any]], None] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -305,6 +306,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
         app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        app.add_handler(CommandHandler("attribution", self._cmd_attribution))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
         app.add_handler(CommandHandler("db", self._cmd_db_model))
@@ -2325,6 +2327,36 @@ class TelegramMonitorBot:
         lines.append("\nDrill-down: /pnl_analysis /compare /worst 10 /costs_detailed /model_performance")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
+    async def _cmd_attribution(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        del context
+        if not await self._authorised(update):
+            return
+        if self._controller is None or self._controller.attribution_provider is None:
+            await self._reply(update, "<b>Attribution</b>\nПока недоступно.")
+            return
+        try:
+            rows = await self._controller.attribution_provider(7)
+        except Exception as exc:
+            await self._reply(update, f"<b>Attribution</b>\nОшибка: <code>{exc}</code>")
+            return
+        if not rows:
+            await self._reply(
+                update,
+                "<b>Attribution (7 дней)</b>\nНет данных по символам.",
+                reply_markup=self._main_menu(),
+            )
+            return
+        source = str(rows[0].get("source") or "live")
+        unit = "USDT" if source == "live" else "avg bps"
+        lines = [f"<b>Attribution за 7 дней</b> ({source})", ""]
+        for row in rows[:12]:
+            sym = row.get("symbol", "?")
+            wins = int(row.get("wins") or 0)
+            losses = int(row.get("losses") or 0)
+            total = float(row.get("total_pnl") or 0)
+            lines.append(f"<code>{sym}</code>: {total:+.4f} {unit} | W/L {wins}/{losses}")
+        await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
+
     async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         del context
         if not await self._authorised(update):
@@ -2354,6 +2386,13 @@ class TelegramMonitorBot:
             f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(positions[:5])}{'…' if len(positions) > 5 else ''}",
             f"Риск портфеля: <code>{heat_str}</code>",
         ]
+        drift = diag.get("drift_status")
+        if isinstance(drift, dict) and drift.get("status") not in {None, "n/a"}:
+            lines.append(f"Drift: <code>{drift.get('status')}</code> PSI=<code>{drift.get('psi', 'n/a')}</code>")
+        if diag.get("strategy_cycle_ms") is not None:
+            lines.append(f"Цикл стратегии: <code>{diag.get('strategy_cycle_ms'):.0f} ms</code>")
+        if diag.get("last_retention_run_at"):
+            lines.append(f"Retention: <code>{diag.get('last_retention_run_at')}</code>")
         telegram_health = diag.get("telegram") or {}
         if telegram_health:
             tg_ok = bool(telegram_health.get("app_running")) and (
@@ -3125,6 +3164,14 @@ class TelegramMonitorBot:
                 f"Свечей 1h:  <code>{candles.get('60', 0)}</code>{candles_note}",
                 f"Снимки признаков: <code>{db_diag.get('feature_snapshots', 0)}</code>",
                 f"Размеченные исходы: <code>{db_diag.get('prediction_outcomes', 0)}</code>",
+            ]
+            storage = db_diag.get("storage_stats") or {}
+            if storage.get("database_size_mb") is not None:
+                lines.append(f"Размер БД: <code>{storage.get('database_size_mb')} MB</code>")
+            invalid_snaps = storage.get("feature_snapshots_invalid")
+            if invalid_snaps is not None:
+                lines.append(f"Invalid snapshots: <code>{invalid_snaps}</code>")
+            lines += [
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
             ]
@@ -4983,6 +5030,7 @@ class TelegramMonitorBot:
             "/subscribe   — подписаться на уведомления (хранится в БД)\n"
             "/unsubscribe — отписаться от уведомлений\n"
             "/diagnostics — счетчики и задержки циклов\n"
+            "/attribution — PnL по символам за 7 дней\n"
             "/help        — это сообщение\n" + ctrl_section
         )
 
