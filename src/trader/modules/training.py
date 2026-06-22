@@ -23,6 +23,10 @@ log = get_logger(__name__)
 class TrainingModule(ModuleTaskMixin):
     name = "training"
 
+    def __init__(self, app: Any) -> None:
+        super().__init__(app)
+        self._schema_milestone_notified: set[str] = set()
+
     def spawn_background_tasks(self, tasks: list[asyncio.Task[object]]) -> None:
         self._spawn(tasks, self.run_bucket_stats_refresher(), "bucket-stats")
         self._spawn(tasks, self.run_auto_model_trainer(), "auto-model-trainer")
@@ -208,6 +212,12 @@ class TrainingModule(ModuleTaskMixin):
                             schema_change_min_samples=schema_change_min_samples,
                             min_samples_needed=schema_change_min_samples,
                         )
+                        await self._maybe_notify_schema_migration_progress(
+                            newest_schema_hash=newest_schema_hash,
+                            newest_schema_samples=newest_schema_samples,
+                            schema_change_min_samples=schema_change_min_samples,
+                            current_schema_hash=current_schema_hash,
+                        )
                     continue
 
                 trigger_reason = (
@@ -264,6 +274,41 @@ class TrainingModule(ModuleTaskMixin):
                     )
             except Exception as exc:
                 log.warning("model_auto_training.failed", error=str(exc))
+
+    async def _maybe_notify_schema_migration_progress(
+        self,
+        *,
+        newest_schema_hash: str,
+        newest_schema_samples: int,
+        schema_change_min_samples: int,
+        current_schema_hash: str,
+    ) -> None:
+        """Telegram milestones while a new feature schema accumulates training samples."""
+        milestones = (
+            10,
+            25,
+            max(1, schema_change_min_samples // 2),
+            schema_change_min_samples,
+        )
+        for milestone in milestones:
+            if newest_schema_samples < milestone:
+                continue
+            key = f"{newest_schema_hash}:{milestone}"
+            if key in self._schema_milestone_notified:
+                continue
+            self._schema_milestone_notified.add(key)
+            if self._app._telegram_bot is None:
+                return
+            ready = newest_schema_samples >= schema_change_min_samples
+            await self._app._telegram_bot.notify(
+                "🧬 <b>Schema migration</b>\n"
+                f"Модель: <code>{current_schema_hash[:8] or '—'}</code> → "
+                f"<code>{newest_schema_hash[:8]}</code>\n"
+                f"Новых samples: <code>{newest_schema_samples}</code> / "
+                f"<code>{schema_change_min_samples}</code>"
+                + ("\n✅ Порог достигнут — auto-train скоро запустится." if ready else "")
+            )
+            return
 
     async def run_auto_model_promoter(self) -> None:
         """Promote the best eligible challenger and roll back degraded champions."""
