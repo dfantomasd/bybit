@@ -19,7 +19,7 @@ class AppBoundModule:
         return self._app
 
     def _initial_shadow_mode(self) -> bool:
-        return self._app._initial_shadow_mode()
+        return self._app._modules.signal_policy.initial_shadow_mode()
 
     def _record_diag(self, event: str) -> None:
         self._app._modules.diagnostics.record(event)
@@ -46,7 +46,7 @@ class AppBoundModule:
         return self._app._ws_topics_for_symbol(symbol)
 
     def _update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
-        self._app._update_model_gate_quality_from_diag(diag)
+        self._app._modules.signal_policy.update_model_gate_quality_from_diag(diag)
 
     async def _evaluate_feature_drift(self) -> dict[str, Any]:
         return await self._app._modules.training.evaluate_feature_drift()
