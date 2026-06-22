@@ -61,7 +61,7 @@ services:
       - key: STARTUP_WARMUP_SECONDS
         value: "180"
       - key: SHADOW_LOSS_GUARD_ENABLED
-        value: "false"
+        value: "true"
       - key: SHADOW_LOSS_GUARD_MIN_CLOSED
         value: "3"
       - key: SHADOW_LOSS_GUARD_WINDOW
@@ -152,7 +152,7 @@ services:
       - key: TRAIN_STRATEGY_ALLOWLIST
         value: "scalp_micro_v1"
       - key: TRAIN_INCLUDE_CANDLE_BASELINE
-        value: "false"
+        value: "true"
       - key: TRAIN_EXCLUDE_NEGATIVE_BUCKETS
         value: "true"
       - key: TRAIN_LABEL_SPREAD_BPS
@@ -189,7 +189,7 @@ services:
       - key: MODEL_AUTO_TRAIN_ENABLED
         value: "true"
       - key: MODEL_AUTO_PROMOTE_ENABLED
-        value: "false"
+        value: "true"
       - key: MODEL_AUTO_TRAIN_MIN_SAMPLES
         value: "1000"
       - key: MODEL_AUTO_TRAIN_INCREMENT_SAMPLES

@@ -41,6 +41,14 @@ class FeeRateProvider:
         self._shadow_mode = shadow_mode
         self._cache: dict[str, FeeRates] = {}
 
+    @property
+    def shadow_mode(self) -> bool:
+        return self._shadow_mode
+
+    @shadow_mode.setter
+    def shadow_mode(self, value: bool) -> None:
+        self._shadow_mode = bool(value)
+
     def _is_stale(self, rates: FeeRates) -> bool:
         return (datetime.now(tz=UTC) - rates.fetched_at).total_seconds() > _CACHE_TTL_SECONDS
 

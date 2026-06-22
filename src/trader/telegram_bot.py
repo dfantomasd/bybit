@@ -169,6 +169,7 @@ class TradingController:
     model_performance_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = None
     champion_health_provider: Callable[[], Awaitable[dict[str, Any]]] | None = None
     attribution_provider: Callable[[int], Awaitable[list[dict[str, Any]]]] | None = None
+    best_challenger_provider: Callable[[], Awaitable[str | None]] | None = None
     enrich_db_diag_fallbacks: Callable[[dict[str, Any]], None] | None = None
     # Persistent Telegram subscriptions (survive restarts)
     add_subscription: Callable[[int], Awaitable[None]] | None = None
@@ -4773,11 +4774,18 @@ class TelegramMonitorBot:
             if self._controller.promote_model is None:
                 await self._button_reply(update, "Промоут сейчас недоступен.", reply_markup=self._main_menu())
                 return
-            db_diag = await self._load_db_diag(lite=True)
-            if db_diag.get("error"):
-                log.warning("telegram.promote.db_diag_failed", error=str(db_diag.get("error")))
-            latest_model = db_diag.get("latest_model_version", {}) or {}
-            version = latest_model.get("version") or ""
+            version = ""
+            if self._controller.best_challenger_provider is not None:
+                try:
+                    version = str(await self._controller.best_challenger_provider() or "")
+                except Exception as exc:
+                    log.warning("telegram.promote.best_challenger_failed", error=str(exc))
+            if not version:
+                db_diag = await self._load_db_diag(lite=True)
+                if db_diag.get("error"):
+                    log.warning("telegram.promote.db_diag_failed", error=str(db_diag.get("error")))
+                latest_model = db_diag.get("latest_model_version", {}) or {}
+                version = str(latest_model.get("version") or "")
             if not version:
                 await self._button_reply(
                     update,
@@ -4789,6 +4797,7 @@ class TelegramMonitorBot:
                 update,
                 "🏆 <b>Промоутировать модель в CHAMPION?</b>\n\n"
                 f"Версия: <code>{html.escape(str(version))}</code>\n"
+                "Выбрана лучшая eligible challenger-модель (не просто последняя).\n"
                 "Backend повторно проверит качество, schema, lift и shadow-gate статистику.",
                 reply_markup=self._confirm_menu(f"promote:{version}"),
             )
