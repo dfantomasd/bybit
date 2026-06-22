@@ -709,9 +709,9 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     """Guard against regressing to mixed 5m/15m readiness counters."""
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.training import TrainingModule
 
-    src = inspect.getsource(TradingApplication._run_auto_model_trainer)
+    src = inspect.getsource(TrainingModule.run_auto_model_trainer)
     compact_src = "".join(src.split())
     assert "training_eligible_by_horizon" in src
     assert "training_by_horizon.get(str(horizon)" in compact_src
@@ -727,9 +727,9 @@ def test_auto_trainer_uses_latest_training_run_for_success_cooldown() -> None:
     """A just-finished run must prevent checkpoint churn even if model diagnostics are stale."""
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.training import TrainingModule
 
-    src = inspect.getsource(TradingApplication._run_auto_model_trainer)
+    src = inspect.getsource(TrainingModule.run_auto_model_trainer)
     assert "latest_run_samples" in src
     assert "latest_success_samples = max(actual_latest_samples, latest_run_samples)" in src
     assert "enough_initial = latest_success_samples == 0" in src
@@ -740,9 +740,9 @@ def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
     """A h5m challenger must not be reported with hard-coded 15m gate stats."""
     import inspect
 
-    from trader.app import TradingApplication
+    from trader.modules.training import TrainingModule
 
-    src = inspect.getsource(TradingApplication._run_model_progress_reporter)
+    src = inspect.getsource(TrainingModule.run_model_progress_reporter)
     assert "report_horizon" in src
     assert "get_shadow_gate_stats(\n                        version,\n                        report_horizon," in src
     assert (
