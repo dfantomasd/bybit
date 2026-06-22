@@ -89,6 +89,8 @@ class TradeJournal:
         *,
         fetch_timeout_seconds: float | None = None,
         pool_max_size: int | None = None,
+        reconnect_max_backoff_seconds: float | None = None,
+        auth_circuit_breaker_min_backoff_seconds: float | None = None,
     ) -> None:
         self._dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._enabled = enabled and bool(postgres_dsn)
@@ -97,12 +99,28 @@ class TradeJournal:
             float(fetch_timeout_seconds if fetch_timeout_seconds is not None else _DEFAULT_FETCH_TIMEOUT_SECONDS),
         )
         self._pool_max_size = max(1, int(pool_max_size if pool_max_size is not None else _DEFAULT_POOL_MAX_SIZE))
+        if reconnect_max_backoff_seconds is None or auth_circuit_breaker_min_backoff_seconds is None:
+            from trader.config import Settings
+
+            settings = Settings()
+            if reconnect_max_backoff_seconds is None:
+                reconnect_max_backoff_seconds = float(settings.TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS)
+            if auth_circuit_breaker_min_backoff_seconds is None:
+                auth_circuit_breaker_min_backoff_seconds = float(
+                    settings.TRADE_JOURNAL_AUTH_CIRCUIT_BREAKER_MIN_BACKOFF_SECONDS
+                )
+        self._reconnect_max_backoff_seconds = max(60.0, float(reconnect_max_backoff_seconds))
+        self._auth_circuit_breaker_min_backoff_seconds = max(
+            60.0,
+            float(auth_circuit_breaker_min_backoff_seconds),
+        )
         self._pool: asyncpg.Pool | None = None
         self._diag_lock = asyncio.Lock()
         self._last_fetch_timeout_log_at: datetime | None = None
         self._schema_initialized: bool = False
         self._connect_failures: int = 0
         self._reconnect_blocked_until: datetime | None = None
+        self._last_backoff_was_auth: bool = False
         self._last_connect_attempt_at: datetime | None = None
         self._last_connect_error_at: datetime | None = None
         self._last_connect_error: str | None = None
@@ -144,6 +162,12 @@ class TradeJournal:
             "last_connect_error": getattr(self, "_last_connect_error", None),
         }
 
+    def reconnect_blocked_remaining_seconds(self) -> float:
+        if self._reconnect_blocked_until is None:
+            return 0.0
+        remaining = (self._reconnect_blocked_until - datetime.now(tz=UTC)).total_seconds()
+        return max(0.0, remaining)
+
     async def connect(self) -> None:
         if not self._enabled or self._pool is not None:
             return
@@ -179,7 +203,8 @@ class TradeJournal:
                         break
                     except Exception as exc:
                         last_exc = exc
-                        if attempt < 2 and self._is_transient_schema_error(str(exc)):
+                        error_text = str(exc)
+                        if attempt < 2 and self._is_transient_schema_error(error_text):
                             delay = 2.0 * (attempt + 1)
                             log.warning(
                                 "trade_journal.schema_bootstrap_retry",
@@ -189,6 +214,8 @@ class TradeJournal:
                             )
                             await asyncio.sleep(delay)
                             continue
+                        if self._is_auth_circuit_breaker_error(error_text):
+                            raise
                         raise
                 if last_exc is not None:
                     raise last_exc
@@ -205,6 +232,7 @@ class TradeJournal:
 
         self._connect_failures = 0
         self._reconnect_blocked_until = None
+        self._last_backoff_was_auth = False
         log.info("trade_journal.connected", schema_degraded=False)
 
     async def _ping_pool(self) -> None:
@@ -225,6 +253,8 @@ class TradeJournal:
     @staticmethod
     def _is_transient_schema_error(error: str) -> bool:
         upper = error.upper()
+        if TradeJournal._is_auth_circuit_breaker_error(error):
+            return False
         return (
             "CONNECTION WAS CLOSED" in upper
             or "CONNECTION RESET" in upper
@@ -232,18 +262,24 @@ class TradeJournal:
             or "SERVER CLOSED THE CONNECTION" in upper
             or "SSL SYSCALL" in upper
             or "TIMEOUT" in upper
-            or "ECIRCUITBREAKER" in upper
-            or "EAUTHQUERY" in upper
         )
 
     def _schedule_reconnect_backoff(self, error: str) -> None:
         self._connect_failures += 1
         base = 30.0
+        max_backoff = self._reconnect_max_backoff_seconds
         if self._is_auth_circuit_breaker_error(error):
-            delay = min(600.0, max(300.0, base * (2 ** min(self._connect_failures - 1, 4))))
+            delay = min(
+                max_backoff,
+                max(
+                    self._auth_circuit_breaker_min_backoff_seconds,
+                    base * (2 ** min(self._connect_failures - 1, 6)),
+                ),
+            )
         else:
-            delay = min(300.0, base * (2 ** min(self._connect_failures - 1, 4)))
+            delay = min(max_backoff / 2.0, base * (2 ** min(self._connect_failures - 1, 4)))
         self._reconnect_blocked_until = datetime.now(tz=UTC) + timedelta(seconds=delay)
+        self._last_backoff_was_auth = self._is_auth_circuit_breaker_error(error)
         log.warning(
             "trade_journal.reconnect_backoff",
             delay_s=delay,
@@ -256,8 +292,10 @@ class TradeJournal:
         if not self._enabled:
             return False
         now = datetime.now(tz=UTC)
-        if not force and self._reconnect_blocked_until is not None and now < self._reconnect_blocked_until:
-            return self.is_enabled
+        blocked_until = self._reconnect_blocked_until
+        if blocked_until is not None and now < blocked_until:
+            if self._last_backoff_was_auth or not force:
+                return self.is_enabled
         if self._pool is not None:
             if not force and self.durable_state_healthy:
                 return True
