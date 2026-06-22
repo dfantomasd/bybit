@@ -227,19 +227,29 @@ class MarketDataModule(ModuleTaskMixin):
         # so position_sizer never hits liquidity_data_missing on the first signal.
         # A single batch GET avoids per-symbol rate-limit pressure during startup.
         if self._app._execution_engine is not None and self._app._bybit_adapter is not None:
-            try:
-                resp = await self._app._bybit_adapter._rest.get_tickers(category="linear")
-                items = resp.get("result", {}).get("list", [])
-                seed_set = set(seed_symbols)
-                for item in items:
-                    sym = item.get("symbol", "")
-                    if sym not in seed_set:
-                        continue
-                    raw_t24h = item.get("turnover24h")
-                    if raw_t24h:
-                        self._app._execution_engine.update_ticker_turnover(sym, Decimal(str(raw_t24h)))
-            except Exception as exc:
-                log.debug("seed.ticker_prefetch_failed", symbols=seed_symbols, error=str(exc))
+            await self.prefetch_ticker_turnover(seed_symbols)
+
+    async def prefetch_ticker_turnover(self, symbols: list[str]) -> None:
+        """Batch-fetch 24h turnover for position sizing (safe to call after execution init)."""
+        if (
+            not symbols
+            or self._app._execution_engine is None
+            or self._app._bybit_adapter is None
+        ):
+            return
+        try:
+            resp = await self._app._bybit_adapter._rest.get_tickers(category="linear")
+            items = resp.get("result", {}).get("list", [])
+            seed_set = set(symbols)
+            for item in items:
+                sym = item.get("symbol", "")
+                if sym not in seed_set:
+                    continue
+                raw_t24h = item.get("turnover24h")
+                if raw_t24h:
+                    self._app._execution_engine.update_ticker_turnover(sym, Decimal(str(raw_t24h)))
+        except Exception as exc:
+            log.debug("seed.ticker_prefetch_failed", symbols=symbols, error=str(exc))
 
     async def reconcile_unconfirmed_candles(self) -> None:
         """Backfill candles that have become confirmed since the last write.
@@ -607,9 +617,16 @@ class MarketDataModule(ModuleTaskMixin):
                                 vec = await self._app._feature_pipeline.on_confirmed_candle(
                                     event.symbol, event.interval
                                 )
+                                # MTF pattern features on 1m depend on closed 5m/15m bars — refresh 1m
+                                # when a higher-TF candle closes so pat5_/pat15_ stay current.
+                                if event.interval in ("5", "15"):
+                                    self._app._feature_pipeline.invalidate_symbol(event.symbol)
+                                    await self._app._feature_pipeline.on_confirmed_candle(
+                                        event.symbol, _WS_INTERVAL
+                                    )
                                 # Per-candle training sampler: a labelled sample per
                                 # confirmed 1m candle instead of per trade signal
-                                if vec is not None:
+                                if vec is not None and event.interval == _WS_INTERVAL:
                                     await self._app._sample_confirmed_candle(event.symbol, event.interval, vec)
 
                             # Persist confirmed candle to PostgreSQL (best-effort, selected intervals only)

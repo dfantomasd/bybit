@@ -88,7 +88,7 @@ def score_hammer(bar: _OHLCBar) -> float:
     body = _body_ratio(bar)
     if lower < 0.55 or upper > 0.25 or body > 0.45:
         return 0.0
-    return _clamp01((lower - 0.55) / 0.35 + (0.25 - upper) / 0.25) / 2.0
+    return _clamp01((lower - 0.55) / 0.35 + (0.25 - upper) / 0.25)
 
 
 def score_hanging_man(bar: _OHLCBar) -> float:
@@ -106,7 +106,7 @@ def score_shooting_star(bar: _OHLCBar) -> float:
     body = _body_ratio(bar)
     if upper < 0.55 or lower > 0.25 or body > 0.45:
         return 0.0
-    return _clamp01((upper - 0.55) / 0.35 + (0.25 - lower) / 0.25) / 2.0
+    return _clamp01((upper - 0.55) / 0.35 + (0.25 - lower) / 0.25)
 
 
 def score_engulfing(bars: Sequence[_OHLCBar], *, bullish: bool) -> float:

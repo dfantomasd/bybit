@@ -304,12 +304,27 @@ class LifecycleModule(AppBoundModule):
         task = asyncio.create_task(
             self._app._feature_pipeline.run(
                 symbols=self._active_symbols(),  # actual screener universe (fallback if absent)
-                intervals=[_WS_INTERVAL],
+                intervals=[_WS_INTERVAL, "5", "15"],
                 symbol_source=self._app._screener,
             ),
             name="feature-pipeline",
         )
         self._app._background_tasks.append(task)
+
+        # Warm HTF feature vectors from REST-seeded candles so LIVE MTF gates
+        # do not wait up to 15 minutes for the first WS close.
+        for symbol in self._active_symbols():
+            for interval in (_WS_INTERVAL, "5", "15"):
+                try:
+                    await self._app._feature_pipeline.on_confirmed_candle(symbol, interval)
+                except Exception as exc:
+                    log.debug(
+                        "feature_pipeline.startup_warmup_failed",
+                        symbol=symbol,
+                        interval=interval,
+                        error=str(exc),
+                    )
+
         log.info("feature_pipeline.started", mode="event_driven", watchdog_interval_s=60.0)
 
     async def graceful_shutdown(self) -> None:
