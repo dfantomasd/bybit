@@ -57,7 +57,7 @@ services:
         value: "25"
       # Burst/rate limiting
       - key: MAX_NEW_ENTRIES_PER_MINUTE
-        value: "1"
+        value: "4"
       - key: MAX_CONCURRENT_PENDING_ENTRIES
         value: "1"
       - key: MAX_SAME_SIDE_POSITIONS

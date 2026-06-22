@@ -72,6 +72,10 @@ class TestSettingsDefaults:
         settings = self._make_settings()
         assert settings.MAX_POSITIONS == 2  # type: ignore[union-attr]
 
+    def test_max_new_entries_per_minute_default(self) -> None:
+        settings = self._make_settings()
+        assert settings.MAX_NEW_ENTRIES_PER_MINUTE == 4  # type: ignore[union-attr]
+
     def test_starter_mode_defaults_to_small_account_price_cap(self) -> None:
         settings = self._make_settings(STARTER_OPTIMIZED_MODE="true", SCREENER_MAX_PRICE_USD="0")
         assert settings.SCREENER_MAX_PRICE_USD == 25.0  # type: ignore[union-attr]
