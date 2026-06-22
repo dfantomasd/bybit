@@ -396,7 +396,9 @@ class Settings(BaseSettings):
     """How often to refresh the screener universe (seconds)."""
 
     SCREENER_SUBSCRIBE_TIMEOUT_SECONDS: int = 10
-    """Reserved: WS subscribe acknowledgement timeout per symbol (not yet enforced in screener)."""
+    """WS subscribe watchdog: retry/resubscribe if no 1m kline arrives within this many seconds."""
+    SCREENER_SUBSCRIBE_MAX_RETRIES: int = 3
+    """Force WS reconnect after this many subscribe retries for the same symbol."""
 
     SCREENER_DENYLIST: list[str] = []
     """Symbols explicitly excluded (pre-market, innovation zone, etc.)."""
@@ -546,6 +548,8 @@ class Settings(BaseSettings):
     MODEL_ONLINE_LEARNING_ENABLED: bool = False
     """Apply challenger partial_fit after resolved outcomes (SGD/LOGREG only)."""
     MODEL_ONLINE_LEARNING_MAX_UPDATES_PER_CYCLE: int = 50
+    MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY: int = 25
+    """Persist challenger artifact to Postgres after this many online partial_fit updates."""
     MODEL_AUTO_TRAIN_LABEL_BPS: float = 2.0
     MODEL_AUTO_PROMOTE_ENABLED: bool = False
     """Auto-promote challenger to champion when it beats the current champion

@@ -1703,8 +1703,19 @@ class TradeJournal:
 
         return _parse(baseline_rows), _parse(current_rows)
 
-    async def fetch_online_learning_batch(self, *, limit: int = 50) -> list[dict[str, Any]]:
-        """Resolved outcomes with feature vectors for challenger partial_fit."""
+    async def fetch_online_learning_batch(
+        self,
+        *,
+        limit: int = 50,
+        challenger_version: str | None = None,
+        label_schema_version: str | None = None,
+        sources: tuple[str, ...] = ("shadow_challenger",),
+    ) -> list[dict[str, Any]]:
+        """Resolved shadow-challenger outcomes with feature vectors for partial_fit."""
+        from trader.training.labels import LABEL_SCHEMA_VERSION
+
+        schema = label_schema_version or LABEL_SCHEMA_VERSION
+        source_list = list(sources) if sources else ["shadow_challenger"]
         rows = await self._fetch(
             """
             SELECT po.prediction_id, po.label, fs.feature_values
@@ -1713,10 +1724,16 @@ class TradeJournal:
             JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
             WHERE po.label IS NOT NULL
               AND po.online_learned_at IS NULL
+              AND po.label_schema_version = $2
+              AND ($3::text IS NULL OR pe.model_version = $3)
+              AND COALESCE(pe.metadata->>'source', '') = ANY($4::text[])
             ORDER BY po.created_at DESC
             LIMIT $1
             """,
             int(limit),
+            schema,
+            challenger_version,
+            source_list,
         )
         batch: list[dict[str, Any]] = []
         for row in rows:

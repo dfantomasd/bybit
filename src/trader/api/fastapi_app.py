@@ -138,7 +138,15 @@ def create_app(
     )
     async def get_livez() -> dict[str, str]:
         """Return minimal unauthenticated liveness for container probes."""
-        return {"status": "ok"}
+        from trader.monitoring.deploy_info import get_deploy_info
+
+        info = get_deploy_info()
+        payload = {"status": "ok"}
+        if info["deploy_id"]:
+            payload["deploy_id"] = info["deploy_id"]
+        if info["git_commit"]:
+            payload["git_commit"] = info["git_commit"]
+        return payload
 
     @app.get(
         "/readyz",

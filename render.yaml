@@ -49,6 +49,10 @@ services:
         value: "10"
       - key: SCREENER_REFRESH_SECONDS
         value: "300"
+      - key: SCREENER_SUBSCRIBE_TIMEOUT_SECONDS
+        value: "10"
+      - key: SCREENER_SUBSCRIBE_MAX_RETRIES
+        value: "3"
       - key: SCREENER_MAX_PRICE_USD
         value: "25"
       # Burst/rate limiting
@@ -107,7 +111,9 @@ services:
       - key: MODEL_DRIFT_AUTO_RETRAIN
         value: "true"
       - key: MODEL_ONLINE_LEARNING_ENABLED
-        value: "false"
+        value: "true"
+      - key: MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY
+        value: "25"
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"
@@ -182,6 +188,8 @@ services:
         value: "false"
       - key: MODEL_TYPE
         value: GBDT
+      - key: MODEL_CANDIDATES
+        value: "GBDT,LOGREG,SGD"
       - key: MODEL_SHADOW_SCORING_ENABLED
         value: "true"
       - key: MODEL_ALLOW_LIVE_DECISIONS
