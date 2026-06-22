@@ -50,6 +50,7 @@ class TradingLoopModule(AppBoundModule):
         # Build risk + execution stack
         await self._app._init_risk_manager(initial_capital)
         await self._app._init_execution_engine()
+        await self._app._modules.market_data.prefetch_ticker_turnover(self._app._active_symbols())
 
         # One symbol-agnostic strategy instance handles ALL screener symbols
         strategies: list[Any] = []
@@ -244,8 +245,16 @@ class TradingLoopModule(AppBoundModule):
         )
         await self._app._refresh_closed_pnl_memory()
 
-        # Initialise ML shadow scoring registry (shadow only; never influences decisions)
-        if self._app._settings.MODEL_SHADOW_SCORING_ENABLED:
+        # Initialise ML registry when shadow scoring, canary gate, or live decisions need it.
+        needs_model_registry = (
+            self._app._settings.MODEL_SHADOW_SCORING_ENABLED
+            or self._app._settings.MODEL_GATE_CANARY_ENABLED
+            or (
+                self._app._settings.MODEL_ENABLED
+                and self._app._settings.MODEL_ALLOW_LIVE_DECISIONS
+            )
+        )
+        if needs_model_registry:
             try:
                 from trader.ml.challenger import ModelRegistry
 
@@ -581,75 +590,86 @@ class TradingLoopModule(AppBoundModule):
                         error=str(_ml_exc),
                     )
 
-                # --- Champion Canary gate: live blocking only when explicitly enabled ---
-                # score_live() returns None when no compatible directional_net Champion exists.
-                # In active execution, an enabled gate must fail closed: if the
-                # champion cannot be scored, the gate cannot prove this trade is acceptable.
-                if settings.MODEL_GATE_CANARY_ENABLED:
-                    try:
-                        live_prediction = self._app._model_registry.score_live(
-                            model_feature_values, model_feature_names
+            # --- Champion Canary gate: independent of shadow scoring ---
+            # score_live() returns None when no compatible directional_net Champion exists.
+            # In active execution, an enabled gate must fail closed.
+            if settings.MODEL_GATE_CANARY_ENABLED and self._app._model_registry is not None:
+                if not self._app._initial_shadow_mode() and not snapshot_id:
+                    self._app._record_diag("model_gate_canary_blocked")
+                    log.warning(
+                        "ml_canary.snapshot_missing_fail_closed",
+                        symbol=proposal.symbol,
+                    )
+                    await _record_signal("feature_snapshot_missing")
+                    return
+                try:
+                    live_prediction = self._app._model_registry.score_live(
+                        model_feature_values, model_feature_names
+                    )
+                    if live_prediction is not None:
+                        canary_threshold = self._app._model_gate_threshold(regime_ctx)
+                        canary_gate_decision = (
+                            "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
                         )
-                        if live_prediction is not None:
-                            canary_threshold = self._app._model_gate_threshold(regime_ctx)
-                            canary_gate_decision = (
-                                "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
-                            )
-                            canary_blocked, canary_reason = self._app._model_gate_canary_blocks(
-                                canary_gate_decision,
-                                canary_threshold,
-                                live_prediction.score,
-                            )
-                            if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
-                                await self._app._trade_journal.record_prediction_event(
-                                    symbol=proposal.symbol,
-                                    interval=_WS_INTERVAL,
-                                    model_version=live_prediction.model_version,
-                                    score=live_prediction.score,
-                                    strategy_signal=proposal.side.value,
-                                    decision=canary_gate_decision,
-                                    feature_snapshot_id=snapshot_id,
-                                    metadata={
-                                        "source": "champion_canary",
-                                        "canary_blocked": canary_blocked,
-                                        "canary_reason": canary_reason,
-                                        "confidence": live_prediction.confidence,
-                                        "gate_reason": "canary_gate",
-                                        "threshold": canary_threshold,
-                                    },
-                                )
-                            if canary_blocked:
-                                self._app._record_diag("model_gate_canary_blocked")
-                                log.info(
-                                    "model_gate.canary_blocked",
-                                    symbol=proposal.symbol,
-                                    model_version=live_prediction.model_version,
-                                    score=live_prediction.score,
-                                    threshold=canary_threshold,
-                                    reason=canary_reason,
-                                )
-                                await _record_signal("model_gate_canary_blocked")
-                                return
-                        else:
-                            log.warning(
-                                "ml_canary.no_compatible_champion",
+                        canary_blocked, canary_reason = self._app._model_gate_canary_blocks(
+                            canary_gate_decision,
+                            canary_threshold,
+                            live_prediction.score,
+                        )
+                        if (
+                            snapshot_id
+                            and self._app._trade_journal is not None
+                            and self._app._trade_journal.is_enabled
+                        ):
+                            await self._app._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
-                                active_execution=not self._app._initial_shadow_mode(),
+                                interval=_WS_INTERVAL,
+                                model_version=live_prediction.model_version,
+                                score=live_prediction.score,
+                                strategy_signal=proposal.side.value,
+                                decision=canary_gate_decision,
+                                feature_snapshot_id=snapshot_id,
+                                metadata={
+                                    "source": "champion_canary",
+                                    "canary_blocked": canary_blocked,
+                                    "canary_reason": canary_reason,
+                                    "confidence": live_prediction.confidence,
+                                    "gate_reason": "canary_gate",
+                                    "threshold": canary_threshold,
+                                },
                             )
-                            if not self._app._initial_shadow_mode():
-                                self._app._record_diag("model_gate_canary_blocked")
-                                await _record_signal("model_gate_no_compatible_champion")
-                                return
-                    except Exception as _canary_exc:
+                        if canary_blocked:
+                            self._app._record_diag("model_gate_canary_blocked")
+                            log.info(
+                                "model_gate.canary_blocked",
+                                symbol=proposal.symbol,
+                                model_version=live_prediction.model_version,
+                                score=live_prediction.score,
+                                threshold=canary_threshold,
+                                reason=canary_reason,
+                            )
+                            await _record_signal("model_gate_canary_blocked")
+                            return
+                    else:
                         log.warning(
-                            "ml_canary.scoring_failed",
+                            "ml_canary.no_compatible_champion",
                             symbol=proposal.symbol,
-                            error=str(_canary_exc),
+                            active_execution=not self._app._initial_shadow_mode(),
                         )
                         if not self._app._initial_shadow_mode():
                             self._app._record_diag("model_gate_canary_blocked")
-                            await _record_signal("model_gate_scoring_failed")
+                            await _record_signal("model_gate_no_compatible_champion")
                             return
+                except Exception as _canary_exc:
+                    log.warning(
+                        "ml_canary.scoring_failed",
+                        symbol=proposal.symbol,
+                        error=str(_canary_exc),
+                    )
+                    if not self._app._initial_shadow_mode():
+                        self._app._record_diag("model_gate_canary_blocked")
+                        await _record_signal("model_gate_scoring_failed")
+                        return
 
             # Skip execution if operator paused trading
             if self._app._trading_paused:
@@ -744,7 +764,7 @@ class TradingLoopModule(AppBoundModule):
             await _record_signal()
 
             # Trade approved — notify Telegram once and log to signal deque
-            is_shadow = self._app._execution_engine._shadow_mode
+            is_shadow = self._app._initial_shadow_mode()
             regime_str = regime_ctx.regime.value if regime_ctx is not None else "UNKNOWN"
             from trader.telegram_bot import SignalEntry
 

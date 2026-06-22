@@ -33,7 +33,9 @@ class SignalPolicyModule(AppBoundModule):
         )
 
     def initial_shadow_mode(self) -> bool:
-        """Compute startup execution mode from settings and safety gates."""
+        """Return current shadow/paper execution mode (runtime-aware)."""
+        if self._app._execution_engine is not None:
+            return bool(self._app._execution_engine._shadow_mode)
         assert self._app._settings is not None
         if self._app._settings.SHADOW_MODE:
             return True

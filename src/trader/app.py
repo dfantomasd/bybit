@@ -691,8 +691,8 @@ class TradingApplication:
             await self._configure_observability()
             await self._run_preflight()
 
-            await self._start_http_server()
             await self._start_trade_journal()
+            await self._start_http_server()
             await self._start_bybit_adapter()
             await self._start_telegram_bot()
 

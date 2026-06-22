@@ -728,6 +728,16 @@ class Settings(BaseSettings):
                 stacklevel=2,
             )
 
+        if not self.MULTITIMEFRAME_ENABLED and self.TREND_MTF_CONFIRMATION_ENABLED:
+            import warnings as _warnings
+
+            _warnings.warn(
+                "TREND_MTF_CONFIRMATION_ENABLED=true with MULTITIMEFRAME_ENABLED=false: "
+                "disabling MTF trend confirmation because higher-TF candles are unavailable.",
+                stacklevel=2,
+            )
+            self.TREND_MTF_CONFIRMATION_ENABLED = False
+
     def market_candle_persist_intervals(self) -> frozenset[str]:
         """Kline intervals persisted to Postgres (others remain in-memory only)."""
         return frozenset(part.strip() for part in self.MARKET_CANDLE_PERSIST_INTERVALS.split(",") if part.strip())

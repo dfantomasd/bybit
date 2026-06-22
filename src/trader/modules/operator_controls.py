@@ -51,6 +51,7 @@ class OperatorControlsModule(AppBoundModule):
                 raise RuntimeError(
                     "Active execution requires BYBIT_USE_TESTNET=true, or LIVE_MODE=true with TRADING_MODE=LIVE/CANARY_LIVE."
                 )
+        self._app._settings.SHADOW_MODE = enabled
         if self._app._execution_engine is not None:
             self._app._execution_engine._shadow_mode = enabled
         if self._app._fee_provider is not None:
@@ -125,7 +126,7 @@ class OperatorControlsModule(AppBoundModule):
             if self._app._trade_journal is None or not self._app._trade_journal.is_enabled:
                 raise RuntimeError("Trade journal/Postgres is not available.")
             self._app._training_task = asyncio.create_task(
-                await self._run_model_training(min_samples, horizon, label_bps),
+                self._run_model_training(min_samples, horizon, label_bps),
                 name="model-training",
             )
             self._app._background_tasks.append(self._app._training_task)
@@ -146,7 +147,7 @@ class OperatorControlsModule(AppBoundModule):
             if self._app._trade_journal is None or not self._app._trade_journal.is_enabled:
                 raise RuntimeError("Trade journal/Postgres is not available.")
             self._app._training_task = asyncio.create_task(
-                await self._run_model_training_all(),
+                self._run_model_training_all(),
                 name="model-training-all",
             )
             self._app._background_tasks.append(self._app._training_task)

@@ -279,12 +279,15 @@ def create_app(
     )
     async def get_dashboard(_auth: None = auth_dep) -> HTMLResponse:
         """Return a small protected HTML dashboard backed by TradeJournal aggregates."""
-        if trade_journal is None or not getattr(trade_journal, "is_enabled", False):
+        journal = trade_journal
+        if state_store is not None:
+            journal = getattr(state_store, "trade_journal", None) or journal
+        if journal is None or not getattr(journal, "is_enabled", False):
             return HTMLResponse(
                 status_code=503,
                 content="<html><body><h1>Dashboard unavailable</h1><p>Trade journal is not connected.</p></body></html>",
             )
-        data = await trade_journal.get_dashboard_data()
+        data = await journal.get_dashboard_data()
         if data.get("error"):
             return HTMLResponse(
                 status_code=500,

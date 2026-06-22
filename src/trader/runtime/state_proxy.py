@@ -72,6 +72,10 @@ class AppStateProxy:
         return {}
 
     @property
+    def trade_journal(self) -> Any:
+        return getattr(self._app, "_trade_journal", None)
+
+    @property
     def active_model_metadata(self) -> Any:
         """Return a ModelMetadata built from the in-memory champion or challenger."""
         from trader.domain.models import ModelMetadata
