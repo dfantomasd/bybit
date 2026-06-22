@@ -149,7 +149,11 @@ class LifecycleModule(AppBoundModule):
         """Reload unresolved durable pending entries into ExecutionEngine."""
         if self._initial_shadow_mode():
             return
-        if self._app._trade_journal is None or self._app._execution_engine is None or not self._app._trade_journal.is_enabled:
+        if (
+            self._app._trade_journal is None
+            or self._app._execution_engine is None
+            or not self._app._trade_journal.is_enabled
+        ):
             return
         try:
             pending_records = await self._app._trade_journal.get_pending_durable_orders()
