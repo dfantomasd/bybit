@@ -253,6 +253,12 @@ class TradingApplication:
             self._settings.BYBIT_USE_TESTNET,
         ).rest_base
 
+        postgres_required = (
+            self._settings.PREFLIGHT_POSTGRES_REQUIRED
+            if self._settings.PREFLIGHT_POSTGRES_REQUIRED is not None
+            else self._settings.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE)
+        )
+
         self._health_checker = HealthChecker(
             postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
             redis_url=self._settings.REDIS_URL.get_secret_value(),
@@ -264,20 +270,36 @@ class TradingApplication:
             model_enabled=self._settings.MODEL_ENABLED,
             postgres_retry_attempts=self._settings.PREFLIGHT_POSTGRES_RETRY_ATTEMPTS,
             postgres_retry_delay_s=self._settings.PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS,
+            postgres_required=postgres_required,
+            postgres_optional_max_attempts=self._settings.PREFLIGHT_POSTGRES_OPTIONAL_MAX_ATTEMPTS,
         )
 
         result = await self._health_checker.run_preflight()
         checks = result["checks"]
+        postgres_required = bool(result.get("postgres_required", True))
 
         for check_name, passed in checks.items():
             if passed:
                 log.info("preflight_check_passed", check=check_name)
+            elif check_name == "postgres" and not postgres_required:
+                log.warning(
+                    "preflight_check_deferred",
+                    check=check_name,
+                    trading_mode=self._settings.TRADING_MODE.value,
+                    hint="continuing startup without postgres",
+                )
             else:
                 log.error("preflight_check_failed", check=check_name)
 
         if not result["passed"]:
             log.critical("preflight_failed", checks=checks)
             raise SystemExit(1)
+
+        if not checks.get("postgres") and not postgres_required:
+            log.warning(
+                "preflight_postgres_optional_continuing",
+                trading_mode=self._settings.TRADING_MODE.value,
+            )
 
         log.info("preflight_passed")
 

@@ -6,7 +6,26 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from trader.monitoring.health import HealthChecker
+from trader.domain.enums import TradingMode
+from trader.monitoring.health import HealthChecker, _postgres_retry_wait_seconds
+
+
+class TestPostgresRetryBackoff:
+    def test_circuit_breaker_uses_longer_backoff(self) -> None:
+        wait = _postgres_retry_wait_seconds(
+            attempt=2,
+            base_delay_seconds=2.0,
+            error_text="(ECIRCUITBREAKER) failed to retrieve database credentials",
+        )
+        assert wait == 30.0
+
+    def test_transient_error_uses_linear_backoff(self) -> None:
+        wait = _postgres_retry_wait_seconds(
+            attempt=2,
+            base_delay_seconds=2.0,
+            error_text="connection was closed in the middle of operation",
+        )
+        assert wait == 4.0
 
 
 class TestHealthCheckerPostgresRetries:
@@ -61,3 +80,42 @@ class TestHealthCheckerPostgresRetries:
         checker.check_postgres_with_retries.assert_awaited_once()
         assert result["passed"] is True
         assert result["checks"]["postgres"] is True
+
+    @pytest.mark.asyncio
+    async def test_run_preflight_allows_optional_postgres_failure(self) -> None:
+        checker = HealthChecker(
+            postgres_dsn="postgresql://user:pw@localhost/db",
+            redis_url="",
+            postgres_required=False,
+            postgres_optional_max_attempts=2,
+            postgres_retry_delay_s=0.0,
+            trading_mode=TradingMode.SHADOW,
+        )
+        checker.check_postgres_with_retries = AsyncMock(return_value=(False, None))  # type: ignore[method-assign]
+        checker.check_redis = AsyncMock(return_value=(True, None))  # type: ignore[method-assign]
+        checker.check_bybit_connectivity = AsyncMock(return_value=(True, None))  # type: ignore[method-assign]
+
+        result = await checker.run_preflight()
+
+        checker.check_postgres_with_retries.assert_awaited_once_with(max_attempts=2)
+        assert result["passed"] is True
+        assert result["checks"]["postgres"] is False
+        assert result["postgres_required"] is False
+
+    @pytest.mark.asyncio
+    async def test_run_preflight_blocks_when_postgres_required(self) -> None:
+        checker = HealthChecker(
+            postgres_dsn="postgresql://user:pw@localhost/db",
+            redis_url="",
+            postgres_required=True,
+            postgres_retry_delay_s=0.0,
+        )
+        checker.check_postgres_with_retries = AsyncMock(return_value=(False, None))  # type: ignore[method-assign]
+        checker.check_redis = AsyncMock(return_value=(True, None))  # type: ignore[method-assign]
+        checker.check_bybit_connectivity = AsyncMock(return_value=(True, None))  # type: ignore[method-assign]
+
+        result = await checker.run_preflight()
+
+        assert result["passed"] is False
+        assert result["checks"]["postgres"] is False
+        assert result["postgres_required"] is True

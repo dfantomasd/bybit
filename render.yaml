@@ -76,10 +76,14 @@ services:
         value: "3"
       - key: CANDLE_SEED_RETRY_BASE_DELAY_SECONDS
         value: "1.0"
+      - key: PREFLIGHT_POSTGRES_REQUIRED
+        value: "false"
       - key: PREFLIGHT_POSTGRES_RETRY_ATTEMPTS
-        value: "6"
+        value: "8"
       - key: PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS
-        value: "2.0"
+        value: "3.0"
+      - key: PREFLIGHT_POSTGRES_OPTIONAL_MAX_ATTEMPTS
+        value: "2"
       - key: TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS
         value: "30"
       - key: TRADE_JOURNAL_POOL_MAX_SIZE
