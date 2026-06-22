@@ -117,6 +117,8 @@ services:
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"
+      - key: MAX_FEATURE_CYCLE_MS
+        value: "3000"
       - key: OUTCOME_RESOLVER_INTERVAL_SECONDS
         value: "60"
       - key: OUTCOME_RESOLVER_BATCH_LIMIT

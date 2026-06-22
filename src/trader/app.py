@@ -3305,7 +3305,9 @@ class TradingApplication:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                 ws_stale = ws_age > ws_stale_threshold_s
 
-            feature_cycle_overload = max_feature_cycle_ms > 0 and self._last_strategy_cycle_ms > max_feature_cycle_ms
+            symbol_count = max(1, len(self._active_symbols()))
+            per_symbol_cycle_ms = self._last_strategy_cycle_ms / symbol_count
+            feature_cycle_overload = max_feature_cycle_ms > 0 and per_symbol_cycle_ms > max_feature_cycle_ms
             overloaded = lag_ms > max_lag_ms or ws_stale or feature_cycle_overload
             if overloaded:
                 overload_streak += 1
@@ -3328,6 +3330,8 @@ class TradingApplication:
                     lag_ms=round(lag_ms, 1),
                     ws_stale=ws_stale,
                     feature_cycle_ms=round(self._last_strategy_cycle_ms, 1),
+                    per_symbol_cycle_ms=round(per_symbol_cycle_ms, 1),
+                    symbol_count=symbol_count,
                     overload_streak=streak,
                     from_max=current,
                     to_max=new_max,
@@ -4710,8 +4714,14 @@ class TradingApplication:
                             telegram_health = self._telegram_bot.health_snapshot()
                         except Exception as tg_exc:
                             telegram_health = {"error": str(tg_exc)}
+                    from trader.monitoring.deploy_info import get_deploy_info
+
+                    deploy = get_deploy_info()
+                    journal_connected = self._trade_journal is not None and self._trade_journal.is_enabled
                     log.info(
                         "system.heartbeat",
+                        deploy_id=deploy.get("deploy_id") or None,
+                        git_commit=deploy.get("git_commit") or None,
                         status=(self._status.value if hasattr(self._status, "value") else str(self._status)),
                         trading_mode=(
                             self._settings.TRADING_MODE.value
@@ -4762,6 +4772,7 @@ class TradingApplication:
                         telegram_webhook=telegram_health.get("webhook_active"),
                         telegram_delivery_mode=telegram_health.get("delivery_mode"),
                         telegram_conflicts=telegram_health.get("polling_conflict_count"),
+                        trade_journal_connected=journal_connected,
                     )
                 except Exception as _hb_exc:
                     log.debug("supervisor.heartbeat_failed", error=str(_hb_exc))
@@ -5569,6 +5580,9 @@ class TradingApplication:
                             error_type=type(result).__name__,
                         )
 
+                # Measure processing time only — the deliberate sleep below is not overload.
+                self._last_strategy_cycle_ms = (time.monotonic() - cycle_start) * 1000.0
+
                 try:
                     await asyncio.wait_for(
                         self._shutdown_event.wait(),
@@ -5576,7 +5590,6 @@ class TradingApplication:
                     )
                 except TimeoutError:
                     pass
-                self._last_strategy_cycle_ms = (time.monotonic() - cycle_start) * 1000.0
 
         task = asyncio.create_task(strategy_loop(), name="strategy-loop")
         self._background_tasks.append(task)

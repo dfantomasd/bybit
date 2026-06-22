@@ -223,6 +223,17 @@ def test_load_governor_uses_ws_stale_hysteresis() -> None:
     assert "ws_stale_threshold_s = 90.0" in src
     assert "overload_streak >= 2" in src
     assert "restore_streak >= 2" in src
+    assert "per_symbol_cycle_ms" in src
+
+
+def test_strategy_loop_measures_processing_before_sleep() -> None:
+    import inspect
+
+    from trader.app import TradingApplication
+
+    src = inspect.getsource(TradingApplication._start_strategy_loop)
+    assert "Measure processing time only" in src
+    assert src.index("_last_strategy_cycle_ms =") < src.index("timeout=_STRATEGY_LOOP_INTERVAL")
 
 
 def test_model_progress_reports_actual_and_compatible_samples() -> None:
