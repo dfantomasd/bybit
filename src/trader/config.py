@@ -265,6 +265,10 @@ class Settings(BaseSettings):
     """Startup Postgres health retries before failing deploy (Supabase cold start / transient SSL)."""
     PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS: float = 2.0
     """Base delay between Postgres preflight retries (linear backoff)."""
+    PREFLIGHT_POSTGRES_REQUIRED: bool | None = None
+    """When None, required only for CANARY_LIVE/LIVE. SHADOW may start without Postgres."""
+    PREFLIGHT_POSTGRES_OPTIONAL_MAX_ATTEMPTS: int = 3
+    """Quick Postgres probes when preflight is optional (SHADOW); avoids long deploy stalls."""
 
     # ------------------------------------------------------------------
     # Telegram notifications

@@ -32,6 +32,26 @@ _REDIS_TIMEOUT_S = 2.0
 _BYBIT_TIMEOUT_S = 5.0
 _MODEL_STALE_THRESHOLD_S = 3600.0  # 1 hour
 _FEATURE_STALE_THRESHOLD_S = 120.0  # 2 minutes — allows pipeline warm-up on startup
+_CIRCUIT_BREAKER_MARKERS = (
+    "ECIRCUITBREAKER",
+    "EAUTHQUERY",
+    "authentication query failed",
+    "failed to retrieve database credentials",
+    "too many authentication failures",
+)
+
+
+def _postgres_retry_wait_seconds(
+    *,
+    attempt: int,
+    base_delay_seconds: float,
+    error_text: str | None,
+) -> float:
+    """Linear backoff; longer waits when Supabase auth circuit breaker is open."""
+    linear = base_delay_seconds * attempt
+    if error_text and any(marker in error_text for marker in _CIRCUIT_BREAKER_MARKERS):
+        return max(linear, 15.0 * attempt)
+    return linear
 
 
 class HealthChecker:
@@ -55,6 +75,8 @@ class HealthChecker:
         model_enabled: bool = False,
         postgres_retry_attempts: int = 6,
         postgres_retry_delay_s: float = 2.0,
+        postgres_required: bool = True,
+        postgres_optional_max_attempts: int = 3,
     ) -> None:
         self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
         self._redis_url = redis_url.strip().strip("\"'")
@@ -66,6 +88,8 @@ class HealthChecker:
         self._model_enabled = model_enabled
         self._postgres_retry_attempts = max(1, int(postgres_retry_attempts))
         self._postgres_retry_delay_s = max(0.0, float(postgres_retry_delay_s))
+        self._postgres_required = postgres_required
+        self._postgres_optional_max_attempts = max(1, int(postgres_optional_max_attempts))
 
         # Mutable state updated by the trading system
         self._ws_connected: bool = False
@@ -128,22 +152,31 @@ class HealthChecker:
             log.warning("postgres_health_check_failed", error=error)
         return ok, latency
 
-    async def check_postgres_with_retries(self) -> tuple[bool, float | None]:
+    async def check_postgres_with_retries(
+        self,
+        *,
+        max_attempts: int | None = None,
+    ) -> tuple[bool, float | None]:
         """Ping PostgreSQL with startup retries for transient cloud DB blips."""
+        attempts = max(1, int(max_attempts or self._postgres_retry_attempts))
         last_error: str | None = None
-        for attempt in range(1, self._postgres_retry_attempts + 1):
+        for attempt in range(1, attempts + 1):
             ok, latency, error = await self._postgres_ping()
             if ok:
                 if attempt > 1:
                     log.info("postgres_health_check_recovered", attempt=attempt)
                 return True, latency
             last_error = error
-            if attempt < self._postgres_retry_attempts:
-                wait_s = self._postgres_retry_delay_s * attempt
+            if attempt < attempts:
+                wait_s = _postgres_retry_wait_seconds(
+                    attempt=attempt,
+                    base_delay_seconds=self._postgres_retry_delay_s,
+                    error_text=error,
+                )
                 log.warning(
                     "postgres_health_check_retrying",
                     attempt=attempt,
-                    max_attempts=self._postgres_retry_attempts,
+                    max_attempts=attempts,
                     wait_seconds=round(wait_s, 2),
                     error=error,
                 )
@@ -311,7 +344,18 @@ class HealthChecker:
 
         Suitable for the startup preflight sequence.
         """
-        pg_ok, _ = await self.check_postgres_with_retries()
+        if self._postgres_required:
+            pg_ok, _ = await self.check_postgres_with_retries()
+        else:
+            pg_ok, _ = await self.check_postgres_with_retries(
+                max_attempts=self._postgres_optional_max_attempts,
+            )
+            if not pg_ok:
+                log.warning(
+                    "preflight_postgres_optional_failed",
+                    trading_mode=self._trading_mode.value,
+                    hint="service will start; trade journal reconnects in background",
+                )
         redis_ok, _ = await self.check_redis()
         bybit_ok, _ = await self.check_bybit_connectivity()
 
@@ -320,5 +364,12 @@ class HealthChecker:
             "redis": redis_ok,
             "bybit_connectivity": bybit_ok,
         }
-        passed = pg_ok and (redis_ok or not self._redis_required) and (bybit_ok or not self._bybit_required)
-        return {"passed": passed, "checks": checks}
+        postgres_blocks = self._postgres_required and not pg_ok
+        passed = (
+            not postgres_blocks and (redis_ok or not self._redis_required) and (bybit_ok or not self._bybit_required)
+        )
+        return {
+            "passed": passed,
+            "checks": checks,
+            "postgres_required": self._postgres_required,
+        }
