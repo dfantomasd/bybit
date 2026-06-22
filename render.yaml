@@ -98,6 +98,10 @@ services:
         value: "30"
       - key: TRADE_JOURNAL_POOL_MAX_SIZE
         value: "2"
+      - key: TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS
+        value: "1800"
+      - key: TRADE_JOURNAL_AUTH_CIRCUIT_BREAKER_MIN_BACKOFF_SECONDS
+        value: "900"
       - key: WS_MARKET_DATA_STALE_RECONNECT_SECONDS
         value: "120"
       - key: MARKET_CANDLE_PERSIST_INTERVALS

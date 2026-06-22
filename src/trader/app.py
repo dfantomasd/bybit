@@ -361,6 +361,8 @@ class TradingApplication:
             enabled=self._settings.TRADE_JOURNAL_ENABLED,
             fetch_timeout_seconds=self._settings.TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS,
             pool_max_size=self._settings.TRADE_JOURNAL_POOL_MAX_SIZE,
+            reconnect_max_backoff_seconds=self._settings.TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS,
+            auth_circuit_breaker_min_backoff_seconds=self._settings.TRADE_JOURNAL_AUTH_CIRCUIT_BREAKER_MIN_BACKOFF_SECONDS,
         )
         await self._trade_journal.connect()
         await self._maybe_run_startup_retention()
@@ -378,7 +380,7 @@ class TradingApplication:
                 try:
                     connected = await self._trade_journal.reconnect_if_needed(
                         min_interval=_TRADE_JOURNAL_RECONNECT_INTERVAL,
-                        force=not durable_healthy,
+                        force=False,
                     )
                     if connected:
                         log.info("trade_journal.reconnected")
@@ -386,10 +388,13 @@ class TradingApplication:
                         await self._maybe_run_startup_retention()
                 except Exception as exc:
                     log.debug("trade_journal.reconnect_failed", error=str(exc))
+            blocked_remaining = getattr(self._trade_journal, "reconnect_blocked_remaining_seconds", lambda: 0.0)()
+            sleep_s = max(_TRADE_JOURNAL_RECONNECT_INTERVAL, float(blocked_remaining or 0.0))
+            sleep_s = min(sleep_s, 120.0)
             try:
                 await asyncio.wait_for(
                     self._shutdown_event.wait(),
-                    timeout=_TRADE_JOURNAL_RECONNECT_INTERVAL,
+                    timeout=sleep_s,
                 )
             except TimeoutError:
                 continue

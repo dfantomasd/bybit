@@ -66,7 +66,10 @@ class Settings(BaseSettings):
     """Per-query read timeout for Postgres diagnostics and journal reads."""
     TRADE_JOURNAL_POOL_MAX_SIZE: int = 5
     """Connection pool size for asyncpg (Render/Supabase free tier)."""
-    TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS: float = 600.0
+    TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS: float = 1800.0
+    """Max reconnect backoff after repeated Postgres failures."""
+    TRADE_JOURNAL_AUTH_CIRCUIT_BREAKER_MIN_BACKOFF_SECONDS: float = 900.0
+    """Minimum reconnect wait after Supabase auth circuit-breaker errors."""
     WS_MARKET_DATA_STALE_RECONNECT_SECONDS: float = 120.0
     """Force public WS reconnect when market data is older than this."""
     # Persist signals, risk decisions, order events, and closed PnL in Postgres.
