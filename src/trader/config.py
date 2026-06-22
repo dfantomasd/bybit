@@ -139,6 +139,7 @@ class Settings(BaseSettings):
     """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
     TREND_STRATEGY_ENABLED: bool = True
     """Enable the EMA crossover trend strategy in the ensemble."""
+    TREND_MIN_ADX: float = 0.25
     """Minimum normalized ADX for EMA trend entries. 0.25 means ADX 25."""
     TREND_BLOCK_NEGATIVE_FUNDING_OI: bool = True
     """Block fragile trend entries when funding and open interest context disagrees."""
