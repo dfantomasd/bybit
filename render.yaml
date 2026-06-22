@@ -83,7 +83,9 @@ services:
       - key: TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS
         value: "30"
       - key: TRADE_JOURNAL_POOL_MAX_SIZE
-        value: "5"
+        value: "3"
+      - key: WS_MARKET_DATA_STALE_RECONNECT_SECONDS
+        value: "120"
       # Adaptive load governor
       - key: ADAPTIVE_LOAD_GOVERNOR_ENABLED
         value: "true"

@@ -73,6 +73,7 @@ class BybitPublicWebSocket:
         self._running: bool = False
         self._stop_event = asyncio.Event()
         self._last_message_ts: float = 0.0
+        self._last_market_message_ts: float = 0.0
 
         # Reconnect counter
         self._reconnect_count: int = 0
@@ -105,11 +106,22 @@ class BybitPublicWebSocket:
     async def stop(self) -> None:
         """Signal the WS loop to stop."""
         self._stop_event.set()
+        await self.force_reconnect()
+
+    async def force_reconnect(self) -> None:
+        """Close the active socket so the start() loop reconnects."""
         if self._ws is not None:
             try:
                 await self._ws.close()
             except Exception:  # noqa: S110
                 pass
+
+    @property
+    def last_market_message_age_s(self) -> float | None:
+        """Seconds since the last market-data frame (excludes pong/subscribe acks)."""
+        if self._last_market_message_ts <= 0:
+            return None
+        return max(0.0, time.monotonic() - self._last_market_message_ts)
 
     async def subscribe(self, topics: list[str]) -> None:
         """Subscribe to additional topics (adds to list and sends if connected)."""
@@ -155,7 +167,9 @@ class BybitPublicWebSocket:
             ) as ws:
                 self._ws = ws
                 self._connected = True
-                self._last_message_ts = time.monotonic()
+                now = time.monotonic()
+                self._last_message_ts = now
+                self._last_market_message_ts = now
 
                 # Record connection restored
                 if self._downtime_start is not None:
@@ -231,19 +245,18 @@ class BybitPublicWebSocket:
                 break
 
     async def _watchdog_loop(self) -> None:
-        """Reconnect if no message received for WATCHDOG_TIMEOUT seconds."""
+        """Reconnect if no market-data message received for WATCHDOG_TIMEOUT seconds."""
         while not self._stop_event.is_set():
             await asyncio.sleep(5.0)
-            if time.monotonic() - self._last_message_ts > _WATCHDOG_TIMEOUT:
+            if self._last_market_message_ts <= 0:
+                continue
+            if time.monotonic() - self._last_market_message_ts > _WATCHDOG_TIMEOUT:
                 self._log.warning(
                     "ws_public.watchdog_timeout",
                     timeout_seconds=_WATCHDOG_TIMEOUT,
+                    reason="market_data_stale",
                 )
-                if self._ws is not None:
-                    try:
-                        await self._ws.close()
-                    except Exception:  # noqa: S110
-                        pass
+                await self.force_reconnect()
                 break
 
     # ------------------------------------------------------------------
@@ -257,10 +270,11 @@ class BybitPublicWebSocket:
         except (json.JSONDecodeError, ValueError):
             return
 
-        # Handle op responses (subscribe confirmations, pong, etc.)
         if "op" in msg:
             await self._handle_op_response(msg)
             return
+
+        self._last_market_message_ts = time.monotonic()
 
         topic: str = msg.get("topic", "")
         msg_type: str = msg.get("type", "")  # snapshot | delta
