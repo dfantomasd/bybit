@@ -22,7 +22,7 @@ class AppBoundModule:
         return self._app._initial_shadow_mode()
 
     def _record_diag(self, event: str) -> None:
-        self._app._record_diag(event)
+        self._app._modules.diagnostics.record(event)
 
     async def _restore_execution_pending_entries(self) -> None:
         await self._app._restore_execution_pending_entries()

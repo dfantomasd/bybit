@@ -73,7 +73,7 @@ def test_zero_trading_warning_is_suppressed_during_startup_warmup():
     engine.get_diag_counts.return_value = {"order_placed": 0}
     app._execution_engine = engine
 
-    with patch("trader.app.log") as log:
+    with patch("trader.modules.diagnostics.log") as log:
         app._check_zero_trading()
 
     log.warning.assert_not_called()
@@ -96,7 +96,7 @@ def test_zero_trading_warning_is_suppressed_when_shadow_orders_flow():
     }
     app._execution_engine = engine
 
-    with patch("trader.app.log") as log:
+    with patch("trader.modules.diagnostics.log") as log:
         app._check_zero_trading()
 
     log.warning.assert_not_called()

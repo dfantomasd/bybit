@@ -5,8 +5,10 @@ from __future__ import annotations
 import asyncio
 from typing import TYPE_CHECKING
 
+from trader.modules.diagnostics import DiagnosticsModule
 from trader.modules.market_data import MarketDataModule
 from trader.modules.ops import OpsModule
+from trader.modules.telegram_bridge import TelegramBridgeModule
 from trader.modules.training import TrainingModule
 from trader.runtime.supervisor import RuntimeSupervisor
 
@@ -22,6 +24,8 @@ class ModuleRegistry:
         self.ops = OpsModule(app)
         self.market_data = MarketDataModule(app)
         self.training = TrainingModule(app)
+        self.diagnostics = DiagnosticsModule(app)
+        self.telegram = TelegramBridgeModule(app)
         self.supervisor = RuntimeSupervisor(app)
 
     def spawn_background_tasks(self, tasks: list[asyncio.Task[object]]) -> None:
