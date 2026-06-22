@@ -23,6 +23,12 @@ import structlog
 
 from trader.data.candles import CandleStore
 from trader.domain.models import FeatureVector
+from trader.features.candle_patterns import (
+    MTF_PATTERN_INTERVALS,
+    PATTERN_LOOKBACK,
+    compute_pattern_features,
+    zero_pattern_features,
+)
 from trader.features.technical import (
     adx,
     atr,
@@ -196,6 +202,23 @@ class FeaturePipeline:
     # ------------------------------------------------------------------
     # Core computation
     # ------------------------------------------------------------------
+
+    def _apply_candle_pattern_features(self, symbol: str, interval: str, features: dict[str, float]) -> None:
+        """Attach pattern scores; primary trading interval gets 5m/15m MTF patterns."""
+        min_pat_bars = 3
+        if interval in {"1", "1m"}:
+            for mtf_interval, prefix in (("5", "pat5_"), ("15", "pat15_")):
+                if mtf_interval in MTF_PATTERN_INTERVALS and self._store.is_ready(symbol, mtf_interval, min_pat_bars):
+                    mtf_candles = self._store.confirmed(symbol, mtf_interval)
+                    features.update(compute_pattern_features(mtf_candles[-PATTERN_LOOKBACK:], prefix=prefix))
+                else:
+                    features.update(zero_pattern_features(prefix=prefix))
+        elif interval in MTF_PATTERN_INTERVALS:
+            native = self._store.confirmed(symbol, interval)
+            if len(native) >= min_pat_bars:
+                features.update(compute_pattern_features(native[-PATTERN_LOOKBACK:], prefix="pat_"))
+            else:
+                features.update(zero_pattern_features(prefix="pat_"))
 
     def compute(self, symbol: str, interval: str) -> FeatureVector | None:
         """Compute all indicators for one (symbol, interval) pair.
@@ -402,6 +425,9 @@ class FeaturePipeline:
         features["vwap_distance_pct"] = val_vwap if val_vwap is not None else 0.0
         if val_vwap is None:
             missing.append("vwap_distance_pct")
+
+        # --- Candlestick pattern scores (5m/15m MTF on 1m; native on 5m/15m) ---
+        self._apply_candle_pattern_features(symbol, interval, features)
 
         # Quality score: fraction of features computed
         total = len(features) + len(missing)

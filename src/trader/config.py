@@ -287,8 +287,13 @@ class Settings(BaseSettings):
     """Purge stale rows once after Postgres connects (reduces Supabase bloat)."""
     DATA_RETENTION_EXPORT_ENABLED: bool = True
     DATA_RETENTION_EXPORT_DIR: str = "data/retention_exports"
-    MARKET_CANDLE_PERSIST_INTERVALS: str = "1"
-    """Comma-separated kline intervals written to Postgres (others stay in-memory only)."""
+    MARKET_CANDLE_PERSIST_INTERVALS: str = "1,5,15,60"
+    """Comma-separated kline intervals written to Postgres.
+
+    1m: outcome resolver + training labels (largest volume; short retention).
+    5m/15m: MTF patterns + horizon labels (moderate volume).
+    60m: sparse (~24 bars/day/symbol); cheap regime context for 60m horizon models.
+    """
     CANDLE_RETENTION_DAYS_1M: int = 14
     CANDLE_RETENTION_DAYS_5M: int = 60
     CANDLE_RETENTION_DAYS_15M: int = 90

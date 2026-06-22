@@ -113,7 +113,7 @@ services:
       - key: WS_MARKET_DATA_STALE_RECONNECT_SECONDS
         value: "120"
       - key: MARKET_CANDLE_PERSIST_INTERVALS
-        value: "1"
+        value: "1,5,15,60"
       - key: DATA_RETENTION_ENABLED
         value: "true"
       - key: DATA_RETENTION_RUN_ON_STARTUP
