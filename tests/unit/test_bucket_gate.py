@@ -34,7 +34,7 @@ def _make_app(**overrides) -> TradingApplication:
 
 def _make_active_app(**overrides) -> TradingApplication:
     app = _make_app(**overrides)
-    app._initial_shadow_mode = lambda: False  # type: ignore[method-assign]
+    app._modules.signal_policy.initial_shadow_mode = lambda: False  # type: ignore[method-assign]
     return app
 
 

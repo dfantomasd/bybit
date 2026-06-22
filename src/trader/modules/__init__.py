@@ -5,6 +5,7 @@ from trader.modules.execution_runtime import ExecutionRuntimeModule
 from trader.modules.market_data import MarketDataModule
 from trader.modules.ops import OpsModule
 from trader.modules.registry import ModuleRegistry
+from trader.modules.signal_policy import SignalPolicyModule
 from trader.modules.telegram_bridge import TelegramBridgeModule
 from trader.modules.trading_loop import TradingLoopModule
 from trader.modules.training import TrainingModule
@@ -15,6 +16,7 @@ __all__ = [
     "MarketDataModule",
     "ModuleRegistry",
     "OpsModule",
+    "SignalPolicyModule",
     "TradingLoopModule",
     "TelegramBridgeModule",
     "TrainingModule",

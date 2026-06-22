@@ -9,6 +9,7 @@ from trader.modules.diagnostics import DiagnosticsModule
 from trader.modules.execution_runtime import ExecutionRuntimeModule
 from trader.modules.market_data import MarketDataModule
 from trader.modules.ops import OpsModule
+from trader.modules.signal_policy import SignalPolicyModule
 from trader.modules.telegram_bridge import TelegramBridgeModule
 from trader.modules.training import TrainingModule
 from trader.runtime.supervisor import RuntimeSupervisor
@@ -27,6 +28,7 @@ class ModuleRegistry:
         self.training = TrainingModule(app)
         self.diagnostics = DiagnosticsModule(app)
         self.execution = ExecutionRuntimeModule(app)
+        self.signal_policy = SignalPolicyModule(app)
         self.telegram = TelegramBridgeModule(app)
         self.supervisor = RuntimeSupervisor(app)
 

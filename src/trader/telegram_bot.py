@@ -66,6 +66,7 @@ from telegram.ext import (
 
 from trader.domain.enums import RiskProfile
 from trader.domain.models import Balance, HealthStatus, Position
+from trader.operator_priorities import canary_readiness_priority_text, full_priority_overview
 
 log = structlog.get_logger(__name__)
 
@@ -309,6 +310,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("attribution", self._cmd_attribution))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
+        app.add_handler(CommandHandler("priorities", self._cmd_priorities))
         app.add_handler(CommandHandler("model_help", self._cmd_model_help))
         app.add_handler(CommandHandler("db", self._cmd_db_model))
         app.add_handler(CommandHandler("model", self._cmd_db_model))
@@ -1236,6 +1238,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
                     InlineKeyboardButton("⚠️ Худшие сделки", callback_data="view:worst"),
                 ],
+                [InlineKeyboardButton("📌 Приоритеты", callback_data="view:priorities")],
                 self._home_row(),
             ]
         )
@@ -1303,6 +1306,7 @@ class TelegramMonitorBot:
         return InlineKeyboardMarkup(
             [
                 [InlineKeyboardButton("🔄 Обновить готовность", callback_data="view:canary")],
+                [InlineKeyboardButton("📌 Приоритеты", callback_data="view:priorities")],
                 [InlineKeyboardButton("📊 Метрики модели", callback_data="view:canary_model")],
                 [
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
@@ -2484,6 +2488,20 @@ class TelegramMonitorBot:
             reply_markup=self._canary_menu(),
         )
 
+    async def _cmd_priorities(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Explain what matters more than what: safety, filters, CANARY, strategies."""
+        del context
+        if not await self._authorised(update):
+            return
+        runtime: dict[str, Any] = {}
+        if self._controller is not None and self._controller.runtime_settings is not None:
+            try:
+                runtime = self._controller.runtime_settings()
+            except Exception:
+                runtime = {}
+        text = full_priority_overview(runtime_settings=runtime)
+        await self._respond(update, text, reply_markup=self._canary_menu())
+
     async def _render_canary_readiness_text(self, *, lite: bool = True) -> str:
         db_diag = await self._load_db_diag(lite=lite)
 
@@ -2882,6 +2900,10 @@ class TelegramMonitorBot:
                 "Если есть ❌ по модели или paper-gate, CANARY_LIVE не включаем: модель продолжает наблюдать в SHADOW.",
                 "Если все обязательные условия ✅, CANARY держим маленьким: 1-2 позиции, минимальный notional.",
                 "Telegram не включает live: реальные деньги включаются только через env vars на Render.",
+                "",
+                canary_readiness_priority_text(),
+                "",
+                "Подробный разбор безопасности и стратегий: /priorities",
             ]
         )
         return "\n".join(lines)
@@ -4678,6 +4700,9 @@ class TelegramMonitorBot:
         if action == "canary":
             await self._cmd_canary_ready(update, fake_context)
             return
+        if action == "priorities":
+            await self._cmd_priorities(update, fake_context)
+            return
         if action == "canary_model":
             await self._show_canary_model_metrics(update)
             return
@@ -5021,6 +5046,7 @@ class TelegramMonitorBot:
                 "/train [500] [15] [5] — обучить модель-кандидат\n"
                 "/limits — показать или изменить безопасные лимиты\n"
                 "/canary — готовность к маленькому CANARY_LIVE\n"
+                "/priorities — что важнее чего: безопасность, фильтры, CANARY, стратегии\n"
                 "/model_help — объяснение модели и обучения\n"
                 "/mode shadow|active — режим исполнения\n"
                 "/shadow on|off — теневой режим\n"
