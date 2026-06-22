@@ -170,8 +170,28 @@ class TradeJournal:
             if self._schema_initialized:
                 await self._ping_pool()
             else:
-                await self._ensure_schema()
-                self._schema_initialized = True
+                last_exc: Exception | None = None
+                for attempt in range(3):
+                    try:
+                        await self._ensure_schema()
+                        self._schema_initialized = True
+                        last_exc = None
+                        break
+                    except Exception as exc:
+                        last_exc = exc
+                        if attempt < 2 and self._is_transient_schema_error(str(exc)):
+                            delay = 2.0 * (attempt + 1)
+                            log.warning(
+                                "trade_journal.schema_bootstrap_retry",
+                                attempt=attempt + 1,
+                                delay_s=delay,
+                                error=str(exc)[:160],
+                            )
+                            await asyncio.sleep(delay)
+                            continue
+                        raise
+                if last_exc is not None:
+                    raise last_exc
             self._last_connect_error_at = None
             self._last_connect_error = None
         except Exception as exc:
@@ -200,6 +220,20 @@ class TradeJournal:
             or "EAUTHQUERY" in upper
             or "AUTHENTICATION" in upper
             or "TOO MANY AUTHENTICATION FAILURES" in upper
+        )
+
+    @staticmethod
+    def _is_transient_schema_error(error: str) -> bool:
+        upper = error.upper()
+        return (
+            "CONNECTION WAS CLOSED" in upper
+            or "CONNECTION RESET" in upper
+            or "CONNECTION DOES NOT EXIST" in upper
+            or "SERVER CLOSED THE CONNECTION" in upper
+            or "SSL SYSCALL" in upper
+            or "TIMEOUT" in upper
+            or "ECIRCUITBREAKER" in upper
+            or "EAUTHQUERY" in upper
         )
 
     def _schedule_reconnect_backoff(self, error: str) -> None:
