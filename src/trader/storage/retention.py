@@ -13,6 +13,33 @@ import structlog
 
 log = structlog.get_logger(__name__)
 
+_TABLE_COUNT_QUERIES: dict[str, str] = {
+    "market_candles": "SELECT count(*) AS cnt FROM market_candles",
+    "feature_snapshots": "SELECT count(*) AS cnt FROM feature_snapshots",
+    "prediction_events": "SELECT count(*) AS cnt FROM prediction_events",
+    "prediction_outcomes": "SELECT count(*) AS cnt FROM prediction_outcomes",
+    "trade_signals": "SELECT count(*) AS cnt FROM trade_signals",
+    "order_events": "SELECT count(*) AS cnt FROM order_events",
+    "execution_events": "SELECT count(*) AS cnt FROM execution_events",
+    "closed_pnl": "SELECT count(*) AS cnt FROM closed_pnl",
+    "model_versions": "SELECT count(*) AS cnt FROM model_versions",
+}
+
+_SHADOW_EVENT_DELETE_QUERIES: dict[str, str] = {
+    "order_events": """
+        DELETE FROM order_events
+        WHERE created_at < now() - ($1::text || ' days')::interval
+    """,
+    "execution_events": """
+        DELETE FROM execution_events
+        WHERE created_at < now() - ($1::text || ' days')::interval
+    """,
+    "risk_decisions": """
+        DELETE FROM risk_decisions
+        WHERE created_at < now() - ($1::text || ' days')::interval
+    """,
+}
+
 
 class RetentionStore(Protocol):
     async def _fetch(self, query: str, *args: Any) -> list[Any]: ...
@@ -68,20 +95,9 @@ async def get_storage_stats(store: RetentionStore) -> dict[str, Any]:
         "database_size_bytes": None,
         "database_size_mb": None,
     }
-    table_names = (
-        "market_candles",
-        "feature_snapshots",
-        "prediction_events",
-        "prediction_outcomes",
-        "trade_signals",
-        "order_events",
-        "execution_events",
-        "closed_pnl",
-        "model_versions",
-    )
-    for table in table_names:
+    for table, query in _TABLE_COUNT_QUERIES.items():
         try:
-            rows = await store._fetch(f"SELECT count(*) AS cnt FROM {table}")
+            rows = await store._fetch(query)
             stats["tables"][table] = int(rows[0]["cnt"]) if rows else 0
         except Exception as exc:
             stats["tables"][table] = None
@@ -240,13 +256,10 @@ async def run_data_retention(store: RetentionStore, settings: RetentionSettings)
     except Exception as exc:
         report.errors.append(f"shadow_signals: {exc}")
 
-    for table in ("order_events", "execution_events", "risk_decisions"):
+    for table, query in _SHADOW_EVENT_DELETE_QUERIES.items():
         try:
             result = await store._execute(
-                f"""
-                DELETE FROM {table}
-                WHERE created_at < now() - ($1::text || ' days')::interval
-                """,
+                query,
                 str(settings.shadow_signal_retention_days),
             )
             report.shadow_signals_deleted += _parse_delete_count(result)

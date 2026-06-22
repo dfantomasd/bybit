@@ -2739,7 +2739,6 @@ class TradingApplication:
 
     async def _start_public_ws(self, symbols: list[str]) -> None:
         """Start the public WebSocket and wire events to CandleStore."""
-        from trader.data.candles import CandleStore
         from trader.exchange.bybit_ws_public import BybitPublicWebSocket
         from trader.exchange.endpoint_selector import EndpointSelector
 
@@ -3252,9 +3251,7 @@ class TradingApplication:
                 ws_age = (datetime.now(tz=UTC) - self._health_checker._last_ws_message_at).total_seconds()
                 ws_stale = ws_age > ws_stale_threshold_s
 
-            feature_cycle_overload = (
-                max_feature_cycle_ms > 0 and self._last_strategy_cycle_ms > max_feature_cycle_ms
-            )
+            feature_cycle_overload = max_feature_cycle_ms > 0 and self._last_strategy_cycle_ms > max_feature_cycle_ms
             overloaded = lag_ms > max_lag_ms or ws_stale or feature_cycle_overload
             if overloaded:
                 overload_streak += 1
