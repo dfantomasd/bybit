@@ -66,6 +66,14 @@ services:
         value: "0"
       - key: SCALP_STRICT_SHADOW
         value: "false"
+      - key: SHADOW_RELAX_SCALP_FILTERS
+        value: "true"
+      - key: MIN_NET_SCALP_RETURN_PCT
+        value: "0.04"
+      - key: SCALP_MIN_OB_IMBALANCE
+        value: "0.08"
+      - key: SHADOW_MIN_ATR_MULTIPLE
+        value: "0.35"
       - key: MAX_ORDERBOOK_ACTIVE_SYMBOLS
         value: "10"
       - key: PERFORMANCE_FILTER_ENABLED

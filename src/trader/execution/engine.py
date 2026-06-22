@@ -121,6 +121,7 @@ class ExecutionEngine:
         profit_gate_pct: float = 3.0,
         profit_lock_pct: float = 5.0,
         live_armed: bool = True,
+        shadow_min_atr_multiple: float | None = None,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -155,6 +156,9 @@ class ExecutionEngine:
         self._profit_gate_pct = max(0.0, float(profit_gate_pct))
         self._profit_lock_pct = max(self._profit_gate_pct, float(profit_lock_pct))
         self._live_armed = bool(live_armed)
+        self._shadow_min_atr_multiple = (
+            Decimal(str(shadow_min_atr_multiple)) if shadow_min_atr_multiple is not None else None
+        )
 
         # P0: Hard block unsupported entry modes. MARKET is the default;
         # MAKER_FIRST is the supervised maker-with-escalation flow below.
@@ -1101,6 +1105,7 @@ class ExecutionEngine:
             except (ValueError, IndexError):
                 pass
         _t_before_risk = datetime.now(UTC)
+        shadow_min_atr = self._shadow_min_atr_multiple if self._shadow_mode and not self._shadow_apply_net_edge_gate else None
         try:
             decision = cast(
                 RiskDecision,
@@ -1114,6 +1119,7 @@ class ExecutionEngine:
                     spread=spread,
                     atr=atr,
                     shadow_mode=self._shadow_mode,
+                    min_atr_multiple=shadow_min_atr,
                 ),
             )
         except Exception as exc:

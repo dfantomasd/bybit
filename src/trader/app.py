@@ -2357,6 +2357,11 @@ class TradingApplication:
                 self._orderbook_tracker.latest_imbalance(s) if self._orderbook_tracker is not None else None
             ),
             live_armed=self._settings.LIVE_ARMED,
+            shadow_min_atr_multiple=(
+                self._settings.SHADOW_MIN_ATR_MULTIPLE
+                if shadow and not self._scalp_strict_shadow()
+                else None
+            ),
         )
 
         # P0.2: Restore unresolved pending entries from durable storage before any new entries.
@@ -4956,7 +4961,11 @@ class TradingApplication:
                         self._orderbook_tracker.latest_imbalance if self._orderbook_tracker is not None else None
                     ),
                     min_imbalance=self._settings.SCALP_MIN_OB_IMBALANCE,
-                    shadow_relaxed=self._initial_shadow_mode(),
+                    shadow_relaxed=(
+                        self._initial_shadow_mode()
+                        and self._settings.SHADOW_RELAX_SCALP_FILTERS
+                        and not self._scalp_strict_shadow()
+                    ),
                 )
             )
             log.info(

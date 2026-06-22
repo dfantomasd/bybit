@@ -137,6 +137,10 @@ class Settings(BaseSettings):
     """Strategy priority override used when RISK_PROFILE=SCALP."""
     SCALP_STRICT_SHADOW: bool = False
     """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
+    SHADOW_RELAX_SCALP_FILTERS: bool = True
+    """When SHADOW and not SCALP_STRICT_SHADOW, loosen scalp gates for paper-trade data collection."""
+    SHADOW_MIN_ATR_MULTIPLE: float = 0.35
+    """Min stop/ATR ratio in shadow sizing (scalp SL is 0.5×ATR; lower value avoids tick-round rejects)."""
     TREND_STRATEGY_ENABLED: bool = True
     """Enable the EMA crossover trend strategy in the ensemble."""
     TREND_MIN_ADX: float = 0.25

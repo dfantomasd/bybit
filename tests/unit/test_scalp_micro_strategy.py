@@ -198,6 +198,33 @@ class TestScalpMicroStrategy:
         assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
         assert "imbalance_rejected" in rejections
 
+    def test_weak_imbalance_allowed_in_shadow_relaxed(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+        strat = _strategy(
+            store,
+            rejections=rejections,
+            imbalance_provider=lambda _s: 0.05,
+            min_imbalance=0.15,
+            shadow_relaxed=True,
+        )
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
+        assert "imbalance_rejected" not in rejections
+
+    def test_net_edge_allowed_in_shadow_relaxed_when_costs_exceed_edge(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        rejections: list[str] = []
+        strat = _strategy(
+            store,
+            taker_fee_pct=0.2,
+            rejections=rejections,
+            shadow_relaxed=True,
+        )
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
+        assert "scalp_net_edge_rejected" not in rejections
+
     def test_missing_imbalance_fails_closed(self) -> None:
         closes, volumes = _cross_up_data()
         store = _make_store(closes, volumes)

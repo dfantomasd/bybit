@@ -141,6 +141,39 @@ def test_position_sizer_rejects_stop_below_fractional_atr_floor():
     assert "min ATR multiple" in reason
 
 
+def test_position_sizer_shadow_min_atr_multiple_allows_tighter_stop():
+    info = InstrumentInfo(
+        symbol="SHADOWUSDT",
+        market_type=MarketType.LINEAR,
+        base_coin="SHADOW",
+        quote_coin="USDT",
+        min_order_qty=Decimal("0.001"),
+        max_order_qty=Decimal("1000000"),
+        qty_step=Decimal("0.001"),
+        tick_size=Decimal("0.0001"),
+        min_notional=Decimal("5"),
+    )
+    sizer = PositionSizer(get_risk_limits(RiskProfile.MODERATE), info)
+
+    qty, reason = sizer.calculate(
+        capital=Decimal("1000"),
+        stop_distance_pct=Decimal("0.0019"),
+        desired_risk_pct=Decimal("1"),
+        current_exposure_pct=Decimal("0"),
+        drawdown_pct=Decimal("0"),
+        event_risk_score=0.0,
+        data_quality_score=1.0,
+        spread=None,
+        atr=Decimal("0.004"),
+        available_balance=Decimal("1000"),
+        entry_price=Decimal("100"),
+        min_atr_multiple=Decimal("0.35"),
+    )
+
+    assert qty > Decimal("0")
+    assert reason == ""
+
+
 def test_position_sizer_available_balance_cap_uses_profile_leverage():
     info = InstrumentInfo(
         symbol="LEVUSDT",
