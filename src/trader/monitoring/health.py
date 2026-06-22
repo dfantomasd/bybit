@@ -366,9 +366,7 @@ class HealthChecker:
         }
         postgres_blocks = self._postgres_required and not pg_ok
         passed = (
-            not postgres_blocks
-            and (redis_ok or not self._redis_required)
-            and (bybit_ok or not self._bybit_required)
+            not postgres_blocks and (redis_ok or not self._redis_required) and (bybit_ok or not self._bybit_required)
         )
         return {
             "passed": passed,
