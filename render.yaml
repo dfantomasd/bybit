@@ -63,9 +63,15 @@ services:
       - key: MAX_SAME_SIDE_POSITIONS
         value: "2"
       - key: STARTUP_WARMUP_SECONDS
-        value: "180"
+        value: "0"
+      - key: SCALP_STRICT_SHADOW
+        value: "false"
+      - key: MAX_ORDERBOOK_ACTIVE_SYMBOLS
+        value: "10"
+      - key: PERFORMANCE_FILTER_ENABLED
+        value: "false"
       - key: SHADOW_LOSS_GUARD_ENABLED
-        value: "true"
+        value: "false"
       - key: SHADOW_LOSS_GUARD_MIN_CLOSED
         value: "3"
       - key: SHADOW_LOSS_GUARD_WINDOW

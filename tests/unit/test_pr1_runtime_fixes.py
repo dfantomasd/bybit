@@ -483,8 +483,8 @@ async def test_below_exchange_minimum_rejected() -> None:
 
 @pytest.mark.asyncio
 async def test_startup_warmup_blocks_entry() -> None:
-    """During startup warmup, no new entries should be allowed."""
-    engine, adapter, _ = _make_engine(startup_warmup_seconds=300)
+    """During startup warmup, live entries should be blocked."""
+    engine, adapter, _ = _make_engine(startup_warmup_seconds=300, shadow=False)
 
     assert engine.is_in_warmup()
     prop = _proposal()
@@ -507,6 +507,14 @@ async def test_startup_warmup_expires() -> None:
     result = await engine.submit(prop, capital=capital, available_balance=capital)
     # Should not be blocked by warmup
     assert result is not None or adapter.place_order.called or True  # just check warmup doesn't block
+
+
+@pytest.mark.asyncio
+async def test_startup_warmup_does_not_block_shadow() -> None:
+    engine, adapter, _ = _make_engine(startup_warmup_seconds=300, shadow=True)
+    assert engine.is_in_warmup()
+    reason = engine._check_rate_limits("DOGEUSDT", "Buy")
+    assert reason is None
 
 
 @pytest.mark.asyncio

@@ -222,7 +222,7 @@ async def test_execution_engine_restores_pending_entry_ids() -> None:
 
 @pytest.mark.asyncio
 async def test_restored_pending_blocks_new_entry_until_resolved() -> None:
-    engine, adapter, risk = _make_engine(shadow=True)
+    engine, adapter, risk = _make_engine(shadow=False)
     engine.restore_pending_entries(["PENDING_001"])
 
     prop = _proposal()

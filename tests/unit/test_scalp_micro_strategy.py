@@ -206,6 +206,17 @@ class TestScalpMicroStrategy:
         assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
         assert "imbalance_missing" in rejections
 
+    def test_missing_imbalance_allowed_in_shadow_relaxed(self) -> None:
+        closes, volumes = _cross_up_data()
+        store = _make_store(closes, volumes)
+        strat = _strategy(
+            store,
+            imbalance_provider=lambda _s: None,
+            min_imbalance=0.15,
+            shadow_relaxed=True,
+        )
+        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
+
     def test_missing_imbalance_provider_fails_closed(self) -> None:
         closes, volumes = _cross_up_data()
         store = _make_store(closes, volumes)

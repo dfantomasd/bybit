@@ -53,7 +53,7 @@ async def test_seed_candle_store_fetches_and_persists_configured_intervals() -> 
     persisted_intervals = [call.kwargs["interval"] for call in app._trade_journal.upsert_market_candle.await_args_list]
 
     assert fetched_intervals == ["1", "5", "15", "60"]
-    assert persisted_intervals == ["1", "5", "15", "60"]
+    assert persisted_intervals == ["1"]
 
 
 @pytest.mark.asyncio

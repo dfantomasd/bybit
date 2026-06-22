@@ -228,7 +228,11 @@ class TradingApplication:
         """Whether confirmed candles for this interval should be written to Postgres."""
         if self._settings is None:
             return interval == "1"
-        return interval in self._settings.market_candle_persist_intervals()
+        persist_fn = getattr(self._settings, "market_candle_persist_intervals", None)
+        if callable(persist_fn):
+            return interval in persist_fn()
+        raw = getattr(self._settings, "MARKET_CANDLE_PERSIST_INTERVALS", "1")
+        return interval in {part.strip() for part in str(raw).split(",") if part.strip()}
 
     def _ws_topics_for_symbol(self, symbol: str) -> list[str]:
         """Build public WS topic list for one symbol."""
@@ -392,6 +396,8 @@ class TradingApplication:
 
     async def _restore_execution_pending_entries(self) -> None:
         """Reload unresolved durable pending entries into ExecutionEngine."""
+        if self._initial_shadow_mode():
+            return
         if self._trade_journal is None or self._execution_engine is None or not self._trade_journal.is_enabled:
             return
         try:
@@ -4941,6 +4947,7 @@ class TradingApplication:
                         self._orderbook_tracker.latest_imbalance if self._orderbook_tracker is not None else None
                     ),
                     min_imbalance=self._settings.SCALP_MIN_OB_IMBALANCE,
+                    shadow_relaxed=self._initial_shadow_mode(),
                 )
             )
             log.info(
@@ -5603,7 +5610,11 @@ class TradingApplication:
 
                 # Feature pipeline runs on full active_symbols universe (set at startup)
                 active_symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
-                _effective_blocked_symbols = self._effective_performance_blocks(active_symbols)
+                _effective_blocked_symbols = (
+                    set()
+                    if self._initial_shadow_mode()
+                    else self._effective_performance_blocks(active_symbols)
+                )
 
                 # Strategy evaluation uses execution_candidates only (Starter-optimized subset)
                 exec_symbols = self._screener.execution_candidates if self._screener is not None else list(_SYMBOLS)

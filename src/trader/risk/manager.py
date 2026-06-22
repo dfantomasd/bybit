@@ -152,6 +152,7 @@ class RiskManager:
         feature_vector: FeatureVector | None = None,
         spread: Decimal | None = None,
         atr: Decimal | None = None,
+        shadow_mode: bool = False,
     ) -> RiskDecision:
         """Evaluate a trade proposal and return a RiskDecision."""
         triggered_rules: list[str] = []
@@ -205,20 +206,24 @@ class RiskManager:
         if regime_context is not None:
             regime = regime_context.regime
             if not regime_context.trading_allowed:
+                if not (shadow_mode and regime == MarketRegime.LOW_LIQUIDITY):
+                    return self._reject(
+                        proposal,
+                        f"regime {regime.value} blocked trading: {regime_context.block_reason}",
+                        ["regime_block"],
+                        capital,
+                    )
+
+        if regime in _BLOCKING_REGIMES:
+            if shadow_mode and regime == MarketRegime.LOW_LIQUIDITY:
+                pass
+            else:
                 return self._reject(
                     proposal,
-                    f"regime {regime.value} blocked trading: {regime_context.block_reason}",
+                    f"regime {regime.value} blocks new entries",
                     ["regime_block"],
                     capital,
                 )
-
-        if regime in _BLOCKING_REGIMES:
-            return self._reject(
-                proposal,
-                f"regime {regime.value} blocks new entries",
-                ["regime_block"],
-                capital,
-            )
 
         # ----------------------------------------------------------------
         # 4. Daily loss limit
