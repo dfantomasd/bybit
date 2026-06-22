@@ -10,6 +10,7 @@ from trader.training.historical_seed import (
     DbCandle,
     _forward_path,
     _rule_side_from_features,
+    aggregate_candles,
     seed_candles_for_symbol,
 )
 
@@ -53,6 +54,38 @@ def test_rule_side_uses_ema_ordering() -> None:
     assert _rule_side_from_features(["ema_9", "ema_21"], [0.01, -0.01]) == "Buy"
     assert _rule_side_from_features(["ema_9", "ema_21"], [-0.01, 0.01]) == "Sell"
     assert _rule_side_from_features(["rsi_14"], [50.0]) is None
+
+
+def test_aggregate_candles_builds_full_5m_bars() -> None:
+    candles = _synthetic_candles(15, step=0.1)
+    bars_5 = aggregate_candles(candles, bucket_minutes=5)
+    assert len(bars_5) == 3
+    assert bars_5[0].open_time == candles[0].open_time
+    assert bars_5[0].close == candles[4].close
+
+
+def test_seed_includes_mtf_pattern_features_from_aggregated_bars() -> None:
+    candles = _synthetic_candles(180, step=0.15)
+    mtf = {
+        "5": aggregate_candles(candles, bucket_minutes=5),
+        "15": aggregate_candles(candles, bucket_minutes=15),
+    }
+    pending, stats = seed_candles_for_symbol(
+        symbol="BTCUSDT",
+        interval="1",
+        candles=candles,
+        horizons=[5],
+        label_bps_threshold=5.0,
+        skip_existing=False,
+        mtf_candles=mtf,
+    )
+
+    assert stats.samples_written > 0
+    sample = pending[-1]
+    names = set(sample["feature_names"])
+    assert "pat5_hammer" in names
+    assert "pat15_morning_star" in names
+    assert sample["feature_values"][sample["feature_names"].index("pat5_data_present")] == 1.0
 
 
 def test_seed_candles_for_symbol_generates_labelled_samples() -> None:

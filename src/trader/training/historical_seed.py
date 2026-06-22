@@ -23,7 +23,7 @@ import asyncio
 import hashlib
 import json
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import click
@@ -106,6 +106,84 @@ def _forward_path(candles: list[DbCandle], entry_idx: int, horizon_minutes: int)
     return path
 
 
+def _bucket_start(open_time: datetime, bucket_minutes: int) -> datetime:
+    """Align open_time to the start of a fixed-width candle bucket."""
+    ts = open_time.astimezone(UTC) if open_time.tzinfo else open_time.replace(tzinfo=UTC)
+    epoch_minutes = int(ts.timestamp() // 60)
+    aligned = (epoch_minutes // bucket_minutes) * bucket_minutes
+    return datetime.fromtimestamp(aligned * 60, tz=UTC)
+
+
+def _is_full_bucket(group: list[DbCandle], bucket_minutes: int) -> bool:
+    if len(group) != bucket_minutes:
+        return False
+    start = group[0].open_time
+    for idx, candle in enumerate(group):
+        expected = start + timedelta(minutes=idx)
+        if candle.open_time != expected:
+            return False
+    return True
+
+
+def aggregate_candles(candles_1m: list[DbCandle], *, bucket_minutes: int) -> list[DbCandle]:
+    """Build higher-TF OHLCV bars from consecutive 1m history (offline replay fallback)."""
+    if bucket_minutes <= 1 or not candles_1m:
+        return []
+    buckets: dict[datetime, list[DbCandle]] = {}
+    for candle in candles_1m:
+        start = _bucket_start(candle.open_time, bucket_minutes)
+        buckets.setdefault(start, []).append(candle)
+
+    aggregated: list[DbCandle] = []
+    for start in sorted(buckets):
+        group = sorted(buckets[start], key=lambda c: c.open_time)
+        if not _is_full_bucket(group, bucket_minutes):
+            continue
+        aggregated.append(
+            DbCandle(
+                open_time=start,
+                open=group[0].open,
+                high=max(item.high for item in group),
+                low=min(item.low for item in group),
+                close=group[-1].close,
+                volume=sum(item.volume for item in group),
+            )
+        )
+    return aggregated
+
+
+def _db_candle_to_store(candle: DbCandle) -> Candle:
+    return Candle(
+        open_time=candle.open_time,
+        open=candle.open,
+        high=candle.high,
+        low=candle.low,
+        close=candle.close,
+        volume=candle.volume,
+        confirm=True,
+    )
+
+
+def _sync_mtf_candles(
+    store: CandleStore,
+    *,
+    symbol: str,
+    mtf_candles: dict[str, list[DbCandle]],
+    mtf_ptr: dict[str, int],
+    as_of_close: datetime,
+) -> None:
+    """Add confirmed higher-TF bars whose close time is <= ``as_of_close``."""
+    for interval, candles in mtf_candles.items():
+        ptr = mtf_ptr.get(interval, 0)
+        while ptr < len(candles):
+            bar = candles[ptr]
+            if _candle_close_time(bar.open_time, interval) > as_of_close:
+                break
+            store.add(symbol, interval, _db_candle_to_store(bar))
+            ptr += 1
+        mtf_ptr[interval] = ptr
+
+
 def seed_candles_for_symbol(
     *,
     symbol: str,
@@ -119,6 +197,7 @@ def seed_candles_for_symbol(
     tp_atr_mult: float = 1.0,
     sl_atr_mult: float = 0.5,
     label_schema_version: str | None = None,
+    mtf_candles: dict[str, list[DbCandle]] | None = None,
 ) -> tuple[list[dict[str, Any]], SeedStats]:
     """Pure replay: compute features and pending DB rows without I/O."""
     if interval != "1":
@@ -133,6 +212,8 @@ def seed_candles_for_symbol(
     samples_written = 0
     samples_skipped = 0
     outcomes_resolved = 0
+    mtf_by_interval = {k: list(v) for k, v in (mtf_candles or {}).items()}
+    mtf_ptr = dict.fromkeys(mtf_by_interval, 0)
 
     for idx, row in enumerate(candles):
         store.add(
@@ -148,6 +229,15 @@ def seed_candles_for_symbol(
                 confirm=True,
             ),
         )
+        current_close = _candle_close_time(row.open_time, interval)
+        if mtf_by_interval:
+            _sync_mtf_candles(
+                store,
+                symbol=symbol,
+                mtf_candles=mtf_by_interval,
+                mtf_ptr=mtf_ptr,
+                as_of_close=current_close,
+            )
         if idx < _MIN_BARS - 1:
             continue
         if idx + max_horizon >= len(candles):
@@ -395,6 +485,14 @@ async def _seed_symbol(
     sl_mult = float(settings.MODEL_LABEL_SL_ATR_MULT)
     label_schema = active_label_schema_version(use_tpsl_exit=use_tpsl)
     candles = await _load_candles(pool, symbol=symbol, interval=interval)
+    mtf_candles: dict[str, list[DbCandle]] = {}
+    for mtf_interval in ("5", "15"):
+        loaded = await _load_candles(pool, symbol=symbol, interval=mtf_interval)
+        if not loaded and interval == "1":
+            loaded = aggregate_candles(candles, bucket_minutes=_interval_minutes(mtf_interval))
+        if loaded:
+            mtf_candles[mtf_interval] = loaded
+
     if len(candles) < _MIN_BARS + max(horizons):
         return SeedStats(
             symbol=symbol,
@@ -420,6 +518,7 @@ async def _seed_symbol(
         tp_atr_mult=tp_mult,
         sl_atr_mult=sl_mult,
         label_schema_version=label_schema,
+        mtf_candles=mtf_candles or None,
     )
 
     written = 0
