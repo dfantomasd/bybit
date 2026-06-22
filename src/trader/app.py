@@ -184,6 +184,8 @@ class TradingApplication:
         self._last_strategy_cycle_ms: float = 0.0
         self._drift_status: dict[str, Any] = {"status": "n/a"}
         self._last_retention_run_at: datetime | None = None
+        self._subscribe_watchdog: Any | None = None
+        self._online_learning_updates_since_checkpoint: int = 0
 
     def _candle_store_caps(self) -> dict[str, int]:
         settings = self._settings
@@ -221,6 +223,18 @@ class TradingApplication:
                 intervals.append(interval)
         return intervals
 
+    def _ws_topics_for_symbol(self, symbol: str) -> list[str]:
+        """Build public WS topic list for one symbol."""
+        topics = [f"kline.{interval}.{symbol}" for interval in self._market_data_intervals()]
+        topics.append(f"tickers.{symbol}")
+        if self._settings is not None and self._settings.ORDERBOOK_FEED_ENABLED:
+            topics.append(f"orderbook.50.{symbol}")
+        if self._settings is not None and self._settings.TRADE_FLOW_FEED_ENABLED:
+            topics.append(f"publicTrade.{symbol}")
+        if self._settings is not None and self._settings.LIQUIDATION_FEED_ENABLED:
+            topics.append(f"allLiquidation.{symbol}")
+        return topics
+
     # ------------------------------------------------------------------
     # Startup
     # ------------------------------------------------------------------
@@ -244,14 +258,18 @@ class TradingApplication:
             log_format=self._settings.LOG_FORMAT,
         )
         self._current_risk_profile_str = self._settings.RISK_PROFILE.value
+        from trader.monitoring.deploy_info import get_deploy_info
         from trader.training.labels import active_label_schema_version
 
+        deploy = get_deploy_info()
         log.info(
             "settings_loaded",
             trading_mode=self._settings.TRADING_MODE,
             risk_profile=self._settings.RISK_PROFILE,
             bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
             live_mode=self._settings.LIVE_MODE,
+            deploy_id=deploy.get("deploy_id") or None,
+            git_commit=deploy.get("git_commit") or None,
             train_strategy_allowlist=self._settings.TRAIN_STRATEGY_ALLOWLIST,
             train_include_candle_baseline=self._settings.TRAIN_INCLUDE_CANDLE_BASELINE,
             model_label_use_tpsl_exit=self._settings.MODEL_LABEL_USE_TPSL_EXIT,
@@ -2159,7 +2177,19 @@ class TradingApplication:
         )
         started = await self._telegram_bot.start(http_app=self._fastapi_app)
         if started:
-            log.info("telegram_bot_started", delivery_mode=delivery_mode, webhook_url=webhook_url or None)
+            from trader.monitoring.deploy_info import deploy_label
+
+            deploy_id = deploy_label()
+            log.info(
+                "telegram_bot_started",
+                delivery_mode=delivery_mode,
+                webhook_url=webhook_url or None,
+                deploy_id=deploy_id,
+            )
+            try:
+                await self._telegram_bot.notify(f"🚀 <b>Бот запущен</b>\nDeploy: <code>{html.escape(deploy_id)}</code>")
+            except Exception as notify_exc:
+                log.debug("telegram.startup_notify_failed", error=str(notify_exc))
         else:
             log.warning("telegram_bot_not_started", health=self._telegram_bot.health_snapshot())
 
@@ -2321,20 +2351,15 @@ class TradingApplication:
 
     async def _on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
+        if self._subscribe_watchdog is not None:
+            self._subscribe_watchdog.register(symbols)
         for symbol in symbols:
             # Seed historical candles (also invalidates cache, triggers recompute,
             # and pre-warms turnover_24h — see _seed_candle_store).
             await self._seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._ws_public is not None:
-                topics = [f"kline.{interval}.{symbol}" for interval in self._market_data_intervals()]
-                topics.append(f"tickers.{symbol}")
-                if self._settings is not None and self._settings.ORDERBOOK_FEED_ENABLED:
-                    topics.append(f"orderbook.50.{symbol}")
-                if self._settings is not None and self._settings.TRADE_FLOW_FEED_ENABLED:
-                    topics.append(f"publicTrade.{symbol}")
-                if self._settings is not None and self._settings.LIQUIDATION_FEED_ENABLED:
-                    topics.append(f"allLiquidation.{symbol}")
+                topics = self._ws_topics_for_symbol(symbol)
                 await self._ws_public.subscribe(topics)
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
 
@@ -2347,10 +2372,16 @@ class TradingApplication:
     async def _start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
         from trader.features.screener import MarketScreener
+        from trader.features.subscribe_watchdog import SubscribeWatchdog
 
         assert self._bybit_adapter is not None
-
         assert self._settings is not None
+
+        self._subscribe_watchdog = SubscribeWatchdog(
+            timeout_s=float(self._settings.SCREENER_SUBSCRIBE_TIMEOUT_SECONDS),
+            max_retries=int(self._settings.SCREENER_SUBSCRIBE_MAX_RETRIES),
+        )
+
         self._screener = MarketScreener(
             rest_client=self._bybit_adapter._rest,
             wide_max_symbols=self._settings.SCREENER_WIDE_MAX_SYMBOLS,
@@ -2774,6 +2805,8 @@ class TradingApplication:
 
         # Build subscription list from screened symbols
         category = self._settings.DEFAULT_MARKET_CATEGORY
+        if self._subscribe_watchdog is not None:
+            self._subscribe_watchdog.register(symbols)
         subs: list[str] = []
         for symbol in symbols:
             for interval in self._market_data_intervals():
@@ -2867,6 +2900,8 @@ class TradingApplication:
                         if self._candle_store is None:
                             continue
                         self._candle_store.add(event.symbol, event.interval, candle)
+                        if self._subscribe_watchdog is not None:
+                            self._subscribe_watchdog.confirm_ws_kline(event.symbol, event.interval)
 
                         if event.confirm:
                             self._last_confirmed_candle_at = datetime.now(tz=UTC)
@@ -3318,6 +3353,43 @@ class TradingApplication:
                     to_exec=self._screener._exec_candidates,
                 )
 
+    async def _run_symbol_subscribe_watchdog(self) -> None:
+        """Retry or reconnect WS when screener symbols never receive 1m klines."""
+        assert self._settings is not None
+        if self._subscribe_watchdog is None:
+            return
+        interval_s = max(2.0, min(10.0, float(self._settings.SCREENER_SUBSCRIBE_TIMEOUT_SECONDS) / 2.0))
+        while not self._shutdown_event.is_set():
+            try:
+                await asyncio.wait_for(self._shutdown_event.wait(), timeout=interval_s)
+                break
+            except TimeoutError:
+                pass
+
+            expired = self._subscribe_watchdog.expired()
+            if not expired:
+                continue
+
+            for symbol in expired:
+                self._subscribe_watchdog.record_timeout(symbol)
+                force_reconnect = self._subscribe_watchdog.mark_retry(symbol)
+                if self._ws_public is not None:
+                    if force_reconnect:
+                        log.warning(
+                            "screener.subscribe_watchdog.force_reconnect",
+                            symbol=symbol,
+                            timeout_s=self._settings.SCREENER_SUBSCRIBE_TIMEOUT_SECONDS,
+                        )
+                        await self._ws_public.force_reconnect()
+                    else:
+                        topics = self._ws_topics_for_symbol(symbol)
+                        log.warning(
+                            "screener.subscribe_watchdog.resubscribe",
+                            symbol=symbol,
+                            topics=topics,
+                        )
+                        await self._ws_public.subscribe(topics)
+
     async def _evaluate_feature_drift(self) -> dict[str, Any]:
         assert self._settings is not None
         if not self._settings.MODEL_DRIFT_DETECTION_ENABLED or self._trade_journal is None:
@@ -3355,23 +3427,44 @@ class TradingApplication:
             return
         if self._model_registry is None:
             return
+        challenger = self._model_registry.challenger
+        if challenger is None or not challenger.supports_online_learning:
+            return
+
+        from trader.training.labels import active_label_schema_version
+
+        label_schema = active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
         limit = int(self._settings.MODEL_ONLINE_LEARNING_MAX_UPDATES_PER_CYCLE)
-        batch = await self._trade_journal.fetch_online_learning_batch(limit=limit)
+        batch = await self._trade_journal.fetch_online_learning_batch(
+            limit=limit,
+            challenger_version=challenger.version,
+            label_schema_version=label_schema,
+        )
         if not batch:
             return
         applied = 0
         prediction_ids: list[str] = []
         for row in batch:
             try:
-                self._model_registry.partial_fit_challenger(row["features"], int(row["label"]))
-                prediction_ids.append(str(row["prediction_id"]))
-                applied += 1
+                if self._model_registry.partial_fit_challenger(row["features"], int(row["label"])):
+                    prediction_ids.append(str(row["prediction_id"]))
+                    applied += 1
             except Exception as exc:
                 log.debug("online_learning.partial_fit_failed", error=str(exc))
         if prediction_ids:
             await self._trade_journal.mark_online_learning_applied(prediction_ids)
         if applied:
-            log.info("online_learning.updated", samples=applied)
+            self._online_learning_updates_since_checkpoint += applied
+            checkpoint_every = max(1, int(self._settings.MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY))
+            if self._online_learning_updates_since_checkpoint >= checkpoint_every:
+                await self._model_registry.save_checkpoint(challenger)
+                self._online_learning_updates_since_checkpoint = 0
+                log.info(
+                    "online_learning.checkpoint_saved",
+                    version=challenger.version,
+                    samples=challenger.training_samples,
+                )
+            log.info("online_learning.updated", samples=applied, model_version=challenger.version)
 
     async def _run_data_retention(self) -> None:
         assert self._settings is not None
@@ -4415,7 +4508,11 @@ class TradingApplication:
             except Exception as exc:
                 telegram_health = {"enabled": True, "error": str(exc)}
 
+        from trader.monitoring.deploy_info import get_deploy_info
+
         return {
+            "deploy": get_deploy_info(),
+            "subscribe_watchdog": (self._subscribe_watchdog.to_dict() if self._subscribe_watchdog is not None else {}),
             "last_strategy_loop_at": self._last_strategy_loop_at.isoformat() if self._last_strategy_loop_at else None,
             "last_ws_message_age_s": ws_age,
             "last_confirmed_candle_age_s": confirmed_age,
@@ -5688,6 +5785,12 @@ class TradingApplication:
 
             retention_task = asyncio.create_task(self._run_data_retention(), name="data-retention")
             self._background_tasks.append(retention_task)
+
+            subscribe_watchdog_task = asyncio.create_task(
+                self._run_symbol_subscribe_watchdog(),
+                name="subscribe-watchdog",
+            )
+            self._background_tasks.append(subscribe_watchdog_task)
 
             if self._telegram_bot is not None and hasattr(self._telegram_bot, "refresh_delivery"):
                 try:

@@ -404,15 +404,15 @@ class ChallengerModel:
             log.debug("challenger.predict_batch_failed", exc_info=exc)
             return zero_scores, zero_labels
 
-    def partial_fit(self, features: list[float], label: int) -> None:
-        """Online update with a single labelled sample."""
+    def partial_fit(self, features: list[float], label: int) -> bool:
+        """Online update with a single labelled sample. Returns True when applied."""
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
-            return
+            return False
         if self.model_type.upper() in ("GBDT", "MLP"):
             # Gradient-boosted trees and MLPs cannot be updated online; the
             # periodic batch retrain covers new data instead.
-            return
+            return False
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
         try:
@@ -420,8 +420,14 @@ class ChallengerModel:
             x_scaled = self._scaler.transform(x)
             self._clf.partial_fit(x_scaled, y, classes=[0, 1])
             self.training_samples += 1
+            return True
         except Exception as exc:
             log.debug("challenger.partial_fit_failed", exc_info=exc)
+            return False
+
+    @property
+    def supports_online_learning(self) -> bool:
+        return self.model_type.upper() in ("SGD", "LOGREG")
 
     def to_bytes(self) -> bytes:
         """Serialize model to bytes for PostgreSQL storage."""
@@ -533,9 +539,10 @@ class ModelRegistry:
 
         return self.score_live(features, feature_names)
 
-    def partial_fit_challenger(self, features: list[float], label: int) -> None:
+    def partial_fit_challenger(self, features: list[float], label: int) -> bool:
         if self._challenger is not None:
-            self._challenger.partial_fit(features, label)
+            return self._challenger.partial_fit(features, label)
+        return False
 
     async def load_active_model(self) -> ChallengerModel | None:
         """Load compatible champion and challenger; return champion when present."""

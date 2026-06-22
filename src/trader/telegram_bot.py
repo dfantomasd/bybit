@@ -1548,9 +1548,18 @@ class TelegramMonitorBot:
             await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{exc}</code>")
             return
 
+        from trader.monitoring.deploy_info import get_deploy_info
+
+        deploy = get_deploy_info()
         ctrl = self._controller
         lines = [
             "<b>Статус системы</b>",
+        ]
+        if deploy.get("deploy_id"):
+            lines.append(f"Deploy: <code>{html.escape(str(deploy['deploy_id']))}</code>")
+        elif deploy.get("git_commit"):
+            lines.append(f"Commit: <code>{html.escape(str(deploy['git_commit']))}</code>")
+        lines += [
             f"Общее состояние: <code>{self._ru(health.overall)}</code>",
             f"Процесс: <code>{self._ru(health.system_status.value)}</code>",
             f"Режим торговли: <code>{health.trading_mode.value}</code>",
