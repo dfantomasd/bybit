@@ -412,7 +412,7 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # Burst / entry rate limiting
     # ------------------------------------------------------------------
-    MAX_NEW_ENTRIES_PER_MINUTE: int = 1
+    MAX_NEW_ENTRIES_PER_MINUTE: int = 4
     """Maximum new position entries allowed per minute (burst guard)."""
     MAX_CONCURRENT_PENDING_ENTRIES: int = 1
     """Maximum simultaneous positions in SUBMITTING/REST_ACCEPTED state."""

@@ -4164,7 +4164,7 @@ class TelegramMonitorBot:
             except Exception as _exc:
                 log.debug("telegram.render_settings_failed", error=str(_exc))
 
-        entries = s.get("max_entries_per_minute", 1)
+        entries = s.get("max_entries_per_minute", 4)
         max_pos = s.get("max_positions", 2)
         same_side = s.get("max_same_side", 2)
         price_cap = s.get("screener_max_price_usd", 25)
