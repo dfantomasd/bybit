@@ -2,7 +2,9 @@
 
 from trader.modules.diagnostics import DiagnosticsModule
 from trader.modules.execution_runtime import ExecutionRuntimeModule
+from trader.modules.lifecycle import LifecycleModule
 from trader.modules.market_data import MarketDataModule
+from trader.modules.operator_controls import OperatorControlsModule
 from trader.modules.ops import OpsModule
 from trader.modules.registry import ModuleRegistry
 from trader.modules.signal_policy import SignalPolicyModule
@@ -13,8 +15,10 @@ from trader.modules.training import TrainingModule
 __all__ = [
     "DiagnosticsModule",
     "ExecutionRuntimeModule",
+    "LifecycleModule",
     "MarketDataModule",
     "ModuleRegistry",
+    "OperatorControlsModule",
     "OpsModule",
     "SignalPolicyModule",
     "TradingLoopModule",

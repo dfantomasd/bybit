@@ -22,9 +22,7 @@ CRITICAL SAFETY RULES:
 from __future__ import annotations
 
 import asyncio
-import html
 import json
-import os
 import signal
 import sys
 from collections import deque
@@ -34,14 +32,14 @@ from typing import Any, cast
 
 import uvicorn
 
-from trader.domain.enums import SystemStatus, TradingMode
+from trader.domain.enums import SystemStatus
 from trader.domain.models import FeatureVector
 from trader.modules.diagnostics import DiagnosticsModule
 from trader.modules.execution_runtime import ExecutionRuntimeModule
 from trader.modules.registry import ModuleRegistry
 from trader.modules.signal_policy import SignalPolicyModule
 from trader.modules.trading_loop import TradingLoopModule
-from trader.monitoring.logging import configure_logging, get_logger
+from trader.monitoring.logging import get_logger
 from trader.runtime.constants import (
     _CRITICAL_TASK_NAMES,
     _DIAG_WINDOW,
@@ -216,158 +214,28 @@ class TradingApplication:
     # ------------------------------------------------------------------
 
     async def _load_settings(self) -> None:
-        from trader.config import Settings
 
-        self._settings = Settings()
-
-        if self._settings.TRADING_MODE == TradingMode.LIVE and not self._settings.LIVE_MODE:
-            log.critical(
-                "live_mode_safety_gate_blocked",
-                reason="LIVE_MODE env var must be explicitly set to true",
-            )
-            raise SystemExit(1)
+        await self._modules.lifecycle.load_settings()
 
     async def _configure_observability(self) -> None:
-        assert self._settings is not None
-        configure_logging(
-            log_level=self._settings.LOG_LEVEL,
-            log_format=self._settings.LOG_FORMAT,
-        )
-        self._current_risk_profile_str = self._settings.RISK_PROFILE.value
-        from trader.monitoring.deploy_info import get_deploy_info
-        from trader.training.labels import active_label_schema_version
 
-        deploy = get_deploy_info()
-        log.info(
-            "settings_loaded",
-            trading_mode=self._settings.TRADING_MODE,
-            risk_profile=self._settings.RISK_PROFILE,
-            bybit_use_testnet=self._settings.BYBIT_USE_TESTNET,
-            live_mode=self._settings.LIVE_MODE,
-            deploy_id=deploy.get("deploy_id") or None,
-            git_commit=deploy.get("git_commit") or None,
-            train_strategy_allowlist=self._settings.TRAIN_STRATEGY_ALLOWLIST,
-            train_include_candle_baseline=self._settings.TRAIN_INCLUDE_CANDLE_BASELINE,
-            model_label_use_tpsl_exit=self._settings.MODEL_LABEL_USE_TPSL_EXIT,
-            active_label_schema=active_label_schema_version(
-                use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT)
-            ),
-        )
+        await self._modules.lifecycle.configure_observability()
 
     async def _run_preflight(self) -> None:
-        from trader.exchange.endpoint_selector import EndpointSelector
-        from trader.monitoring.health import HealthChecker
 
-        assert self._settings is not None
-        self._status = SystemStatus.PREFLIGHT
-
-        bybit_base = EndpointSelector(
-            self._settings.BYBIT_REGION,
-            self._settings.BYBIT_USE_TESTNET,
-        ).rest_base
-
-        postgres_required = (
-            self._settings.PREFLIGHT_POSTGRES_REQUIRED
-            if self._settings.PREFLIGHT_POSTGRES_REQUIRED is not None
-            else self._settings.TRADING_MODE in (TradingMode.CANARY_LIVE, TradingMode.LIVE)
-        )
-
-        self._health_checker = HealthChecker(
-            postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
-            redis_url=self._settings.REDIS_URL.get_secret_value(),
-            redis_required=self._settings.REDIS_REQUIRED,
-            bybit_required=self._settings.BYBIT_CONNECTIVITY_REQUIRED,
-            bybit_rest_url=bybit_base,
-            trading_mode=self._settings.TRADING_MODE,
-            system_status=self._status,
-            model_enabled=self._settings.MODEL_ENABLED,
-            postgres_retry_attempts=self._settings.PREFLIGHT_POSTGRES_RETRY_ATTEMPTS,
-            postgres_retry_delay_s=self._settings.PREFLIGHT_POSTGRES_RETRY_DELAY_SECONDS,
-            postgres_required=postgres_required,
-            postgres_optional_max_attempts=self._settings.PREFLIGHT_POSTGRES_OPTIONAL_MAX_ATTEMPTS,
-        )
-
-        result = await self._health_checker.run_preflight()
-        checks = result["checks"]
-        postgres_required = bool(result.get("postgres_required", True))
-
-        for check_name, passed in checks.items():
-            if passed:
-                log.info("preflight_check_passed", check=check_name)
-            elif check_name == "postgres" and not postgres_required:
-                log.warning(
-                    "preflight_check_deferred",
-                    check=check_name,
-                    trading_mode=self._settings.TRADING_MODE.value,
-                    hint="continuing startup without postgres",
-                )
-            else:
-                log.error("preflight_check_failed", check=check_name)
-
-        if not result["passed"]:
-            log.critical("preflight_failed", checks=checks)
-            raise SystemExit(1)
-
-        if not checks.get("postgres") and not postgres_required:
-            log.warning(
-                "preflight_postgres_optional_continuing",
-                trading_mode=self._settings.TRADING_MODE.value,
-            )
-
-        log.info("preflight_passed")
+        await self._modules.lifecycle.run_preflight()
 
     async def _start_trade_journal(self) -> None:
-        """Start best-effort Postgres memory for trades and performance."""
-        from trader.storage.trade_journal import TradeJournal
 
-        assert self._settings is not None
-        self._trade_journal = TradeJournal(
-            postgres_dsn=self._settings.POSTGRES_DSN.get_secret_value(),
-            enabled=self._settings.TRADE_JOURNAL_ENABLED,
-            fetch_timeout_seconds=self._settings.TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS,
-            pool_max_size=self._settings.TRADE_JOURNAL_POOL_MAX_SIZE,
-            reconnect_max_backoff_seconds=self._settings.TRADE_JOURNAL_RECONNECT_MAX_BACKOFF_SECONDS,
-            auth_circuit_breaker_min_backoff_seconds=self._settings.TRADE_JOURNAL_AUTH_CIRCUIT_BREAKER_MIN_BACKOFF_SECONDS,
-        )
-        await self._trade_journal.connect()
-        await self._maybe_run_startup_retention()
-        task = asyncio.create_task(self._run_trade_journal_reconnector(), name="trade-journal-reconnector")
-        self._background_tasks.append(task)
+        await self._modules.lifecycle.start_trade_journal()
 
     async def _run_trade_journal_reconnector(self) -> None:
         """Keep trying Postgres after transient Render startup/network failures."""
         await self._modules.ops.run_trade_journal_reconnector()
 
     async def _restore_execution_pending_entries(self) -> None:
-        """Reload unresolved durable pending entries into ExecutionEngine."""
-        if self._initial_shadow_mode():
-            return
-        if self._trade_journal is None or self._execution_engine is None or not self._trade_journal.is_enabled:
-            return
-        try:
-            pending_records = await self._trade_journal.get_pending_durable_orders()
-            unresolved_records = []
-            skipped_resolved = []
-            for record in pending_records:
-                oid = str(record.get("order_link_id") or "")
-                if oid and await self._trade_journal.is_order_resolved(oid):
-                    skipped_resolved.append(oid)
-                    continue
-                unresolved_records.append(record)
-            if skipped_resolved:
-                log.info(
-                    "execution_engine.pending_restore_skipped_resolved",
-                    ids=skipped_resolved,
-                )
-            if unresolved_records:
-                self._execution_engine.restore_pending_entries_with_symbols(unresolved_records)
-                log.info(
-                    "execution_engine.pending_restored",
-                    count=len(unresolved_records),
-                    ids=[r.get("order_link_id") for r in unresolved_records],
-                )
-        except Exception as exc:
-            log.warning("execution_engine.pending_restore_failed", error=str(exc))
+
+        await self._modules.lifecycle.restore_execution_pending_entries()
 
     # ------------------------------------------------------------------
     # HTTP state proxy
@@ -377,132 +245,28 @@ class TradingApplication:
         return AppStateProxy(self)
 
     async def _start_http_server(self) -> asyncio.Task[Any]:
-        from trader.api.fastapi_app import create_app
 
-        assert self._settings is not None
-        import secrets
-
-        internal_api_key = self._settings.INTERNAL_API_KEY.get_secret_value()
-        if not internal_api_key:
-            internal_api_key = secrets.token_urlsafe(32)
-            log.warning(
-                "http_server.generated_internal_api_key",
-                reason="INTERNAL_API_KEY is not configured; authenticated endpoints are only usable inside this process",
-            )
-        port = int(os.getenv("PORT", str(self._settings.FASTAPI_PORT)))
-        log.info("http_server_starting", port=port)
-
-        fastapi_app = create_app(
-            api_key=internal_api_key,
-            health_checker=self._health_checker,
-            state_store=_AppStateProxy(self),
-            trade_journal=self._trade_journal,
-            runtime_settings=self._runtime_settings,
-            set_runtime_setting=self._set_runtime_setting,
-        )
-        self._fastapi_app = fastapi_app
-
-        config = uvicorn.Config(
-            app=fastapi_app,
-            # Container service must bind internally; external exposure belongs to the platform.
-            host="0.0.0.0",  # noqa: S104  # nosec B104
-            port=port,
-            log_level="warning",
-            access_log=False,
-        )
-        self._uvicorn_server = uvicorn.Server(config=config)
-        task = asyncio.create_task(self._uvicorn_server.serve(), name="http-server")
-        self._background_tasks.append(task)
-        return task
+        return await self._modules.lifecycle.start_http_server()
 
     async def _start_bybit_adapter(self) -> None:
-        from trader.exchange.bybit_adapter import BybitAdapter
 
-        assert self._settings is not None
-        self._bybit_adapter = BybitAdapter(
-            api_key=self._settings.BYBIT_API_KEY.get_secret_value(),
-            api_secret=self._settings.BYBIT_API_SECRET.get_secret_value(),
-            region_code=self._settings.BYBIT_REGION.value,
-            use_testnet=self._settings.BYBIT_USE_TESTNET,
-            default_category=self._settings.DEFAULT_MARKET_CATEGORY,
-            trade_journal=self._trade_journal,
-            trading_mode=self._settings.TRADING_MODE.value,
-        )
-        log.info("bybit_adapter_created", category=self._settings.DEFAULT_MARKET_CATEGORY)
-
-        from trader.exchange.fee_provider import FeeRateProvider
-
-        self._fee_provider = FeeRateProvider(
-            rest=self._bybit_adapter._rest,
-            category=self._settings.DEFAULT_MARKET_CATEGORY,
-            default_maker=self._settings.DEFAULT_LINEAR_MAKER_FEE_RATE,
-            default_taker=self._settings.DEFAULT_LINEAR_TAKER_FEE_RATE,
-            shadow_mode=self._initial_shadow_mode(),
-        )
-
-        # Run Bybit exchange preflight checks (clock skew, API perms, balance, etc.)
-        has_key = bool(self._settings.BYBIT_API_KEY.get_secret_value())
-        if has_key:
-            try:
-                report = await self._bybit_adapter.initialize()
-                is_live = self._settings.LIVE_MODE and self._settings.TRADING_MODE in (
-                    TradingMode.LIVE,
-                    TradingMode.CANARY_LIVE,
-                )
-                if not report.passed:
-                    if is_live:
-                        log.critical(
-                            "bybit_preflight_failed_blocking_live",
-                            errors=report.errors,
-                        )
-                        raise SystemExit(1)
-                    else:
-                        log.warning(
-                            "bybit_preflight_partial_continuing_shadow",
-                            errors=report.errors,
-                            warnings=report.warnings,
-                        )
-                else:
-                    log.info("bybit_preflight_passed", warnings=report.warnings)
-            except SystemExit:
-                raise
-            except Exception as exc:
-                # P0.7: exception during preflight is fatal for CANARY_LIVE / LIVE
-                is_active = self._settings.LIVE_MODE and self._settings.TRADING_MODE in (
-                    TradingMode.LIVE,
-                    TradingMode.CANARY_LIVE,
-                )
-                if is_active:
-                    log.critical("bybit_preflight_exception_blocking_live", error=str(exc))
-                    raise SystemExit(1) from exc
-                log.warning("bybit_preflight_exception_continuing_shadow", error=str(exc))
-        else:
-            log.info("bybit_adapter_skipped_preflight", reason="no_api_key_configured")
+        await self._modules.lifecycle.start_bybit_adapter()
 
     # ------------------------------------------------------------------
     # Operator control callbacks (wired into TradingController)
     # ------------------------------------------------------------------
 
     async def _pause_trading(self) -> None:
-        self._trading_paused = True
-        log.info("trading.paused")
+
+        await self._modules.operator.pause_trading()
 
     async def _resume_trading(self) -> None:
-        self._trading_paused = False
-        log.info("trading.resumed")
+
+        await self._modules.operator.resume_trading()
 
     async def _set_shadow_mode(self, enabled: bool) -> None:
-        assert self._settings is not None
-        if not enabled:
-            if not self._active_execution_allowed():
-                raise RuntimeError(
-                    "Active execution requires BYBIT_USE_TESTNET=true, or LIVE_MODE=true with TRADING_MODE=LIVE/CANARY_LIVE."
-                )
-        if self._execution_engine is not None:
-            self._execution_engine._shadow_mode = enabled
-        if self._fee_provider is not None:
-            self._fee_provider.shadow_mode = enabled
-        log.info("shadow_mode.changed", enabled=enabled)
+
+        await self._modules.operator.set_shadow_mode(enabled)
 
     def _active_execution_allowed(self) -> bool:
         return self._modules.signal_policy.active_execution_allowed()
@@ -520,146 +284,28 @@ class TradingApplication:
         return self._modules.signal_policy.expectancy_gates_apply()
 
     async def _change_risk_profile(self, profile: Any) -> None:
-        """Hot-swap the risk profile without restarting — preserves all risk state.
 
-        SAFETY: Blocked in LIVE and CANARY_LIVE modes because a profile change
-        alters leverage limits, position caps, and daily-loss thresholds while
-        real positions are open — an unsafe combination requiring a clean restart.
-        """
-        assert self._settings is not None
-        if self._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE):
-            raise RuntimeError(
-                "Risk profile hot-swap is not permitted in LIVE / CANARY_LIVE mode. "
-                "Restart the service to apply a new profile."
-            )
-
-        old = self._current_risk_profile_str
-        capital = await self._refresh_balance()
-
-        # Preserve ALL risk state that spans profile boundaries.
-        # Reinitialising would silently reset peak equity → new hard-stop baseline
-        # that ignores losses already taken — a critical safety hole.
-        old_drawdown = self._risk_manager._drawdown if self._risk_manager is not None else None
-        old_daily_pnl = self._risk_manager.daily_pnl if self._risk_manager is not None else Decimal("0")
-
-        if self._settings is not None:
-            self._settings.RISK_PROFILE = profile
-        await self._init_risk_manager(capital)
-
-        if self._risk_manager is not None:
-            if old_drawdown is not None:
-                self._risk_manager._drawdown = old_drawdown
-            # Restore daily PnL so daily loss limit is not reset mid-day
-            if old_daily_pnl != Decimal("0"):
-                self._risk_manager._daily_pnl = old_daily_pnl
-
-        # Rewire execution engine to the new risk manager
-        if self._execution_engine is not None:
-            self._execution_engine._risk_manager = self._risk_manager
-        self._current_risk_profile_str = profile.value
-        log.info("risk_profile.changed", old=old, new=profile.value)
-        if self._telegram_bot is not None:
-            await self._telegram_bot.notify_risk_changed(old, profile.value)
+        await self._modules.operator.change_risk_profile(profile)
 
     async def _emergency_stop(self) -> None:
-        self._trading_paused = True
-        if self._kill_switch is not None:
-            from trader.domain.enums import KillSwitchMode
 
-            await self._kill_switch.activate(
-                KillSwitchMode.FULL_STOP,
-                reason="operator emergency stop via Telegram",
-                operator="telegram",
-            )
-        log.critical("emergency_stop.activated", source="telegram")
-        if self._telegram_bot is not None:
-            await self._telegram_bot.notify(
-                "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
-            )
+        await self._modules.operator.emergency_stop()
 
     async def _start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:
-        """Start offline model training in a subprocess; trading loop stays isolated."""
-        async with self._training_start_lock:
-            if self._training_task is not None and not self._training_task.done():
-                return "⏳ Обучение уже идет."
-            if self._trade_journal is not None and not self._trade_journal.is_enabled:
-                await self._trade_journal.reconnect_if_needed(force=True)
-            if self._trade_journal is None or not self._trade_journal.is_enabled:
-                raise RuntimeError("Trade journal/Postgres is not available.")
-            self._training_task = asyncio.create_task(
-                self._run_model_training(min_samples, horizon, label_bps),
-                name="model-training",
-            )
-            self._background_tasks.append(self._training_task)
-        return (
-            "🧠 <b>Обучение запущено</b>\n"
-            f"минимум примеров=<code>{min_samples}</code>, горизонт=<code>{horizon}m</code>, "
-            f"порог=<code>{label_bps:g} bps</code>\n"
-            "Результат придет сюда после завершения."
-        )
+
+        return await self._modules.operator.start_model_training(min_samples, horizon, label_bps)
 
     async def _start_model_training_all(self) -> str:
-        """Start sequential training on all available data for every horizon (5m, 15m, 30m, 60m)."""
-        async with self._training_start_lock:
-            if self._training_task is not None and not self._training_task.done():
-                return "⏳ Обучение уже идет."
-            if self._trade_journal is not None and not self._trade_journal.is_enabled:
-                await self._trade_journal.reconnect_if_needed(force=True)
-            if self._trade_journal is None or not self._trade_journal.is_enabled:
-                raise RuntimeError("Trade journal/Postgres is not available.")
-            self._training_task = asyncio.create_task(
-                self._run_model_training_all(),
-                name="model-training-all",
-            )
-            self._background_tasks.append(self._training_task)
-        return (
-            "🧠🔁 <b>Обучение ВСЕ запущено</b>\n"
-            f"Горизонты: <code>5m, 15m, 30m, 60m</code> | Порог: <code>{self._settings.MODEL_AUTO_TRAIN_LABEL_BPS} bps</code>\n"
-            "Используются все доступные примеры (мин. 100).\n"
-            "Результаты придут по мере завершения каждого горизонта."
-        )
+
+        return await self._modules.operator.start_model_training_all()
 
     async def _run_model_training_all(self) -> None:
         """Run training sequentially for all horizons using all available labeled data."""
         await self._modules.training.run_model_training_all()
 
     async def _start_model_promote(self, version: str) -> str:
-        """Promote a model through the same strict engine used by auto-promotion."""
-        if self._trade_journal is None or not self._trade_journal.is_enabled:
-            raise RuntimeError("Trade journal/Postgres is not available.")
 
-        def code_text(value: str, limit: int = 800) -> str:
-            return html.escape(value[-limit:])
-
-        log.info("model_promote.started", version=version)
-        try:
-            from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
-
-            async def _reload_registry() -> None:
-                if self._model_registry is not None:
-                    await self._model_registry.load_active_model()
-
-            engine = AutoPromotionEngine(
-                trade_journal=self._trade_journal,
-                config=AutoPromotionConfig.from_settings(self._settings),
-                reload_registry=_reload_registry,
-            )
-            decision = await asyncio.wait_for(engine.promote(version), timeout=60.0)
-            if decision.promote:
-                message = f"Model {version} promoted to CHAMPION: {', '.join(decision.reasons)}"
-                if self._telegram_bot is not None:
-                    await self._telegram_bot.notify(
-                        f"🏆 <b>Модель промоутирована</b>\n<code>{code_text(message)}</code>"
-                    )
-                return f"🏆 <b>Промоут успешен!</b>\n<code>{code_text(message)}</code>"
-            out = "; ".join(decision.reasons)
-            if self._telegram_bot is not None:
-                await self._telegram_bot.notify(f"❌ <b>Промоут не прошёл</b>\n<code>{code_text(out)}</code>")
-            return f"❌ <b>Промоут не прошёл:</b>\n<code>{code_text(out)}</code>"
-        except TimeoutError:
-            return "❌ Промоут завис (timeout 60s)"
-        except Exception as exc:
-            return f"❌ Ошибка промоута: <code>{html.escape(str(exc))}</code>"
+        return await self._modules.operator.start_model_promote(version)
 
     async def _run_model_training(self, min_samples: int, horizon: int, label_bps: float) -> None:
         await self._modules.training.run_model_training(min_samples, horizon, label_bps)
@@ -743,165 +389,24 @@ class TradingApplication:
         return SignalPolicyModule.feature_values_for_side(vec, side)
 
     def _runtime_settings(self) -> dict[str, Any]:
-        from trader.training.labels import active_label_schema_version
 
-        return {
-            "paused": self._trading_paused,
-            "shadow": self._execution_engine._shadow_mode if self._execution_engine is not None else True,
-            "risk_profile": self._current_risk_profile_str,
-            "max_entries_per_minute": (
-                self._execution_engine._max_entries_per_minute if self._execution_engine is not None else None
-            ),
-            "max_concurrent_pending": (
-                self._execution_engine._max_concurrent_pending if self._execution_engine is not None else None
-            ),
-            "max_same_side": self._execution_engine._max_same_side if self._execution_engine is not None else None,
-            "max_positions": (
-                self._execution_engine._max_open_positions
-                if self._execution_engine is not None
-                else (self._settings.MAX_POSITIONS if self._settings is not None else None)
-            ),
-            "screener_max_price_usd": self._settings.SCREENER_MAX_PRICE_USD if self._settings is not None else None,
-            "feature_max_symbols": self._screener._feature_max if self._screener is not None else None,
-            "execution_candidates": self._screener._exec_candidates if self._screener is not None else None,
-            "manual_symbols": self._selected_symbols(),
-            "model_gate_canary_enabled": (
-                self._settings.MODEL_GATE_CANARY_ENABLED if self._settings is not None else False
-            ),
-            "model_gate_threshold": self._settings.MODEL_SHADOW_GATE_THRESHOLD if self._settings is not None else None,
-            "model_gate_quality": self._model_gate_quality,
-            "model_auto_train_min_samples": (
-                self._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES if self._settings is not None else 1000
-            ),
-            "model_auto_train_horizon_minutes": (
-                self._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES if self._settings is not None else 5
-            ),
-            "model_auto_train_label_bps": (
-                self._settings.MODEL_AUTO_TRAIN_LABEL_BPS if self._settings is not None else 2.0
-            ),
-            "label_schema_version": (
-                active_label_schema_version(use_tpsl_exit=bool(self._settings.MODEL_LABEL_USE_TPSL_EXIT))
-                if self._settings is not None
-                else "directional_net_v1"
-            ),
-            "strategy_priority_order": (self._settings.STRATEGY_PRIORITY_ORDER if self._settings is not None else ""),
-            "scalp_strategy_priority_order": (
-                self._settings.SCALP_STRATEGY_PRIORITY_ORDER if self._settings is not None else ""
-            ),
-        }
+        return self._modules.operator.runtime_settings()
 
     async def _set_runtime_setting(self, key: str, value: Any) -> str:
-        assert self._settings is not None
-        key = key.lower()
-        if key == "entries":
-            ivalue = int(value)
-            if not 0 < ivalue <= 10:
-                raise ValueError("entries must be 1..10")
-            self._settings.MAX_NEW_ENTRIES_PER_MINUTE = ivalue
-            if self._execution_engine is not None:
-                self._execution_engine._max_entries_per_minute = ivalue
-            return f"Max entries/min set to {ivalue}"
-        if key == "pending":
-            ivalue = int(value)
-            if not 0 < ivalue <= 10:
-                raise ValueError("pending must be 1..10")
-            self._settings.MAX_CONCURRENT_PENDING_ENTRIES = ivalue
-            if self._execution_engine is not None:
-                self._execution_engine._max_concurrent_pending = ivalue
-            return f"Max pending entries set to {ivalue}"
-        if key == "same_side":
-            ivalue = int(value)
-            if not 0 < ivalue <= 10:
-                raise ValueError("same_side must be 1..10")
-            self._settings.MAX_SAME_SIDE_POSITIONS = ivalue
-            if self._execution_engine is not None:
-                self._execution_engine._max_same_side = ivalue
-            return f"Max same-side positions set to {ivalue}"
-        if key == "max_positions":
-            ivalue = int(value)
-            if not 1 <= ivalue <= 10:
-                raise ValueError("max_positions must be 1..10")
-            self._settings.MAX_POSITIONS = ivalue
-            if self._execution_engine is not None:
-                self._execution_engine._max_open_positions = ivalue
-            return f"Max simultaneous positions set to {ivalue}"
-        if key == "price_cap":
-            fvalue = float(value)
-            if fvalue < 0 or fvalue > 100_000:
-                raise ValueError("price_cap must be 0..100000")
-            self._settings.SCREENER_MAX_PRICE_USD = fvalue
-            if self._screener is not None:
-                self._screener._max_price_usd = fvalue
-            return f"Screener price cap set to {fvalue:g}"
-        if key == "feature_symbols":
-            ivalue = int(value)
-            if not 1 <= ivalue <= self._settings.SCREENER_WIDE_MAX_SYMBOLS:
-                raise ValueError(f"feature_symbols must be 1..{self._settings.SCREENER_WIDE_MAX_SYMBOLS}")
-            self._settings.SCREENER_FEATURE_MAX_SYMBOLS = ivalue
-            if self._settings.SCREENER_EXECUTION_CANDIDATES > ivalue:
-                self._settings.SCREENER_EXECUTION_CANDIDATES = ivalue
-            if self._screener is not None:
-                self._screener._feature_max = ivalue
-                if self._screener._exec_candidates > ivalue:
-                    self._screener._exec_candidates = ivalue
-            return f"Feature symbols set to {ivalue}"
-        if key == "exec_candidates":
-            ivalue = int(value)
-            if not 1 <= ivalue <= self._settings.SCREENER_FEATURE_MAX_SYMBOLS:
-                raise ValueError(f"exec_candidates must be 1..{self._settings.SCREENER_FEATURE_MAX_SYMBOLS}")
-            self._settings.SCREENER_EXECUTION_CANDIDATES = ivalue
-            if self._screener is not None:
-                self._screener._exec_candidates = ivalue
-            return f"Execution candidates set to {ivalue}"
-        if key == "model_gate":
-            sval = str(value).strip().lower()
-            if sval not in {"on", "off", "true", "false", "1", "0"}:
-                raise ValueError("model_gate must be on/off")
-            if sval in {"on", "true", "1"}:
-                raise ValueError(
-                    "Canary model gate can only be enabled through environment configuration after manual readiness review."
-                )
-            self._settings.MODEL_GATE_CANARY_ENABLED = False
-            return "Model gate canary remains OFF (runtime enable blocked — use env vars)"
-        if key == "model_gate_threshold":
-            fvalue = float(value)
-            if not 0.50 <= fvalue <= 0.80:
-                raise ValueError("model_gate_threshold must be 0.50..0.80")
-            self._settings.MODEL_SHADOW_GATE_THRESHOLD = fvalue
-            return f"Model gate threshold set to {fvalue:.2f}"
-        raise ValueError("unknown setting")
+
+        return await self._modules.operator.set_runtime_setting(key, value)
 
     def _symbol_candidates(self) -> list[str]:
-        if self._screener is None:
-            return list(_SYMBOLS)
-        wide = self._screener.wide_universe
-        if wide:
-            return [str(item.symbol) for item in wide[:100]]
-        return cast(list[str], self._screener.active_symbols)
+
+        return self._modules.operator.symbol_candidates()
 
     def _selected_symbols(self) -> list[str]:
-        if self._screener is None:
-            return []
-        return cast(list[str], self._screener.manual_symbols)
+
+        return self._modules.operator.selected_symbols()
 
     async def _toggle_manual_symbol(self, symbol: str) -> str:
-        if self._screener is None:
-            raise RuntimeError("Сканер еще не запущен")
-        symbol = symbol.upper()
-        if symbol not in set(self._symbol_candidates()):
-            raise ValueError(f"{symbol} сейчас не проходит фильтры сканера")
 
-        selected = set(self._screener.manual_symbols)
-        if symbol in selected:
-            selected.remove(symbol)
-            self._screener.set_manual_symbols(sorted(selected))
-            return f"☐ <code>{symbol}</code> убрана из ручного списка."
-
-        selected.add(symbol)
-        self._screener.set_manual_symbols(sorted(selected))
-        if symbol not in self._screener.active_symbols:
-            await self._on_screener_symbols_added([symbol])
-        return f"✅ <code>{symbol}</code> добавлена: бот будет учиться и торговать по ней, пока она проходит фильтры."
+        return await self._modules.operator.toggle_manual_symbol(symbol)
 
     # ------------------------------------------------------------------
 
@@ -1029,32 +534,8 @@ class TradingApplication:
         await self._modules.ops.run_transaction_log_sync()
 
     async def _start_feature_pipeline(self) -> None:
-        """Start event-driven feature pipeline with 60 s staleness watchdog."""
-        from trader.features.pipeline import FeaturePipeline
-        from trader.features.regime import RegimeClassifier
 
-        assert self._candle_store is not None
-
-        self._feature_pipeline = FeaturePipeline(
-            candle_store=self._candle_store,
-            health_checker=self._health_checker,
-            stale_threshold_s=90.0,
-            watchdog_interval_s=60.0,
-            orderbook_tracker=self._orderbook_tracker,
-            market_stats_source=self._screener,
-        )
-        self._regime_classifier = RegimeClassifier()
-
-        task = asyncio.create_task(
-            self._feature_pipeline.run(
-                symbols=self._active_symbols(),  # actual screener universe (fallback if absent)
-                intervals=[_WS_INTERVAL],
-                symbol_source=self._screener,
-            ),
-            name="feature-pipeline",
-        )
-        self._background_tasks.append(task)
-        log.info("feature_pipeline.started", mode="event_driven", watchdog_interval_s=60.0)
+        await self._modules.lifecycle.start_feature_pipeline()
 
     async def _refresh_closed_pnl_memory(self) -> None:
         await self._modules.execution.refresh_closed_pnl_memory()
@@ -1193,76 +674,8 @@ class TradingApplication:
         self._shutdown_event.set()
 
     async def _graceful_shutdown(self) -> None:
-        log.info("graceful_shutdown_starting")
-        self._status = SystemStatus.STOPPING
-        self._trading_paused = True  # pause new entries immediately
 
-        if self._health_checker:
-            self._health_checker.set_system_status(self._status)
-
-        if self._feature_pipeline:
-            self._feature_pipeline.stop()
-
-        # Run reconciliation before stopping to catch any order state mismatches
-        _is_shadow = self._settings is None or self._initial_shadow_mode()
-        if self._bybit_adapter is not None and not _is_shadow:
-            try:
-                result = await asyncio.wait_for(self._bybit_adapter.reconcile(), timeout=10.0)
-                log.info(
-                    "graceful_shutdown.reconciliation",
-                    discrepancies=result.discrepancies_found,
-                    summary=result.summary,
-                )
-            except Exception as exc:
-                log.warning("graceful_shutdown.reconciliation_failed", error=str(exc))
-
-        # Log final execution state and open positions before shutdown
-        if self._execution_engine is not None:
-            status = self._execution_engine.get_status()
-            log.info(
-                "execution_engine.shutdown_status",
-                open_positions=len(status["open_positions"]),
-                shadow_mode=status["shadow_mode"],
-            )
-            # Alert via Telegram about shutdown with open positions
-            if status["open_positions"] and self._telegram_bot is not None:
-                try:
-                    pos_list = ", ".join(status["open_positions"].keys())
-                    await self._telegram_bot.notify(
-                        f"⚠️ <b>Shutdown with open positions</b>: <code>{pos_list}</code>\n"
-                        "Open positions remain on exchange. Verify SL manually."
-                    )
-                except Exception as exc:
-                    log.debug("graceful_shutdown.telegram_failed", error=str(exc))
-
-        if self._telegram_bot:
-            await self._telegram_bot.stop()
-
-        if self._ws_public:
-            await self._ws_public.stop()
-
-        if self._ws_private:
-            await self._ws_private.stop()
-
-        # Cancel all background tasks
-        for task in self._background_tasks:
-            if not task.done():
-                task.cancel()
-        if self._background_tasks:
-            await asyncio.gather(*self._background_tasks, return_exceptions=True)
-
-        if self._uvicorn_server:
-            self._uvicorn_server.should_exit = True
-            await asyncio.sleep(1)
-
-        if self._bybit_adapter:
-            await self._bybit_adapter.close()
-
-        if self._trade_journal:
-            await self._trade_journal.close()
-
-        self._status = SystemStatus.STOPPED
-        log.info("graceful_shutdown_complete")
+        await self._modules.lifecycle.graceful_shutdown()
 
     # ------------------------------------------------------------------
     # Entry point
