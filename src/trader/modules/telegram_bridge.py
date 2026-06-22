@@ -174,7 +174,9 @@ class TelegramBridgeModule(AppBoundModule):
             from trader.training.labels import active_label_schema_version
 
             horizon = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            label_schema = active_label_schema_version(
+                use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT)
+            )
             return cast(
                 dict[str, Any],
                 await self._app._trade_journal.get_strategy_pnl_analysis(
@@ -189,7 +191,9 @@ class TelegramBridgeModule(AppBoundModule):
             from trader.training.labels import active_label_schema_version
 
             horizon = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            label_schema = active_label_schema_version(
+                use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT)
+            )
             return cast(
                 dict[str, Any],
                 await self._app._trade_journal.get_model_compare_analysis(
@@ -209,7 +213,9 @@ class TelegramBridgeModule(AppBoundModule):
             from trader.training.labels import active_label_schema_version
 
             horizon = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-            label_schema = active_label_schema_version(use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT))
+            label_schema = active_label_schema_version(
+                use_tpsl_exit=bool(self._app._settings.MODEL_LABEL_USE_TPSL_EXIT)
+            )
             return cast(
                 dict[str, Any],
                 await self._app._trade_journal.get_detailed_costs(
@@ -294,9 +300,13 @@ class TelegramBridgeModule(AppBoundModule):
             selected_symbols=self._app._selected_symbols,
             toggle_symbol=self._app._toggle_manual_symbol,
             is_paused=lambda: self._app._trading_paused,
-            is_shadow=lambda: self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True,
+            is_shadow=lambda: (
+                self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True
+            ),
             current_profile=lambda: self._app._current_risk_profile_str,
-            active_symbols=lambda: self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS),
+            active_symbols=lambda: (
+                self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
+            ),
             regime_for=_regime_for,
             signal_log=self._app._signal_log,
             diagnostics_provider=self._app._modules.diagnostics.get_snapshot,
@@ -354,9 +364,10 @@ class TelegramBridgeModule(AppBoundModule):
                 deploy_id=deploy_id,
             )
             try:
-                await self._app._telegram_bot.notify(f"🚀 <b>Бот запущен</b>\nDeploy: <code>{html.escape(deploy_id)}</code>")
+                await self._app._telegram_bot.notify(
+                    f"🚀 <b>Бот запущен</b>\nDeploy: <code>{html.escape(deploy_id)}</code>"
+                )
             except Exception as notify_exc:
                 log.debug("telegram.startup_notify_failed", error=str(notify_exc))
         else:
             log.warning("telegram_bot_not_started", health=self._app._telegram_bot.health_snapshot())
-
