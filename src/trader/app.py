@@ -523,6 +523,8 @@ class TradingApplication:
                 )
         if self._execution_engine is not None:
             self._execution_engine._shadow_mode = enabled
+        if self._fee_provider is not None:
+            self._fee_provider.shadow_mode = enabled
         log.info("shadow_mode.changed", enabled=enabled)
 
     def _active_execution_allowed(self) -> bool:
@@ -2077,6 +2079,21 @@ class TradingApplication:
                 return []
             return await self._trade_journal.get_pnl_attribution(days=days)
 
+        async def _best_challenger_provider() -> str | None:
+            if self._trade_journal is None or not self._trade_journal.is_enabled:
+                return None
+            try:
+                from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
+
+                engine = AutoPromotionEngine(
+                    trade_journal=self._trade_journal,
+                    config=AutoPromotionConfig.from_settings(self._settings),
+                )
+                return await engine.best_challenger()
+            except Exception as exc:
+                log.debug("best_challenger.lookup_failed", error=str(exc))
+                return None
+
         controller = TradingController(
             pause=self._pause_trading,
             resume=self._resume_trading,
@@ -2110,6 +2127,7 @@ class TradingApplication:
             model_performance_provider=_model_performance_provider,
             champion_health_provider=_champion_health_provider,
             attribution_provider=_attribution_provider,
+            best_challenger_provider=_best_challenger_provider,
             enrich_db_diag_fallbacks=self._merge_runtime_db_diag_fallbacks,
             add_subscription=_add_subscription,
             remove_subscription=_remove_subscription,
@@ -2284,6 +2302,7 @@ class TradingApplication:
             imbalance_provider=lambda s: (
                 self._orderbook_tracker.latest_imbalance(s) if self._orderbook_tracker is not None else None
             ),
+            live_armed=self._settings.LIVE_ARMED,
         )
 
         # P0.2: Restore unresolved pending entries from durable storage before any new entries.
@@ -5277,11 +5296,15 @@ class TradingApplication:
                                 await _record_signal("model_gate_no_compatible_champion")
                                 return
                     except Exception as _canary_exc:
-                        log.debug(
+                        log.warning(
                             "ml_canary.scoring_failed",
                             symbol=proposal.symbol,
                             error=str(_canary_exc),
                         )
+                        if not self._initial_shadow_mode():
+                            self._record_diag("model_gate_canary_blocked")
+                            await _record_signal("model_gate_scoring_failed")
+                            return
 
             # Skip execution if operator paused trading
             if self._trading_paused:

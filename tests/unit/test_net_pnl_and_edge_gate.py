@@ -63,6 +63,7 @@ def _make_engine(
     fee_provider: Any = None,
     min_net_edge_pct: float = 0.25,
     net_edge_safety_margin_pct: float = 0.05,
+    live_armed: bool = True,
 ):
     from trader.execution.engine import ExecutionEngine
 
@@ -94,6 +95,7 @@ def _make_engine(
         expected_slippage_pct=0.03,
         funding_buffer_pct=0.01,
         max_spread_bps=8.0,
+        live_armed=live_armed,
     )
     return engine
 
@@ -405,3 +407,134 @@ def test_shadow_mode_skips_net_edge_gate():
     assert engine._diag_no_tp_rejected == 0
     assert engine._diag_net_edge_rejected == 0
     assert engine._shadow_mode is True
+
+
+def _proposal_and_instrument_for_edge_gate():
+    from trader.domain.enums import MarketType, OrderSide, RiskDecisionStatus
+    from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
+
+    proposal = MagicMock(spec=TradeProposal)
+    proposal.symbol = "BTCUSDT"
+    proposal.side = OrderSide.BUY
+    proposal.entry_price = Decimal("100")
+    proposal.take_profit = Decimal("101.5")
+    proposal.stop_loss = Decimal("99")
+    proposal.confidence = 0.7
+    proposal.requested_qty = Decimal("10")
+    proposal.proposal_id = "test-id-fee"
+    proposal.strategy_id = "test"
+    proposal.rationale = "test"
+
+    decision = MagicMock(spec=RiskDecision)
+    decision.status = RiskDecisionStatus.APPROVED
+    decision.approved_qty = Decimal("10")
+    decision.approved_notional_usd = Decimal("1000")
+    decision.reason = "ok"
+    decision.decision_id = "decision-fee"
+    decision.proposal_id = "test-id-fee"
+    decision.triggered_rules = []
+    decision.portfolio_heat = 0.0
+    decision.current_drawdown_pct = 0.0
+    decision.open_positions_count = 0
+
+    instrument = InstrumentInfo(
+        symbol="BTCUSDT",
+        market_type=MarketType.LINEAR,
+        base_coin="BTC",
+        quote_coin="USDT",
+        min_order_qty=Decimal("1"),
+        max_order_qty=Decimal("1000"),
+        qty_step=Decimal("1"),
+        tick_size=Decimal("0.01"),
+        min_notional=Decimal("5"),
+    )
+    return proposal, decision, instrument
+
+
+@pytest.mark.asyncio
+async def test_live_rejects_fee_unavailable_increments_counter():
+    """LIVE mode must reject when fee provider returns None (fail-closed)."""
+    engine = _make_engine(shadow_mode=False, fee_provider_returns_none=True, min_net_edge_pct=0.05)
+    proposal, decision, instrument = _proposal_and_instrument_for_edge_gate()
+
+    engine._open_positions = {}
+    engine._pending_entry_order_link_ids = set()
+    engine._is_canary = False
+    engine._risk_manager.evaluate = AsyncMock(return_value=decision)
+    engine._adapter.get_instrument_info = AsyncMock(return_value=instrument)
+    engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
+    engine._trade_journal = None
+
+    result = await engine._submit_locked(
+        proposal=proposal,
+        capital=Decimal("1000"),
+        available_balance=Decimal("1000"),
+    )
+
+    assert result is None
+    assert engine._diag_fee_unavailable_rejected == 1
+    assert engine._diag_net_edge_rejected == 0
+
+
+@pytest.mark.asyncio
+async def test_live_rejects_when_not_armed():
+    """LIVE mode must reject order submission when LIVE_ARMED is false."""
+    from trader.domain.enums import MarketType, OrderSide, RiskDecisionStatus
+    from trader.domain.models import InstrumentInfo, RiskDecision, TradeProposal
+
+    engine = _make_engine(shadow_mode=False, live_armed=False, min_net_edge_pct=0.05)
+
+    proposal = MagicMock(spec=TradeProposal)
+    proposal.symbol = "BTCUSDT"
+    proposal.market_type = MarketType.LINEAR
+    proposal.side = OrderSide.BUY
+    proposal.entry_price = Decimal("100")
+    proposal.take_profit = Decimal("101.5")
+    proposal.stop_loss = Decimal("99")
+    proposal.confidence = 0.7
+    proposal.requested_qty = Decimal("10")
+    proposal.proposal_id = "test-id-armed"
+    proposal.strategy_id = "test"
+    proposal.rationale = "test"
+
+    decision = MagicMock(spec=RiskDecision)
+    decision.status = RiskDecisionStatus.APPROVED
+    decision.approved_qty = Decimal("10")
+    decision.approved_notional_usd = Decimal("1000")
+    decision.reason = "ok"
+    decision.decision_id = "decision-armed"
+    decision.proposal_id = "test-id-armed"
+    decision.triggered_rules = []
+    decision.portfolio_heat = 0.0
+    decision.current_drawdown_pct = 0.0
+    decision.open_positions_count = 0
+
+    instrument = InstrumentInfo(
+        symbol="BTCUSDT",
+        market_type=MarketType.LINEAR,
+        base_coin="BTC",
+        quote_coin="USDT",
+        min_order_qty=Decimal("1"),
+        max_order_qty=Decimal("1000"),
+        qty_step=Decimal("1"),
+        tick_size=Decimal("0.01"),
+        min_notional=Decimal("5"),
+    )
+
+    engine._open_positions = {}
+    engine._pending_entry_order_link_ids = set()
+    engine._is_canary = False
+    engine._risk_manager.evaluate = AsyncMock(return_value=decision)
+    engine._adapter.get_instrument_info = AsyncMock(return_value=instrument)
+    engine._adapter.get_conservative_market_price = AsyncMock(return_value=Decimal("100"))
+    engine._adapter.place_order = AsyncMock()
+    engine._trade_journal = None
+
+    result = await engine._submit_locked(
+        proposal=proposal,
+        capital=Decimal("1000"),
+        available_balance=Decimal("1000"),
+    )
+
+    assert result is None
+    engine._adapter.place_order.assert_not_called()

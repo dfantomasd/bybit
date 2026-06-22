@@ -120,6 +120,7 @@ class ExecutionEngine:
         trailing_stop_min_pct: float = 0.01,
         profit_gate_pct: float = 3.0,
         profit_lock_pct: float = 5.0,
+        live_armed: bool = True,
     ) -> None:
         self._adapter = adapter
         self._risk_manager = risk_manager
@@ -153,6 +154,7 @@ class ExecutionEngine:
         self._trailing_stop_min_pct = max(0.001, float(trailing_stop_min_pct))
         self._profit_gate_pct = max(0.0, float(profit_gate_pct))
         self._profit_lock_pct = max(self._profit_gate_pct, float(profit_lock_pct))
+        self._live_armed = bool(live_armed)
 
         # P0: Hard block unsupported entry modes. MARKET is the default;
         # MAKER_FIRST is the supervised maker-with-escalation flow below.
@@ -1179,21 +1181,30 @@ class ExecutionEngine:
                 exposure_reserved = False
                 return None
 
-            # Fetch fee rates; fall back to conservative default if unavailable
+            # Fetch fee rates; fail-closed in LIVE when the provider cannot return rates.
             taker_default = Decimal("0.00055")  # 0.055% Bybit taker standard
+            fee_unavailable = False
             if self._fee_provider is not None:
                 try:
                     fee_rates_obj = await self._fee_provider.get(symbol)
                     if fee_rates_obj is not None:
                         taker_default = Decimal(str(fee_rates_obj.taker_fee_rate))
                     else:
-                        self._diag_fee_unavailable_rejected += 1
-                        log.warning("execution.fee_rate_unavailable_using_default", symbol=symbol)
+                        fee_unavailable = True
                 except Exception as _fee_exc:
-                    self._diag_fee_unavailable_rejected += 1
+                    fee_unavailable = True
                     log.warning("execution.fee_rate_fetch_failed", symbol=symbol, error=str(_fee_exc))
             else:
                 log.warning("execution.fee_provider_none_using_default", symbol=symbol)
+
+            if fee_unavailable:
+                self._diag_fee_unavailable_rejected += 1
+                if not self._shadow_mode:
+                    log.warning("execution.fee_rate_unavailable_rejected_live", symbol=symbol)
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
+                    return None
+                log.warning("execution.fee_rate_unavailable_using_default", symbol=symbol)
             taker = taker_default
 
             entry_price_d = proposal.entry_price
@@ -1328,6 +1339,12 @@ class ExecutionEngine:
                 )
 
         # 5. Build OrderIntent ─────────────────────────────────────────
+        if not self._shadow_mode and not self._live_armed:
+            log.warning("execution.rejected_live_not_armed", symbol=symbol)
+            self._release_exposure_reservation(proposal)
+            exposure_reserved = False
+            return None
+
         assert decision.approved_qty is not None
         intent = self._build_intent(proposal, decision, instrument_info)
 
