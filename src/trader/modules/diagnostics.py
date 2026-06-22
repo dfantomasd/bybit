@@ -352,18 +352,28 @@ class DiagnosticsModule(AppBoundModule):
 
         return {
             "deploy": get_deploy_info(),
-            "subscribe_watchdog": (self._app._subscribe_watchdog.to_dict() if self._app._subscribe_watchdog is not None else {}),
-            "last_strategy_loop_at": self._app._last_strategy_loop_at.isoformat() if self._app._last_strategy_loop_at else None,
+            "subscribe_watchdog": (
+                self._app._subscribe_watchdog.to_dict() if self._app._subscribe_watchdog is not None else {}
+            ),
+            "last_strategy_loop_at": self._app._last_strategy_loop_at.isoformat()
+            if self._app._last_strategy_loop_at
+            else None,
             "last_ws_message_age_s": ws_age,
             "last_confirmed_candle_age_s": confirmed_age,
             "runtime_candles_by_interval": self.runtime_candle_readiness_counts(),
             "telegram": telegram_health,
-            "active_symbols": (self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)),
+            "active_symbols": (
+                self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
+            ),
             "open_positions": (
-                list(self._app._execution_engine._open_positions.keys()) if self._app._execution_engine is not None else []
+                list(self._app._execution_engine._open_positions.keys())
+                if self._app._execution_engine is not None
+                else []
             ),
             "portfolio_heat_pct": (
-                float(self._app._exposure_tracker.total_exposure_pct) if self._app._exposure_tracker is not None else None
+                float(self._app._exposure_tracker.total_exposure_pct)
+                if self._app._exposure_tracker is not None
+                else None
             ),
             "hour_signals_emitted": hour_counts.get("signals_emitted", 0),
             "hour_risk_rejected": hour_counts.get("risk_rejected", 0),
@@ -481,7 +491,8 @@ class DiagnosticsModule(AppBoundModule):
                             if self._app._model_registry is not None and self._app._model_registry.champion is not None
                             else (
                                 getattr(self._app._model_registry.challenger, "metrics", {})
-                                if self._app._model_registry is not None and self._app._model_registry.challenger is not None
+                                if self._app._model_registry is not None
+                                and self._app._model_registry.challenger is not None
                                 else {}
                             )
                         ).get("quality")
@@ -495,7 +506,8 @@ class DiagnosticsModule(AppBoundModule):
                         if self._app._model_registry is not None and self._app._model_registry.champion is not None
                         else (
                             getattr(self._app._model_registry.challenger, "metrics", {})
-                            if self._app._model_registry is not None and self._app._model_registry.challenger is not None
+                            if self._app._model_registry is not None
+                            and self._app._model_registry.challenger is not None
                             else {}
                         )
                     ).get("lift_bps")
@@ -506,7 +518,8 @@ class DiagnosticsModule(AppBoundModule):
                         if self._app._model_registry is not None and self._app._model_registry.champion is not None
                         else (
                             getattr(self._app._model_registry.challenger, "metrics", {})
-                            if self._app._model_registry is not None and self._app._model_registry.challenger is not None
+                            if self._app._model_registry is not None
+                            and self._app._model_registry.challenger is not None
                             else {}
                         )
                     ).get("walk_forward_expectancy_bps", "n/a")
@@ -516,4 +529,3 @@ class DiagnosticsModule(AppBoundModule):
                 "gate_quality": self._app._model_gate_quality.get("quality"),
             },
         }
-
