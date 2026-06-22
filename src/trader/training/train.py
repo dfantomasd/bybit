@@ -901,7 +901,9 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
 @click.command()
 @click.option("--min-samples", default=500, type=int, help="Minimum compatible samples required")
-@click.option("--label-bps", default=lambda: _settings_label_bps(), type=float, help="Resolved net-return threshold in bps")
+@click.option(
+    "--label-bps", default=lambda: _settings_label_bps(), type=float, help="Resolved net-return threshold in bps"
+)
 @click.option(
     "--horizon",
     default=lambda: _settings_horizon(),

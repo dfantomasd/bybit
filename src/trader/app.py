@@ -2358,9 +2358,7 @@ class TradingApplication:
             ),
             live_armed=self._settings.LIVE_ARMED,
             shadow_min_atr_multiple=(
-                self._settings.SHADOW_MIN_ATR_MULTIPLE
-                if shadow and not self._scalp_strict_shadow()
-                else None
+                self._settings.SHADOW_MIN_ATR_MULTIPLE if shadow and not self._scalp_strict_shadow() else None
             ),
         )
 
@@ -5629,9 +5627,7 @@ class TradingApplication:
                 # Feature pipeline runs on full active_symbols universe (set at startup)
                 active_symbols = self._screener.active_symbols if self._screener is not None else list(_SYMBOLS)
                 _effective_blocked_symbols = (
-                    set()
-                    if self._initial_shadow_mode()
-                    else self._effective_performance_blocks(active_symbols)
+                    set() if self._initial_shadow_mode() else self._effective_performance_blocks(active_symbols)
                 )
 
                 # Strategy evaluation uses execution_candidates only (Starter-optimized subset)

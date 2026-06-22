@@ -1105,7 +1105,9 @@ class ExecutionEngine:
             except (ValueError, IndexError):
                 pass
         _t_before_risk = datetime.now(UTC)
-        shadow_min_atr = self._shadow_min_atr_multiple if self._shadow_mode and not self._shadow_apply_net_edge_gate else None
+        shadow_min_atr = (
+            self._shadow_min_atr_multiple if self._shadow_mode and not self._shadow_apply_net_edge_gate else None
+        )
         try:
             decision = cast(
                 RiskDecision,

@@ -725,9 +725,7 @@ class Settings(BaseSettings):
 
     def market_candle_persist_intervals(self) -> frozenset[str]:
         """Kline intervals persisted to Postgres (others remain in-memory only)."""
-        return frozenset(
-            part.strip() for part in self.MARKET_CANDLE_PERSIST_INTERVALS.split(",") if part.strip()
-        )
+        return frozenset(part.strip() for part in self.MARKET_CANDLE_PERSIST_INTERVALS.split(",") if part.strip())
 
 
 # ---------------------------------------------------------------------------
