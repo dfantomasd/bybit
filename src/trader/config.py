@@ -132,7 +132,7 @@ class Settings(BaseSettings):
         "statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
     )
     """Strategy priority override used when RISK_PROFILE=SCALP."""
-    SCALP_STRICT_SHADOW: bool = True
+    SCALP_STRICT_SHADOW: bool = False
     """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
     TREND_STRATEGY_ENABLED: bool = True
     """Enable the EMA crossover trend strategy in the ensemble."""

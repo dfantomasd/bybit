@@ -115,6 +115,7 @@ class ScalpMicroStrategy(BaseStrategy):
         diag_hook: Callable[[str], None] | None = None,
         imbalance_provider: Callable[[str], float | None] | None = None,
         min_imbalance: float = 0.15,
+        shadow_relaxed: bool = False,
     ) -> None:
         self._store = candle_store
         self._interval = interval
@@ -131,6 +132,7 @@ class ScalpMicroStrategy(BaseStrategy):
         self._diag_hook = diag_hook
         self._imbalance_provider = imbalance_provider
         self._min_imbalance = min_imbalance
+        self._shadow_relaxed = shadow_relaxed
         self._last_signal_at: dict[str, datetime] = {}
 
     @property
@@ -209,8 +211,19 @@ class ScalpMicroStrategy(BaseStrategy):
         slow_now, slow_prev = ema_slow[-1], ema_slow[-2]
         crossed_up = fast_prev <= slow_prev and fast_now > slow_now
         crossed_down = fast_prev >= slow_prev and fast_now < slow_now
+        trend_continuation = False
         if not crossed_up and not crossed_down:
-            return None
+            if self._shadow_relaxed:
+                if fast_now > slow_now and rsi14 < _RSI_OVERBOUGHT:
+                    crossed_up = True
+                    trend_continuation = True
+                elif fast_now < slow_now and rsi14 > _RSI_OVERSOLD:
+                    crossed_down = True
+                    trend_continuation = True
+                else:
+                    return None
+            else:
+                return None
 
         # --- Volume impulse ---
         vol_sma20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0.0
@@ -219,6 +232,8 @@ class ScalpMicroStrategy(BaseStrategy):
 
         # --- Spread filter (fail closed: unknown spread = no trade) ---
         spread_bps = self._spread_provider(symbol) if self._spread_provider is not None else None
+        if spread_bps is None and self._shadow_relaxed:
+            spread_bps = min(self._max_spread_bps, 4.0)
         if spread_bps is None or spread_bps > self._max_spread_bps:
             self._diag("spread_rejected")
             log.debug(
@@ -234,43 +249,56 @@ class ScalpMicroStrategy(BaseStrategy):
 
         side: OrderSide | None = None
         if crossed_up and rsi14 < _RSI_OVERBOUGHT:
-            # Bounce from the low of the last 5 candles
-            low5 = min(lows[-_BOUNCE_LOOKBACK:])
-            if current_price > low5 and (current_price - low5) <= bounce_zone + atr_abs:
+            if trend_continuation:
                 side = OrderSide.BUY
+            else:
+                low5 = min(lows[-_BOUNCE_LOOKBACK:])
+                if current_price > low5 and (current_price - low5) <= bounce_zone + atr_abs:
+                    side = OrderSide.BUY
         elif crossed_down and rsi14 > _RSI_OVERSOLD:
-            high5 = max(highs[-_BOUNCE_LOOKBACK:])
-            if current_price < high5 and (high5 - current_price) <= bounce_zone + atr_abs:
+            if trend_continuation:
                 side = OrderSide.SELL
+            else:
+                high5 = max(highs[-_BOUNCE_LOOKBACK:])
+                if current_price < high5 and (high5 - current_price) <= bounce_zone + atr_abs:
+                    side = OrderSide.SELL
         if side is None:
             return None
 
-        # --- Orderbook imbalance confirmation (fail closed: no data = no scalp) ---
-        # Micro-scalps are small-edge trades; without fresh book confirmation the
-        # spread/slippage edge can disappear before execution.
-        if self._imbalance_provider is None:
-            self._diag("imbalance_missing")
-            return None
-        try:
-            imbalance = self._imbalance_provider(symbol)
-        except Exception as exc:
-            self._diag("imbalance_missing")
-            log.debug("scalp_micro.imbalance_provider_failed", symbol=symbol, error=str(exc))
-            return None
+        # --- Orderbook imbalance confirmation ---
+        imbalance: float | None = None
+        if self._imbalance_provider is not None:
+            try:
+                imbalance = self._imbalance_provider(symbol)
+            except Exception as exc:
+                log.debug("scalp_micro.imbalance_provider_failed", symbol=symbol, error=str(exc))
+                imbalance = None
         if imbalance is None:
-            self._diag("imbalance_missing")
-            return None
-        confirms = imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
-        if not confirms:
-            self._diag("imbalance_rejected")
-            log.debug(
-                "scalp_micro.imbalance_rejected",
-                symbol=symbol,
-                side=side.value,
-                imbalance=round(imbalance, 3),
-                min_imbalance=self._min_imbalance,
-            )
-            return None
+            if self._shadow_relaxed:
+                log.debug("scalp_micro.imbalance_skipped_shadow", symbol=symbol)
+            else:
+                self._diag("imbalance_missing")
+                return None
+        elif imbalance is not None:
+            confirms = imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
+            if not confirms:
+                if self._shadow_relaxed and abs(imbalance) >= self._min_imbalance * 0.5:
+                    log.debug(
+                        "scalp_micro.imbalance_soft_pass_shadow",
+                        symbol=symbol,
+                        side=side.value,
+                        imbalance=round(imbalance, 3),
+                    )
+                else:
+                    self._diag("imbalance_rejected")
+                    log.debug(
+                        "scalp_micro.imbalance_rejected",
+                        symbol=symbol,
+                        side=side.value,
+                        imbalance=round(imbalance, 3),
+                        min_imbalance=self._min_imbalance,
+                    )
+                    return None
 
         # --- Net edge check: gross edge is the TP distance ---
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0
@@ -309,6 +337,8 @@ class ScalpMicroStrategy(BaseStrategy):
 
         # Confidence scales with how much net edge clears the minimum
         confidence = min(0.90, 0.55 + min(0.25, net_edge_pct / max(self._min_net_return_pct, 1e-9) * 0.05))
+        if trend_continuation:
+            confidence = min(confidence, 0.58)
 
         self._register_signal(symbol)
         log.info(

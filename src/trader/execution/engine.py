@@ -235,7 +235,7 @@ class ExecutionEngine:
         Rate limits are enforced only in live mode (non-shadow). In shadow mode
         we simulate freely so tests and monitoring remain unaffected.
         """
-        if self.is_in_warmup():
+        if self.is_in_warmup() and not self._shadow_mode:
             return f"startup_warmup_active ({self.warmup_seconds_remaining():.0f}s remaining)"
 
         # Rate / burst limits only apply to live execution
@@ -245,7 +245,8 @@ class ExecutionEngine:
                 return f"rate_limit: {len(self._recent_entries)}/{self._max_entries_per_minute} entries this minute"
 
         if (
-            self._max_queue_util_pct > 0
+            not self._shadow_mode
+            and self._max_queue_util_pct > 0
             and self._max_concurrent_pending > 0
             and (self._pending_entry_count / self._max_concurrent_pending) * 100 >= self._max_queue_util_pct
         ):
@@ -918,8 +919,8 @@ class ExecutionEngine:
             )
             return None
 
-        # P0.2/P0.3: Block new entries while pending ones await resolution
-        if self.has_pending_entries():
+        # P0.2/P0.3: Block new entries while pending ones await resolution (live only)
+        if not self._shadow_mode and self.has_pending_entries():
             self._diag_skip_pending += 1
             log.debug(
                 "execution.skipped_pending_entries",
@@ -1112,6 +1113,7 @@ class ExecutionEngine:
                     regime_context=regime_context,
                     spread=spread,
                     atr=atr,
+                    shadow_mode=self._shadow_mode,
                 ),
             )
         except Exception as exc:
