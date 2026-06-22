@@ -2354,9 +2354,7 @@ class TelegramMonitorBot:
             wins = int(row.get("wins") or 0)
             losses = int(row.get("losses") or 0)
             total = float(row.get("total_pnl") or 0)
-            lines.append(
-                f"<code>{sym}</code>: {total:+.4f} {unit} | W/L {wins}/{losses}"
-            )
+            lines.append(f"<code>{sym}</code>: {total:+.4f} {unit} | W/L {wins}/{losses}")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_diagnostics(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -2390,9 +2388,7 @@ class TelegramMonitorBot:
         ]
         drift = diag.get("drift_status")
         if isinstance(drift, dict) and drift.get("status") not in {None, "n/a"}:
-            lines.append(
-                f"Drift: <code>{drift.get('status')}</code> PSI=<code>{drift.get('psi', 'n/a')}</code>"
-            )
+            lines.append(f"Drift: <code>{drift.get('status')}</code> PSI=<code>{drift.get('psi', 'n/a')}</code>")
         if diag.get("strategy_cycle_ms") is not None:
             lines.append(f"Цикл стратегии: <code>{diag.get('strategy_cycle_ms'):.0f} ms</code>")
         if diag.get("last_retention_run_at"):
