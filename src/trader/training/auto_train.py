@@ -16,13 +16,11 @@ from typing import Any
 
 import click
 
-from trader.training.eligibility import training_strategy_filter_sql
 from trader.training.labels import active_label_schema_version
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
 
-_STRATEGY_FILTER = training_strategy_filter_sql("$2", "$3")
 _CANDIDATE_HORIZONS = (5, 15, 30, 60)
 
 
@@ -53,37 +51,29 @@ async def _pool() -> Any:
 
 async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
     from trader.config import Settings
+    from trader.training.sample_counts import fetch_training_snapshots_for_horizons
 
     settings = Settings()
     allowlist = [item.strip() for item in settings.TRAIN_STRATEGY_ALLOWLIST.split(",") if item.strip()] or None
     include_candle = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
     label_schema = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
     label_threshold = float(settings.MODEL_AUTO_TRAIN_LABEL_BPS)
-    rows = await pool.fetch(
-        f"""
-        SELECT po.horizon_minutes, count(DISTINCT fs.snapshot_id) AS sample_count
-        FROM feature_snapshots fs
-        JOIN prediction_events pe ON pe.feature_snapshot_id = fs.snapshot_id
-        JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-        WHERE po.label IS NOT NULL
-          AND po.label_schema_version = $1
-          AND po.label_threshold_bps = $4
-          AND fs.feature_values IS NOT NULL
-          AND fs.training_eligible = true
-          AND pe.model_version = 'RULE_BASELINE_V1'
-          AND pe.strategy_signal IN ('Buy', 'Sell')
-          AND {_STRATEGY_FILTER}
-        GROUP BY po.horizon_minutes
-        ORDER BY sample_count DESC
-        """,
-        label_schema,
-        allowlist,
-        include_candle,
-        label_threshold,
+
+    async def fetch(query: str, *args: Any) -> list[Any]:
+        return list(await pool.fetch(query, *args))
+
+    snapshots = await fetch_training_snapshots_for_horizons(
+        fetch,
+        horizons=_CANDIDATE_HORIZONS,
+        label_schema_version=label_schema,
+        label_threshold_bps=label_threshold,
+        strategy_allowlist=allowlist,
+        include_candle_baseline=include_candle,
+        min_samples=1,
     )
     return [
-        TrainableSnapshot(horizon_minutes=int(row["horizon_minutes"]), sample_count=int(row["sample_count"]))
-        for row in rows
+        TrainableSnapshot(horizon_minutes=int(horizon), sample_count=snapshot.best_schema_count)
+        for horizon, snapshot in snapshots.items()
     ]
 
 

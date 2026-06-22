@@ -19,6 +19,7 @@ from trader.ml.model_selection import model_selection_metrics, selection_reason
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
+    active_label_schema_version,
     build_directional_outcome,
 )
 
@@ -29,6 +30,23 @@ _POOL_CLOSE_TIMEOUT_SECONDS = 5.0
 _DEFAULT_FETCH_TIMEOUT_SECONDS = 30.0
 _DEFAULT_POOL_MAX_SIZE = 5
 _FETCH_TIMEOUT_LOG_INTERVAL_SECONDS = 60.0
+
+
+def _optional_settings() -> Any | None:
+    try:
+        from trader.config import Settings
+
+        return Settings()
+    except Exception:
+        return None
+
+
+def _parse_command_rowcount(result: str | None) -> int:
+    """Parse asyncpg command tag (e.g. ``DELETE 42``, ``INSERT 0 1``)."""
+    parts = str(result or "").strip().split()
+    if len(parts) >= 2 and parts[-1].isdigit():
+        return int(parts[-1])
+    return 0
 
 
 def _decimal_or_none(value: Any) -> Decimal | None:
@@ -860,8 +878,7 @@ class TradeJournal:
             ON CONFLICT (order_link_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 exchange_order_id = EXCLUDED.exchange_order_id,
-                error = EXCLUDED.error,
-                created_at = EXCLUDED.created_at
+                error = EXCLUDED.error
             """,
             order_link_id,
             proposal_id,
@@ -903,8 +920,7 @@ class TradeJournal:
             ON CONFLICT (order_link_id) DO UPDATE SET
                 status = EXCLUDED.status,
                 exchange_order_id = EXCLUDED.exchange_order_id,
-                error = EXCLUDED.error,
-                created_at = EXCLUDED.created_at
+                error = EXCLUDED.error
             """,
             order_link_id,
             proposal_id,
@@ -970,7 +986,7 @@ class TradeJournal:
         for entry in entries:
             try:
                 trade_id = entry.get("tradeId") or None
-                await self._execute(
+                result = await self._execute(
                     """
                     INSERT INTO account_transaction_events
                         (transaction_time, symbol, side, funding, fee, fee_rate,
@@ -996,7 +1012,7 @@ class TradeJournal:
                     entry.get("type"),
                     entry.get("category"),
                 )
-                inserted += 1
+                inserted += _parse_command_rowcount(result)
             except Exception as exc:
                 log.info("trade_journal.transaction_log_insert_failed", error=str(exc))
         return inserted
@@ -1786,9 +1802,13 @@ class TradeJournal:
         sources: tuple[str, ...] = ("shadow_challenger",),
     ) -> list[dict[str, Any]]:
         """Resolved shadow-challenger outcomes with feature vectors for partial_fit."""
-        from trader.training.labels import LABEL_SCHEMA_VERSION
+        from trader.training.labels import active_label_schema_version
 
-        schema = label_schema_version or LABEL_SCHEMA_VERSION
+        schema = label_schema_version
+        if schema is None:
+            settings = _optional_settings()
+            use_tpsl = bool(settings.MODEL_LABEL_USE_TPSL_EXIT) if settings is not None else True
+            schema = active_label_schema_version(use_tpsl_exit=use_tpsl)
         source_list = list(sources) if sources else ["shadow_challenger"]
         rows = await self._fetch(
             """
@@ -1801,7 +1821,7 @@ class TradeJournal:
               AND po.label_schema_version = $2
               AND ($3::text IS NULL OR pe.model_version = $3)
               AND COALESCE(pe.metadata->>'source', '') = ANY($4::text[])
-            ORDER BY po.created_at DESC
+            ORDER BY po.resolved_at DESC NULLS LAST
             LIMIT $1
             """,
             int(limit),
@@ -3411,7 +3431,7 @@ class TradeJournal:
                 continue
             raw = json.dumps(record)
             closed_pnl_id = self._closed_pnl_id(record)
-            await self._execute(
+            result = await self._execute(
                 """
                 INSERT INTO closed_pnl (
                     closed_pnl_id, created_at, symbol, side, qty, avg_entry_price,
@@ -3430,7 +3450,7 @@ class TradeJournal:
                 pnl,
                 raw,
             )
-            inserted += 1
+            inserted += _parse_command_rowcount(result)
         return inserted
 
     async def get_blocked_symbols(
@@ -3634,7 +3654,33 @@ class TradeJournal:
         )
         return restore_version
 
-    async def _execute(self, query: str, *args: Any) -> None:
+    async def _execute(self, query: str, *args: Any) -> str | None:
+        if not self.is_enabled:
+            return None
+        assert self._pool is not None
+        try:
+            async with self._pool.acquire() as conn:
+                result = await conn.execute(query, *args)
+            self._last_successful_write_at = datetime.now(tz=UTC)
+            self._consecutive_write_errors = 0
+            return str(result) if result is not None else None
+        except Exception as exc:
+            self._last_write_error_at = datetime.now(tz=UTC)
+            self._last_write_error = str(exc)
+            self._consecutive_write_errors += 1
+            log.debug(
+                "trade_journal.write_failed",
+                error=str(exc),
+                consecutive_errors=self._consecutive_write_errors,
+            )
+            return None
+
+    async def _execute_required(self, query: str, *args: Any) -> None:
+        """Fail-closed execute — raises on DB error.
+
+        Use only for writes that MUST succeed before a REST call is made.
+        If the journal is disabled, this is a no-op.
+        """
         if not self.is_enabled:
             return
         assert self._pool is not None
@@ -3647,23 +3693,7 @@ class TradeJournal:
             self._last_write_error_at = datetime.now(tz=UTC)
             self._last_write_error = str(exc)
             self._consecutive_write_errors += 1
-            log.debug(
-                "trade_journal.write_failed",
-                error=str(exc),
-                consecutive_errors=self._consecutive_write_errors,
-            )
-
-    async def _execute_required(self, query: str, *args: Any) -> None:
-        """Fail-closed execute — raises on DB error.
-
-        Use only for writes that MUST succeed before a REST call is made.
-        If the journal is disabled, this is a no-op.
-        """
-        if not self.is_enabled:
-            return
-        assert self._pool is not None
-        async with self._pool.acquire() as conn:
-            await conn.execute(query, *args)
+            raise
 
     async def _fetch(self, query: str, *args: Any) -> list[asyncpg.Record]:
         if not self.is_enabled:

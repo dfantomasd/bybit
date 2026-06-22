@@ -147,6 +147,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         horizon_minutes: int,
         feature_schema_hash: str,
     ) -> dict[str, Any]:
+        _allowlist, _include_candle, label_schema, _label_threshold = _training_eligibility_params()
         baseline_rows = await self._fetch(
             """
             SELECT po.net_return_bps
@@ -162,7 +163,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             LIMIT 1000
             """,
             int(horizon_minutes),
-            LABEL_SCHEMA_VERSION,
+            label_schema,
         )
         gate_rows = await self._fetch(
             """
@@ -181,7 +182,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             model_version,
             int(horizon_minutes),
-            LABEL_SCHEMA_VERSION,
+            label_schema,
             feature_schema_hash,
         )
 
