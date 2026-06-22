@@ -100,6 +100,9 @@ class TradeJournal:
         self._pool: asyncpg.Pool | None = None
         self._diag_lock = asyncio.Lock()
         self._last_fetch_timeout_log_at: datetime | None = None
+        self._schema_initialized: bool = False
+        self._connect_failures: int = 0
+        self._reconnect_blocked_until: datetime | None = None
         self._last_connect_attempt_at: datetime | None = None
         self._last_connect_error_at: datetime | None = None
         self._last_connect_error: str | None = None
@@ -159,28 +162,75 @@ class TradeJournal:
             self._pool = None
             self._last_connect_error_at = datetime.now(tz=UTC)
             self._last_connect_error = str(exc)
+            self._schedule_reconnect_backoff(str(exc))
             log.warning("trade_journal.unavailable", error=str(exc))
             return
 
         try:
-            await self._ensure_schema()
+            if self._schema_initialized:
+                await self._ping_pool()
+            else:
+                await self._ensure_schema()
+                self._schema_initialized = True
+            self._last_connect_error_at = None
+            self._last_connect_error = None
         except Exception as exc:
             self._last_connect_error_at = datetime.now(tz=UTC)
             self._last_connect_error = f"schema bootstrap degraded: {exc}"
             log.warning("trade_journal.schema_bootstrap_degraded", error=str(exc))
-        log.info("trade_journal.connected", schema_degraded=self._last_connect_error is not None)
+            await self._close_pool_after_failure("schema_bootstrap_failed")
+            self._pool = None
+            self._schedule_reconnect_backoff(str(exc))
+            return
+
+        self._connect_failures = 0
+        self._reconnect_blocked_until = None
+        log.info("trade_journal.connected", schema_degraded=False)
+
+    async def _ping_pool(self) -> None:
+        assert self._pool is not None
+        async with self._pool.acquire() as conn:
+            await conn.fetchval("SELECT 1")
+
+    @staticmethod
+    def _is_auth_circuit_breaker_error(error: str) -> bool:
+        upper = error.upper()
+        return (
+            "ECIRCUITBREAKER" in upper
+            or "EAUTHQUERY" in upper
+            or "AUTHENTICATION" in upper
+            or "TOO MANY AUTHENTICATION FAILURES" in upper
+        )
+
+    def _schedule_reconnect_backoff(self, error: str) -> None:
+        self._connect_failures += 1
+        base = 30.0
+        if self._is_auth_circuit_breaker_error(error):
+            delay = min(600.0, max(300.0, base * (2 ** min(self._connect_failures - 1, 4))))
+        else:
+            delay = min(300.0, base * (2 ** min(self._connect_failures - 1, 4)))
+        self._reconnect_blocked_until = datetime.now(tz=UTC) + timedelta(seconds=delay)
+        log.warning(
+            "trade_journal.reconnect_backoff",
+            delay_s=delay,
+            failures=self._connect_failures,
+            error=error[:160],
+        )
 
     async def reconnect_if_needed(self, *, min_interval: float = 30.0, force: bool = False) -> bool:
         """Try to reconnect after transient startup/network failures."""
         if not self._enabled:
             return False
+        now = datetime.now(tz=UTC)
+        if not force and self._reconnect_blocked_until is not None and now < self._reconnect_blocked_until:
+            return self.is_enabled
         if self._pool is not None:
             if not force and self.durable_state_healthy:
                 return True
             await self._close_pool_after_failure("reconnect_pool_close_failed")
             self._pool = None
         if not force and self._last_connect_attempt_at is not None:
-            age = datetime.now(tz=UTC) - self._last_connect_attempt_at
+            age = now - self._last_connect_attempt_at
             if age < timedelta(seconds=min_interval):
                 return False
         await self.connect()

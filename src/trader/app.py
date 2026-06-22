@@ -161,6 +161,7 @@ class TradingApplication:
         self._fee_provider: Any | None = None
         self._last_tx_log_sync_at: datetime | None = None
         self._last_zero_trading_warn_at: datetime | None = None
+        self._last_ws_recovery_at: datetime | None = None
         self._shadow_closed_results: deque[tuple[datetime, str, float]] = deque(maxlen=50)
         self._shadow_loss_guard_until: datetime | None = None
         # Set on every confirmed WS kline; drives the canary "fresh confirmed candles" check
@@ -3319,6 +3320,7 @@ class TradingApplication:
                     if age > 60.0:
                         log.warning("risk_monitor.ws_stale", age_s=age)
                         self._record_diag("ws_stale")
+                    await self._maybe_recover_stale_ws(age)
 
             except Exception as exc:
                 log.warning("risk_monitor.error", error=str(exc))
@@ -3330,6 +3332,27 @@ class TradingApplication:
                 )
             except TimeoutError:
                 pass
+
+    async def _maybe_recover_stale_ws(self, market_data_age_s: float) -> None:
+        """Nudge the public WS to reconnect when market data stops flowing."""
+        assert self._settings is not None
+        threshold = float(self._settings.WS_MARKET_DATA_STALE_RECONNECT_SECONDS)
+        if market_data_age_s < threshold or self._ws_public is None:
+            return
+        now = datetime.now(tz=UTC)
+        if self._last_ws_recovery_at is not None:
+            if (now - self._last_ws_recovery_at).total_seconds() < threshold:
+                return
+        self._last_ws_recovery_at = now
+        log.warning(
+            "ws_public.recovery_requested",
+            market_data_age_s=round(market_data_age_s, 1),
+            threshold_s=threshold,
+        )
+        try:
+            await self._ws_public.force_reconnect()
+        except Exception as exc:
+            log.warning("ws_public.recovery_failed", error=str(exc))
 
     async def _run_reconciliation(self) -> None:
         """Periodic reconciliation: compare local order state with exchange."""

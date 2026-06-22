@@ -177,15 +177,18 @@ async def test_trade_journal_pool_close_timeout_terminates(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
-async def test_trade_journal_connect_keeps_pool_when_schema_bootstrap_times_out(
+async def test_trade_journal_connect_closes_pool_when_schema_bootstrap_times_out(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import trader.storage.trade_journal as trade_journal_module
     from trader.storage.trade_journal import TradeJournal
 
+    closed = False
+
     class FakePool:
         async def close(self) -> None:
-            raise AssertionError("pool must not be closed for schema bootstrap timeout")
+            nonlocal closed
+            closed = True
 
     pool = FakePool()
 
@@ -204,9 +207,11 @@ async def test_trade_journal_connect_keeps_pool_when_schema_bootstrap_times_out(
 
     await journal.connect()
 
-    assert journal.is_enabled is True
-    assert journal._pool is pool
+    assert closed is True
+    assert journal.is_enabled is False
+    assert journal._pool is None
     assert "schema bootstrap degraded" in str(journal.write_health()["last_connect_error"])
+    assert journal._reconnect_blocked_until is not None
 
 
 def test_load_governor_uses_ws_stale_hysteresis() -> None:
