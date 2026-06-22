@@ -1802,7 +1802,6 @@ class TradeJournal:
         sources: tuple[str, ...] = ("shadow_challenger",),
     ) -> list[dict[str, Any]]:
         """Resolved shadow-challenger outcomes with feature vectors for partial_fit."""
-        from trader.training.labels import active_label_schema_version
 
         schema = label_schema_version
         if schema is None:

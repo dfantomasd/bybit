@@ -28,12 +28,12 @@ import json
 import os
 import signal
 import sys
-from uuid import UUID
 import time
 from collections import deque
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_CEILING, ROUND_DOWN, Decimal
 from typing import Any, cast
+from uuid import UUID
 
 import uvicorn
 
