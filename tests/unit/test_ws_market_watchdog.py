@@ -18,12 +18,12 @@ async def test_pong_does_not_refresh_market_watchdog_timestamp() -> None:
         subscriptions=[],
         event_queue=queue,
     )
-    ws._last_market_message_ts = time.monotonic() - 120.0
+    ws._last_market_message_ts = time.monotonic() - 5.0
 
     await ws._handle_message(json.dumps({"op": "pong", "success": True}))
 
     assert ws.last_market_message_age_s is not None
-    assert ws.last_market_message_age_s >= 119.0
+    assert ws.last_market_message_age_s >= 4.0
 
 
 @pytest.mark.asyncio
@@ -34,7 +34,7 @@ async def test_market_message_refreshes_watchdog_timestamp() -> None:
         subscriptions=[],
         event_queue=queue,
     )
-    ws._last_market_message_ts = time.monotonic() - 120.0
+    ws._last_market_message_ts = time.monotonic() - 5.0
 
     await ws._handle_message(
         json.dumps(
