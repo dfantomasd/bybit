@@ -7,7 +7,9 @@ from typing import TYPE_CHECKING
 
 from trader.modules.diagnostics import DiagnosticsModule
 from trader.modules.execution_runtime import ExecutionRuntimeModule
+from trader.modules.lifecycle import LifecycleModule
 from trader.modules.market_data import MarketDataModule
+from trader.modules.operator_controls import OperatorControlsModule
 from trader.modules.ops import OpsModule
 from trader.modules.signal_policy import SignalPolicyModule
 from trader.modules.telegram_bridge import TelegramBridgeModule
@@ -29,6 +31,8 @@ class ModuleRegistry:
         self.diagnostics = DiagnosticsModule(app)
         self.execution = ExecutionRuntimeModule(app)
         self.signal_policy = SignalPolicyModule(app)
+        self.lifecycle = LifecycleModule(app)
+        self.operator = OperatorControlsModule(app)
         self.telegram = TelegramBridgeModule(app)
         self.supervisor = RuntimeSupervisor(app)
 
