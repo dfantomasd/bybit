@@ -626,7 +626,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             GROUP BY pool
             ORDER BY pool
             """,
-            LABEL_SCHEMA_VERSION,
+            label_schema,
             label_threshold,
         )
         legacy_v1 = {

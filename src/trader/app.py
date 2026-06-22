@@ -4517,9 +4517,17 @@ class TradingApplication:
         runtime_candles = self._runtime_candle_readiness_counts()
         if runtime_candles:
             diag["runtime_candles_by_interval"] = runtime_candles
-            if not diag.get("candles_by_interval"):
-                diag["candles_by_interval"] = dict(runtime_candles)
-                diag["candles_source"] = "runtime_fallback"
+            db_candles = dict(diag.get("candles_by_interval") or {})
+            merged = dict(db_candles)
+            for interval, runtime_count in runtime_candles.items():
+                if int(runtime_count) > int(merged.get(interval) or 0):
+                    merged[interval] = int(runtime_count)
+            if merged:
+                diag["candles_by_interval"] = merged
+                if db_candles and merged != db_candles:
+                    diag["candles_source"] = "db_with_runtime_fallback"
+                elif not db_candles:
+                    diag["candles_source"] = "runtime_fallback"
         if self._last_confirmed_candle_at is not None and not diag.get("latest_candle_1m"):
             diag["latest_candle_1m"] = self._last_confirmed_candle_at
             diag["last_confirmed_candle_age_s"] = max(

@@ -1760,12 +1760,12 @@ class TradeJournal:
             FROM feature_snapshots
             WHERE training_eligible = true
               AND created_at < now() - ($1::text || ' days')::interval
-              AND created_at >= now() - (($1 + $2)::text || ' days')::interval
+              AND created_at >= now() - ($2::text || ' days')::interval
             ORDER BY created_at DESC
             LIMIT $3
             """,
             str(current_days),
-            str(baseline_days),
+            str(baseline_days + current_days),
             int(limit),
         )
         current_rows = await self._fetch(
@@ -3111,7 +3111,16 @@ class TradeJournal:
             self._last_read_error_at = None
 
             if lite:
-                latest_candle_1m, candles_by_interval, training_rows, model_rows, champion_rows = await asyncio.gather(
+                (
+                    latest_candle_1m,
+                    candles_by_interval,
+                    feature_snapshots,
+                    prediction_outcomes,
+                    labelled_samples_15m,
+                    training_rows,
+                    model_rows,
+                    champion_rows,
+                ) = await asyncio.gather(
                     _read_or_default(
                         "latest_candle_1m",
                         None,
@@ -3121,6 +3130,21 @@ class TradeJournal:
                         "candle_readiness_counts",
                         {},
                         self.get_candle_readiness_counts,
+                    ),
+                    _read_or_default(
+                        "feature_snapshot_readiness_count",
+                        0,
+                        self.get_feature_snapshot_readiness_count,
+                    ),
+                    _read_or_default(
+                        "prediction_outcome_readiness_count",
+                        0,
+                        self.get_prediction_outcome_readiness_count,
+                    ),
+                    _read_or_default(
+                        "labelled_15m_readiness_count",
+                        0,
+                        self.get_labelled_15m_readiness_count,
                     ),
                     self._fetch(
                         """
@@ -3156,6 +3180,10 @@ class TradeJournal:
                         0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                     )
                 result["candles_by_interval"] = candles_by_interval
+                result["feature_snapshots"] = int(feature_snapshots or 0)
+                result["prediction_outcomes"] = int(prediction_outcomes or 0)
+                result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
+                result["training_eligible_15m"] = result["labelled_samples_15m"]
                 if training_rows:
                     result["latest_training_run"] = dict(training_rows[0])
                 if model_rows:

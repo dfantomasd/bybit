@@ -2513,12 +2513,15 @@ class TelegramMonitorBot:
                 warnings.append((detail, fix))
 
         candles = db_diag.get("candles_by_interval", {}) or {}
-        if not any(int(candles.get(key) or 0) for key in ("1", "5", "15", "60")):
-            runtime_candles = (
-                diag.get("runtime_candles_by_interval") or db_diag.get("runtime_candles_by_interval") or {}
-            )
-            if runtime_candles:
-                candles = runtime_candles
+        runtime_candles = diag.get("runtime_candles_by_interval") or db_diag.get("runtime_candles_by_interval") or {}
+        if runtime_candles:
+            merged = dict(candles)
+            for interval, runtime_count in runtime_candles.items():
+                if int(runtime_count) > int(merged.get(interval) or 0):
+                    merged[interval] = int(runtime_count)
+            candles = merged
+        elif not any(int(candles.get(key) or 0) for key in ("1", "5", "15", "60")):
+            candles = runtime_candles or candles
         latest_1m = db_diag.get("latest_candle_1m")
         latest_age_s = self._utc_age_seconds(latest_1m)
         if latest_age_s is None:

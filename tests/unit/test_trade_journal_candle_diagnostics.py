@@ -175,13 +175,15 @@ async def test_db_diagnostics_preserves_partial_results_when_one_section_times_o
 
 
 @pytest.mark.asyncio
-async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
+async def test_db_diagnostics_lite_includes_capped_readiness_counts() -> None:
     journal = TradeJournal("postgresql://example/db")
     journal._pool = object()  # type: ignore[assignment]
     latest = datetime.now(tz=UTC) - timedelta(seconds=30)
     journal.get_latest_candle_time = AsyncMock(return_value=latest)  # type: ignore[method-assign]
     journal.get_candle_readiness_counts = AsyncMock(return_value={"1": 100, "5": 20, "15": 0, "60": 0})  # type: ignore[method-assign]
-    journal.get_feature_snapshot_readiness_count = AsyncMock(side_effect=AssertionError("lite must skip"))  # type: ignore[method-assign]
+    journal.get_feature_snapshot_readiness_count = AsyncMock(return_value=42)  # type: ignore[method-assign]
+    journal.get_prediction_outcome_readiness_count = AsyncMock(return_value=77)  # type: ignore[method-assign]
+    journal.get_labelled_15m_readiness_count = AsyncMock(return_value=12)  # type: ignore[method-assign]
 
     async def fake_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
         del args
@@ -194,14 +196,35 @@ async def test_db_diagnostics_lite_skips_heavy_readiness_counts() -> None:
         return []
 
     journal._fetch = fake_fetch  # type: ignore[method-assign]
+    journal.get_storage_stats = AsyncMock(return_value={})  # type: ignore[method-assign]
 
     diag = await journal.get_db_diagnostics(lite=True)
 
     assert diag["lite"] is True
     assert diag["latest_candle_1m"] == latest
     assert diag["candles_by_interval"] == {"1": 100, "5": 20, "15": 0, "60": 0}
+    assert diag["feature_snapshots"] == 42
+    assert diag["prediction_outcomes"] == 77
+    assert diag["labelled_samples_15m"] == 12
     assert diag["latest_model_version"]["version"] == "v1"
     assert diag["active_model_version"]["status"] == "CHAMPION"
+
+
+@pytest.mark.asyncio
+async def test_fetch_feature_drift_samples_uses_text_day_offsets() -> None:
+    journal = TradeJournal("postgresql://example/db")
+    fetch = _FetchRecorder([])
+    journal._fetch = fetch  # type: ignore[method-assign]
+
+    await journal.fetch_feature_drift_samples(baseline_days=14, current_days=3, limit=25)
+
+    assert len(fetch.calls) == 2
+    baseline_query, baseline_args = fetch.calls[0]
+    assert "($2::text || ' days')" in baseline_query
+    assert "+ $2" not in baseline_query
+    assert baseline_args == ("3", "17", 25)
+    current_query, current_args = fetch.calls[1]
+    assert current_args == ("3", 25)
 
 
 @pytest.mark.asyncio
