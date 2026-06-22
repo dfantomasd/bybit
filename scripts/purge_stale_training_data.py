@@ -27,7 +27,7 @@ async def _run(*, dry_run: bool) -> None:
         enabled=True,
         pool_max_size=2,
     )
-    await journal.start()
+    await journal.connect()
     try:
         if dry_run:
             stats = await journal.get_storage_stats()
@@ -41,7 +41,7 @@ async def _run(*, dry_run: bool) -> None:
         for key, value in report.items():
             click.echo(f"  {key}: {value}")
     finally:
-        await journal.stop()
+        await journal.close()
 
 
 @click.command()

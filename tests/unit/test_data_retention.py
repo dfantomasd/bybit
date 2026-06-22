@@ -49,6 +49,28 @@ class TestRetentionRunner:
         assert any("feature_snapshots" in str(call.args[0]) for call in store._execute.await_args_list)
 
     @pytest.mark.asyncio
+    async def test_run_data_retention_deletes_orphan_snapshots(self) -> None:
+        store = AsyncMock()
+
+        async def _execute(query: str, *args: object) -> str:
+            if "NOT EXISTS" in query and "prediction_events pe WHERE pe.feature_snapshot_id" in query:
+                return "DELETE 5"
+            return "DELETE 0"
+
+        store._execute = AsyncMock(side_effect=_execute)
+        store._fetch = AsyncMock(return_value=[])
+
+        report = await run_data_retention(
+            store,
+            RetentionSettings(
+                candle_retention_days={},
+                export_enabled=False,
+                feature_snapshot_orphan_retention_days=7,
+            ),
+        )
+        assert report.orphan_snapshots_deleted == 5
+
+    @pytest.mark.asyncio
     async def test_get_pnl_attribution_shadow_fallback(self) -> None:
         store = AsyncMock()
         store._fetch = AsyncMock(
