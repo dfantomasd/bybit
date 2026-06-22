@@ -91,20 +91,40 @@ services:
       - key: TRADE_JOURNAL_FETCH_TIMEOUT_SECONDS
         value: "30"
       - key: TRADE_JOURNAL_POOL_MAX_SIZE
-        value: "3"
+        value: "2"
       - key: WS_MARKET_DATA_STALE_RECONNECT_SECONDS
         value: "120"
+      - key: MARKET_CANDLE_PERSIST_INTERVALS
+        value: "1"
       - key: DATA_RETENTION_ENABLED
         value: "true"
+      - key: DATA_RETENTION_RUN_ON_STARTUP
+        value: "true"
       - key: DATA_RETENTION_INTERVAL_HOURS
-        value: "24"
-      - key: FEATURE_SNAPSHOT_RETENTION_DAYS
+        value: "6"
+      - key: DATA_RETENTION_EXPORT_ENABLED
+        value: "false"
+      - key: CANDLE_RETENTION_DAYS_1M
+        value: "7"
+      - key: CANDLE_RETENTION_DAYS_5M
+        value: "30"
+      - key: CANDLE_RETENTION_DAYS_15M
+        value: "60"
+      - key: CANDLE_RETENTION_DAYS_60M
         value: "90"
+      - key: FEATURE_SNAPSHOT_RETENTION_DAYS
+        value: "30"
       - key: FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS
+        value: "3"
+      - key: FEATURE_SNAPSHOT_ORPHAN_RETENTION_DAYS
         value: "7"
       - key: PREDICTION_EVENT_ORPHAN_RETENTION_DAYS
-        value: "30"
+        value: "7"
+      - key: PREDICTION_OUTCOME_RETENTION_DAYS
+        value: "60"
       - key: SHADOW_SIGNAL_RETENTION_DAYS
+        value: "7"
+      - key: RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS
         value: "30"
       - key: MODEL_DRIFT_DETECTION_ENABLED
         value: "true"

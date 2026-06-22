@@ -1681,7 +1681,9 @@ class TradeJournal:
             },
             feature_snapshot_retention_days=int(settings.FEATURE_SNAPSHOT_RETENTION_DAYS),
             feature_snapshot_invalid_retention_days=int(settings.FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS),
+            feature_snapshot_orphan_retention_days=int(settings.FEATURE_SNAPSHOT_ORPHAN_RETENTION_DAYS),
             prediction_event_orphan_retention_days=int(settings.PREDICTION_EVENT_ORPHAN_RETENTION_DAYS),
+            prediction_outcome_retention_days=int(settings.PREDICTION_OUTCOME_RETENTION_DAYS),
             shadow_signal_retention_days=int(settings.SHADOW_SIGNAL_RETENTION_DAYS),
             resolved_snapshot_export_before_delete_days=int(settings.RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS),
             export_enabled=bool(settings.DATA_RETENTION_EXPORT_ENABLED),
@@ -3033,12 +3035,6 @@ class TradeJournal:
             "paper_pnl_15m": {},
             "storage_stats": {},
         }
-        if not self.is_enabled:
-            await self.reconnect_if_needed()
-            result["connected"] = self.is_enabled
-            result["last_connect_error"] = self._last_connect_error
-            result["last_connect_error_at"] = self._last_connect_error_at
-            result["write_health"] = self.write_health()
         if not self.is_enabled:
             return result
 

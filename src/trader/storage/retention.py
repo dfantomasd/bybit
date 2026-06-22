@@ -48,12 +48,14 @@ class RetentionStore(Protocol):
 
 @dataclass
 class RetentionSettings:
-    candle_retention_days: dict[str, int] = field(default_factory=lambda: {"1": 30, "5": 180, "15": 365, "60": 730})
-    feature_snapshot_retention_days: int = 90
-    feature_snapshot_invalid_retention_days: int = 7
-    prediction_event_orphan_retention_days: int = 30
-    shadow_signal_retention_days: int = 30
-    resolved_snapshot_export_before_delete_days: int = 90
+    candle_retention_days: dict[str, int] = field(default_factory=lambda: {"1": 14, "5": 60, "15": 90, "60": 180})
+    feature_snapshot_retention_days: int = 45
+    feature_snapshot_invalid_retention_days: int = 3
+    feature_snapshot_orphan_retention_days: int = 14
+    prediction_event_orphan_retention_days: int = 14
+    prediction_outcome_retention_days: int = 90
+    shadow_signal_retention_days: int = 14
+    resolved_snapshot_export_before_delete_days: int = 45
     export_enabled: bool = True
     export_dir: str = "data/retention_exports"
 
@@ -62,7 +64,9 @@ class RetentionSettings:
 class RetentionReport:
     candles_deleted: int = 0
     invalid_snapshots_deleted: int = 0
+    orphan_snapshots_deleted: int = 0
     orphan_predictions_deleted: int = 0
+    old_outcomes_deleted: int = 0
     shadow_signals_deleted: int = 0
     archived_snapshots_deleted: int = 0
     exported_files: list[str] = field(default_factory=list)
@@ -72,7 +76,9 @@ class RetentionReport:
         return {
             "candles_deleted": self.candles_deleted,
             "invalid_snapshots_deleted": self.invalid_snapshots_deleted,
+            "orphan_snapshots_deleted": self.orphan_snapshots_deleted,
             "orphan_predictions_deleted": self.orphan_predictions_deleted,
+            "old_outcomes_deleted": self.old_outcomes_deleted,
             "shadow_signals_deleted": self.shadow_signals_deleted,
             "archived_snapshots_deleted": self.archived_snapshots_deleted,
             "exported_files": self.exported_files,
@@ -232,6 +238,21 @@ async def run_data_retention(store: RetentionStore, settings: RetentionSettings)
     try:
         result = await store._execute(
             """
+            DELETE FROM feature_snapshots fs
+            WHERE fs.created_at < now() - ($1::text || ' days')::interval
+              AND NOT EXISTS (
+                  SELECT 1 FROM prediction_events pe WHERE pe.feature_snapshot_id = fs.snapshot_id
+              )
+            """,
+            str(settings.feature_snapshot_orphan_retention_days),
+        )
+        report.orphan_snapshots_deleted = _parse_delete_count(result)
+    except Exception as exc:
+        report.errors.append(f"orphan_snapshots: {exc}")
+
+    try:
+        result = await store._execute(
+            """
             DELETE FROM prediction_events pe
             WHERE pe.created_at < now() - ($1::text || ' days')::interval
               AND NOT EXISTS (
@@ -243,6 +264,18 @@ async def run_data_retention(store: RetentionStore, settings: RetentionSettings)
         report.orphan_predictions_deleted = _parse_delete_count(result)
     except Exception as exc:
         report.errors.append(f"orphan_predictions: {exc}")
+
+    try:
+        result = await store._execute(
+            """
+            DELETE FROM prediction_outcomes
+            WHERE created_at < now() - ($1::text || ' days')::interval
+            """,
+            str(settings.prediction_outcome_retention_days),
+        )
+        report.old_outcomes_deleted = _parse_delete_count(result)
+    except Exception as exc:
+        report.errors.append(f"old_outcomes: {exc}")
 
     try:
         result = await store._execute(
@@ -307,6 +340,12 @@ async def run_data_retention(store: RetentionStore, settings: RetentionSettings)
         except Exception as exc:
             report.errors.append(f"archived_snapshots: {exc}")
 
-    if report.candles_deleted or report.invalid_snapshots_deleted or report.archived_snapshots_deleted:
+    if (
+        report.candles_deleted
+        or report.invalid_snapshots_deleted
+        or report.orphan_snapshots_deleted
+        or report.archived_snapshots_deleted
+        or report.old_outcomes_deleted
+    ):
         log.info("data_retention.completed", **report.to_dict())
     return report

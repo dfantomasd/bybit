@@ -184,6 +184,7 @@ class TradingApplication:
         self._last_strategy_cycle_ms: float = 0.0
         self._drift_status: dict[str, Any] = {"status": "n/a"}
         self._last_retention_run_at: datetime | None = None
+        self._startup_retention_done: bool = False
         self._subscribe_watchdog: Any | None = None
         self._online_learning_updates_since_checkpoint: int = 0
 
@@ -222,6 +223,12 @@ class TradingApplication:
             if interval and interval not in intervals:
                 intervals.append(interval)
         return intervals
+
+    def _should_persist_candle_interval(self, interval: str) -> bool:
+        """Whether confirmed candles for this interval should be written to Postgres."""
+        if self._settings is None:
+            return interval == "1"
+        return interval in self._settings.market_candle_persist_intervals()
 
     def _ws_topics_for_symbol(self, symbol: str) -> list[str]:
         """Build public WS topic list for one symbol."""
@@ -352,6 +359,7 @@ class TradingApplication:
             pool_max_size=self._settings.TRADE_JOURNAL_POOL_MAX_SIZE,
         )
         await self._trade_journal.connect()
+        await self._maybe_run_startup_retention()
         task = asyncio.create_task(self._run_trade_journal_reconnector(), name="trade-journal-reconnector")
         self._background_tasks.append(task)
 
@@ -371,6 +379,7 @@ class TradingApplication:
                     if connected:
                         log.info("trade_journal.reconnected")
                         await self._restore_execution_pending_entries()
+                        await self._maybe_run_startup_retention()
                 except Exception as exc:
                     log.debug("trade_journal.reconnect_failed", error=str(exc))
             try:
@@ -1906,9 +1915,9 @@ class TradingApplication:
                     "lite": lite,
                 }
             if not self._trade_journal.is_enabled:
-                await self._trade_journal.reconnect_if_needed(force=True)
+                await self._trade_journal.reconnect_if_needed()
             now = time.monotonic()
-            cache_ttl = 30.0 if lite else 10.0
+            cache_ttl = 60.0 if lite else 15.0
             cache = self._db_diagnostics_lite_cache if lite else self._db_diagnostics_cache
             cache_at = self._db_diagnostics_lite_cache_at if lite else self._db_diagnostics_cache_at
             if cache is not None and (now - cache_at) < cache_ttl:
@@ -2498,7 +2507,12 @@ class TradingApplication:
                             # Only persist confirmed candles — active REST candles
                             # may carry intermediate prices and must not be stored as
                             # confirmed=true in the training database.
-                            if confirmed and self._trade_journal is not None and self._trade_journal.is_enabled:
+                            if (
+                                confirmed
+                                and self._should_persist_candle_interval(interval)
+                                and self._trade_journal is not None
+                                and self._trade_journal.is_enabled
+                            ):
                                 await self._trade_journal.upsert_market_candle(
                                     symbol=symbol,
                                     interval=interval,
@@ -2598,6 +2612,8 @@ class TradingApplication:
                                 close_epoch_ms = ts_ms + bar_ms
                                 if now_ms < close_epoch_ms:
                                     continue  # still open — skip, no look-ahead
+                                if not self._should_persist_candle_interval(interval):
+                                    continue
                                 await self._trade_journal.upsert_market_candle(
                                     symbol=symbol,
                                     interval=interval,
@@ -2742,6 +2758,8 @@ class TradingApplication:
                             close_epoch_ms = ts_ms + bar_ms
                             if now_ms < close_epoch_ms:
                                 continue  # unconfirmed — never persist (look-ahead guard)
+                            if not self._should_persist_candle_interval(interval):
+                                continue
                             await self._trade_journal.upsert_market_candle(
                                 symbol=symbol,
                                 interval=interval,
@@ -2913,8 +2931,12 @@ class TradingApplication:
                                 if vec is not None:
                                     await self._sample_confirmed_candle(event.symbol, event.interval, vec)
 
-                            # Persist confirmed candle to PostgreSQL (best-effort)
-                            if self._trade_journal is not None and self._trade_journal.is_enabled:
+                            # Persist confirmed candle to PostgreSQL (best-effort, selected intervals only)
+                            if (
+                                self._should_persist_candle_interval(event.interval)
+                                and self._trade_journal is not None
+                                and self._trade_journal.is_enabled
+                            ):
                                 bar_ms = _INTERVAL_MS.get(event.interval, 60_000)
                                 close_time = datetime.fromtimestamp(
                                     (event.open_time.timestamp() * 1000 + bar_ms - 1) / 1000,
@@ -3469,6 +3491,25 @@ class TradingApplication:
                     samples=challenger.training_samples,
                 )
             log.info("online_learning.updated", samples=applied, model_version=challenger.version)
+
+    async def _maybe_run_startup_retention(self) -> None:
+        """One-shot purge after Postgres connects to trim historical bloat."""
+        assert self._settings is not None
+        if (
+            self._startup_retention_done
+            or not self._settings.DATA_RETENTION_ENABLED
+            or not self._settings.DATA_RETENTION_RUN_ON_STARTUP
+            or self._trade_journal is None
+            or not self._trade_journal.is_enabled
+        ):
+            return
+        self._startup_retention_done = True
+        try:
+            report = await self._trade_journal.run_data_retention_policy(self._settings)
+            self._last_retention_run_at = datetime.now(tz=UTC)
+            log.info("data_retention.startup_complete", **report)
+        except Exception as exc:
+            log.warning("data_retention.startup_failed", error=str(exc))
 
     async def _run_data_retention(self) -> None:
         assert self._settings is not None

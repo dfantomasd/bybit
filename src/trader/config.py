@@ -275,17 +275,24 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     DATA_RETENTION_ENABLED: bool = True
     DATA_RETENTION_INTERVAL_HOURS: float = 24.0
+    DATA_RETENTION_RUN_ON_STARTUP: bool = True
+    """Purge stale rows once after Postgres connects (reduces Supabase bloat)."""
     DATA_RETENTION_EXPORT_ENABLED: bool = True
     DATA_RETENTION_EXPORT_DIR: str = "data/retention_exports"
-    CANDLE_RETENTION_DAYS_1M: int = 30
-    CANDLE_RETENTION_DAYS_5M: int = 180
-    CANDLE_RETENTION_DAYS_15M: int = 365
-    CANDLE_RETENTION_DAYS_60M: int = 730
-    FEATURE_SNAPSHOT_RETENTION_DAYS: int = 90
-    FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS: int = 7
-    PREDICTION_EVENT_ORPHAN_RETENTION_DAYS: int = 30
-    SHADOW_SIGNAL_RETENTION_DAYS: int = 30
-    RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS: int = 90
+    MARKET_CANDLE_PERSIST_INTERVALS: str = "1"
+    """Comma-separated kline intervals written to Postgres (others stay in-memory only)."""
+    CANDLE_RETENTION_DAYS_1M: int = 14
+    CANDLE_RETENTION_DAYS_5M: int = 60
+    CANDLE_RETENTION_DAYS_15M: int = 90
+    CANDLE_RETENTION_DAYS_60M: int = 180
+    FEATURE_SNAPSHOT_RETENTION_DAYS: int = 45
+    FEATURE_SNAPSHOT_INVALID_RETENTION_DAYS: int = 3
+    FEATURE_SNAPSHOT_ORPHAN_RETENTION_DAYS: int = 14
+    """Delete snapshots with no linked prediction_events after this many days."""
+    PREDICTION_EVENT_ORPHAN_RETENTION_DAYS: int = 14
+    PREDICTION_OUTCOME_RETENTION_DAYS: int = 90
+    SHADOW_SIGNAL_RETENTION_DAYS: int = 14
+    RESOLVED_SNAPSHOT_EXPORT_BEFORE_DELETE_DAYS: int = 45
 
     # ------------------------------------------------------------------
     # Telegram notifications
@@ -707,6 +714,12 @@ class Settings(BaseSettings):
                 "block low-score signals. Consider enabling MODEL_GATE_CANARY_ENABLED.",
                 stacklevel=2,
             )
+
+    def market_candle_persist_intervals(self) -> frozenset[str]:
+        """Kline intervals persisted to Postgres (others remain in-memory only)."""
+        return frozenset(
+            part.strip() for part in self.MARKET_CANDLE_PERSIST_INTERVALS.split(",") if part.strip()
+        )
 
 
 # ---------------------------------------------------------------------------
