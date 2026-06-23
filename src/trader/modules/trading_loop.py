@@ -135,6 +135,28 @@ class TradingLoopModule(AppBoundModule):
                 max_trades_per_minute=self._app._settings.SCALP_MAX_TRADES_PER_MINUTE,
             )
 
+        if self._app._initial_shadow_mode() and self._app._settings.SHADOW_PROBE_ENABLED:
+            from trader.strategies.shadow_probe import ShadowProbeStrategy
+
+            strategies.append(
+                ShadowProbeStrategy(
+                    imbalance_provider=(
+                        self._app._orderbook_tracker.latest_imbalance
+                        if self._app._orderbook_tracker is not None
+                        else None
+                    ),
+                    min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
+                    cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
+                    max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
+                )
+            )
+            log.info(
+                "shadow_probe.enabled",
+                min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
+                cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
+                max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
+            )
+
         if (
             self._app._settings.ORDER_FLOW_STRATEGY_ENABLED
             or self._app._settings.FUNDING_ARB_STRATEGY_ENABLED

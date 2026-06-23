@@ -139,6 +139,11 @@ class Settings(BaseSettings):
     """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
     SHADOW_RELAX_SCALP_FILTERS: bool = True
     """When SHADOW and not SCALP_STRICT_SHADOW, loosen scalp gates for paper-trade data collection."""
+    SHADOW_PROBE_ENABLED: bool = True
+    """Enable SHADOW-only paper probes so model/order outcomes accumulate when live strategies are silent."""
+    SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.03
+    SHADOW_PROBE_COOLDOWN_SECONDS: int = 300
+    SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
     SHADOW_MIN_ATR_MULTIPLE: float = 0.35
     """Min stop/ATR ratio in shadow sizing (scalp SL is 0.5×ATR; lower value avoids tick-round rejects)."""
     TREND_STRATEGY_ENABLED: bool = True
