@@ -196,7 +196,7 @@ services:
       - key: MODEL_AUTO_TRAIN_HORIZON_MINUTES
         value: "5"
       - key: TRAIN_STRATEGY_ALLOWLIST
-        value: "scalp_micro_v1"
+        value: "scalp_micro_v1,candle_sampler_v1"
       - key: TRAIN_INCLUDE_CANDLE_BASELINE
         value: "true"
       - key: TRAIN_EXCLUDE_NEGATIVE_BUCKETS
@@ -229,7 +229,11 @@ services:
       - key: MODEL_TYPE
         value: GBDT
       - key: MODEL_CANDIDATES
-        value: "GBDT,LOGREG,SGD"
+        value: "LOGREG"
+      - key: MODEL_WF_FOLDS
+        value: "3"
+      - key: MODEL_THRESHOLD_GRID
+        value: "2,5"
       - key: MODEL_SHADOW_SCORING_ENABLED
         value: "true"
       - key: MODEL_ALLOW_LIVE_DECISIONS

@@ -536,7 +536,7 @@ class Settings(BaseSettings):
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
     TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
-    TRAIN_INCLUDE_CANDLE_BASELINE: bool = False
+    TRAIN_INCLUDE_CANDLE_BASELINE: bool = True
     """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines."""
     TRAIN_LABEL_SPREAD_BPS: float = 4.0
     """Spread component in the training label cost model (scalp max spread is ~5 bps)."""

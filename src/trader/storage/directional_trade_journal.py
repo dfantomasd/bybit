@@ -505,9 +505,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "label_schema_version": label_schema,
             "label_threshold_bps": label_threshold,
             "auto_train_horizon_minutes": (
-                int(settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
-                if settings is not None
-                else 5
+                int(settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES) if settings is not None else 5
             ),
         }
         rows = await self._fetch(

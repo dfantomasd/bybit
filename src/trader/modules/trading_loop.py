@@ -249,10 +249,7 @@ class TradingLoopModule(AppBoundModule):
         needs_model_registry = (
             self._app._settings.MODEL_SHADOW_SCORING_ENABLED
             or self._app._settings.MODEL_GATE_CANARY_ENABLED
-            or (
-                self._app._settings.MODEL_ENABLED
-                and self._app._settings.MODEL_ALLOW_LIVE_DECISIONS
-            )
+            or (self._app._settings.MODEL_ENABLED and self._app._settings.MODEL_ALLOW_LIVE_DECISIONS)
         )
         if needs_model_registry:
             try:
@@ -603,9 +600,7 @@ class TradingLoopModule(AppBoundModule):
                     await _record_signal("feature_snapshot_missing")
                     return
                 try:
-                    live_prediction = self._app._model_registry.score_live(
-                        model_feature_values, model_feature_names
-                    )
+                    live_prediction = self._app._model_registry.score_live(model_feature_values, model_feature_names)
                     if live_prediction is not None:
                         canary_threshold = self._app._model_gate_threshold(regime_ctx)
                         canary_gate_decision = (
@@ -616,11 +611,7 @@ class TradingLoopModule(AppBoundModule):
                             canary_threshold,
                             live_prediction.score,
                         )
-                        if (
-                            snapshot_id
-                            and self._app._trade_journal is not None
-                            and self._app._trade_journal.is_enabled
-                        ):
+                        if snapshot_id and self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
                             await self._app._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
                                 interval=_WS_INTERVAL,

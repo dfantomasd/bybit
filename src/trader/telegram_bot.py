@@ -356,6 +356,8 @@ class TelegramMonitorBot:
                     return False
                 self._mount_webhook_route(http_app)
                 await self._activate_webhook(app)
+                # Same watchdog loop re-registers webhook after rolling-deploy overlap.
+                self._start_polling_watchdog()
             else:
                 await self._start_polling(app)
                 self._start_polling_watchdog()
@@ -409,10 +411,10 @@ class TelegramMonitorBot:
             return
         try:
             if self._uses_webhook():
-                try:
-                    await app.bot.delete_webhook(drop_pending_updates=False)
-                except Exception as exc:
-                    log.debug("telegram_delete_webhook_failed", error=str(exc))
+                # Keep webhook registered on shutdown. During Render rolling deploys the
+                # replacement instance already called set_webhook; deleting here leaves
+                # Telegram deaf until the new process finishes long startup work.
+                log.info("telegram_webhook_preserved_on_shutdown")
             elif app.updater is not None and getattr(app.updater, "running", False):
                 await app.updater.stop()
             if getattr(app, "running", False):

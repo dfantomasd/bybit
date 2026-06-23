@@ -119,11 +119,7 @@ class TrainingModule(ModuleTaskMixin):
                     if latest_success_samples == 0
                     else None
                 )
-                active_horizon = (
-                    initial_chosen.horizon_minutes
-                    if initial_chosen is not None
-                    else preferred_horizon
-                )
+                active_horizon = initial_chosen.horizon_minutes if initial_chosen is not None else preferred_horizon
                 horizon_schema = newest_schema_by_horizon.get(str(active_horizon), {}) or {}
                 trainable = int(
                     horizon_schema.get(
@@ -463,7 +459,21 @@ class TrainingModule(ModuleTaskMixin):
                 )
                 report_horizon = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
+                filtered_by_horizon = diag.get("training_filtered_total_by_horizon", {}) or {}
+                min_train_samples = max(50, int(self._app._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
                 labelled = int(training_by_horizon.get(str(report_horizon), diag.get("labelled_samples_15m", 0)) or 0)
+                pool_breakdown = diag.get("training_pool_breakdown", {}) or {}
+                candle_pool = int(pool_breakdown.get("candle_baseline_active_schema", 0) or 0) + int(
+                    pool_breakdown.get("candle_sampler_v1_active_schema", 0) or 0
+                )
+                scalp_pool = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
+                horizon_parts = [
+                    f"{horizon_key}m: {int(training_by_horizon.get(horizon_key, 0) or 0)}"
+                    for horizon_key in ("5", "15")
+                    if horizon_key in training_by_horizon or horizon_key in filtered_by_horizon
+                ]
+                horizon_summary = ", ".join(horizon_parts) if horizon_parts else f"{report_horizon}m: {labelled}"
+                no_trained_model = version in {"", "—", "none"} or actual_training_samples == 0
 
                 # Fetch gate stats for the latest model (challenger), not the active champion.
                 # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
@@ -583,7 +593,12 @@ class TrainingModule(ModuleTaskMixin):
                             if compatible_training_samples != actual_training_samples
                             else ""
                         )
-                        + f" | Доступно ({report_horizon}m): <code>{labelled}</code>"
+                        + f" | Доступно: <code>{horizon_summary}</code>"
+                    ),
+                    (
+                        f"Пул (5m): candle <code>{candle_pool}</code>, scalp <code>{scalp_pool}</code>"
+                        if candle_pool or scalp_pool
+                        else ""
                     ),
                     (
                         f"Gate: <code>{resolved_count}</code> resolved / "
@@ -591,6 +606,7 @@ class TrainingModule(ModuleTaskMixin):
                         + (f" / <code>{pending_count}</code> ждёт outcome" if pending_count else "")
                     ),
                 ]
+                lines = [line for line in lines if line]
 
                 if schema_drift:
                     lines.append(
@@ -625,6 +641,16 @@ class TrainingModule(ModuleTaskMixin):
                     lines.append(f"\n⏳ Auto-promoter ждёт: <code>{safe_reasons}</code>")
                 elif not is_challenger and status == "CHAMPION":
                     lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
+                elif no_trained_model:
+                    best_trainable = max(
+                        (int(training_by_horizon.get(key, 0) or 0) for key in ("5", "15", "30", "60")),
+                        default=labelled,
+                    )
+                    lines.append(
+                        f"\n⏳ <b>Модель ещё не обучена.</b> Нужно ≥ <code>{min_train_samples}</code> "
+                        f"примеров на одной схеме (сейчас лучший горизонт: <code>{best_trainable}</code>). "
+                        "Авто-обучение запустится, когда порог будет достигнут."
+                    )
                 elif schema_drift:
                     lines.append(
                         f"\n⏳ Модель не обучена под текущую схему фичей. "
@@ -697,22 +723,33 @@ class TrainingModule(ModuleTaskMixin):
             return html.escape(value[-limit:])
 
         try:
+            train_env = {
+                **os.environ,
+                # Keep sklearn/BLAS from saturating the single Render starter CPU.
+                "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
+                "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
+                "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
+                "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
+                "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
+                "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
+                "TRAIN_STRATEGY_ALLOWLIST": (
+                    self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
+                ),
+                "TRAIN_INCLUDE_CANDLE_BASELINE": (
+                    "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
+                ),
+                "MODEL_LABEL_USE_TPSL_EXIT": (
+                    "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
+                ),
+            }
+            create_kwargs: dict[str, Any] = {"env": train_env}
+            if hasattr(os, "nice"):
+                create_kwargs["preexec_fn"] = lambda: os.nice(10)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={
-                    **os.environ,
-                    "TRAIN_STRATEGY_ALLOWLIST": (
-                        self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
-                    ),
-                    "TRAIN_INCLUDE_CANDLE_BASELINE": (
-                        "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
-                    ),
-                    "MODEL_LABEL_USE_TPSL_EXIT": (
-                        "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
-                    ),
-                },
+                **create_kwargs,
             )
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False

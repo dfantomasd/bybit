@@ -247,11 +247,7 @@ class MarketDataModule(ModuleTaskMixin):
 
     async def prefetch_ticker_turnover(self, symbols: list[str]) -> None:
         """Batch-fetch 24h turnover for position sizing (safe to call after execution init)."""
-        if (
-            not symbols
-            or self._app._execution_engine is None
-            or self._app._bybit_adapter is None
-        ):
+        if not symbols or self._app._execution_engine is None or self._app._bybit_adapter is None:
             return
         try:
             resp = await self._app._bybit_adapter._rest.get_tickers(category="linear")
@@ -637,9 +633,7 @@ class MarketDataModule(ModuleTaskMixin):
                                 # when a higher-TF candle closes so pat5_/pat15_ stay current.
                                 if event.interval in ("5", "15"):
                                     self._app._feature_pipeline.invalidate_symbol(event.symbol)
-                                    await self._app._feature_pipeline.on_confirmed_candle(
-                                        event.symbol, _WS_INTERVAL
-                                    )
+                                    await self._app._feature_pipeline.on_confirmed_candle(event.symbol, _WS_INTERVAL)
                                 # Per-candle training sampler: a labelled sample per
                                 # confirmed 1m candle instead of per trade signal
                                 if vec is not None and event.interval == _WS_INTERVAL:
