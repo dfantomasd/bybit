@@ -362,6 +362,16 @@ class DiagnosticsModule(AppBoundModule):
             "last_confirmed_candle_age_s": confirmed_age,
             "runtime_candles_by_interval": self.runtime_candle_readiness_counts(),
             "telegram": telegram_health,
+            "scalp_strict_shadow": self._app._scalp_strict_shadow(),
+            "shadow_apply_net_edge_gate": self._app._execution_engine._shadow_apply_net_edge_gate
+            if self._app._execution_engine is not None
+            else None,
+            "min_expected_net_edge_pct": (
+                self._app._settings.MIN_EXPECTED_NET_EDGE_PCT if self._app._settings is not None else None
+            ),
+            "net_edge_safety_margin_pct": (
+                self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT if self._app._settings is not None else None
+            ),
             "active_symbols": (
                 self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
             ),

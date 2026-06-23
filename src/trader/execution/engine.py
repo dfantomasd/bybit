@@ -907,6 +907,7 @@ class ExecutionEngine:
         symbol = proposal.symbol
         _t_engine_start = datetime.now(UTC)
         notional_buffer_pct = self._min_notional_buffer_for_balance(available_balance)
+        shadow_probe = self._shadow_mode and proposal.strategy_id == "shadow_probe_v1"
 
         # 1. Deduplication ─────────────────────────────────────────────
         if self.has_open_position(symbol):
@@ -1052,16 +1053,18 @@ class ExecutionEngine:
                 return None
 
         # 3d. STDEV + Trend Guard ─────────────────────────────────────
-        stdev_block = self._stdev_trend_guard(proposal, feature_vector)
+        stdev_block = None if shadow_probe else self._stdev_trend_guard(proposal, feature_vector)
         if stdev_block:
             log.info("execution.stdev_guard_blocked", symbol=symbol, reason=stdev_block)
             return None
 
         # 3e. pDiv size multiplier — stale-signal penalty ─────────────
-        pdiv_multiplier = self._pdiv_size_multiplier(proposal, feature_vector)
+        pdiv_multiplier = Decimal("1") if shadow_probe else self._pdiv_size_multiplier(proposal, feature_vector)
 
         # 3f. SOP size boost — strong orderbook alignment ─────────────
-        sop_multiplier = self._sop_size_multiplier(proposal, feature_vector, regime_context)
+        sop_multiplier = (
+            Decimal("1") if shadow_probe else self._sop_size_multiplier(proposal, feature_vector, regime_context)
+        )
 
         # Safety ladder size multiplier [0.0, 1.0] — applied before SOP can boost
         ladder_multiplier = Decimal("1")
@@ -1168,7 +1171,7 @@ class ExecutionEngine:
         exposure_reserved = True
 
         # 5b. Cost-aware entry gate (LIVE, or SCALP strict shadow) ─────────
-        apply_net_edge_gate = (not self._shadow_mode) or self._shadow_apply_net_edge_gate
+        apply_net_edge_gate = ((not self._shadow_mode) or self._shadow_apply_net_edge_gate) and not shadow_probe
         if apply_net_edge_gate:
             # Fail-closed: TP required for LIVE entries
             if proposal.take_profit is None:
