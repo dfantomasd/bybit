@@ -695,6 +695,18 @@ class TradingApplication:
             await self._start_http_server()
             await self._start_bybit_adapter()
             await self._start_telegram_bot()
+            if self._telegram_bot is not None and hasattr(self._telegram_bot, "refresh_delivery"):
+
+                async def _early_webhook_refresh() -> None:
+                    await asyncio.sleep(8.0)
+                    try:
+                        await self._telegram_bot.refresh_delivery()
+                    except Exception as tg_refresh_exc:
+                        log.warning("telegram.early_refresh_failed", error=str(tg_refresh_exc))
+
+                self._background_tasks.append(
+                    asyncio.create_task(_early_webhook_refresh(), name="telegram-webhook-refresh")
+                )
 
             # Start private WebSocket for real-time order/position/balance events
             await self._start_private_ws()

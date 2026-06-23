@@ -102,3 +102,30 @@ async def test_telegram_webhook_processes_update() -> None:
     assert response.status_code == 200
     await asyncio.sleep(0)
     mock_app.process_update.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_telegram_webhook_start_starts_delivery_watchdog() -> None:
+    bot = _make_webhook_bot()
+    http_app = FastAPI()
+    mock_app = _mock_application()
+
+    with patch("trader.telegram_bot.Application") as mock_app_cls:
+        mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
+        with patch.object(bot, "_start_polling_watchdog") as mock_watchdog:
+            assert await bot.start(http_app=http_app) is True
+            mock_watchdog.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_telegram_webhook_shutdown_preserves_registration() -> None:
+    bot = _make_webhook_bot()
+    http_app = FastAPI()
+    mock_app = _mock_application()
+
+    with patch("trader.telegram_bot.Application") as mock_app_cls:
+        mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
+        assert await bot.start(http_app=http_app) is True
+
+    await bot.stop()
+    mock_app.bot.delete_webhook.assert_not_awaited()

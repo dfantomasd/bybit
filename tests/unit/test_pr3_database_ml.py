@@ -712,7 +712,6 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     from trader.modules.training import TrainingModule
 
     src = inspect.getsource(TrainingModule.run_auto_model_trainer)
-    compact_src = "".join(src.split())
     assert "training_eligible_by_horizon" in src
     assert "resolve_training_horizon" in src
     assert "active_horizon" in src
