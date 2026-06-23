@@ -1,0 +1,70 @@
+from __future__ import annotations
+
+from types import SimpleNamespace
+
+from trader.modules.signal_policy import SignalPolicyModule
+
+
+def _policy_module(
+    *,
+    side_stats: dict[tuple[str, str], tuple[float, int]] | None = None,
+    symbol_stats: dict[str, tuple[float, int]] | None = None,
+    eligible: set[str] | None = None,
+) -> SignalPolicyModule:
+    settings = SimpleNamespace(
+        SHADOW_PROBE_SIDE_BLOCK_ENABLED=True,
+        SHADOW_PROBE_SIDE_MIN_SAMPLES=8,
+        SHADOW_PROBE_SIDE_BLOCK_AVG_BPS=-3.0,
+        SHADOW_PROBE_QUALITY_FILTER_ENABLED=True,
+        SHADOW_PROBE_BASELINE_MIN_AVG_BPS=0.0,
+        SHADOW_PROBE_BASELINE_MIN_SAMPLES=6,
+        SHADOW_PROBE_SYMBOL_TOP_N=2,
+        SHADOW_PROBE_SYMBOL_MIN_SAMPLES=5,
+        SHADOW_PROBE_SYMBOL_MIN_AVG_BPS=-1.0,
+    )
+    app = SimpleNamespace(
+        _settings=settings,
+        _shadow_probe_side_stats=side_stats or {},
+        _shadow_probe_symbol_stats=symbol_stats or {},
+        _shadow_probe_eligible_symbols=eligible,
+    )
+    return SignalPolicyModule(app)
+
+
+def test_shadow_probe_side_blocked_for_losing_side() -> None:
+    policy = _policy_module(side_stats={("XRPUSDT", "Sell"): (-5.0, 10)})
+
+    assert policy.shadow_probe_side_blocked("XRPUSDT", "Sell") is True
+    assert policy.shadow_probe_side_blocked("XRPUSDT", "Buy") is False
+
+
+def test_shadow_probe_quality_requires_non_negative_baseline() -> None:
+    policy = _policy_module(side_stats={("XRPUSDT", "Buy"): (-1.0, 8)})
+
+    assert policy.shadow_probe_quality_allows("XRPUSDT", "Buy") is False
+    assert policy.shadow_probe_quality_allows("XRPUSDT", "Sell") is True
+
+
+def test_shadow_probe_symbol_allowed_uses_eligible_set() -> None:
+    policy = _policy_module(eligible={"XRPUSDT", "SOLUSDT"})
+
+    assert policy.shadow_probe_symbol_allowed("XRPUSDT") is True
+    assert policy.shadow_probe_symbol_allowed("DOGEUSDT") is False
+
+
+def test_compute_shadow_probe_eligible_symbols_returns_top_n() -> None:
+    stats = {
+        "XRPUSDT": (4.0, 10),
+        "SOLUSDT": (2.0, 8),
+        "DOGEUSDT": (-2.0, 12),
+        "BTCUSDT": (1.0, 7),
+    }
+
+    eligible = SignalPolicyModule.compute_shadow_probe_eligible_symbols(
+        stats,
+        top_n=2,
+        min_samples=5,
+        min_avg_bps=-1.0,
+    )
+
+    assert eligible == {"XRPUSDT", "SOLUSDT"}

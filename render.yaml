@@ -80,6 +80,28 @@ services:
         value: "0.45"
       - key: SHADOW_PROBE_MIN_SL_PCT
         value: "0.25"
+      - key: SHADOW_PROBE_MIN_NET_RETURN_PCT
+        value: "0.05"
+      - key: SHADOW_PROBE_SIDE_BLOCK_ENABLED
+        value: "true"
+      - key: SHADOW_PROBE_SIDE_MIN_SAMPLES
+        value: "8"
+      - key: SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
+        value: "-3.0"
+      - key: SHADOW_PROBE_QUALITY_FILTER_ENABLED
+        value: "true"
+      - key: SHADOW_PROBE_BASELINE_MIN_AVG_BPS
+        value: "0.0"
+      - key: SHADOW_PROBE_BASELINE_MIN_SAMPLES
+        value: "6"
+      - key: SHADOW_PROBE_SYMBOL_TOP_N
+        value: "6"
+      - key: SHADOW_PROBE_SYMBOL_MIN_SAMPLES
+        value: "6"
+      - key: SHADOW_PROBE_SYMBOL_MIN_AVG_BPS
+        value: "-1.0"
+      - key: SHADOW_PROBE_STATS_LOOKBACK_DAYS
+        value: "7"
       - key: MIN_NET_SCALP_RETURN_PCT
         value: "0.04"
       - key: SCALP_MIN_OB_IMBALANCE

@@ -343,6 +343,69 @@ class SignalPolicyModule(AppBoundModule):
             and avg_bps < self._app._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
         )
 
+    def shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
+        """Block probe entries on symbol+side pairs with negative paper baseline."""
+
+        assert self._app._settings is not None
+        if not self._app._settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED:
+            return False
+        stats = self._app._shadow_probe_side_stats.get((symbol, side))
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return bool(
+            count >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
+            and avg_bps < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
+        )
+
+    def shadow_probe_quality_allows(self, symbol: str, side: str) -> bool:
+        """Require non-negative recent probe baseline when enough samples exist."""
+
+        assert self._app._settings is not None
+        if not self._app._settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED:
+            return True
+        stats = self._app._shadow_probe_side_stats.get((symbol, side))
+        if stats is None:
+            return True
+        avg_bps, count = stats
+        if count < self._app._settings.SHADOW_PROBE_BASELINE_MIN_SAMPLES:
+            return True
+        return avg_bps >= self._app._settings.SHADOW_PROBE_BASELINE_MIN_AVG_BPS
+
+    def shadow_probe_symbol_allowed(self, symbol: str) -> bool:
+        """Restrict probes to top-performing symbols when configured."""
+
+        assert self._app._settings is not None
+        top_n = int(self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N)
+        if top_n <= 0:
+            return True
+        eligible = self._app._shadow_probe_eligible_symbols
+        if eligible is None:
+            return True
+        return symbol in eligible
+
+    @staticmethod
+    def compute_shadow_probe_eligible_symbols(
+        symbol_stats: dict[str, tuple[float, int]],
+        *,
+        top_n: int,
+        min_samples: int,
+        min_avg_bps: float,
+    ) -> set[str] | None:
+        """Return top-N probe-eligible symbols, or None during warmup."""
+
+        if top_n <= 0:
+            return None
+        ranked = [
+            symbol
+            for symbol, (avg_bps, count) in symbol_stats.items()
+            if count >= min_samples and avg_bps >= min_avg_bps
+        ]
+        if not ranked:
+            return None
+        ranked.sort(key=lambda symbol: symbol_stats[symbol][0], reverse=True)
+        return set(ranked[:top_n])
+
     def record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
         """Track shadow TP/SL results and arm a cooldown after poor recent outcomes."""
 

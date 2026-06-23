@@ -136,7 +136,23 @@ class TradingLoopModule(AppBoundModule):
             )
 
         if self._app._initial_shadow_mode() and self._app._settings.SHADOW_PROBE_ENABLED:
+            from trader.domain.models import InstrumentInfo
+            from trader.risk.net_edge import NetEdgeParams
             from trader.strategies.shadow_probe import ShadowProbeStrategy
+
+            def _probe_instrument_info(symbol: str) -> InstrumentInfo | None:
+                if self._app._execution_engine is None:
+                    return None
+                cached = self._app._execution_engine._instrument_cache.get(symbol)
+                return cached[0] if cached else None
+
+            probe_cost_params = NetEdgeParams(
+                taker_fee_pct=self._app._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
+                expected_slippage_pct=self._app._settings.EXPECTED_SLIPPAGE_PCT,
+                max_spread_bps=self._app._settings.SCREENER_MAX_SPREAD_BPS,
+                funding_buffer_pct=self._app._settings.FUNDING_BUFFER_PCT,
+                safety_margin_pct=0.01,
+            )
 
             strategies.append(
                 ShadowProbeStrategy(
@@ -145,11 +161,20 @@ class TradingLoopModule(AppBoundModule):
                         if self._app._orderbook_tracker is not None
                         else None
                     ),
+                    instrument_info_provider=_probe_instrument_info,
+                    side_blocked=lambda symbol, side: (
+                        self._app._shadow_probe_side_blocked(symbol, side)
+                        or not self._app._shadow_probe_quality_allows(symbol, side)
+                    ),
+                    symbol_allowed=self._app._shadow_probe_symbol_allowed,
                     min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                     cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                     min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                     min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
+                    min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                    min_notional_buffer_pct=self._app._settings.SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT,
+                    cost_params=probe_cost_params,
                 )
             )
             log.info(
@@ -159,6 +184,8 @@ class TradingLoopModule(AppBoundModule):
                 max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                 min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                 min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
+                min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                symbol_top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
             )
 
         if (

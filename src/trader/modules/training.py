@@ -908,8 +908,24 @@ class TrainingModule(ModuleTaskMixin):
                 try:
                     stats = await self._app._trade_journal.get_bucket_stats()
                     symbol_side_stats = await self._app._trade_journal.get_symbol_side_stats()
+                    probe_side_stats = await self._app._trade_journal.get_shadow_probe_symbol_side_stats(
+                        lookback_days=self._app._settings.SHADOW_PROBE_STATS_LOOKBACK_DAYS,
+                    )
+                    probe_symbol_stats = await self._app._trade_journal.get_shadow_probe_symbol_stats(
+                        lookback_days=self._app._settings.SHADOW_PROBE_STATS_LOOKBACK_DAYS,
+                    )
                     self._app._bucket_stats = stats
                     self._app._symbol_side_stats = symbol_side_stats
+                    self._app._shadow_probe_side_stats = probe_side_stats
+                    self._app._shadow_probe_symbol_stats = probe_symbol_stats
+                    self._app._shadow_probe_eligible_symbols = (
+                        self._app._modules.signal_policy.compute_shadow_probe_eligible_symbols(
+                            probe_symbol_stats,
+                            top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
+                            min_samples=self._app._settings.SHADOW_PROBE_SYMBOL_MIN_SAMPLES,
+                            min_avg_bps=self._app._settings.SHADOW_PROBE_SYMBOL_MIN_AVG_BPS,
+                        )
+                    )
                     self._app._bucket_stats_refreshed_at = datetime.now(tz=UTC)
                     blocked = [
                         key
@@ -923,6 +939,12 @@ class TrainingModule(ModuleTaskMixin):
                         if cnt >= self._app._settings.SYMBOL_SIDE_MIN_SAMPLES
                         and avg < self._app._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
                     ]
+                    blocked_probe_sides = [
+                        key
+                        for key, (avg, cnt) in probe_side_stats.items()
+                        if cnt >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
+                        and avg < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
+                    ]
                     log.info(
                         "bucket_stats.refreshed",
                         buckets=len(stats),
@@ -930,6 +952,9 @@ class TrainingModule(ModuleTaskMixin):
                         blocked_keys=blocked[:10],
                         symbol_sides=len(symbol_side_stats),
                         blocked_symbol_sides=blocked_symbol_sides[:10],
+                        probe_symbol_sides=len(probe_side_stats),
+                        blocked_probe_sides=blocked_probe_sides[:10],
+                        probe_eligible_symbols=sorted(self._app._shadow_probe_eligible_symbols or [])[:10],
                     )
                 except Exception as exc:
                     log.warning("bucket_stats.refresh_failed", error=str(exc))

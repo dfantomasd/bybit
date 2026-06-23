@@ -148,6 +148,23 @@ class Settings(BaseSettings):
     """Minimum gross TP distance for paper probes; must exceed round-trip costs."""
     SHADOW_PROBE_MIN_SL_PCT: float = 0.25
     """Minimum SL distance for paper probes to avoid instant noise stop-outs."""
+    SHADOW_PROBE_MIN_NET_RETURN_PCT: float = 0.05
+    """Minimum expected net return after round-trip costs before emitting a probe."""
+    SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT: float = 3.0
+    """Safety buffer when pre-checking probe notional against exchange min_notional."""
+    SHADOW_PROBE_SIDE_BLOCK_ENABLED: bool = True
+    """Block probe entries on symbol+side pairs with persistently negative paper baseline."""
+    SHADOW_PROBE_SIDE_MIN_SAMPLES: int = 8
+    SHADOW_PROBE_SIDE_BLOCK_AVG_BPS: float = -3.0
+    SHADOW_PROBE_QUALITY_FILTER_ENABLED: bool = True
+    """Require non-negative recent paper baseline for a symbol+side before new probe entries."""
+    SHADOW_PROBE_BASELINE_MIN_AVG_BPS: float = 0.0
+    SHADOW_PROBE_BASELINE_MIN_SAMPLES: int = 6
+    SHADOW_PROBE_SYMBOL_TOP_N: int = 6
+    """When >0, restrict probes to top-N symbols by recent paper baseline. 0 disables the cap."""
+    SHADOW_PROBE_SYMBOL_MIN_SAMPLES: int = 6
+    SHADOW_PROBE_SYMBOL_MIN_AVG_BPS: float = -1.0
+    SHADOW_PROBE_STATS_LOOKBACK_DAYS: int = 7
     SHADOW_MIN_ATR_MULTIPLE: float = 0.35
     """Min stop/ATR ratio in shadow sizing (scalp SL is 0.5×ATR; lower value avoids tick-round rejects)."""
     TREND_STRATEGY_ENABLED: bool = True

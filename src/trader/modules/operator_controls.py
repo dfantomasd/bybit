@@ -246,6 +246,23 @@ class OperatorControlsModule(AppBoundModule):
             if self._app._settings is not None
             else None,
             "shadow_probe_bypasses_live_edge_gate": True,
+            "shadow_probe_min_net_return_pct": (
+                self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT if self._app._settings is not None else None
+            ),
+            "shadow_probe_symbol_top_n": (
+                self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N if self._app._settings is not None else None
+            ),
+            "shadow_probe_side_block_enabled": (
+                self._app._settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED if self._app._settings is not None else None
+            ),
+            "shadow_probe_eligible_symbols": sorted(self._app._shadow_probe_eligible_symbols or []),
+            "shadow_probe_blocked_sides": [
+                f"{symbol}:{side}"
+                for (symbol, side), (avg_bps, count) in self._app._shadow_probe_side_stats.items()
+                if self._app._settings is not None
+                and count >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
+                and avg_bps < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
+            ][:20],
             "model_auto_train_min_samples": (
                 self._app._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES if self._app._settings is not None else 1000
             ),

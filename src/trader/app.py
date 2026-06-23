@@ -81,6 +81,10 @@ class TradingApplication:
         self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
         # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
         self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
+        # Shadow probe paper stats (active even in SHADOW mode)
+        self._shadow_probe_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
+        self._shadow_probe_symbol_stats: dict[str, tuple[float, int]] = {}
+        self._shadow_probe_eligible_symbols: set[str] | None = None
         self._bucket_stats_refreshed_at: datetime | None = None
         # Per-candle training sampler: last sampled candle open_time per symbol
         self._last_candle_sample_at: dict[str, datetime] = {}
@@ -597,6 +601,15 @@ class TradingApplication:
 
     def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
         return self._modules.signal_policy.symbol_side_blocked(symbol, side)
+
+    def _shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
+        return self._modules.signal_policy.shadow_probe_side_blocked(symbol, side)
+
+    def _shadow_probe_quality_allows(self, symbol: str, side: str) -> bool:
+        return self._modules.signal_policy.shadow_probe_quality_allows(symbol, side)
+
+    def _shadow_probe_symbol_allowed(self, symbol: str) -> bool:
+        return self._modules.signal_policy.shadow_probe_symbol_allowed(symbol)
 
     def _record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
         self._modules.signal_policy.record_shadow_close(symbol, reason, pnl_pct)
