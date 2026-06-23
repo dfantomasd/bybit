@@ -432,6 +432,13 @@ class DiagnosticsModule(AppBoundModule):
                 if self._app._execution_engine is not None
                 else 0
             ),
+            "candle_sampler": {
+                "total": self._app._candle_sampler_total,
+                "scored": self._app._candle_sampler_scored,
+                "no_model": self._app._candle_sampler_no_model,
+                "gate_pass": self._app._candle_sampler_gate_pass,
+                "gate_block": self._app._candle_sampler_gate_block,
+            },
             "hour_order_failed": (
                 self._app._execution_engine.get_diag_counts().get("order_failed", 0)
                 if self._app._execution_engine is not None

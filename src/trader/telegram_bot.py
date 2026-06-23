@@ -308,6 +308,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
         app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        app.add_handler(CommandHandler("deep_report", self._cmd_deep_report))
         app.add_handler(CommandHandler("attribution", self._cmd_attribution))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("priorities", self._cmd_priorities))
@@ -1242,6 +1243,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🔬 PnL-анализ", callback_data="view:pnl_analysis"),
                     InlineKeyboardButton("⚠️ Худшие сделки", callback_data="view:worst"),
                 ],
+                [InlineKeyboardButton("🧾 Полная сводка для анализа", callback_data="view:deep_report")],
                 [InlineKeyboardButton("📌 Приоритеты", callback_data="view:priorities")],
                 self._home_row(),
             ]
@@ -1312,6 +1314,7 @@ class TelegramMonitorBot:
                 [InlineKeyboardButton("🔄 Обновить готовность", callback_data="view:canary")],
                 [InlineKeyboardButton("📌 Приоритеты", callback_data="view:priorities")],
                 [InlineKeyboardButton("📊 Метрики модели", callback_data="view:canary_model")],
+                [InlineKeyboardButton("🧾 Полная сводка для анализа", callback_data="view:deep_report")],
                 [
                     InlineKeyboardButton("🗄 База и модель", callback_data="view:db_model"),
                     InlineKeyboardButton("⬅️ Назад", callback_data="view:control"),
@@ -2478,6 +2481,326 @@ class TelegramMonitorBot:
             )
 
         await self._respond(update, "\n".join(lines))
+
+    async def _cmd_deep_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Send a copy-paste report with all operator diagnostics needed for analysis."""
+        del context
+        if not await self._authorised(update):
+            return
+        text = await self._render_deep_report_text()
+        await self._respond(update, text, reply_markup=self._diagnostics_menu())
+
+    @staticmethod
+    def _redact_for_report(value: Any) -> Any:
+        """Redact obvious secret-bearing fields before dumping raw diagnostics."""
+        sensitive = (
+            "api_key",
+            "api_secret",
+            "secret",
+            "token",
+            "password",
+            "postgres_dsn",
+            "database_url",
+            "redis_url",
+            "encrypt_key",
+        )
+        if isinstance(value, dict):
+            redacted: dict[str, Any] = {}
+            for key, item in value.items():
+                key_s = str(key)
+                if any(marker in key_s.lower() for marker in sensitive):
+                    redacted[key_s] = "***REDACTED***"
+                else:
+                    redacted[key_s] = TelegramMonitorBot._redact_for_report(item)
+            return redacted
+        if isinstance(value, list | tuple):
+            return [TelegramMonitorBot._redact_for_report(item) for item in value]
+        return value
+
+    @classmethod
+    def _json_for_report(cls, value: Any) -> str:
+        return html.escape(
+            json.dumps(
+                cls._redact_for_report(value),
+                ensure_ascii=False,
+                sort_keys=True,
+                indent=2,
+                default=str,
+            )
+        )
+
+    async def _render_deep_report_text(self) -> str:
+        ctrl = self._controller
+
+        async def _safe_async(label: str, provider: Callable[[], Awaitable[Any]] | None, default: Any) -> Any:
+            if provider is None:
+                return default
+            try:
+                return await asyncio.wait_for(provider(), timeout=12.0)
+            except Exception as exc:
+                return {"error": f"{label}: {type(exc).__name__}: {exc}"}
+
+        def _safe_sync(label: str, provider: Callable[[], Any] | None, default: Any) -> Any:
+            if provider is None:
+                return default
+            try:
+                return provider()
+            except Exception as exc:
+                return {"error": f"{label}: {type(exc).__name__}: {exc}"}
+
+        from trader.monitoring.deploy_info import get_deploy_info
+
+        generated_at = datetime.now(tz=UTC).isoformat()
+        deploy = get_deploy_info()
+        runtime_diag = _safe_sync(
+            "runtime_diagnostics",
+            ctrl.diagnostics_provider if ctrl is not None else None,
+            {},
+        )
+        runtime_settings = _safe_sync(
+            "runtime_settings",
+            ctrl.runtime_settings if ctrl is not None else None,
+            {},
+        )
+        db_diag = await self._load_db_diag(lite=False)
+        healthcheck = await _safe_async(
+            "healthcheck",
+            ctrl.healthcheck_provider if ctrl is not None else None,
+            {},
+        )
+        compare = await _safe_async(
+            "compare",
+            ctrl.compare_provider if ctrl is not None else None,
+            {},
+        )
+        pnl_analysis = await _safe_async(
+            "pnl_analysis",
+            ctrl.pnl_analysis_provider if ctrl is not None else None,
+            {},
+        )
+        costs = await _safe_async(
+            "costs_detailed",
+            ctrl.costs_detailed_provider if ctrl is not None else None,
+            {},
+        )
+        model_rows = await _safe_async(
+            "model_performance",
+            ctrl.model_performance_provider if ctrl is not None else None,
+            [],
+        )
+        champion = await _safe_async(
+            "champion_health",
+            ctrl.champion_health_provider if ctrl is not None else None,
+            {},
+        )
+        canary_text = self._canary_readiness_text(
+            db_diag=db_diag, diag=runtime_diag if isinstance(runtime_diag, dict) else {}
+        )
+
+        model_info = runtime_diag.get("model") if isinstance(runtime_diag, dict) else {}
+        latest_model = db_diag.get("latest_model_version") or db_diag.get("active_model_version") or {}
+        latest_metrics = latest_model.get("metrics") if isinstance(latest_model, dict) else {}
+        if isinstance(latest_metrics, str):
+            try:
+                latest_metrics = json.loads(latest_metrics) or {}
+            except Exception:
+                latest_metrics = {}
+        gate_quality = (
+            runtime_settings.get("model_gate_quality") if isinstance(runtime_settings, dict) else None
+        ) or {}
+        if not gate_quality and isinstance(model_info, dict):
+            gate_quality = {"quality": model_info.get("quality")}
+
+        shadow = ctrl.is_shadow() if ctrl is not None else bool(runtime_diag.get("shadow_mode", True))
+        paused = ctrl.is_paused() if ctrl is not None else bool(runtime_diag.get("paused", False))
+        hour_signals = int(runtime_diag.get("hour_signals_emitted") or healthcheck.get("signals_last_hour") or 0)
+        hour_orders = int(runtime_diag.get("hour_order_placed") or healthcheck.get("fills_last_hour") or 0)
+        pending_count = int(runtime_diag.get("pending_entry_count") or 0)
+        model_quality = str(gate_quality.get("quality") or latest_metrics.get("quality") or "n/a")
+        wf_bps = latest_metrics.get("walk_forward_expectancy_bps")
+        champion_row = champion.get("champion") if isinstance(champion, dict) else {}
+        champion_version = champion_row.get("version") if isinstance(champion_row, dict) else None
+        model_horizon, shadow_gate = self._model_horizon_and_gate(
+            db_diag,
+            latest_metrics if isinstance(latest_metrics, dict) else {},
+        )
+        paper_by_horizon = db_diag.get("paper_pnl_by_horizon", {}) or {}
+        paper_horizon = (
+            paper_by_horizon.get(str(model_horizon))
+            or db_diag.get(f"paper_pnl_{model_horizon}m")
+            or db_diag.get("paper_pnl_15m")
+            or {}
+        )
+        paper_baseline = paper_horizon.get("baseline", {}) if isinstance(paper_horizon, dict) else {}
+        paper_model_gate = paper_horizon.get("model_gate", {}) if isinstance(paper_horizon, dict) else {}
+        candle_sampler = runtime_diag.get("candle_sampler", {}) if isinstance(runtime_diag, dict) else {}
+
+        blockers: list[str] = []
+        if shadow:
+            blockers.append("SHADOW включен: реальные ордера намеренно не отправляются.")
+        if paused:
+            blockers.append("Бот на паузе.")
+        if model_quality.upper() != "GOOD":
+            blockers.append(f"Качество модели не GOOD: {self._ru(model_quality)}.")
+        try:
+            if wf_bps is not None and float(wf_bps) <= 0:
+                blockers.append(f"Walk-forward <= 0 bps: {float(wf_bps):+.2f} bps.")
+        except (TypeError, ValueError):
+            pass
+        if not champion_version:
+            blockers.append("CHAMPION-модель отсутствует; есть только shadow challenger.")
+        if hour_signals == 0:
+            blockers.append("За последний час нет сигналов стратегии.")
+        if pending_count > 0:
+            blockers.append(f"Есть pending-заявки: {pending_count}.")
+
+        signal_rows: list[dict[str, Any]] = []
+        if ctrl is not None:
+            for entry in list(ctrl.signal_log)[-20:]:
+                signal_rows.append(
+                    {
+                        "timestamp": entry.timestamp.isoformat(),
+                        "symbol": entry.symbol,
+                        "side": entry.side,
+                        "confidence": entry.confidence,
+                        "regime": entry.regime,
+                        "shadow": entry.shadow,
+                        "rationale": entry.rationale,
+                    }
+                )
+
+        compact = {
+            "generated_at": generated_at,
+            "deploy": deploy,
+            "runtime": {
+                "status": runtime_diag.get("status") if isinstance(runtime_diag, dict) else None,
+                "trading_mode": runtime_diag.get("trading_mode") if isinstance(runtime_diag, dict) else None,
+                "shadow_mode": runtime_diag.get("shadow_mode") if isinstance(runtime_diag, dict) else shadow,
+                "paused": runtime_diag.get("paused") if isinstance(runtime_diag, dict) else paused,
+                "active_symbols": runtime_diag.get("active_symbols") if isinstance(runtime_diag, dict) else [],
+                "execution_candidates": runtime_diag.get("execution_candidates")
+                if isinstance(runtime_diag, dict)
+                else None,
+                "open_positions": runtime_diag.get("open_positions") if isinstance(runtime_diag, dict) else [],
+                "pending_entry_count": pending_count,
+                "last_ws_message_age_s": runtime_diag.get("last_ws_message_age_s")
+                if isinstance(runtime_diag, dict)
+                else None,
+                "last_feature_age_s": runtime_diag.get("last_feature_age_s")
+                if isinstance(runtime_diag, dict)
+                else None,
+                "model_version": runtime_diag.get("model_version") if isinstance(runtime_diag, dict) else None,
+                "model_gate_quality": runtime_diag.get("model_gate_quality")
+                if isinstance(runtime_diag, dict)
+                else None,
+            },
+            "model": {
+                "quality": model_quality,
+                "walk_forward_expectancy_bps": wf_bps,
+                "champion_version": champion_version,
+                "latest_model_version": latest_model.get("version") if isinstance(latest_model, dict) else None,
+                "latest_status": latest_model.get("status") if isinstance(latest_model, dict) else None,
+                "shadow_gate_quality": gate_quality,
+            },
+            "virtual_orders": {
+                "explanation": (
+                    "strategy_signals are actual rule proposals; candle_sampler checks score every confirmed "
+                    "candle so model pass/block and +/- outcomes can accumulate even when strategy signals are rare"
+                ),
+                "model_horizon_minutes": model_horizon,
+                "strategy_paper_baseline": paper_baseline,
+                "strategy_paper_model_gate": paper_model_gate,
+                "shadow_gate": shadow_gate,
+                "candle_sampler_runtime": candle_sampler,
+            },
+            "hour": {
+                "signals": hour_signals,
+                "orders": hour_orders,
+                "risk_rejected": runtime_diag.get("hour_risk_rejected") if isinstance(runtime_diag, dict) else None,
+                "api_rejected": runtime_diag.get("hour_api_rejected") if isinstance(runtime_diag, dict) else None,
+                "spread_rejected": runtime_diag.get("hour_spread_rejected") if isinstance(runtime_diag, dict) else None,
+                "imbalance_rejected": runtime_diag.get("hour_imbalance_rejected")
+                if isinstance(runtime_diag, dict)
+                else None,
+                "model_gate_blocked": runtime_diag.get("hour_model_gate_canary_blocked")
+                if isinstance(runtime_diag, dict)
+                else None,
+            },
+            "db": {
+                "connected": db_diag.get("connected"),
+                "error": db_diag.get("error"),
+                "candles_by_interval": db_diag.get("candles_by_interval"),
+                "feature_snapshots": db_diag.get("feature_snapshots"),
+                "prediction_outcomes": db_diag.get("prediction_outcomes"),
+                "training_eligible_by_horizon": db_diag.get("training_eligible_by_horizon"),
+                "latest_training_run": db_diag.get("latest_training_run"),
+                "training_config": db_diag.get("training_config"),
+            },
+        }
+
+        lines = [
+            "🧾 <b>ПОЛНАЯ СВОДКА ДЛЯ АНАЛИЗА</b>",
+            f"Сгенерировано UTC: <code>{html.escape(generated_at)}</code>",
+            "Скопируйте все части этого сообщения в Cursor/ChatGPT для разбора.",
+            "",
+            "<b>Короткий вывод: когда будут ордера</b>",
+            f"Реальные ордера сейчас: <code>{'нет' if blockers else 'условия близки к готовности'}</code>",
+            f"SHADOW: <code>{'да' if shadow else 'нет'}</code> | Пауза: <code>{'да' if paused else 'нет'}</code>",
+            f"Сигналов за час: <code>{hour_signals}</code> | Ордеров за час: <code>{hour_orders}</code>",
+            f"Модель: <code>{html.escape(str(compact['runtime']['model_version'] or 'n/a'))}</code>",
+            f"Качество: <code>{html.escape(self._ru(model_quality))}</code> | Champion: <code>{html.escape(str(champion_version or 'нет'))}</code>",
+            "",
+            "<b>Условные сделки / virtual orders</b>",
+            "• <b>Strategy paper</b> — реальные сигналы стратегии: "
+            f"baseline=<code>{int((paper_baseline or {}).get('count') or 0)}</code>, "
+            f"model_gate=<code>{int((paper_model_gate or {}).get('count') or 0)}</code>",
+            "• <b>Candle-sampler checks</b> — модель оценивает каждую подтверждённую свечу: "
+            f"scored=<code>{int((candle_sampler or {}).get('scored') or 0)}</code>, "
+            f"pass=<code>{int((candle_sampler or {}).get('gate_pass') or 0)}</code>, "
+            f"block=<code>{int((candle_sampler or {}).get('gate_block') or 0)}</code>",
+            f"• Shadow gate ({model_horizon}m): decisions=<code>{int((shadow_gate or {}).get('total_count') or 0)}</code>, "
+            f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
+            f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
+        ]
+        if blockers:
+            lines.append("\n<b>Блокеры реальных ордеров / CANARY</b>")
+            lines.extend(f"❌ {html.escape(item)}" for item in blockers)
+        else:
+            lines.append("\n✅ Критичных блокеров в краткой сводке нет; проверьте readiness ниже.")
+
+        lines += [
+            "",
+            "<b>CANARY readiness</b>",
+            canary_text,
+            "",
+            "<b>Compact JSON</b>",
+            f"<pre>{self._json_for_report(compact)}</pre>",
+            "",
+            "<b>Last 20 in-memory signals</b>",
+            f"<pre>{self._json_for_report(signal_rows)}</pre>",
+            "",
+            "<b>Healthcheck JSON</b>",
+            f"<pre>{self._json_for_report(healthcheck)}</pre>",
+            "",
+            "<b>Runtime settings JSON</b>",
+            f"<pre>{self._json_for_report(runtime_settings)}</pre>",
+            "",
+            "<b>Runtime diagnostics JSON</b>",
+            f"<pre>{self._json_for_report(runtime_diag)}</pre>",
+            "",
+            "<b>DB diagnostics JSON</b>",
+            f"<pre>{self._json_for_report(db_diag)}</pre>",
+            "",
+            "<b>Model performance JSON</b>",
+            f"<pre>{self._json_for_report(model_rows)}</pre>",
+            "",
+            "<b>Champion health JSON</b>",
+            f"<pre>{self._json_for_report(champion)}</pre>",
+            "",
+            "<b>Compare / PnL / Costs JSON</b>",
+            f"<pre>{self._json_for_report({'compare': compare, 'pnl_analysis': pnl_analysis, 'costs': costs})}</pre>",
+        ]
+        return "\n".join(lines)
 
     async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Show whether the system is ready for a tiny CANARY_LIVE test."""
@@ -4627,6 +4950,7 @@ class TelegramMonitorBot:
             "strategy_report": self._cmd_strategy_report,
             "model_performance": self._cmd_model_performance,
             "champion_health": self._cmd_champion_health,
+            "deep_report": self._cmd_deep_report,
         }
         if action == "home":
             text, markup = await self._render_home()
@@ -5078,6 +5402,7 @@ class TelegramMonitorBot:
             "/trades      — последние 10 закрытых сделок\n"
             "/healthcheck — сигналы/сделки за час и главный блокер\n"
             "/buckets     — экспектанси по режимам/часам и блокировки\n"
+            "/deep_report — полная copy-paste сводка для внешнего анализа\n"
             "/subscribe   — подписаться на уведомления (хранится в БД)\n"
             "/unsubscribe — отписаться от уведомлений\n"
             "/diagnostics — счетчики и задержки циклов\n"

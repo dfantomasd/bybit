@@ -68,6 +68,14 @@ services:
         value: "false"
       - key: SHADOW_RELAX_SCALP_FILTERS
         value: "true"
+      - key: SHADOW_PROBE_ENABLED
+        value: "true"
+      - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
+        value: "0.03"
+      - key: SHADOW_PROBE_COOLDOWN_SECONDS
+        value: "300"
+      - key: SHADOW_PROBE_MAX_NOTIONAL_USD
+        value: "8.0"
       - key: MIN_NET_SCALP_RETURN_PCT
         value: "0.04"
       - key: SCALP_MIN_OB_IMBALANCE
