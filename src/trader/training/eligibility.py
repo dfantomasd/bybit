@@ -20,7 +20,8 @@ def training_strategy_filter_sql(
     candle sampler.
 
     When the allowlist is set and ``TRAIN_INCLUDE_CANDLE_BASELINE`` is true, candle
-    baselines without ``strategy_id`` are also included (legacy mixed training).
+    baselines (``SHADOW_CANDLE`` / ``HISTORICAL_REAL``) are also included regardless
+    of ``strategy_id`` — the live candle sampler tags rows as ``candle_sampler_v1``.
     """
     decisions = ", ".join(f"'{item}'" for item in _CANDLE_BASELINE_DECISIONS)
     return f"""(
@@ -29,7 +30,6 @@ def training_strategy_filter_sql(
         OR pe.metadata->>'strategy_id' = ANY({allowlist_param}::text[])
         OR (
             {include_candle_baseline_param}::boolean IS TRUE
-            AND pe.metadata->>'strategy_id' IS NULL
             AND COALESCE(pe.decision, '') IN ({decisions})
         )
     )"""

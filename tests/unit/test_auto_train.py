@@ -11,6 +11,7 @@ def test_training_strategy_filter_includes_candle_baselines_when_enabled() -> No
     assert "SHADOW_CANDLE" in sql
     assert "HISTORICAL_REAL" in sql
     assert "$5::boolean IS TRUE" in sql
+    assert "strategy_id' IS NULL" not in sql
 
 
 def test_training_strategy_filter_exclusive_when_allowlist_set() -> None:

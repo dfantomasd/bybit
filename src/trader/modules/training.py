@@ -463,7 +463,21 @@ class TrainingModule(ModuleTaskMixin):
                 )
                 report_horizon = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
+                filtered_by_horizon = diag.get("training_filtered_total_by_horizon", {}) or {}
+                min_train_samples = max(50, int(self._app._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES))
                 labelled = int(training_by_horizon.get(str(report_horizon), diag.get("labelled_samples_15m", 0)) or 0)
+                pool_breakdown = diag.get("training_pool_breakdown", {}) or {}
+                candle_pool = int(pool_breakdown.get("candle_baseline_active_schema", 0) or 0) + int(
+                    pool_breakdown.get("candle_sampler_v1_active_schema", 0) or 0
+                )
+                scalp_pool = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
+                horizon_parts = [
+                    f"{horizon_key}m: {int(training_by_horizon.get(horizon_key, 0) or 0)}"
+                    for horizon_key in ("5", "15")
+                    if horizon_key in training_by_horizon or horizon_key in filtered_by_horizon
+                ]
+                horizon_summary = ", ".join(horizon_parts) if horizon_parts else f"{report_horizon}m: {labelled}"
+                no_trained_model = version in {"", "—", "none"} or actual_training_samples == 0
 
                 # Fetch gate stats for the latest model (challenger), not the active champion.
                 # get_db_diagnostics.shadow_gate_15m tracks the active/champion model which can
@@ -583,7 +597,12 @@ class TrainingModule(ModuleTaskMixin):
                             if compatible_training_samples != actual_training_samples
                             else ""
                         )
-                        + f" | Доступно ({report_horizon}m): <code>{labelled}</code>"
+                        + f" | Доступно: <code>{horizon_summary}</code>"
+                    ),
+                    (
+                        f"Пул (5m): candle <code>{candle_pool}</code>, scalp <code>{scalp_pool}</code>"
+                        if candle_pool or scalp_pool
+                        else ""
                     ),
                     (
                         f"Gate: <code>{resolved_count}</code> resolved / "
@@ -591,6 +610,7 @@ class TrainingModule(ModuleTaskMixin):
                         + (f" / <code>{pending_count}</code> ждёт outcome" if pending_count else "")
                     ),
                 ]
+                lines = [line for line in lines if line]
 
                 if schema_drift:
                     lines.append(
@@ -625,6 +645,16 @@ class TrainingModule(ModuleTaskMixin):
                     lines.append(f"\n⏳ Auto-promoter ждёт: <code>{safe_reasons}</code>")
                 elif not is_challenger and status == "CHAMPION":
                     lines.append("\n🏆 Модель уже чемпион — ждём нового challenger после следующего обучения.")
+                elif no_trained_model:
+                    best_trainable = max(
+                        (int(training_by_horizon.get(key, 0) or 0) for key in ("5", "15", "30", "60")),
+                        default=labelled,
+                    )
+                    lines.append(
+                        f"\n⏳ <b>Модель ещё не обучена.</b> Нужно ≥ <code>{min_train_samples}</code> "
+                        f"примеров на одной схеме (сейчас лучший горизонт: <code>{best_trainable}</code>). "
+                        "Авто-обучение запустится, когда порог будет достигнут."
+                    )
                 elif schema_drift:
                     lines.append(
                         f"\n⏳ Модель не обучена под текущую схему фичей. "

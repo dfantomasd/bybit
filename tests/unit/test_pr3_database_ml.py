@@ -752,7 +752,7 @@ def test_model_progress_reporter_uses_configured_gate_horizon() -> None:
 
 
 def test_training_allowlist_includes_candle_sampler_baselines() -> None:
-    """Candle-sampling baselines without strategy_id must remain trainable."""
+    """Candle-sampling baselines (SHADOW_CANDLE) must remain trainable with strategy_id set."""
     import inspect
 
     from trader.training import eligibility, train
@@ -761,7 +761,7 @@ def test_training_allowlist_includes_candle_sampler_baselines() -> None:
     assert "training_strategy_filter_sql" in src
     eligibility_src = inspect.getsource(eligibility)
     assert "SHADOW_CANDLE" in eligibility_src
-    assert "strategy_id' IS NULL" in eligibility_src
+    assert "strategy_id' IS NULL" not in eligibility_src
 
 
 @pytest.mark.asyncio
