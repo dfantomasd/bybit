@@ -106,129 +106,144 @@ class MarketDataModule(ModuleTaskMixin):
 
     async def seed_candle_store(self, symbols: list[str] | None = None) -> None:
         """Fetch recent historical klines via REST to seed the CandleStore."""
-        from trader.data.candles import Candle
-
         assert self._app._settings is not None
         assert self._app._bybit_adapter is not None
 
         if self._app._candle_store is None:
             self._app._candle_store = self._app._new_candle_store()
 
-        has_api_key = bool(self._app._settings.BYBIT_API_KEY.get_secret_value())
         seed_symbols = symbols or _SYMBOLS
         retry_attempts = max(1, int(getattr(self._app._settings, "CANDLE_SEED_RETRY_ATTEMPTS", 3)))
         retry_base_delay_s = max(0.0, float(getattr(self._app._settings, "CANDLE_SEED_RETRY_BASE_DELAY_SECONDS", 1.0)))
 
         for symbol in seed_symbols:
-            # Clear any pre-existing cached vector before touching the candle store.
-            # This prevents the watchdog from reading a stale vector during the seeding
-            # window and then re-caching it, which would persist until the next WS kline.
-            if self._app._feature_pipeline is not None:
-                self._app._feature_pipeline.invalidate_symbol(symbol)
-            for interval in self._app._market_data_intervals():
-                try:
-                    for attempt in range(1, retry_attempts + 1):
-                        try:
-                            resp = await self._app._bybit_adapter._rest.get_kline(
-                                category="linear",
-                                symbol=symbol,
-                                interval=interval,
-                                limit=_MIN_SEED_BARS,
-                            )
-                            break
-                        except RateLimitError:
-                            if attempt >= retry_attempts:
-                                raise
-                            wait_s = retry_base_delay_s * (2 ** (attempt - 1))
-                            log.warning(
-                                "candle_store.seed_rate_limited_retrying",
-                                symbol=symbol,
-                                interval=interval,
-                                attempt=attempt,
-                                max_attempts=retry_attempts,
-                                wait_seconds=round(wait_s, 3),
-                            )
-                            await asyncio.sleep(wait_s)
-                    items = resp.get("result", {}).get("list", [])
-                    # Bybit returns newest-first; reverse to oldest-first
-                    items = list(reversed(items))
-                    now = datetime.now(tz=UTC)
-                    count = 0
-                    for row in items:
-                        # row: [startTime, open, high, low, close, volume, turnover]
-                        try:
-                            ts_ms = int(row[0])
-                            open_time = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
-                            bar_ms = _INTERVAL_MS.get(interval, 60_000)
-                            # A candle is confirmed only after its full interval has elapsed.
-                            # close_epoch_ms is the exclusive start of the next bar.
-                            close_epoch_ms = ts_ms + bar_ms
-                            close_time = datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC)
-                            confirmed = now.timestamp() * 1000 >= close_epoch_ms
-                            candle = Candle(
-                                open_time=open_time,
-                                open=float(row[1]),
-                                high=float(row[2]),
-                                low=float(row[3]),
-                                close=float(row[4]),
-                                volume=float(row[5]),
-                                confirm=confirmed,
-                            )
-                            self._app._candle_store.add(symbol, interval, candle)
-                            # Only persist confirmed candles — active REST candles
-                            # may carry intermediate prices and must not be stored as
-                            # confirmed=true in the training database.
-                            if (
-                                confirmed
-                                and self._app._should_persist_candle_interval(interval)
-                                and self._app._trade_journal is not None
-                                and self._app._trade_journal.is_enabled
-                            ):
-                                await self._app._trade_journal.upsert_market_candle(
-                                    symbol=symbol,
-                                    interval=interval,
-                                    open_time=open_time,
-                                    close_time=close_time,
-                                    open=Decimal(str(row[1])),
-                                    high=Decimal(str(row[2])),
-                                    low=Decimal(str(row[3])),
-                                    close=Decimal(str(row[4])),
-                                    volume=Decimal(str(row[5])),
-                                    turnover=Decimal(str(row[6])),
-                                    confirmed=True,
-                                    source="rest_seed",
-                                )
-                            count += 1
-                        except (IndexError, ValueError):
-                            continue
-                    log.info(
-                        "candle_store.seeded",
-                        symbol=symbol,
-                        interval=interval,
-                        bars=count,
-                    )
-                except Exception as exc:
-                    log.warning(
-                        "candle_store.seed_failed",
-                        symbol=symbol,
-                        interval=interval,
-                        error=str(exc),
-                        has_api_key=has_api_key,
-                    )
-            # After all intervals seeded: invalidate again (watchdog may have run during
-            # the seeding window and re-cached a stale vector), then trigger an immediate
-            # recompute so the next strategy call gets a valid vector without waiting for
-            # the next WS kline or the 60-second watchdog cycle.
-            if self._app._feature_pipeline is not None:
-                self._app._feature_pipeline.invalidate_symbol(symbol)
-                for interval in self._app._market_data_intervals():
-                    await self._app._feature_pipeline.on_confirmed_candle(symbol, interval)
+            # Block feature caching for the full REST seed window.  Watchdog/WS may still
+            # compute mid-seed, but vectors must not be published until all intervals load.
+            pipeline = self._app._feature_pipeline
+            if pipeline is not None:
+                pipeline.begin_symbol_seed(symbol)
+            try:
+                await self._seed_symbol_candles(
+                    symbol,
+                    retry_attempts=retry_attempts,
+                    retry_base_delay_s=retry_base_delay_s,
+                )
+            finally:
+                if pipeline is not None:
+                    pipeline.invalidate_symbol(symbol)
+                    pipeline.end_symbol_seed(symbol)
+                    for interval in self._app._market_data_intervals():
+                        await pipeline.on_confirmed_candle(symbol, interval)
 
         # Pre-warm InstrumentInfo.turnover_24h for all seeded symbols in ONE batch call
         # so position_sizer never hits liquidity_data_missing on the first signal.
         # A single batch GET avoids per-symbol rate-limit pressure during startup.
         if self._app._execution_engine is not None and self._app._bybit_adapter is not None:
             await self.prefetch_ticker_turnover(seed_symbols)
+
+    async def _seed_symbol_candles(
+        self,
+        symbol: str,
+        *,
+        retry_attempts: int,
+        retry_base_delay_s: float,
+    ) -> None:
+        from trader.data.candles import Candle
+
+        assert self._app._settings is not None
+        assert self._app._bybit_adapter is not None
+        has_api_key = bool(self._app._settings.BYBIT_API_KEY.get_secret_value())
+
+        for interval in self._app._market_data_intervals():
+            try:
+                for attempt in range(1, retry_attempts + 1):
+                    try:
+                        resp = await self._app._bybit_adapter._rest.get_kline(
+                            category="linear",
+                            symbol=symbol,
+                            interval=interval,
+                            limit=_MIN_SEED_BARS,
+                        )
+                        break
+                    except RateLimitError:
+                        if attempt >= retry_attempts:
+                            raise
+                        wait_s = retry_base_delay_s * (2 ** (attempt - 1))
+                        log.warning(
+                            "candle_store.seed_rate_limited_retrying",
+                            symbol=symbol,
+                            interval=interval,
+                            attempt=attempt,
+                            max_attempts=retry_attempts,
+                            wait_seconds=round(wait_s, 3),
+                        )
+                        await asyncio.sleep(wait_s)
+                items = resp.get("result", {}).get("list", [])
+                # Bybit returns newest-first; reverse to oldest-first
+                items = list(reversed(items))
+                now = datetime.now(tz=UTC)
+                count = 0
+                for row in items:
+                    # row: [startTime, open, high, low, close, volume, turnover]
+                    try:
+                        ts_ms = int(row[0])
+                        open_time = datetime.fromtimestamp(ts_ms / 1000, tz=UTC)
+                        bar_ms = _INTERVAL_MS.get(interval, 60_000)
+                        # A candle is confirmed only after its full interval has elapsed.
+                        # close_epoch_ms is the exclusive start of the next bar.
+                        close_epoch_ms = ts_ms + bar_ms
+                        close_time = datetime.fromtimestamp((close_epoch_ms - 1) / 1000, tz=UTC)
+                        confirmed = now.timestamp() * 1000 >= close_epoch_ms
+                        candle = Candle(
+                            open_time=open_time,
+                            open=float(row[1]),
+                            high=float(row[2]),
+                            low=float(row[3]),
+                            close=float(row[4]),
+                            volume=float(row[5]),
+                            confirm=confirmed,
+                        )
+                        self._app._candle_store.add(symbol, interval, candle)
+                        # Only persist confirmed candles — active REST candles
+                        # may carry intermediate prices and must not be stored as
+                        # confirmed=true in the training database.
+                        if (
+                            confirmed
+                            and self._app._should_persist_candle_interval(interval)
+                            and self._app._trade_journal is not None
+                            and self._app._trade_journal.is_enabled
+                        ):
+                            await self._app._trade_journal.upsert_market_candle(
+                                symbol=symbol,
+                                interval=interval,
+                                open_time=open_time,
+                                close_time=close_time,
+                                open=Decimal(str(row[1])),
+                                high=Decimal(str(row[2])),
+                                low=Decimal(str(row[3])),
+                                close=Decimal(str(row[4])),
+                                volume=Decimal(str(row[5])),
+                                turnover=Decimal(str(row[6])),
+                                confirmed=True,
+                                source="rest_seed",
+                            )
+                        count += 1
+                    except (IndexError, ValueError):
+                        continue
+                log.info(
+                    "candle_store.seeded",
+                    symbol=symbol,
+                    interval=interval,
+                    bars=count,
+                )
+            except Exception as exc:
+                log.warning(
+                    "candle_store.seed_failed",
+                    symbol=symbol,
+                    interval=interval,
+                    error=str(exc),
+                    has_api_key=has_api_key,
+                )
 
     async def prefetch_ticker_turnover(self, symbols: list[str]) -> None:
         """Batch-fetch 24h turnover for position sizing (safe to call after execution init)."""

@@ -218,6 +218,22 @@ class TrainingModule(ModuleTaskMixin):
                             schema_change_min_samples=schema_change_min_samples,
                             current_schema_hash=current_schema_hash,
                         )
+                    else:
+                        pool_breakdown = diag.get("training_pool_breakdown", {}) or {}
+                        log.info(
+                            "model_auto_training.waiting",
+                            reason="threshold_not_met",
+                            trainable=trainable,
+                            trainable_filtered_total=trainable_filtered_total,
+                            min_samples=min_samples,
+                            horizon_minutes=horizon,
+                            latest_success_samples=latest_success_samples,
+                            newest_schema_samples=newest_schema_samples,
+                            schema_mismatch=schema_mismatch,
+                            label_schema_mismatch=label_schema_mismatch,
+                            candle_baseline=int(pool_breakdown.get("candle_baseline_active_schema", 0) or 0),
+                            scalp_micro=int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0),
+                        )
                     continue
 
                 trigger_reason = (

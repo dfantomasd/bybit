@@ -57,6 +57,11 @@ def clear_source_bindings_for_symbol(symbol: str) -> None:
         _SOURCE_CANDLE_BY_FEATURE_ID.pop(key, None)
 
 
+def remove_source_binding(feature_id: Any) -> None:
+    """Drop one feature vector's source-candle binding after cache eviction."""
+    _SOURCE_CANDLE_BY_FEATURE_ID.pop(str(feature_id), None)
+
+
 def source_candle_for_feature(feature_id: Any) -> _SourceBinding | None:
     """Return ``(symbol, interval, open_time)`` for a previously computed vector."""
 
@@ -92,6 +97,9 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
         return vec
 
     def latest(self, symbol: str, interval: str) -> FeatureVector | None:
+        if symbol in self._seeding_symbols:
+            return None
+
         vec = super().latest(symbol, interval)
         if vec is None:
             return None
@@ -110,6 +118,7 @@ class SourceCandleFeaturePipeline(_BaseFeaturePipeline):
                 source_binding=binding,
                 latest_candle_open_time=latest_open_time,
             )
+            self.evict_cached_vector(symbol, interval)
             return None
 
         return vec
