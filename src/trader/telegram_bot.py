@@ -2620,6 +2620,20 @@ class TelegramMonitorBot:
         wf_bps = latest_metrics.get("walk_forward_expectancy_bps")
         champion_row = champion.get("champion") if isinstance(champion, dict) else {}
         champion_version = champion_row.get("version") if isinstance(champion_row, dict) else None
+        model_horizon, shadow_gate = self._model_horizon_and_gate(
+            db_diag,
+            latest_metrics if isinstance(latest_metrics, dict) else {},
+        )
+        paper_by_horizon = db_diag.get("paper_pnl_by_horizon", {}) or {}
+        paper_horizon = (
+            paper_by_horizon.get(str(model_horizon))
+            or db_diag.get(f"paper_pnl_{model_horizon}m")
+            or db_diag.get("paper_pnl_15m")
+            or {}
+        )
+        paper_baseline = paper_horizon.get("baseline", {}) if isinstance(paper_horizon, dict) else {}
+        paper_model_gate = paper_horizon.get("model_gate", {}) if isinstance(paper_horizon, dict) else {}
+        candle_sampler = runtime_diag.get("candle_sampler", {}) if isinstance(runtime_diag, dict) else {}
 
         blockers: list[str] = []
         if shadow:
@@ -2688,6 +2702,17 @@ class TelegramMonitorBot:
                 "latest_status": latest_model.get("status") if isinstance(latest_model, dict) else None,
                 "shadow_gate_quality": gate_quality,
             },
+            "virtual_orders": {
+                "explanation": (
+                    "strategy_signals are actual rule proposals; candle_sampler checks score every confirmed "
+                    "candle so model pass/block and +/- outcomes can accumulate even when strategy signals are rare"
+                ),
+                "model_horizon_minutes": model_horizon,
+                "strategy_paper_baseline": paper_baseline,
+                "strategy_paper_model_gate": paper_model_gate,
+                "shadow_gate": shadow_gate,
+                "candle_sampler_runtime": candle_sampler,
+            },
             "hour": {
                 "signals": hour_signals,
                 "orders": hour_orders,
@@ -2724,6 +2749,18 @@ class TelegramMonitorBot:
             f"Сигналов за час: <code>{hour_signals}</code> | Ордеров за час: <code>{hour_orders}</code>",
             f"Модель: <code>{html.escape(str(compact['runtime']['model_version'] or 'n/a'))}</code>",
             f"Качество: <code>{html.escape(self._ru(model_quality))}</code> | Champion: <code>{html.escape(str(champion_version or 'нет'))}</code>",
+            "",
+            "<b>Условные сделки / virtual orders</b>",
+            "• <b>Strategy paper</b> — реальные сигналы стратегии: "
+            f"baseline=<code>{int((paper_baseline or {}).get('count') or 0)}</code>, "
+            f"model_gate=<code>{int((paper_model_gate or {}).get('count') or 0)}</code>",
+            "• <b>Candle-sampler checks</b> — модель оценивает каждую подтверждённую свечу: "
+            f"scored=<code>{int((candle_sampler or {}).get('scored') or 0)}</code>, "
+            f"pass=<code>{int((candle_sampler or {}).get('gate_pass') or 0)}</code>, "
+            f"block=<code>{int((candle_sampler or {}).get('gate_block') or 0)}</code>",
+            f"• Shadow gate ({model_horizon}m): decisions=<code>{int((shadow_gate or {}).get('total_count') or 0)}</code>, "
+            f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
+            f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
         ]
         if blockers:
             lines.append("\n<b>Блокеры реальных ордеров / CANARY</b>")
