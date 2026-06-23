@@ -39,6 +39,7 @@ import asyncio
 import hashlib
 import html
 import inspect
+import io
 import json
 import os
 import re
@@ -309,6 +310,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
         app.add_handler(CommandHandler("deep_report", self._cmd_deep_report))
+        app.add_handler(CommandHandler("deep_report_text", self._cmd_deep_report_text))
         app.add_handler(CommandHandler("attribution", self._cmd_attribution))
         app.add_handler(CommandHandler("canary", self._cmd_canary_ready))
         app.add_handler(CommandHandler("priorities", self._cmd_priorities))
@@ -2483,12 +2485,62 @@ class TelegramMonitorBot:
         await self._respond(update, "\n".join(lines))
 
     async def _cmd_deep_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Send a copy-paste report with all operator diagnostics needed for analysis."""
+        """Send all operator diagnostics as one downloadable text file."""
+        del context
+        if not await self._authorised(update):
+            return
+        text = await self._render_deep_report_text()
+        await self._send_deep_report_document(update, text)
+
+    async def _cmd_deep_report_text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Legacy text mode for the deep report (may split into many messages)."""
         del context
         if not await self._authorised(update):
             return
         text = await self._render_deep_report_text()
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
+
+    async def _send_deep_report_document(self, update: Update, html_text: str) -> None:
+        """Send the deep report as a single .txt attachment for easy copying."""
+        generated_at = datetime.now(tz=UTC).strftime("%Y%m%d_%H%M%S")
+        filename = f"bybit_deep_report_{generated_at}.txt"
+        plain_text = self._plain_text(html_text)
+        payload = io.BytesIO(plain_text.encode("utf-8"))
+        payload.name = filename
+        caption = (
+            "🧾 <b>Полная сводка готова файлом</b>\n"
+            "Скачайте .txt и пришлите/скопируйте его целиком для анализа.\n"
+            "Если нужен старый режим сообщениями: <code>/deep_report_text</code>"
+        )
+        message = update.effective_message
+        if message is not None:
+            await message.reply_document(
+                document=payload,
+                filename=filename,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._diagnostics_menu(),
+            )
+            if update.callback_query is not None:
+                try:
+                    await update.callback_query.answer("Файл со сводкой отправлен")
+                except Exception as exc:
+                    log.debug("telegram.deep_report_callback_answer_failed", error=str(exc))
+            return
+        chat_id = self._chat_id(update)
+        if chat_id is not None and self._app is not None:
+            await self._app.bot.send_document(
+                chat_id=chat_id,
+                document=payload,
+                filename=filename,
+                caption=caption,
+                parse_mode=ParseMode.HTML,
+                reply_markup=self._diagnostics_menu(),
+            )
+            return
+        await self._respond(
+            update, "Не удалось определить чат для отправки файла.", reply_markup=self._diagnostics_menu()
+        )
 
     @staticmethod
     def _redact_for_report(value: Any) -> Any:
@@ -5402,7 +5454,8 @@ class TelegramMonitorBot:
             "/trades      — последние 10 закрытых сделок\n"
             "/healthcheck — сигналы/сделки за час и главный блокер\n"
             "/buckets     — экспектанси по режимам/часам и блокировки\n"
-            "/deep_report — полная copy-paste сводка для внешнего анализа\n"
+            "/deep_report — полная сводка одним .txt файлом\n"
+            "/deep_report_text — та же сводка сообщениями (может быть длинной)\n"
             "/subscribe   — подписаться на уведомления (хранится в БД)\n"
             "/unsubscribe — отписаться от уведомлений\n"
             "/diagnostics — счетчики и задержки циклов\n"

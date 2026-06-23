@@ -157,3 +157,22 @@ def test_deep_report_json_escapes_and_redacts() -> None:
     assert "&quot;secret&quot;" not in rendered
     assert "***REDACTED***" in rendered
     assert "&lt;copy me&gt;" in rendered
+
+
+@pytest.mark.asyncio
+async def test_deep_report_sends_single_text_file() -> None:
+    bot = _make_webhook_bot()
+    message = MagicMock()
+    message.reply_document = AsyncMock()
+    update = MagicMock(effective_message=message, callback_query=None)
+
+    await bot._send_deep_report_document(update, "<b>Report</b>\n<pre>{&quot;ok&quot;: true}</pre>")
+
+    message.reply_document.assert_awaited_once()
+    kwargs = message.reply_document.await_args.kwargs
+    assert kwargs["filename"].startswith("bybit_deep_report_")
+    assert kwargs["filename"].endswith(".txt")
+    document = kwargs["document"]
+    document.seek(0)
+    assert "Report" in document.read().decode("utf-8")
+    assert "Полная сводка готова файлом" in kwargs["caption"]
