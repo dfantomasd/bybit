@@ -37,6 +37,7 @@ from trader.features.technical import (
     candle_body_ratio,
     ema_slope,
     ema_value,
+    ewma_periods_for_bar_count,
     log_return,
     macd,
     multi_ewma_signal,
@@ -191,10 +192,13 @@ class FeaturePipeline:
 
     def invalidate_symbol(self, symbol: str) -> None:
         """Remove cached feature vectors for a symbol after its candles are reseeded."""
+        from trader.features.source_candle_guard import clear_source_bindings_for_symbol
+
         keys = [k for k in self._latest if k[0] == symbol]
         for k in keys:
             del self._latest[k]
             self._last_computed_at.pop(k, None)
+        clear_source_bindings_for_symbol(symbol)
 
     def latest(self, symbol: str, interval: str) -> FeatureVector | None:
         return self._latest.get((symbol, interval))
@@ -410,9 +414,10 @@ class FeaturePipeline:
 
         # --- Multi-tier EWMA directional signal ---
         # Always emitted (0.0 fallback) so every symbol shares ONE feature schema.
-        val_ewma = multi_ewma_signal(closes)
+        ewma_periods = ewma_periods_for_bar_count(len(closes))
+        val_ewma = multi_ewma_signal(closes, periods=ewma_periods)
         features["ewma_tier_signal"] = val_ewma if val_ewma is not None else 0.0
-        if val_ewma is None:
+        if val_ewma is None and interval in {"1", "1m", "5", "5m"}:
             missing.append("ewma_tier_signal")
 
         # --- VWAP distance ---

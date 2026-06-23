@@ -131,6 +131,7 @@ async def fetch_training_sample_snapshot(
             WHERE po.horizon_minutes = $1
               AND po.label IS NOT NULL
               AND po.label_schema_version = $2
+              AND po.label_threshold_bps = $3
               AND fs.feature_values IS NOT NULL
               AND fs.training_eligible = true
               AND pe.model_version = 'RULE_BASELINE_V1'
@@ -145,6 +146,7 @@ async def fetch_training_sample_snapshot(
         """,
         horizon_minutes,
         label_schema_version,
+        float(label_threshold_bps),
         strategy_allowlist,
         include_candle_baseline,
     )

@@ -221,7 +221,8 @@ class MarketDataModule(ModuleTaskMixin):
             # the next WS kline or the 60-second watchdog cycle.
             if self._app._feature_pipeline is not None:
                 self._app._feature_pipeline.invalidate_symbol(symbol)
-                await self._app._feature_pipeline.on_confirmed_candle(symbol, _WS_INTERVAL)
+                for interval in self._app._market_data_intervals():
+                    await self._app._feature_pipeline.on_confirmed_candle(symbol, interval)
 
         # Pre-warm InstrumentInfo.turnover_24h for all seeded symbols in ONE batch call
         # so position_sizer never hits liquidity_data_missing on the first signal.

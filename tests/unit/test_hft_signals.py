@@ -15,7 +15,7 @@ from unittest.mock import MagicMock
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide, RiskProfile
 from trader.domain.models import FeatureVector, InstrumentInfo, RegimeContext, TradeProposal
-from trader.features.technical import multi_ewma_signal
+from trader.features.technical import ewma_periods_for_bar_count, multi_ewma_signal
 from trader.risk.profiles import get_risk_limits
 from trader.risk.sizing import PositionSizer
 
@@ -147,6 +147,12 @@ class TestMultiEwmaSignal:
     def test_returns_none_on_zero_price(self):
         closes = [0.0] * 250
         assert multi_ewma_signal(closes) is None
+
+    def test_compact_periods_fit_htf_bar_caps(self):
+        periods = ewma_periods_for_bar_count(120)
+        closes = [float(100 + i * 0.1) for i in range(120)]
+        result = multi_ewma_signal(closes, periods=periods)
+        assert result is not None
 
 
 # ---------------------------------------------------------------------------

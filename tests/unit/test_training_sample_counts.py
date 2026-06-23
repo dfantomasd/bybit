@@ -44,3 +44,30 @@ async def test_training_snapshot_uses_best_schema_count_for_readiness() -> None:
     assert snapshot.training_ready is False
     assert snapshot.by_strategy_pool["scalp_micro_v1"] == 120
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_threshold_breakdown_query_binds_label_threshold_bps() -> None:
+    bind_lengths: list[int] = []
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        if "GROUP BY label_threshold_bps" in query:
+            bind_lengths.append(len(args))
+            assert "po.label_threshold_bps = $3" in query
+            return [{"threshold": "5.0", "sample_count": 10}]
+        if "GROUP BY feature_schema_hash" in query:
+            return [{"feature_schema_hash": "schema_a", "sample_count": 10, "latest_at": "2026-06-21"}]
+        if "GROUP BY pool" in query:
+            return []
+        return []
+
+    await fetch_training_sample_snapshot(
+        mock_fetch,
+        horizon_minutes=5,
+        label_schema_version="directional_net_v2",
+        label_threshold_bps=5.0,
+        strategy_allowlist=["scalp_micro_v1"],
+        include_candle_baseline=False,
+        min_samples=100,
+    )
+    assert bind_lengths == [5]

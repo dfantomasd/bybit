@@ -49,6 +49,14 @@ def register_source_candle(
         _SOURCE_CANDLE_BY_FEATURE_ID.popitem(last=False)
 
 
+def clear_source_bindings_for_symbol(symbol: str) -> None:
+    """Drop cached source-candle bindings after a symbol's candles are reseeded."""
+    norm = _normalise_symbol(symbol)
+    stale = [key for key, binding in _SOURCE_CANDLE_BY_FEATURE_ID.items() if binding[0] == norm]
+    for key in stale:
+        _SOURCE_CANDLE_BY_FEATURE_ID.pop(key, None)
+
+
 def source_candle_for_feature(feature_id: Any) -> _SourceBinding | None:
     """Return ``(symbol, interval, open_time)`` for a previously computed vector."""
 

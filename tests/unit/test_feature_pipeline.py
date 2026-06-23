@@ -150,6 +150,18 @@ class TestFeaturePipeline:
 
         assert pipeline.latest("BTCUSDT", "1") is None
 
+    def test_invalidate_symbol_clears_source_bindings(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        assert source_candle_for_feature(vec.feature_id) is not None
+
+        pipeline.invalidate_symbol("BTCUSDT")
+
+        assert source_candle_for_feature(vec.feature_id) is None
+        assert pipeline.latest("BTCUSDT", "1") is None
+
 
 class _FakeMarketStats:
     def __init__(self, stats):
