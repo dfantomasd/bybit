@@ -127,7 +127,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         return metrics if isinstance(metrics, dict) else {}
 
     @classmethod
-    def _model_horizon_minutes(cls, model_row: dict[str, Any], default: int = 15) -> int:
+    def _model_horizon_minutes(cls, model_row: dict[str, Any], default: int | None = None) -> int:
         metrics = cls._model_metrics_dict(model_row)
         for key in ("horizon_minutes", "model_horizon_minutes"):
             raw_horizon = metrics.get(key)
@@ -139,7 +139,12 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 continue
             if horizon > 0:
                 return horizon
-        return default
+        if default is not None:
+            return default
+        settings = _optional_settings()
+        if settings is not None:
+            return int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 5) or 5)
+        return 5
 
     async def _paper_pnl_for_model(
         self,
@@ -491,6 +496,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
 
     async def _get_db_diagnostics_directional(self, result: dict[str, Any]) -> dict[str, Any]:
         allowlist, include_candle, label_schema, label_threshold = _training_eligibility_params()
+        settings = _optional_settings()
         result["label_schema_version"] = label_schema
         result["training_label_threshold_bps"] = label_threshold
         result["training_config"] = {
@@ -498,6 +504,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "include_candle_baseline": include_candle,
             "label_schema_version": label_schema,
             "label_threshold_bps": label_threshold,
+            "auto_train_horizon_minutes": (
+                int(settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+                if settings is not None
+                else 5
+            ),
         }
         rows = await self._fetch(
             """

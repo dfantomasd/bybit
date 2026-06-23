@@ -1065,11 +1065,13 @@ class TelegramMonitorBot:
         metrics: dict[str, Any] | None = None,
     ) -> tuple[int, dict[str, Any]]:
         metrics = metrics or {}
+        training_config = db_diag.get("training_config", {}) or {}
         raw_horizon = (
             db_diag.get("model_gate_horizon_minutes")
             or metrics.get("horizon_minutes")
             or metrics.get("label_horizon_minutes")
-            or 15
+            or training_config.get("auto_train_horizon_minutes")
+            or 5
         )
         try:
             horizon = int(raw_horizon)

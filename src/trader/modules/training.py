@@ -98,19 +98,7 @@ class TrainingModule(ModuleTaskMixin):
                 drift_summary = await self._app._evaluate_feature_drift()
                 training_by_horizon = diag.get("training_eligible_by_horizon", {}) or {}
                 newest_schema_by_horizon = diag.get("newest_training_schema_by_horizon", {}) or {}
-                horizon_schema = newest_schema_by_horizon.get(str(horizon), {}) or {}
-                trainable = int(
-                    horizon_schema.get(
-                        "best_schema_count",
-                        training_by_horizon.get(
-                            str(horizon), diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0))
-                        ),
-                    )
-                    or 0
-                )
-                trainable_filtered_total = int(
-                    (diag.get("training_filtered_total_by_horizon", {}) or {}).get(str(horizon), 0) or 0
-                )
+                preferred_horizon = horizon
                 latest_model = diag.get("latest_model_version", {}) or {}
                 latest_run = diag.get("latest_training_run", {}) or {}
                 latest_run_status = str(latest_run.get("status") or "").upper()
@@ -119,6 +107,39 @@ class TrainingModule(ModuleTaskMixin):
                     latest_model.get("actual_training_samples", latest_model.get("training_samples", 0)) or 0
                 )
                 latest_success_samples = max(actual_latest_samples, latest_run_samples)
+                from trader.training.auto_train import TrainableSnapshot, resolve_training_horizon
+
+                horizon_snapshots = [
+                    TrainableSnapshot(int(horizon_key), int(count or 0))
+                    for horizon_key, count in training_by_horizon.items()
+                    if str(horizon_key).isdigit()
+                ]
+                initial_chosen = (
+                    resolve_training_horizon(horizon_snapshots, preferred_horizon, min_samples=min_samples)
+                    if latest_success_samples == 0
+                    else None
+                )
+                active_horizon = (
+                    initial_chosen.horizon_minutes
+                    if initial_chosen is not None
+                    else preferred_horizon
+                )
+                horizon_schema = newest_schema_by_horizon.get(str(active_horizon), {}) or {}
+                trainable = int(
+                    horizon_schema.get(
+                        "best_schema_count",
+                        training_by_horizon.get(
+                            str(active_horizon),
+                            diag.get("training_eligible_15m", diag.get("labelled_samples_15m", 0)),
+                        ),
+                    )
+                    or 0
+                )
+                if initial_chosen is not None:
+                    trainable = initial_chosen.sample_count
+                trainable_filtered_total = int(
+                    (diag.get("training_filtered_total_by_horizon", {}) or {}).get(str(active_horizon), 0) or 0
+                )
                 compatible_latest_samples = int(
                     latest_model.get("training_samples_compatible", latest_model.get("training_samples", 0)) or 0
                 )
@@ -166,7 +187,7 @@ class TrainingModule(ModuleTaskMixin):
                             )
                             continue
 
-                enough_initial = latest_success_samples == 0 and trainable >= min_samples
+                enough_initial = initial_chosen is not None
                 enough_increment = (
                     not schema_mismatch
                     and not label_schema_mismatch
@@ -226,7 +247,9 @@ class TrainingModule(ModuleTaskMixin):
                             trainable=trainable,
                             trainable_filtered_total=trainable_filtered_total,
                             min_samples=min_samples,
-                            horizon_minutes=horizon,
+                            preferred_horizon_minutes=preferred_horizon,
+                            active_horizon_minutes=active_horizon,
+                            training_eligible_by_horizon=training_by_horizon,
                             latest_success_samples=latest_success_samples,
                             newest_schema_samples=newest_schema_samples,
                             schema_mismatch=schema_mismatch,
@@ -260,16 +283,18 @@ class TrainingModule(ModuleTaskMixin):
                         trainable=trainable,
                         trainable_filtered_total=trainable_filtered_total,
                         min_samples=effective_min_samples,
-                        horizon_minutes=horizon,
+                        horizon_minutes=active_horizon,
                         label_schema_mismatch=label_schema_mismatch,
                     )
                     continue
 
-                msg = await self._app._start_model_training(effective_min_samples, horizon, label_bps)
+                train_horizon = active_horizon if enough_initial else preferred_horizon
+                msg = await self._app._start_model_training(effective_min_samples, train_horizon, label_bps)
                 log.info(
                     "model_auto_training.started",
                     trainable=trainable,
-                    horizon_minutes=horizon,
+                    horizon_minutes=train_horizon,
+                    preferred_horizon_minutes=preferred_horizon,
                     latest_samples=actual_latest_samples,
                     latest_run_samples=latest_run_samples,
                     compatible_latest_samples=compatible_latest_samples,
@@ -282,7 +307,7 @@ class TrainingModule(ModuleTaskMixin):
                 if self._app._telegram_bot is not None:
                     await self._app._telegram_bot.notify(
                         "🤖 <b>Auto-training triggered</b>\n"
-                        f"trainable_{horizon}m=<code>{trainable}</code>, "
+                        f"trainable_{train_horizon}m=<code>{trainable}</code>, "
                         f"latest_model_samples=<code>{actual_latest_samples}</code>, "
                         f"latest_run_samples=<code>{latest_run_samples}</code>, "
                         f"compatible=<code>{compatible_latest_samples}</code>\n"
