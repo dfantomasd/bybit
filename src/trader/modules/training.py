@@ -119,11 +119,7 @@ class TrainingModule(ModuleTaskMixin):
                     if latest_success_samples == 0
                     else None
                 )
-                active_horizon = (
-                    initial_chosen.horizon_minutes
-                    if initial_chosen is not None
-                    else preferred_horizon
-                )
+                active_horizon = initial_chosen.horizon_minutes if initial_chosen is not None else preferred_horizon
                 horizon_schema = newest_schema_by_horizon.get(str(active_horizon), {}) or {}
                 trainable = int(
                     horizon_schema.get(
