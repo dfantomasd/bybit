@@ -241,6 +241,10 @@ class Settings(BaseSettings):
     """Retries for startup CandleStore seed requests that hit Bybit rate limits."""
     CANDLE_SEED_RETRY_BASE_DELAY_SECONDS: float = 1.0
     """Base exponential backoff delay after a rate-limited startup seed request."""
+    CANDLE_SEED_USE_DB_CACHE: bool = True
+    """Load startup CandleStore from Postgres before falling back to Bybit REST."""
+    CANDLE_SEED_DB_MIN_BARS: int = 200
+    """Minimum confirmed DB bars per symbol/interval required to skip REST seeding."""
 
     # ------------------------------------------------------------------
     # Anti zero-trading guards
@@ -557,19 +561,19 @@ class Settings(BaseSettings):
     """Minimum samples required to fire auto-training when the loaded model uses a stale feature
     schema (predict() returns None for every candle). Lower than MIN_SAMPLES because any working
     model is better than no model — we can retrain again once more samples accumulate."""
-    MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 1000
+    MODEL_AUTO_TRAIN_INCREMENT_SAMPLES: int = 5000
     MODEL_AUTO_TRAIN_CHECK_SECONDS: int = 300
-    MODEL_AUTO_TRAIN_MIN_INTERVAL_SECONDS: int = 3600
+    MODEL_AUTO_TRAIN_MIN_INTERVAL_SECONDS: int = 21600
     """Minimum time between successful auto-training runs. Prevents checkpoint churn
     while a challenger has not yet accumulated shadow evidence."""
     MODEL_AUTO_TRAIN_HORIZON_MINUTES: int = 5
-    MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = True
+    MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK: bool = False
     """Retrain automatically when the latest model quality is WEAK/missing."""
     MODEL_DRIFT_DETECTION_ENABLED: bool = True
     """Monitor feature distribution drift (PSI) and optionally trigger retrain."""
     MODEL_DRIFT_PSI_THRESHOLD: float = 0.25
     MODEL_DRIFT_MIN_SAMPLES: int = 200
-    MODEL_DRIFT_AUTO_RETRAIN: bool = True
+    MODEL_DRIFT_AUTO_RETRAIN: bool = False
     MODEL_ONLINE_LEARNING_ENABLED: bool = False
     """Apply challenger partial_fit after resolved outcomes (SGD/LOGREG only)."""
     MODEL_ONLINE_LEARNING_MAX_UPDATES_PER_CYCLE: int = 50

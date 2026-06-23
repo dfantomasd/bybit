@@ -1645,6 +1645,33 @@ class TradeJournal:
         )
         return {(str(r["symbol"]), str(r["interval"])): int(r["cnt"]) for r in rows}
 
+    async def get_recent_market_candles(
+        self,
+        symbol: str,
+        interval: str,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        """Return recent confirmed candles oldest-first for startup CandleStore seeding."""
+        rows = await self._fetch(
+            """
+            SELECT open_time, open, high, low, close, volume
+            FROM (
+                SELECT open_time, open, high, low, close, volume
+                FROM market_candles
+                WHERE symbol = $1
+                  AND interval = $2
+                  AND confirmed = true
+                ORDER BY open_time DESC
+                LIMIT $3
+            ) recent
+            ORDER BY open_time ASC
+            """,
+            symbol.upper(),
+            str(interval),
+            int(limit),
+        )
+        return [dict(row) for row in rows]
+
     async def get_latest_candle_time(self, interval: str = "1") -> datetime | None:
         """Return the most recent confirmed open_time for the given interval."""
         rows = await self._fetch(

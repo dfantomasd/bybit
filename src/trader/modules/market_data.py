@@ -155,6 +155,8 @@ class MarketDataModule(ModuleTaskMixin):
         has_api_key = bool(self._app._settings.BYBIT_API_KEY.get_secret_value())
 
         for interval in self._app._market_data_intervals():
+            if await self._seed_interval_from_db(symbol, interval):
+                continue
             try:
                 for attempt in range(1, retry_attempts + 1):
                     try:
@@ -244,6 +246,55 @@ class MarketDataModule(ModuleTaskMixin):
                     error=str(exc),
                     has_api_key=has_api_key,
                 )
+
+    async def _seed_interval_from_db(self, symbol: str, interval: str) -> bool:
+        """Seed CandleStore from Postgres when enough confirmed candles already exist."""
+        assert self._app._settings is not None
+        if not self._app._settings.CANDLE_SEED_USE_DB_CACHE:
+            return False
+        if self._app._trade_journal is None or not self._app._trade_journal.is_enabled:
+            return False
+        if self._app._candle_store is None:
+            return False
+        min_bars = max(1, int(self._app._settings.CANDLE_SEED_DB_MIN_BARS))
+        try:
+            rows = await self._app._trade_journal.get_recent_market_candles(symbol, interval, _MIN_SEED_BARS)
+        except Exception as exc:
+            log.debug("candle_store.db_seed_read_failed", symbol=symbol, interval=interval, error=str(exc))
+            return False
+        if len(rows) < min_bars:
+            log.info(
+                "candle_store.db_seed_insufficient",
+                symbol=symbol,
+                interval=interval,
+                bars=len(rows),
+                min_bars=min_bars,
+            )
+            return False
+
+        from trader.data.candles import Candle
+
+        count = 0
+        for row in rows:
+            try:
+                self._app._candle_store.add(
+                    symbol,
+                    interval,
+                    Candle(
+                        open_time=row["open_time"],
+                        open=float(row["open"]),
+                        high=float(row["high"]),
+                        low=float(row["low"]),
+                        close=float(row["close"]),
+                        volume=float(row["volume"]),
+                        confirm=True,
+                    ),
+                )
+                count += 1
+            except (KeyError, TypeError, ValueError):
+                continue
+        log.info("candle_store.seeded_from_db", symbol=symbol, interval=interval, bars=count)
+        return count >= min_bars
 
     async def prefetch_ticker_turnover(self, symbols: list[str]) -> None:
         """Batch-fetch 24h turnover for position sizing (safe to call after execution init)."""
