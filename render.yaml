@@ -102,6 +102,10 @@ services:
         value: "3"
       - key: CANDLE_SEED_RETRY_BASE_DELAY_SECONDS
         value: "1.0"
+      - key: CANDLE_SEED_USE_DB_CACHE
+        value: "true"
+      - key: CANDLE_SEED_DB_MIN_BARS
+        value: "200"
       - key: PREFLIGHT_POSTGRES_REQUIRED
         value: "false"
       - key: PREFLIGHT_POSTGRES_RETRY_ATTEMPTS
@@ -155,7 +159,7 @@ services:
       - key: MODEL_DRIFT_DETECTION_ENABLED
         value: "true"
       - key: MODEL_DRIFT_AUTO_RETRAIN
-        value: "true"
+        value: "false"
       - key: MODEL_ONLINE_LEARNING_ENABLED
         value: "true"
       - key: MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY
@@ -253,9 +257,13 @@ services:
       - key: MODEL_AUTO_TRAIN_MIN_SAMPLES
         value: "1000"
       - key: MODEL_AUTO_TRAIN_INCREMENT_SAMPLES
-        value: "1000"
+        value: "5000"
       - key: MODEL_AUTO_TRAIN_CHECK_SECONDS
         value: "300"
+      - key: MODEL_AUTO_TRAIN_MIN_INTERVAL_SECONDS
+        value: "21600"
+      - key: MODEL_AUTO_TRAIN_RETRAIN_IF_WEAK
+        value: "false"
       # Auto-promotion (disabled by default — requires explicit opt-in)
       - key: MODEL_AUTO_PROMOTE_CHECK_SECONDS
         value: "600"
