@@ -733,7 +733,7 @@ def test_auto_trainer_uses_latest_training_run_for_success_cooldown() -> None:
     src = inspect.getsource(TrainingModule.run_auto_model_trainer)
     assert "latest_run_samples" in src
     assert "latest_success_samples = max(actual_latest_samples, latest_run_samples)" in src
-    assert "enough_initial = latest_success_samples == 0" in src
+    assert "enough_initial = initial_chosen is not None" in src
     assert 'latest_finished_at = latest_run.get("finished_at")' in src
 
 
@@ -913,6 +913,8 @@ async def test_database_model_telegram_screen() -> None:
             "prediction_outcomes": 300,
             "prediction_outcomes_by_horizon": {"5": 120, "15": 180},
             "labelled_samples_15m": 180,
+            "training_eligible_by_horizon": {"5": 180, "15": 180},
+            "training_config": {"auto_train_horizon_minutes": 5},
             "latest_training_run": {
                 "status": "COMPLETED",
                 "model_version": "v20260607_1000",
@@ -999,12 +1001,12 @@ async def test_database_model_telegram_screen() -> None:
     # The method calls self._reply which calls message.reply_text with HTML parse mode.
     await bot._cmd_db_model(fake_update, fake_context)  # type: ignore[arg-type]
     text = fake_message.reply_text.await_args.args[0]
-    assert "Готово для обучения (15m)" in text
+    assert "Готово для обучения (5m)" in text
     assert "v20260607_1000" in text
     assert "Качество" in text
     assert "ХОРОШО" in text
     assert "+2.70 bps" in text
-    assert "Фильтр модели 15m" in text
+    assert "Фильтр модели 5m" in text
     assert "12/20 пропущено" in text
     assert "Paper baseline" in text
     assert "Paper model gate" in text
