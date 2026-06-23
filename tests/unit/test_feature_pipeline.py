@@ -7,7 +7,10 @@ from datetime import UTC, datetime, timedelta
 
 from trader.data.candles import Candle, CandleStore
 from trader.features.pipeline import _MIN_BARS, FeaturePipeline
-from trader.features.source_candle_guard import SourceCandleFeaturePipeline, source_candle_for_feature
+from trader.features.source_candle_guard import (
+    SourceCandleFeaturePipeline,
+    source_candle_for_feature,
+)
 
 
 def _make_store(n: int = 60, symbol: str = "BTCUSDT", interval: str = "1") -> CandleStore:
@@ -149,6 +152,37 @@ class TestFeaturePipeline:
         )
 
         assert pipeline.latest("BTCUSDT", "1") is None
+        assert source_candle_for_feature(vec.feature_id) is None
+
+        refreshed = await pipeline.on_confirmed_candle("BTCUSDT", "1")
+        assert refreshed is not None
+        assert pipeline.latest("BTCUSDT", "1") is refreshed
+
+    def test_evict_cached_vector_clears_binding(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+        vec = pipeline.compute("BTCUSDT", "1")
+        assert vec is not None
+        pipeline._latest[("BTCUSDT", "1")] = vec
+        assert source_candle_for_feature(vec.feature_id) is not None
+
+        pipeline.evict_cached_vector("BTCUSDT", "1")
+
+        assert pipeline.latest("BTCUSDT", "1") is None
+        assert source_candle_for_feature(vec.feature_id) is None
+
+    async def test_seeding_guard_skips_cache_until_seed_complete(self):
+        store = _make_store(60)
+        pipeline = SourceCandleFeaturePipeline(store)
+        pipeline.begin_symbol_seed("BTCUSDT")
+        vec = await pipeline.on_confirmed_candle("BTCUSDT", "1")
+        assert vec is not None
+        assert pipeline.latest("BTCUSDT", "1") is None
+
+        pipeline.end_symbol_seed("BTCUSDT")
+        vec2 = await pipeline.on_confirmed_candle("BTCUSDT", "1")
+        assert vec2 is not None
+        assert pipeline.latest("BTCUSDT", "1") is vec2
 
     def test_invalidate_symbol_clears_source_bindings(self):
         store = _make_store(60)

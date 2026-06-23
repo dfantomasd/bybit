@@ -97,6 +97,8 @@ class FeaturePipeline:
         self._active_symbols: list[str] = []
         self._active_intervals: list[str] = []
         self._symbol_source: Any | None = None
+        # Symbols currently being REST-seeded; skip caching until seed completes.
+        self._seeding_symbols: set[str] = set()
 
     # ------------------------------------------------------------------
     # Public
@@ -110,7 +112,7 @@ class FeaturePipeline:
         """
         try:
             vec = self.compute(symbol, interval)
-            if vec is not None:
+            if vec is not None and symbol not in self._seeding_symbols:
                 self._latest[(symbol, interval)] = vec
                 self._last_computed_at[(symbol, interval)] = datetime.now(tz=UTC)
                 if self._health is not None:
@@ -190,6 +192,15 @@ class FeaturePipeline:
     def stop(self) -> None:
         self._stop_event.set()
 
+    def begin_symbol_seed(self, symbol: str) -> None:
+        """Mark a symbol as mid-REST-seed so cached vectors are not published."""
+        self._seeding_symbols.add(symbol)
+        self.invalidate_symbol(symbol)
+
+    def end_symbol_seed(self, symbol: str) -> None:
+        """Clear the seeding guard after all intervals are loaded and recomputed."""
+        self._seeding_symbols.discard(symbol)
+
     def invalidate_symbol(self, symbol: str) -> None:
         """Remove cached feature vectors for a symbol after its candles are reseeded."""
         from trader.features.source_candle_guard import clear_source_bindings_for_symbol
@@ -200,7 +211,19 @@ class FeaturePipeline:
             self._last_computed_at.pop(k, None)
         clear_source_bindings_for_symbol(symbol)
 
+    def evict_cached_vector(self, symbol: str, interval: str) -> None:
+        """Drop one cached vector and its source-candle binding after staleness detection."""
+        from trader.features.source_candle_guard import remove_source_binding
+
+        key = (symbol, interval)
+        vec = self._latest.pop(key, None)
+        self._last_computed_at.pop(key, None)
+        if vec is not None:
+            remove_source_binding(vec.feature_id)
+
     def latest(self, symbol: str, interval: str) -> FeatureVector | None:
+        if symbol in self._seeding_symbols:
+            return None
         return self._latest.get((symbol, interval))
 
     # ------------------------------------------------------------------

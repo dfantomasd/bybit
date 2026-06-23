@@ -714,7 +714,8 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     src = inspect.getsource(TrainingModule.run_auto_model_trainer)
     compact_src = "".join(src.split())
     assert "training_eligible_by_horizon" in src
-    assert "training_by_horizon.get(str(horizon)" in compact_src
+    assert "resolve_training_horizon" in src
+    assert "active_horizon" in src
     assert "actual_training_samples" in src
     assert "training_samples_compatible" in src
     assert "label_schema_mismatch" in src
