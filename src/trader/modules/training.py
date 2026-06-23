@@ -727,22 +727,33 @@ class TrainingModule(ModuleTaskMixin):
             return html.escape(value[-limit:])
 
         try:
+            train_env = {
+                **os.environ,
+                # Keep sklearn/BLAS from saturating the single Render starter CPU.
+                "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
+                "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
+                "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
+                "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
+                "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
+                "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
+                "TRAIN_STRATEGY_ALLOWLIST": (
+                    self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
+                ),
+                "TRAIN_INCLUDE_CANDLE_BASELINE": (
+                    "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
+                ),
+                "MODEL_LABEL_USE_TPSL_EXIT": (
+                    "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
+                ),
+            }
+            create_kwargs: dict[str, Any] = {"env": train_env}
+            if hasattr(os, "nice"):
+                create_kwargs["preexec_fn"] = lambda: os.nice(10)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                env={
-                    **os.environ,
-                    "TRAIN_STRATEGY_ALLOWLIST": (
-                        self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
-                    ),
-                    "TRAIN_INCLUDE_CANDLE_BASELINE": (
-                        "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
-                    ),
-                    "MODEL_LABEL_USE_TPSL_EXIT": (
-                        "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
-                    ),
-                },
+                **create_kwargs,
             )
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False
