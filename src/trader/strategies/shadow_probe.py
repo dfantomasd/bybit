@@ -31,13 +31,15 @@ class ShadowProbeStrategy(BaseStrategy):
         self,
         *,
         imbalance_provider: Callable[[str], float | None] | None = None,
-        min_abs_imbalance: float = 0.03,
+        min_abs_imbalance: float = 0.05,
         min_quality: float = 0.45,
         cooldown_seconds: int = 300,
         max_notional_usd: float = 8.0,
         risk_pct: float = 0.003,
-        tp_atr_mult: float = 1.0,
-        sl_atr_mult: float = 0.6,
+        tp_atr_mult: float = 1.4,
+        sl_atr_mult: float = 0.8,
+        min_tp_pct: float = 0.45,
+        min_sl_pct: float = 0.25,
     ) -> None:
         self._imbalance_provider = imbalance_provider
         self._min_abs_imbalance = max(0.0, float(min_abs_imbalance))
@@ -47,6 +49,8 @@ class ShadowProbeStrategy(BaseStrategy):
         self._risk_pct = max(0.0001, float(risk_pct))
         self._tp_atr_mult = max(0.2, float(tp_atr_mult))
         self._sl_atr_mult = max(0.2, float(sl_atr_mult))
+        self._min_tp_pct = max(0.05, float(min_tp_pct))
+        self._min_sl_pct = max(0.05, float(min_sl_pct))
         self._last_signal_at: dict[str, datetime] = {}
 
     @property
@@ -61,7 +65,21 @@ class ShadowProbeStrategy(BaseStrategy):
     def _features(vec: FeatureVector) -> dict[str, float]:
         return dict(zip(vec.feature_names, vec.values, strict=True))
 
+    @staticmethod
+    def _ema_side(features: dict[str, float]) -> OrderSide | None:
+        ema9 = features.get("ema_9")
+        ema21 = features.get("ema_21")
+        rsi = features.get("rsi_14")
+        if ema9 is None or ema21 is None:
+            return None
+        if ema9 > ema21 and (rsi is None or rsi < 68):
+            return OrderSide.BUY
+        if ema9 < ema21 and (rsi is None or rsi > 32):
+            return OrderSide.SELL
+        return None
+
     def _side_from_features(self, vec: FeatureVector, features: dict[str, float]) -> tuple[OrderSide | None, str]:
+        ema_side = self._ema_side(features)
         imbalance = None
         if self._imbalance_provider is not None:
             try:
@@ -70,16 +88,13 @@ class ShadowProbeStrategy(BaseStrategy):
                 imbalance = None
         if imbalance is not None and abs(imbalance) >= self._min_abs_imbalance:
             side = OrderSide.BUY if imbalance > 0 else OrderSide.SELL
+            if ema_side is not None and side != ema_side:
+                return None, f"book/EMA conflict imbalance={imbalance:+.3f}"
             return side, f"book imbalance {imbalance:+.3f}"
 
-        ema9 = features.get("ema_9")
-        ema21 = features.get("ema_21")
-        rsi = features.get("rsi_14")
-        if ema9 is None or ema21 is None:
-            return None, "missing ema"
-        if ema9 > ema21 and (rsi is None or rsi < 72):
+        if ema_side == OrderSide.BUY:
             return OrderSide.BUY, "ema9>ema21 probe"
-        if ema9 < ema21 and (rsi is None or rsi > 28):
+        if ema_side == OrderSide.SELL:
             return OrderSide.SELL, "ema9<ema21 probe"
         return None, "no directional bias"
 
@@ -109,8 +124,8 @@ class ShadowProbeStrategy(BaseStrategy):
         if side is None:
             return None
 
-        sl_dist = max(float(atr_pct) * self._sl_atr_mult, 0.001)
-        tp_dist = max(float(atr_pct) * self._tp_atr_mult, sl_dist * 1.25)
+        sl_dist = max(float(atr_pct) * self._sl_atr_mult, self._min_sl_pct / 100.0)
+        tp_dist = max(float(atr_pct) * self._tp_atr_mult, self._min_tp_pct / 100.0, sl_dist * 1.5)
         notional = min(self._max_notional_usd, max(5.0, available_balance_usd * 0.25))
         qty = notional / current_price
         if qty <= 0:
@@ -143,5 +158,5 @@ class ShadowProbeStrategy(BaseStrategy):
             expected_risk=sl_dist * 100.0,
             regime=regime,
             feature_id=feature_vector.feature_id,
-            rationale=f"SHADOW probe: {reason}, tp={tp_dist * 100:.3f}%, sl={sl_dist * 100:.3f}%",
+            rationale=f"SHADOW cost-aware probe: {reason}, tp={tp_dist * 100:.3f}%, sl={sl_dist * 100:.3f}%",
         )

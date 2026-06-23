@@ -29,7 +29,7 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
         cooldown_seconds=30,
     )
 
-    proposal = strategy.evaluate(_feature_vector(), current_price=0.5, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(ema_9=0.99, ema_21=1.0), current_price=0.5, available_balance_usd=25.0)
 
     assert proposal is not None
     assert proposal.strategy_id == "shadow_probe_v1"
@@ -38,6 +38,10 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
     assert proposal.stop_loss is not None
     assert proposal.requested_notional_usd is not None
     assert proposal.requested_notional_usd >= 5
+    assert proposal.take_profit < proposal.entry_price
+    assert proposal.stop_loss > proposal.entry_price
+    assert proposal.expected_return is not None
+    assert proposal.expected_return >= 0.45
 
 
 def test_shadow_probe_uses_ema_bias_without_orderbook() -> None:
@@ -56,3 +60,11 @@ def test_shadow_probe_cooldown_suppresses_duplicate_symbol() -> None:
 
     assert strategy.evaluate(vec, current_price=1.0, available_balance_usd=25.0) is not None
     assert strategy.evaluate(vec, current_price=1.0, available_balance_usd=25.0) is None
+
+
+def test_shadow_probe_blocks_book_ema_conflict() -> None:
+    strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: -0.08)
+
+    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is None

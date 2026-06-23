@@ -71,11 +71,15 @@ services:
       - key: SHADOW_PROBE_ENABLED
         value: "true"
       - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
-        value: "0.03"
+        value: "0.05"
       - key: SHADOW_PROBE_COOLDOWN_SECONDS
         value: "300"
       - key: SHADOW_PROBE_MAX_NOTIONAL_USD
         value: "8.0"
+      - key: SHADOW_PROBE_MIN_TP_PCT
+        value: "0.45"
+      - key: SHADOW_PROBE_MIN_SL_PCT
+        value: "0.25"
       - key: MIN_NET_SCALP_RETURN_PCT
         value: "0.04"
       - key: SCALP_MIN_OB_IMBALANCE
