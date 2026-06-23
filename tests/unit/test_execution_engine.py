@@ -112,6 +112,7 @@ def _make_engine(
     shadow_mode: bool = True,
     qty: Decimal | None = None,
     trade_journal: MagicMock | None = None,
+    shadow_apply_net_edge_gate: bool = False,
 ) -> ExecutionEngine:
     adapter = MagicMock()
     adapter.get_positions = AsyncMock(return_value=[])
@@ -136,6 +137,7 @@ def _make_engine(
         risk_manager=risk_manager,
         exposure_tracker=exposure,
         shadow_mode=shadow_mode,
+        shadow_apply_net_edge_gate=shadow_apply_net_edge_gate,
         cooldown_s=0,  # disable cooldown for tests
         trade_journal=trade_journal,
     )
@@ -182,6 +184,27 @@ class TestExecutionEngine:
         assert decision is not None
         assert decision.status == RiskDecisionStatus.APPROVED
         assert engine.has_open_position("BTCUSDT")
+
+    @pytest.mark.asyncio
+    async def test_shadow_probe_bypasses_strict_shadow_net_edge_gate(self):
+        engine = _make_engine(approved=True, shadow_mode=True, shadow_apply_net_edge_gate=True)
+        proposal = _proposal().model_copy(
+            update={
+                "strategy_id": "shadow_probe_v1",
+                # Deliberately tiny TP would fail the live/strict net-edge gate.
+                "take_profit": Decimal("50001"),
+            }
+        )
+
+        decision = await engine.submit(
+            proposal=proposal,
+            capital=Decimal("10000"),
+            available_balance=Decimal("10000"),
+        )
+
+        assert decision is not None
+        assert decision.status == RiskDecisionStatus.APPROVED
+        assert engine.get_diag_counts()["shadow_order_would_be_placed"] == 1
 
     @pytest.mark.asyncio
     async def test_shadow_order_event_recorded_in_trade_journal(self):

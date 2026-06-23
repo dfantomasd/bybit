@@ -230,6 +230,22 @@ class OperatorControlsModule(AppBoundModule):
             if self._app._settings is not None
             else None,
             "model_gate_quality": self._app._model_gate_quality,
+            "scalp_strict_shadow": self._app._scalp_strict_shadow(),
+            "shadow_apply_net_edge_gate": (
+                self._app._execution_engine._shadow_apply_net_edge_gate
+                if self._app._execution_engine is not None
+                else None
+            ),
+            "min_expected_net_edge_pct": (
+                self._app._settings.MIN_EXPECTED_NET_EDGE_PCT if self._app._settings is not None else None
+            ),
+            "net_edge_safety_margin_pct": (
+                self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT if self._app._settings is not None else None
+            ),
+            "shadow_probe_enabled": self._app._settings.SHADOW_PROBE_ENABLED
+            if self._app._settings is not None
+            else None,
+            "shadow_probe_bypasses_live_edge_gate": True,
             "model_auto_train_min_samples": (
                 self._app._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES if self._app._settings is not None else 1000
             ),
