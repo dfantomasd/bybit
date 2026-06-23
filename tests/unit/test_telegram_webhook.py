@@ -129,3 +129,31 @@ async def test_telegram_webhook_shutdown_preserves_registration() -> None:
 
     await bot.stop()
     mock_app.bot.delete_webhook.assert_not_awaited()
+
+
+def test_deep_report_button_is_available_from_diagnostics() -> None:
+    bot = _make_webhook_bot()
+
+    markup = bot._diagnostics_menu()
+    callback_data = [
+        button.callback_data for row in markup.inline_keyboard for button in row if button.callback_data is not None
+    ]
+
+    assert "view:deep_report" in callback_data
+    assert bot._redact_for_report({"api_key": "secret", "nested": {"telegram_token": "token"}}) == {
+        "api_key": "***REDACTED***",
+        "nested": {"telegram_token": "***REDACTED***"},
+    }
+
+
+def test_deep_report_json_escapes_and_redacts() -> None:
+    rendered = TelegramMonitorBot._json_for_report(
+        {
+            "api_secret": "secret",
+            "safe": "<copy me>",
+        }
+    )
+
+    assert "&quot;secret&quot;" not in rendered
+    assert "***REDACTED***" in rendered
+    assert "&lt;copy me&gt;" in rendered
