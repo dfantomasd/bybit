@@ -425,6 +425,20 @@ def ema_slope(series: Sequence[float], period: int, lookback: int = 3) -> float 
     return (num / denom) / y_mean  # normalise by price level
 
 
+def ewma_periods_for_bar_count(bar_count: int) -> tuple[int, ...]:
+    """Pick EWMA tiers that fit the available confirmed bar count (HTF-aware)."""
+    tiers = (
+        (3, 12, 50, 100, 200),
+        (3, 8, 21, 34, 55),
+        (3, 8, 13, 21, 34),
+        (3, 8, 13),
+    )
+    for candidate in tiers:
+        if bar_count >= max(candidate) + 1:
+            return candidate
+    return (3, 8)
+
+
 def multi_ewma_signal(
     closes: Sequence[float],
     periods: tuple[int, ...] = (3, 12, 50, 100, 200),
