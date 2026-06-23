@@ -148,6 +148,8 @@ class TradingLoopModule(AppBoundModule):
                     min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                     cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
+                    min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
+                    min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
                 )
             )
             log.info(
@@ -155,6 +157,8 @@ class TradingLoopModule(AppBoundModule):
                 min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                 cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
                 max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
+                min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
+                min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
             )
 
         if (
