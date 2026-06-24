@@ -42,11 +42,11 @@ services:
       - key: STARTER_OPTIMIZED_MODE
         value: "true"
       - key: SCREENER_WIDE_MAX_SYMBOLS
-        value: "50"
+        value: "30"
       - key: SCREENER_FEATURE_MAX_SYMBOLS
         value: "20"
       - key: SCREENER_EXECUTION_CANDIDATES
-        value: "10"
+        value: "6"
       - key: SCREENER_REFRESH_SECONDS
         value: "300"
       - key: SCREENER_SUBSCRIBE_TIMEOUT_SECONDS
@@ -77,11 +77,19 @@ services:
       - key: SHADOW_PROBE_MAX_NOTIONAL_USD
         value: "8.0"
       - key: SHADOW_PROBE_MIN_TP_PCT
-        value: "0.45"
+        value: "0.75"
       - key: SHADOW_PROBE_MIN_SL_PCT
-        value: "0.25"
+        value: "0.40"
       - key: SHADOW_PROBE_MIN_NET_RETURN_PCT
-        value: "0.05"
+        value: "0.30"
+      - key: SHADOW_PROBE_MAX_OPEN_POSITIONS
+        value: "2"
+      - key: SHADOW_PROBE_BURST_MAX_SIGNALS
+        value: "3"
+      - key: SHADOW_PROBE_BURST_WINDOW_SECONDS
+        value: "300"
+      - key: SHADOW_PROBE_BURST_COOLDOWN_SECONDS
+        value: "600"
       - key: SHADOW_PROBE_SYMBOL_WARMUP_SECONDS
         value: "300"
       - key: SHADOW_PROBE_SELL_ENABLED
@@ -113,7 +121,7 @@ services:
       - key: SHADOW_MIN_ATR_MULTIPLE
         value: "0.35"
       - key: MAX_ORDERBOOK_ACTIVE_SYMBOLS
-        value: "10"
+        value: "6"
       - key: PERFORMANCE_FILTER_ENABLED
         value: "false"
       - key: SHADOW_LOSS_GUARD_ENABLED

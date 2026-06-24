@@ -8,6 +8,7 @@ and TP/SL outcome analysis when production strategies are too selective.
 from __future__ import annotations
 
 import uuid
+from collections import deque
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import ROUND_DOWN, Decimal
@@ -67,6 +68,11 @@ class ShadowProbeStrategy(BaseStrategy):
         instrument_info_provider: Callable[[str], InstrumentInfo | None] | None = None,
         side_blocked: Callable[[str, str], bool] | None = None,
         symbol_allowed: Callable[[str], bool] | None = None,
+        open_positions_count: Callable[[], int] | None = None,
+        max_open_positions: int = 2,
+        burst_max_signals: int = 3,
+        burst_window_seconds: int = 300,
+        burst_cooldown_seconds: int = 600,
         min_abs_imbalance: float = 0.05,
         min_quality: float = 0.45,
         cooldown_seconds: int = 300,
@@ -85,6 +91,11 @@ class ShadowProbeStrategy(BaseStrategy):
         self._instrument_info_provider = instrument_info_provider
         self._side_blocked = side_blocked
         self._symbol_allowed = symbol_allowed
+        self._open_positions_count = open_positions_count
+        self._max_open_positions = max(1, int(max_open_positions))
+        self._burst_max_signals = max(1, int(burst_max_signals))
+        self._burst_window = timedelta(seconds=max(1, int(burst_window_seconds)))
+        self._burst_cooldown = timedelta(seconds=max(1, int(burst_cooldown_seconds)))
         self._min_abs_imbalance = max(0.0, float(min_abs_imbalance))
         self._min_quality = max(0.0, min(1.0, float(min_quality)))
         self._cooldown = timedelta(seconds=max(30, int(cooldown_seconds)))
@@ -99,6 +110,8 @@ class ShadowProbeStrategy(BaseStrategy):
         self._cost_params = cost_params
         self._sell_enabled = bool(sell_enabled)
         self._last_signal_at: dict[str, datetime] = {}
+        self._signal_times: deque[datetime] = deque()
+        self._burst_blocked_until: datetime | None = None
 
     @property
     def strategy_id(self) -> str:
@@ -107,6 +120,19 @@ class ShadowProbeStrategy(BaseStrategy):
     def _cooldown_active(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
         return last is not None and datetime.now(tz=UTC) - last < self._cooldown
+
+    def _burst_limited(self, now: datetime) -> bool:
+        if self._burst_blocked_until is not None:
+            if now < self._burst_blocked_until:
+                return True
+            self._burst_blocked_until = None
+        cutoff = now - self._burst_window
+        while self._signal_times and self._signal_times[0] < cutoff:
+            self._signal_times.popleft()
+        if len(self._signal_times) >= self._burst_max_signals:
+            self._burst_blocked_until = now + self._burst_cooldown
+            return True
+        return False
 
     @staticmethod
     def _features(vec: FeatureVector) -> dict[str, float]:
@@ -133,17 +159,16 @@ class ShadowProbeStrategy(BaseStrategy):
                 imbalance = self._imbalance_provider(vec.symbol)
             except Exception:
                 imbalance = None
-        if imbalance is not None and abs(imbalance) >= self._min_abs_imbalance:
-            side = OrderSide.BUY if imbalance > 0 else OrderSide.SELL
-            if ema_side is not None and side != ema_side:
-                return None, f"book/EMA conflict imbalance={imbalance:+.3f}"
-            return side, f"book imbalance {imbalance:+.3f}"
-
-        if ema_side == OrderSide.BUY:
-            return OrderSide.BUY, "ema9>ema21 probe"
-        if ema_side == OrderSide.SELL:
-            return OrderSide.SELL, "ema9<ema21 probe"
-        return None, "no directional bias"
+        if imbalance is None:
+            return None, "orderbook imbalance unavailable"
+        if abs(imbalance) < self._min_abs_imbalance:
+            return None, f"orderbook imbalance below threshold {imbalance:+.3f}"
+        side = OrderSide.BUY if imbalance > 0 else OrderSide.SELL
+        if ema_side is None:
+            return None, f"EMA confirmation unavailable imbalance={imbalance:+.3f}"
+        if side != ema_side:
+            return None, f"book/EMA conflict imbalance={imbalance:+.3f}"
+        return side, f"book imbalance {imbalance:+.3f}"
 
     def evaluate(
         self,
@@ -152,6 +177,11 @@ class ShadowProbeStrategy(BaseStrategy):
         available_balance_usd: float,
     ) -> TradeProposal | None:
         if current_price <= 0 or available_balance_usd <= 0:
+            return None
+        now = datetime.now(tz=UTC)
+        if self._open_positions_count is not None and self._open_positions_count() >= self._max_open_positions:
+            return None
+        if self._burst_limited(now):
             return None
         if self._symbol_allowed is not None and not self._symbol_allowed(feature_vector.symbol):
             return None
@@ -210,7 +240,8 @@ class ShadowProbeStrategy(BaseStrategy):
             stop_loss = current_price * (1 + sl_dist)
             regime = MarketRegime.BEAR_TREND
 
-        self._last_signal_at[feature_vector.symbol] = datetime.now(tz=UTC)
+        self._last_signal_at[feature_vector.symbol] = now
+        self._signal_times.append(now)
         confidence = min(0.62, 0.50 + min(0.10, abs(float(atr_pct)) * 20.0))
         return TradeProposal(
             proposal_id=uuid.uuid4(),

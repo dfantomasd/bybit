@@ -92,6 +92,7 @@ class MarketDataModule(ModuleTaskMixin):
             self._app._background_tasks.append(task)
             await self._app._screener.wait_ready()
             symbols = self._app._screener.active_symbols
+            self._app._record_shadow_probe_symbol_subscribed(symbols)
             log.info("screener.initial_symbols", symbols=symbols)
             return symbols
         except Exception as exc:
@@ -100,7 +101,9 @@ class MarketDataModule(ModuleTaskMixin):
                 error=str(exc),
                 fallback=_SYMBOLS,
             )
-            return list(_SYMBOLS)
+            symbols = list(_SYMBOLS)
+            self._app._record_shadow_probe_symbol_subscribed(symbols)
+            return symbols
 
     # ------------------------------------------------------------------
     # Market data & features
@@ -340,6 +343,10 @@ class MarketDataModule(ModuleTaskMixin):
                 or self._app._trade_journal is None
                 or not self._app._trade_journal.is_enabled
             ):
+                continue
+            training_task = self._app._training_task
+            if training_task is not None and not training_task.done():
+                log.info("candle_reconcile.deferred", reason="model_training_active")
                 continue
 
             symbols = self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
