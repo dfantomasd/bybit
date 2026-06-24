@@ -8,7 +8,7 @@ from trader.risk.net_edge import NetEdgeParams
 from trader.strategies.shadow_probe import ShadowProbeStrategy, probe_notional_viable
 
 
-def _feature_vector(**overrides: float) -> FeatureVector:
+def _feature_vector(*, symbol: str = "XRPUSDT", **overrides: float) -> FeatureVector:
     features = {
         "ema_9": 1.01,
         "ema_21": 1.0,
@@ -17,7 +17,7 @@ def _feature_vector(**overrides: float) -> FeatureVector:
     }
     features.update(overrides)
     return FeatureVector(
-        symbol="XRPUSDT",
+        symbol=symbol,
         feature_names=list(features.keys()),
         values=list(features.values()),
         quality_score=0.9,
@@ -62,14 +62,21 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
     assert proposal.expected_risk == 1.0
 
 
-def test_shadow_probe_uses_ema_bias_without_orderbook() -> None:
+def test_shadow_probe_rejects_ema_only_without_obi() -> None:
     strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: None)
 
     proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=2.0, available_balance_usd=25.0)
 
-    assert proposal is not None
-    assert proposal.side == OrderSide.BUY
-    assert "ema9>ema21" in proposal.rationale
+    assert proposal is None
+
+
+def test_shadow_probe_requires_obi_above_threshold() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.05,
+        min_abs_imbalance=0.08,
+    )
+
+    assert strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
 
 
 def test_shadow_probe_cooldown_suppresses_duplicate_symbol() -> None:
@@ -147,6 +154,59 @@ def test_shadow_probe_respects_side_and_symbol_filters() -> None:
         symbol_allowed=lambda symbol: symbol == "XRPUSDT",
     )
     assert buy_strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is not None
+
+
+def test_shadow_probe_respects_max_open_positions() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        open_positions_count=lambda: 2,
+        max_open_positions=2,
+    )
+
+    assert strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
+
+
+def test_shadow_probe_burst_limit_blocks_fourth_signal() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        cooldown_seconds=30,
+        burst_max_signals=3,
+        burst_window_seconds=300,
+        burst_cooldown_seconds=600,
+    )
+
+    for symbol in ("XRPUSDT", "DOGEUSDT", "SOLUSDT"):
+        vec = _feature_vector(symbol=symbol)
+        assert strategy.evaluate(vec, current_price=1.0, available_balance_usd=25.0) is not None
+    vec = _feature_vector(symbol="ADAUSDT")
+    assert strategy.evaluate(vec, current_price=1.0, available_balance_usd=25.0) is None
+
+
+def test_shadow_probe_net_edge_with_new_min_tp() -> None:
+    costs = NetEdgeParams(
+        taker_fee_pct=0.11,
+        expected_slippage_pct=0.06,
+        max_spread_bps=8.0,
+        funding_buffer_pct=0.01,
+        safety_margin_pct=0.01,
+    )
+    passing = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        min_tp_pct=0.75,
+        min_sl_pct=0.40,
+        min_net_return_pct=0.30,
+        cost_params=costs,
+    )
+    failing = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        min_tp_pct=0.45,
+        min_sl_pct=0.40,
+        min_net_return_pct=0.30,
+        cost_params=costs,
+    )
+
+    assert passing.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is not None
+    assert failing.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
 
 
 def test_probe_notional_viable_requires_buffer_after_penalties() -> None:

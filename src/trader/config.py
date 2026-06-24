@@ -144,16 +144,24 @@ class Settings(BaseSettings):
     SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
     SHADOW_PROBE_COOLDOWN_SECONDS: int = 300
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
-    SHADOW_PROBE_MIN_TP_PCT: float = 0.45
+    SHADOW_PROBE_MIN_TP_PCT: float = 0.75
     """Minimum gross TP distance for paper probes; must exceed round-trip costs."""
-    SHADOW_PROBE_MIN_SL_PCT: float = 0.25
+    SHADOW_PROBE_MIN_SL_PCT: float = 0.40
     """Minimum SL distance for paper probes to avoid instant noise stop-outs."""
-    SHADOW_PROBE_MIN_NET_RETURN_PCT: float = 0.05
+    SHADOW_PROBE_MIN_NET_RETURN_PCT: float = 0.30
     """Minimum expected net return after round-trip costs before emitting a probe."""
     SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT: float = 3.0
     """Safety buffer when pre-checking probe notional against exchange min_notional."""
     SHADOW_PROBE_SYMBOL_WARMUP_SECONDS: int = 300
     """Skip probe entries on symbols for this long after screener subscription."""
+    SHADOW_PROBE_MAX_OPEN_POSITIONS: int = 2
+    """Maximum total open positions allowed before new shadow probes are blocked."""
+    SHADOW_PROBE_BURST_MAX_SIGNALS: int = 3
+    """Maximum probe signals allowed inside the burst window."""
+    SHADOW_PROBE_BURST_WINDOW_SECONDS: int = 300
+    """Rolling window used by the probe burst limiter."""
+    SHADOW_PROBE_BURST_COOLDOWN_SECONDS: int = 600
+    """Global pause after the probe burst limit is reached."""
     SHADOW_PROBE_SELL_ENABLED: bool = False
     """Allow SELL-side paper probes. Disabled by default while SELL baseline is negative."""
     SHADOW_PROBE_SIDE_BLOCK_ENABLED: bool = True

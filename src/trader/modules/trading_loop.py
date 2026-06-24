@@ -172,6 +172,15 @@ class TradingLoopModule(AppBoundModule):
                         or not self._app._shadow_probe_quality_allows(symbol, side)
                     ),
                     symbol_allowed=_probe_symbol_allowed,
+                    open_positions_count=(
+                        self._app._execution_engine.open_position_count
+                        if self._app._execution_engine is not None
+                        else None
+                    ),
+                    max_open_positions=self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS,
+                    burst_max_signals=self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS,
+                    burst_window_seconds=self._app._settings.SHADOW_PROBE_BURST_WINDOW_SECONDS,
+                    burst_cooldown_seconds=self._app._settings.SHADOW_PROBE_BURST_COOLDOWN_SECONDS,
                     min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                     cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
@@ -193,6 +202,9 @@ class TradingLoopModule(AppBoundModule):
                 min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
                 symbol_top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
                 symbol_warmup_seconds=self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS,
+                max_open_positions=self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS,
+                burst_max_signals=self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS,
+                burst_cooldown_seconds=self._app._settings.SHADOW_PROBE_BURST_COOLDOWN_SECONDS,
                 sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
             )
 
