@@ -141,7 +141,7 @@ class Settings(BaseSettings):
     """When SHADOW and not SCALP_STRICT_SHADOW, loosen scalp gates for paper-trade data collection."""
     SHADOW_PROBE_ENABLED: bool = True
     """Enable SHADOW-only paper probes so model/order outcomes accumulate when live strategies are silent."""
-    SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.05
+    SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
     SHADOW_PROBE_COOLDOWN_SECONDS: int = 300
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
     SHADOW_PROBE_MIN_TP_PCT: float = 0.45
@@ -152,6 +152,10 @@ class Settings(BaseSettings):
     """Minimum expected net return after round-trip costs before emitting a probe."""
     SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT: float = 3.0
     """Safety buffer when pre-checking probe notional against exchange min_notional."""
+    SHADOW_PROBE_SYMBOL_WARMUP_SECONDS: int = 300
+    """Skip probe entries on symbols for this long after screener subscription."""
+    SHADOW_PROBE_SELL_ENABLED: bool = False
+    """Allow SELL-side paper probes. Disabled by default while SELL baseline is negative."""
     SHADOW_PROBE_SIDE_BLOCK_ENABLED: bool = True
     """Block probe entries on symbol+side pairs with persistently negative paper baseline."""
     SHADOW_PROBE_SIDE_MIN_SAMPLES: int = 8
@@ -564,7 +568,7 @@ class Settings(BaseSettings):
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
-    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1"
+    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,candle_sampler_v1,shadow_probe_v1"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
     TRAIN_INCLUDE_CANDLE_BASELINE: bool = True
     """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines."""

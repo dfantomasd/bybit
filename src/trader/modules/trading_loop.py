@@ -154,6 +154,11 @@ class TradingLoopModule(AppBoundModule):
                 safety_margin_pct=0.01,
             )
 
+            def _probe_symbol_allowed(symbol: str) -> bool:
+                return self._app._shadow_probe_symbol_warmed_up(symbol) and self._app._shadow_probe_symbol_allowed(
+                    symbol
+                )
+
             strategies.append(
                 ShadowProbeStrategy(
                     imbalance_provider=(
@@ -166,7 +171,7 @@ class TradingLoopModule(AppBoundModule):
                         self._app._shadow_probe_side_blocked(symbol, side)
                         or not self._app._shadow_probe_quality_allows(symbol, side)
                     ),
-                    symbol_allowed=self._app._shadow_probe_symbol_allowed,
+                    symbol_allowed=_probe_symbol_allowed,
                     min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                     cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
@@ -175,6 +180,7 @@ class TradingLoopModule(AppBoundModule):
                     min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
                     min_notional_buffer_pct=self._app._settings.SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT,
                     cost_params=probe_cost_params,
+                    sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
                 )
             )
             log.info(
@@ -186,6 +192,8 @@ class TradingLoopModule(AppBoundModule):
                 min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
                 min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
                 symbol_top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
+                symbol_warmup_seconds=self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS,
+                sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
             )
 
         if (

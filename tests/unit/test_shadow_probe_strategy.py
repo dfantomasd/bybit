@@ -41,22 +41,22 @@ def _instrument_info(*, min_notional: str = "5", qty_step: str = "0.1") -> Instr
 
 def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
     strategy = ShadowProbeStrategy(
-        imbalance_provider=lambda _symbol: -0.05,
+        imbalance_provider=lambda _symbol: 0.10,
         min_abs_imbalance=0.03,
         cooldown_seconds=30,
     )
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=0.99, ema_21=1.0), current_price=0.5, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=0.5, available_balance_usd=25.0)
 
     assert proposal is not None
     assert proposal.strategy_id == "shadow_probe_v1"
-    assert proposal.side == OrderSide.SELL
+    assert proposal.side == OrderSide.BUY
     assert proposal.take_profit is not None
     assert proposal.stop_loss is not None
     assert proposal.requested_notional_usd is not None
     assert proposal.requested_notional_usd >= 5
-    assert proposal.take_profit < proposal.entry_price
-    assert proposal.stop_loss > proposal.entry_price
+    assert proposal.take_profit > proposal.entry_price
+    assert proposal.stop_loss < proposal.entry_price
     assert proposal.expected_return is not None
     assert proposal.expected_return >= 0.45
     assert proposal.expected_risk == 1.0
@@ -65,11 +65,11 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
 def test_shadow_probe_uses_ema_bias_without_orderbook() -> None:
     strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: None)
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=0.99, ema_21=1.0), current_price=2.0, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=2.0, available_balance_usd=25.0)
 
     assert proposal is not None
-    assert proposal.side == OrderSide.SELL
-    assert "ema9<ema21" in proposal.rationale
+    assert proposal.side == OrderSide.BUY
+    assert "ema9>ema21" in proposal.rationale
 
 
 def test_shadow_probe_cooldown_suppresses_duplicate_symbol() -> None:
@@ -121,6 +121,17 @@ def test_shadow_probe_skips_symbol_failing_min_notional() -> None:
     assert proposal is None
 
 
+def test_shadow_probe_blocks_sell_when_disabled() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: -0.12,
+        sell_enabled=False,
+    )
+
+    proposal = strategy.evaluate(_feature_vector(ema_9=0.99, ema_21=1.0), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is None
+
+
 def test_shadow_probe_respects_side_and_symbol_filters() -> None:
     strategy = ShadowProbeStrategy(
         imbalance_provider=lambda _symbol: 0.08,
@@ -130,13 +141,12 @@ def test_shadow_probe_respects_side_and_symbol_filters() -> None:
 
     assert strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
 
-    sell_strategy = ShadowProbeStrategy(
-        imbalance_provider=lambda _symbol: None,
-        side_blocked=lambda _symbol, side: side == "Buy",
+    buy_strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.08,
+        side_blocked=lambda _symbol, side: side == "Sell",
         symbol_allowed=lambda symbol: symbol == "XRPUSDT",
     )
-    sell_vec = _feature_vector(ema_9=0.99, ema_21=1.0)
-    assert sell_strategy.evaluate(sell_vec, current_price=1.0, available_balance_usd=25.0) is not None
+    assert buy_strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is not None
 
 
 def test_probe_notional_viable_requires_buffer_after_penalties() -> None:

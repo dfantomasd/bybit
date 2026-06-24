@@ -52,9 +52,7 @@ def probe_notional_viable(
         return False
     if info.min_notional is None or info.min_notional <= Decimal("0"):
         return True
-    required_notional = info.min_notional * (
-        Decimal("1") + Decimal(str(min_notional_buffer_pct)) / Decimal("100")
-    )
+    required_notional = info.min_notional * (Decimal("1") + Decimal(str(min_notional_buffer_pct)) / Decimal("100"))
     adjusted_notional = qty * entry_price * worst_case_qty_multiplier
     return adjusted_notional >= required_notional
 
@@ -81,6 +79,7 @@ class ShadowProbeStrategy(BaseStrategy):
         min_net_return_pct: float = 0.05,
         min_notional_buffer_pct: float = 3.0,
         cost_params: NetEdgeParams | None = None,
+        sell_enabled: bool = False,
     ) -> None:
         self._imbalance_provider = imbalance_provider
         self._instrument_info_provider = instrument_info_provider
@@ -98,6 +97,7 @@ class ShadowProbeStrategy(BaseStrategy):
         self._min_net_return_pct = max(0.0, float(min_net_return_pct))
         self._min_notional_buffer_pct = max(0.0, float(min_notional_buffer_pct))
         self._cost_params = cost_params
+        self._sell_enabled = bool(sell_enabled)
         self._last_signal_at: dict[str, datetime] = {}
 
     @property
@@ -171,6 +171,8 @@ class ShadowProbeStrategy(BaseStrategy):
 
         side, reason = self._side_from_features(feature_vector, features)
         if side is None:
+            return None
+        if side == OrderSide.SELL and not self._sell_enabled:
             return None
         if self._side_blocked is not None and self._side_blocked(feature_vector.symbol, side.value):
             return None

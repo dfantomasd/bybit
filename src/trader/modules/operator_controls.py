@@ -252,6 +252,12 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_symbol_top_n": (
                 self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N if self._app._settings is not None else None
             ),
+            "shadow_probe_symbol_warmup_seconds": (
+                self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS if self._app._settings is not None else None
+            ),
+            "shadow_probe_sell_enabled": (
+                self._app._settings.SHADOW_PROBE_SELL_ENABLED if self._app._settings is not None else None
+            ),
             "shadow_probe_side_block_enabled": (
                 self._app._settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED if self._app._settings is not None else None
             ),

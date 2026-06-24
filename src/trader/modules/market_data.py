@@ -32,6 +32,7 @@ class MarketDataModule(ModuleTaskMixin):
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
         if self._app._subscribe_watchdog is not None:
             self._app._subscribe_watchdog.register(symbols)
+        self._app._record_shadow_probe_symbol_subscribed(symbols)
         for symbol in symbols:
             # Seed historical candles (also invalidates cache, triggers recompute,
             # and pre-warms turnover_24h — see _seed_candle_store).
@@ -47,6 +48,7 @@ class MarketDataModule(ModuleTaskMixin):
         for symbol in symbols:
             self._app._last_candle_sample_at.pop(symbol, None)
             self._app._last_signal_at.pop(symbol, None)
+            self._app._shadow_probe_symbol_subscribed_at.pop(symbol, None)
 
     async def start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
