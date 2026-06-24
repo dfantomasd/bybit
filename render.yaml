@@ -71,7 +71,7 @@ services:
       - key: SHADOW_PROBE_ENABLED
         value: "true"
       - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
-        value: "0.05"
+        value: "0.08"
       - key: SHADOW_PROBE_COOLDOWN_SECONDS
         value: "300"
       - key: SHADOW_PROBE_MAX_NOTIONAL_USD
@@ -82,6 +82,10 @@ services:
         value: "0.25"
       - key: SHADOW_PROBE_MIN_NET_RETURN_PCT
         value: "0.05"
+      - key: SHADOW_PROBE_SYMBOL_WARMUP_SECONDS
+        value: "300"
+      - key: SHADOW_PROBE_SELL_ENABLED
+        value: "false"
       - key: SHADOW_PROBE_SIDE_BLOCK_ENABLED
         value: "true"
       - key: SHADOW_PROBE_SIDE_MIN_SAMPLES
@@ -234,7 +238,7 @@ services:
       - key: MODEL_AUTO_TRAIN_HORIZON_MINUTES
         value: "5"
       - key: TRAIN_STRATEGY_ALLOWLIST
-        value: "scalp_micro_v1,candle_sampler_v1"
+        value: "scalp_micro_v1,candle_sampler_v1,shadow_probe_v1"
       - key: TRAIN_INCLUDE_CANDLE_BASELINE
         value: "true"
       - key: TRAIN_EXCLUDE_NEGATIVE_BUCKETS

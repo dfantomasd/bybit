@@ -384,6 +384,25 @@ class SignalPolicyModule(AppBoundModule):
             return True
         return symbol in eligible
 
+    def record_shadow_probe_symbol_subscribed(self, symbols: list[str]) -> None:
+        """Mark screener-added symbols so probe warmup can skip unstable first minutes."""
+        now = datetime.now(tz=UTC)
+        for symbol in symbols:
+            if symbol:
+                self._app._shadow_probe_symbol_subscribed_at[str(symbol)] = now
+
+    def shadow_probe_symbol_warmed_up(self, symbol: str) -> bool:
+        """Return False while a newly subscribed symbol is still in probe warmup."""
+
+        assert self._app._settings is not None
+        warmup_s = int(self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS)
+        if warmup_s <= 0:
+            return True
+        subscribed_at = self._app._shadow_probe_symbol_subscribed_at.get(symbol)
+        if subscribed_at is None:
+            return True
+        return datetime.now(tz=UTC) - subscribed_at >= timedelta(seconds=warmup_s)
+
     @staticmethod
     def compute_shadow_probe_eligible_symbols(
         symbol_stats: dict[str, tuple[float, int]],

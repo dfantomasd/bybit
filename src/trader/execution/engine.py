@@ -1081,7 +1081,7 @@ class ExecutionEngine:
                 vwap_dist = feature_vector.values[feature_vector.feature_names.index("vwap_distance_pct")]
             except (ValueError, AttributeError, IndexError):
                 pass
-        if vwap_dist is not None:
+        if vwap_dist is not None and not shadow_probe:
             # BUY above VWAP or SELL below VWAP is contra-trend — apply penalty
             if (proposal.side == OrderSide.BUY and vwap_dist > 0) or (
                 proposal.side == OrderSide.SELL and vwap_dist < 0

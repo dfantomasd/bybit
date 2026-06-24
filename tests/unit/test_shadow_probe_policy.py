@@ -21,12 +21,14 @@ def _policy_module(
         SHADOW_PROBE_SYMBOL_TOP_N=2,
         SHADOW_PROBE_SYMBOL_MIN_SAMPLES=5,
         SHADOW_PROBE_SYMBOL_MIN_AVG_BPS=-1.0,
+        SHADOW_PROBE_SYMBOL_WARMUP_SECONDS=300,
     )
     app = SimpleNamespace(
         _settings=settings,
         _shadow_probe_side_stats=side_stats or {},
         _shadow_probe_symbol_stats=symbol_stats or {},
         _shadow_probe_eligible_symbols=eligible,
+        _shadow_probe_symbol_subscribed_at={},
     )
     return SignalPolicyModule(app)
 
@@ -68,3 +70,16 @@ def test_compute_shadow_probe_eligible_symbols_returns_top_n() -> None:
     )
 
     assert eligible == {"XRPUSDT", "SOLUSDT"}
+
+
+def test_shadow_probe_symbol_warmup_blocks_recent_subscriptions() -> None:
+    from datetime import UTC, datetime, timedelta
+
+    policy = _policy_module()
+    policy.record_shadow_probe_symbol_subscribed(["WLDUSDT"])
+
+    assert policy.shadow_probe_symbol_warmed_up("XRPUSDT") is True
+    assert policy.shadow_probe_symbol_warmed_up("WLDUSDT") is False
+
+    policy._app._shadow_probe_symbol_subscribed_at["WLDUSDT"] = datetime.now(tz=UTC) - timedelta(seconds=400)
+    assert policy.shadow_probe_symbol_warmed_up("WLDUSDT") is True
