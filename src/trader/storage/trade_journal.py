@@ -65,6 +65,53 @@ def _parse_dec(v: Any) -> Decimal | None:
         return None
 
 
+def _query_label_schema_version() -> str:
+    settings = _optional_settings()
+    if settings is not None:
+        return active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
+    return LABEL_SCHEMA_VERSION
+
+
+def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
+    returns = [float(row.get("net_return_bps") or 0.0) for row in rows]
+    equity = 0.0
+    peak = 0.0
+    max_drawdown = 0.0
+    for ret in returns:
+        equity += ret
+        peak = max(peak, equity)
+        max_drawdown = min(max_drawdown, equity - peak)
+    return {
+        "count": len(returns),
+        "avg_bps": (sum(returns) / len(returns)) if returns else None,
+        "total_bps": sum(returns),
+        "max_drawdown_bps": max_drawdown,
+    }
+
+
+def _model_horizon_minutes_from_metrics(metrics: dict[str, Any], default: int = 15) -> int:
+    for key in ("horizon_minutes", "model_horizon_minutes"):
+        raw_horizon = metrics.get(key)
+        if raw_horizon is None:
+            continue
+        try:
+            return int(raw_horizon)
+        except (TypeError, ValueError):
+            continue
+    settings = _optional_settings()
+    if settings is not None:
+        return int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", default) or default)
+    return default
+
+
+def _feature_schema_hash_from_metrics(metrics: dict[str, Any]) -> str:
+    for key in ("feature_schema_hash", "source_feature_schema_hash"):
+        value = metrics.get(key)
+        if value:
+            return str(value)
+    return ""
+
+
 def _champion_selection_thresholds() -> tuple[int, int, float]:
     min_paper_gate_count = 50
     min_wf_positive_folds = 3
@@ -2989,6 +3036,81 @@ class TradeJournal:
             log.warning("trade_journal.detailed_costs_failed", error=str(exc))
             return {"connected": self.is_enabled, "error": str(exc)}
 
+    async def get_live_paper_gate_stats(
+        self,
+        model_version: str,
+        *,
+        horizon_minutes: int = 15,
+        feature_schema_hash: str = "",
+    ) -> dict[str, Any]:
+        """Return live paper GATE_PASS PnL from resolved prediction outcomes."""
+        if not self.is_enabled or not model_version:
+            return {"count": 0, "total_bps": 0.0, "avg_bps": None, "max_drawdown_bps": 0.0}
+        label_schema = _query_label_schema_version()
+        try:
+            gate_rows = await self._fetch(
+                """
+                SELECT po.net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                WHERE pe.model_version = $1
+                  AND pe.decision = 'GATE_PASS'
+                  AND po.horizon_minutes = $2
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $3
+                  AND ($4::text = '' OR fs.feature_schema_hash = $4)
+                ORDER BY pe.created_at ASC
+                LIMIT 1000
+                """,
+                model_version,
+                int(horizon_minutes),
+                label_schema,
+                feature_schema_hash,
+            )
+            return _paper_stats_from_rows(gate_rows)
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug("trade_journal.live_paper_gate_stats_failed", error=str(exc))
+            return {"count": 0, "total_bps": 0.0, "avg_bps": None, "max_drawdown_bps": 0.0}
+
+    async def _enrich_model_with_live_paper(self, model: dict[str, Any] | None) -> dict[str, Any] | None:
+        if not model:
+            return model
+        try:
+            version = str(model.get("version") or "")
+            if not version:
+                return model
+            raw_metrics = self._decode_json_field(model.get("metrics")) or {}
+            metrics = raw_metrics if isinstance(raw_metrics, dict) else {}
+            horizon = _model_horizon_minutes_from_metrics(metrics)
+            schema_hash = _feature_schema_hash_from_metrics(metrics)
+            live = await self.get_live_paper_gate_stats(
+                version,
+                horizon_minutes=horizon,
+                feature_schema_hash=schema_hash,
+            )
+            live_count = int(live.get("count") or 0)
+            if live_count <= 0:
+                return model
+            enriched = dict(model)
+            enriched["paper_gate_count"] = live_count
+            enriched["paper_gate_total_bps"] = live.get("total_bps")
+            enriched["paper_gate_avg_bps"] = live.get("avg_bps")
+            enriched["paper_gate_source"] = "live_outcomes"
+            enriched_metrics = dict(metrics)
+            enriched_metrics["paper_gate"] = {
+                "count": live_count,
+                "total_bps": live.get("total_bps"),
+                "avg_bps": live.get("avg_bps"),
+            }
+            enriched["selection_reason"] = selection_reason(enriched_metrics)
+            return enriched
+        except Exception as exc:
+            log.debug("trade_journal.live_paper_enrich_failed", error=str(exc))
+            return model
+
     async def get_model_performance_history(self, limit: int = 12) -> list[dict[str, Any]]:
         """Return recent model registry metrics for Telegram diagnostics."""
         if not self.is_enabled:
@@ -3011,22 +3133,23 @@ class TradeJournal:
                 if not isinstance(metrics, dict):
                     metrics = {}
                 normalized = model_selection_metrics(metrics)
-                result.append(
-                    {
-                        "version": data.get("version"),
-                        "status": data.get("status"),
-                        "created_at": data.get("training_finished_at") or data.get("created_at"),
-                        "training_samples": data.get("training_samples"),
-                        "quality": metrics.get("quality", "n/a"),
-                        "precision": metrics.get("precision"),
-                        "lift_bps": normalized["lift_bps"],
-                        "walk_forward_expectancy_bps": normalized["walk_forward_bps"],
-                        "walk_forward_bps": normalized["walk_forward_bps"],
-                        "model_score": metrics.get("model_score", normalized["model_score"]),
-                        "paper_gate_count": normalized["paper_gate_count"],
-                        "selection_reason": selection_reason(metrics),
-                    }
-                )
+                entry = {
+                    "version": data.get("version"),
+                    "status": data.get("status"),
+                    "created_at": data.get("training_finished_at") or data.get("created_at"),
+                    "training_samples": data.get("training_samples"),
+                    "quality": metrics.get("quality", "n/a"),
+                    "precision": metrics.get("precision"),
+                    "lift_bps": normalized["lift_bps"],
+                    "walk_forward_expectancy_bps": normalized["walk_forward_bps"],
+                    "walk_forward_bps": normalized["walk_forward_bps"],
+                    "model_score": metrics.get("model_score", normalized["model_score"]),
+                    "paper_gate_count": normalized["paper_gate_count"],
+                    "walk_forward_pass_count": normalized["walk_forward_pass_count"],
+                    "selection_reason": selection_reason(metrics),
+                    "metrics": metrics,
+                }
+                result.append(await self._enrich_model_with_live_paper(entry))
             return result
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)
@@ -3093,12 +3216,18 @@ class TradeJournal:
                     "wf_std_bps": metrics.get("wf_std_bps"),
                     "lift_bps": normalized["lift_bps"],
                     "paper_gate_count": normalized["paper_gate_count"],
+                    "walk_forward_pass_count": normalized["walk_forward_pass_count"],
                     "selection_reason": selection_reason(metrics),
                     "walk_forward_chronology": metrics.get("walk_forward_chronology"),
+                    "metrics": metrics,
                 }
 
-            champion = _model(champion_rows[0] if champion_rows else None)
-            candidate = _model(candidate_rows[0] if candidate_rows else None)
+            champion = await self._enrich_model_with_live_paper(
+                _model(champion_rows[0] if champion_rows else None)
+            )
+            candidate = await self._enrich_model_with_live_paper(
+                _model(candidate_rows[0] if candidate_rows else None)
+            )
             checks: list[dict[str, Any]] = []
             if champion:
                 wf = champion.get("walk_forward_bps")
@@ -3153,6 +3282,7 @@ class TradeJournal:
         try:
             model = await self._analysis_model_version()
             model_version = str(model.get("version") or "")
+            label_schema = _query_label_schema_version()
             baseline_rows = await self._fetch(
                 """
                 SELECT pe.created_at, po.net_return_bps
@@ -3166,7 +3296,7 @@ class TradeJournal:
                 ORDER BY pe.created_at ASC
                 LIMIT 3000
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema,
                 int(horizon_minutes),
             )
             gate_rows = []
@@ -3185,7 +3315,7 @@ class TradeJournal:
                     LIMIT 3000
                     """,
                     model_version,
-                    LABEL_SCHEMA_VERSION,
+                    label_schema,
                     int(horizon_minutes),
                 )
 
@@ -3231,7 +3361,7 @@ class TradeJournal:
                 GROUP BY weekday, hour_utc
                 ORDER BY weekday, hour_utc
                 """,
-                LABEL_SCHEMA_VERSION,
+                label_schema,
                 int(horizon_minutes),
             )
             return {
@@ -3526,6 +3656,7 @@ class TradeJournal:
             active_model_row = champion_rows[0] if champion_rows else (rows[0] if rows else None)
             latest_model_version = str(active_model_row["version"]) if active_model_row else ""
             if latest_model_version:
+                label_schema = _query_label_schema_version()
                 gate_rows = await self._fetch(
                     """
                     SELECT
@@ -3543,7 +3674,7 @@ class TradeJournal:
                     GROUP BY pe.decision
                     """,
                     latest_model_version,
-                    LABEL_SCHEMA_VERSION,
+                    label_schema,
                 )
                 gate: dict[str, Any] = {"model_version": latest_model_version}
                 total_count = 0
@@ -3595,10 +3726,12 @@ class TradeJournal:
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE po.horizon_minutes = 15
                       AND po.label IS NOT NULL
+                      AND po.label_schema_version = $1
                       AND pe.model_version = 'RULE_BASELINE_V1'
                     ORDER BY pe.created_at ASC
                     LIMIT 1000
                     """,
+                    label_schema,
                 )
                 paper_gate_rows = await self._fetch(
                     """
@@ -3607,35 +3740,20 @@ class TradeJournal:
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE po.horizon_minutes = 15
                       AND po.label IS NOT NULL
-                      AND po.label_schema_version = 'directional_net_v1'
-                      AND pe.model_version = $1
+                      AND po.label_schema_version = $1
+                      AND pe.model_version = $2
                       AND pe.decision = 'GATE_PASS'
                     ORDER BY pe.created_at ASC
                     LIMIT 1000
                     """,
+                    label_schema,
                     latest_model_version,
                 )
 
-                def _paper_stats(rows: list[Any]) -> dict[str, Any]:
-                    returns = [float(row["net_return_bps"] or 0.0) for row in rows]
-                    equity = 0.0
-                    peak = 0.0
-                    max_drawdown = 0.0
-                    for ret in returns:
-                        equity += ret
-                        peak = max(peak, equity)
-                        max_drawdown = min(max_drawdown, equity - peak)
-                    return {
-                        "count": len(returns),
-                        "avg_bps": (sum(returns) / len(returns)) if returns else None,
-                        "total_bps": sum(returns),
-                        "max_drawdown_bps": max_drawdown,
-                    }
-
                 result["paper_pnl_15m"] = {
                     "model_version": latest_model_version,
-                    "baseline": _paper_stats(paper_baseline_rows),
-                    "model_gate": _paper_stats(paper_gate_rows),
+                    "baseline": _paper_stats_from_rows(paper_baseline_rows),
+                    "model_gate": _paper_stats_from_rows(paper_gate_rows),
                 }
             result["storage_stats"] = await _read_or_default("storage_stats", {}, self.get_storage_stats)
         except Exception as exc:

@@ -374,7 +374,10 @@ async def test_model_performance_history_includes_score_and_selection_reason() -
     journal._pool = MagicMock()
 
     async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
-        del query, args
+        del args
+        if "net_return_bps" in query.lower():
+            return []
+        del query
         return [
             {
                 "version": "v_good",
@@ -411,7 +414,9 @@ async def test_champion_health_includes_checks_alternative_and_promotion_log() -
     calls = 0
 
     async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
-        del query, args
+        del args
+        if "net_return_bps" in query.lower():
+            return []
         nonlocal calls
         calls += 1
         if calls == 1:

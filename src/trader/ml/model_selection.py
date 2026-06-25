@@ -60,14 +60,19 @@ def model_selection_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
     )
     lift_bps = metric_float(metrics, "lift_bps", "paper_gate.lift_bps", "model_gate.lift_bps") or 0.0
     precision = metric_float(metrics, "precision", "paper_gate.precision", "model_gate.precision") or 0.0
-    pass_count = metric_int(
+    paper_gate_count = metric_int(
         metrics,
         "paper_gate.count",
         "model_gate.count",
         "paper_gate_count",
+    )
+    walk_forward_pass_count = metric_int(
+        metrics,
         "total_pass_count",
         "best_threshold_pass_count",
+        "walk_forward_pass_count",
     )
+    pass_count = paper_gate_count or walk_forward_pass_count
     drawdown_bps = abs(
         metric_float(
             metrics,
@@ -85,7 +90,9 @@ def model_selection_metrics(metrics: dict[str, Any]) -> dict[str, Any]:
         "walk_forward_bps": wf_bps,
         "lift_bps": lift_bps,
         "precision": precision,
-        "paper_gate_count": pass_count,
+        "paper_gate_count": paper_gate_count,
+        "walk_forward_pass_count": walk_forward_pass_count,
+        "pass_count_for_score": pass_count,
         "drawdown_bps": drawdown_bps,
     }
 

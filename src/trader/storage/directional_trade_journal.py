@@ -192,7 +192,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
 
         def stats(rows: list[Any]) -> dict[str, Any]:
-            returns = [float(row["net_return_bps"] or 0.0) for row in rows]
+            returns = [float(row.get("net_return_bps") or 0.0) for row in rows]
             equity = 0.0
             peak = 0.0
             max_drawdown = 0.0
@@ -213,6 +213,24 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             "baseline": stats(baseline_rows),
             "model_gate": stats(gate_rows),
         }
+
+    async def get_live_paper_gate_stats(
+        self,
+        model_version: str,
+        *,
+        horizon_minutes: int = 15,
+        feature_schema_hash: str = "",
+    ) -> dict[str, Any]:
+        try:
+            paper = await self._paper_pnl_for_model(model_version, int(horizon_minutes), feature_schema_hash)
+            return dict(paper.get("model_gate") or {})
+        except Exception as exc:
+            log.debug("directional_trade_journal.live_paper_gate_stats_failed", error=str(exc))
+            return await super().get_live_paper_gate_stats(
+                model_version,
+                horizon_minutes=horizon_minutes,
+                feature_schema_hash=feature_schema_hash,
+            )
 
     async def record_signal(
         self,
