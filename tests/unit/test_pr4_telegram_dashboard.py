@@ -132,6 +132,44 @@ async def test_render_pnl_uses_provider_net_without_double_subtracting_fees() ->
 
 
 @pytest.mark.asyncio
+async def test_pnl_analysis_renders_canonical_regime_and_weekday_returns() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.pnl_analysis_provider = AsyncMock(
+        return_value={
+            "horizon_minutes": 5,
+            "label_schema_version": "directional_net_v2",
+            "symbols_best": [],
+            "symbols_worst": [],
+            "hours": [],
+            "regimes": [
+                {
+                    "regime": "BULL_TREND",
+                    "count": 69,
+                    "avg_net_return_bps": -12.34,
+                    "total_net_return_bps": -851.46,
+                }
+            ],
+            "weekdays": [
+                {
+                    "weekday": 2,
+                    "count": 418,
+                    "avg_net_return_bps": -26.02,
+                    "total_net_return_bps": -10876.36,
+                }
+            ],
+        }
+    )
+    update = _fake_update()
+
+    await bot._cmd_pnl_analysis(update, _fake_context())  # type: ignore[arg-type]
+
+    text = update.effective_message.reply_text.call_args.args[0]
+    assert "BULL_TREND: <code>69</code>, avg <code>-12.34</code>, Σ <code>-851.5</code>" in text
+    assert "2: <code>418</code>, avg <code>-26.02</code>, Σ <code>-10876.4</code>" in text
+
+
+@pytest.mark.asyncio
 async def test_live_activation_blocked_via_mode_button() -> None:
     """mode:active button should return blocked message."""
     bot = _make_bot()

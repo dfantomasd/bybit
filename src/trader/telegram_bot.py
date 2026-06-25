@@ -1973,6 +1973,11 @@ class TelegramMonitorBot:
             total_part = f", Σ <code>{float(total or 0.0):+.1f}</code>" if total is not None else ""
             return f"{label}: <code>{int(count or 0)}</code>, avg <code>{float(avg or 0.0):+.2f}</code>{total_part}"
 
+        def _net_value(row: dict[str, Any], short_key: str, canonical_key: str) -> Any:
+            """Read PnL without treating a legitimate zero as a missing value."""
+            value = row.get(short_key)
+            return row.get(canonical_key) if value is None else value
+
         symbol_best = data.get("symbols_best") or data.get("top_symbols") or []
         symbol_worst = data.get("symbols_worst") or data.get("worst_symbols") or []
         regimes = data.get("regimes") or []
@@ -1991,8 +1996,8 @@ class TelegramMonitorBot:
             _row(
                 f"<code>{row.get('symbol', '?')}</code>",
                 row.get("count"),
-                row.get("avg_net_bps") or row.get("avg_net_return_bps"),
-                row.get("total_net_bps") or row.get("total_net_return_bps"),
+                _net_value(row, "avg_net_bps", "avg_net_return_bps"),
+                _net_value(row, "total_net_bps", "total_net_return_bps"),
             )
             for row in symbol_best[:5]
         )
@@ -2001,8 +2006,8 @@ class TelegramMonitorBot:
             _row(
                 f"<code>{row.get('symbol', '?')}</code>",
                 row.get("count"),
-                row.get("avg_net_bps") or row.get("avg_net_return_bps"),
-                row.get("total_net_bps") or row.get("total_net_return_bps"),
+                _net_value(row, "avg_net_bps", "avg_net_return_bps"),
+                _net_value(row, "total_net_bps", "total_net_return_bps"),
             )
             for row in symbol_worst[:5]
         )
@@ -2011,7 +2016,7 @@ class TelegramMonitorBot:
         for hour in range(24):
             row = hours.get(hour, {})
             label = f"{hour:02d}-{(hour + 1) % 24:02d}"
-            avg = row.get("avg_net_bps") or row.get("avg_net_return_bps")
+            avg = _net_value(row, "avg_net_bps", "avg_net_return_bps")
             hour_chunks.append(f"{label}:{float(avg or 0.0):+.1f}/{int(row.get('count') or 0)}")
         lines.extend("<code>" + "  ".join(hour_chunks[i : i + 4]) + "</code>" for i in range(0, 24, 4))
         lines.append("\n<b>По режимам</b>")
@@ -2019,8 +2024,8 @@ class TelegramMonitorBot:
             _row(
                 str(row.get("regime") or "unknown"),
                 row.get("count"),
-                row.get("avg_net_bps"),
-                row.get("total_net_bps"),
+                _net_value(row, "avg_net_bps", "avg_net_return_bps"),
+                _net_value(row, "total_net_bps", "total_net_return_bps"),
             )
             for row in regimes[:10]
         )
@@ -2029,8 +2034,8 @@ class TelegramMonitorBot:
             _row(
                 str(row.get("weekday") or "?"),
                 row.get("count"),
-                row.get("avg_net_bps"),
-                row.get("total_net_bps"),
+                _net_value(row, "avg_net_bps", "avg_net_return_bps"),
+                _net_value(row, "total_net_bps", "total_net_return_bps"),
             )
             for row in weekdays
         )
