@@ -744,10 +744,10 @@ class Settings(BaseSettings):
             "FLOW_TRACKER_HISTORY_SLOTS": 128,
             "WS_PUBLIC_EVENT_QUEUE_MAXSIZE": 2000,
         }
-        for field, ceiling in ceilings.items():
-            current = getattr(self, field)
+        for setting_name, ceiling in ceilings.items():
+            current = getattr(self, setting_name)
             if isinstance(current, int | float) and current > ceiling:
-                setattr(self, field, type(current)(ceiling))
+                setattr(self, setting_name, type(current)(ceiling))
 
         self.MODEL_ONLINE_LEARNING_ENABLED = False
         if self.STARTER_LIGHT_WS_FEEDS:

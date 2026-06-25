@@ -171,7 +171,7 @@ class TradingApplication:
         from trader.data.candles import CandleStore
 
         default_cap = 250
-        if self._settings is not None and self._settings.STARTER_OPTIMIZED_MODE:
+        if self._settings is not None and getattr(self._settings, "STARTER_OPTIMIZED_MODE", False):
             default_cap = 150
         return CandleStore(max_bars=default_cap, max_bars_by_interval=self._candle_store_caps())
 
@@ -198,7 +198,7 @@ class TradingApplication:
         """Orderbook/trade/liquidation WS topics only for execution candidates on Starter."""
         if self._settings is None:
             return True
-        if not self._settings.STARTER_OPTIMIZED_MODE:
+        if not getattr(self._settings, "STARTER_OPTIMIZED_MODE", False):
             return True
         if self._screener is None:
             return False
@@ -659,7 +659,6 @@ class TradingApplication:
     def _record_shadow_close(self, symbol: str, reason: str, pnl_pct: float) -> None:
         self._modules.signal_policy.record_shadow_close(symbol, reason, pnl_pct)
 
-    @staticmethod
     @staticmethod
     def _shadow_exit_hit(position: dict[str, Any], *, high: float, low: float) -> tuple[str, float] | None:
         return SignalPolicyModule.shadow_exit_hit(position, high=high, low=low)
