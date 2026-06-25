@@ -790,6 +790,14 @@ class Settings(BaseSettings):
 
     def model_post_init(self, __context: Any) -> None:
         """Enforce critical safety invariants after field parsing."""
+        if self.SHADOW_PROBE_RESEARCH_PROFILE_V2:
+            # Existing Render services retain dashboard env values even when
+            # render.yaml changes. Keep the versioned research cohort isolated
+            # in every Settings consumer (runtime, diagnostics, and trainer
+            # subprocess) regardless of stale deployment overrides.
+            self.TRAIN_STRATEGY_ALLOWLIST = "scalp_micro_v1,shadow_probe_hv_v2"
+            self.TRAIN_INCLUDE_CANDLE_BASELINE = False
+
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
             self.SCREENER_MAX_PRICE_USD = 25.0
         if self.STARTER_OPTIMIZED_MODE:

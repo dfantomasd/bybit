@@ -206,6 +206,30 @@ class TestSettingsSafetyGates:
         assert settings.TRADING_MODE == TradingMode.SHADOW  # type: ignore[union-attr]
         assert settings.BYBIT_USE_TESTNET is False  # type: ignore[union-attr]
 
+    def test_research_v2_overrides_stale_render_training_pool(self) -> None:
+        settings = self._make_settings(
+            TRADING_MODE="SHADOW",
+            BYBIT_USE_TESTNET="false",
+            SHADOW_PROBE_RESEARCH_PROFILE_V2="true",
+            TRAIN_STRATEGY_ALLOWLIST="scalp_micro_v1,candle_sampler_v1,shadow_probe_v1",
+            TRAIN_INCLUDE_CANDLE_BASELINE="true",
+        )
+
+        assert settings.TRAIN_STRATEGY_ALLOWLIST == "scalp_micro_v1,shadow_probe_hv_v2"  # type: ignore[union-attr]
+        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is False  # type: ignore[union-attr]
+
+    def test_legacy_profile_keeps_explicit_training_pool(self) -> None:
+        settings = self._make_settings(
+            TRADING_MODE="SHADOW",
+            BYBIT_USE_TESTNET="false",
+            SHADOW_PROBE_RESEARCH_PROFILE_V2="false",
+            TRAIN_STRATEGY_ALLOWLIST="custom_v1",
+            TRAIN_INCLUDE_CANDLE_BASELINE="true",
+        )
+
+        assert settings.TRAIN_STRATEGY_ALLOWLIST == "custom_v1"  # type: ignore[union-attr]
+        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is True  # type: ignore[union-attr]
+
     def test_live_trading_mode_allowed_when_live_mode_true(self) -> None:
         """LIVE mode is permitted only when LIVE_MODE=true and LIVE_ARMED=true are set."""
         settings = self._make_settings(
