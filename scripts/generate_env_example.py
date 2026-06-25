@@ -19,6 +19,10 @@ from pathlib import Path
 # Resolve repo root relative to this script
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _ENV_EXAMPLE = _REPO_ROOT / ".env.example"
+# CI installs the project non-editably and caches uv dependencies. Without
+# preferring the checkout's src/ tree this script can import a stale installed
+# trader.config while reading the current .env.example.
+sys.path.insert(0, str(_REPO_ROOT / "src"))
 
 
 def main() -> int:
