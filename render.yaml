@@ -92,6 +92,8 @@ services:
         value: "600"
       - key: SHADOW_PROBE_SYMBOL_WARMUP_SECONDS
         value: "300"
+      - key: SHADOW_PROBE_ALLOWED_REGIMES
+        value: "BULL_TREND,BEAR_TREND"
       - key: SHADOW_PROBE_SELL_ENABLED
         value: "false"
       - key: SHADOW_PROBE_SIDE_BLOCK_ENABLED

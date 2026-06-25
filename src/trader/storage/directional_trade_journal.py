@@ -501,6 +501,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["training_label_threshold_bps"] = label_threshold
         result["training_config"] = {
             "strategy_allowlist": allowlist or [],
+            "runtime_strategy_allowlist": allowlist or [],
             "include_candle_baseline": include_candle,
             "label_schema_version": label_schema,
             "label_threshold_bps": label_threshold,

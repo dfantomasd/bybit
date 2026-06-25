@@ -400,8 +400,24 @@ class SignalPolicyModule(AppBoundModule):
             return True
         subscribed_at = self._app._shadow_probe_symbol_subscribed_at.get(symbol)
         if subscribed_at is None:
-            return True
+            return False
         return datetime.now(tz=UTC) - subscribed_at >= timedelta(seconds=warmup_s)
+
+    def shadow_probe_regime_allows(self, regime_ctx: Any | None) -> bool:
+        """Block probes in choppy/uncertain regimes where OBI mean-reversion loses."""
+
+        assert self._app._settings is not None
+        allowed = {
+            part.strip()
+            for part in str(self._app._settings.SHADOW_PROBE_ALLOWED_REGIMES or "").split(",")
+            if part.strip()
+        }
+        if not allowed:
+            return True
+        if regime_ctx is None or getattr(regime_ctx, "regime", None) is None:
+            return False
+        regime = getattr(regime_ctx.regime, "value", str(regime_ctx.regime))
+        return str(regime) in allowed
 
     @staticmethod
     def compute_shadow_probe_eligible_symbols(
@@ -485,16 +501,21 @@ class SignalPolicyModule(AppBoundModule):
             return None
         return None
 
-    def shadow_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
-        """Return direction-aware net shadow PnL percent after estimated costs."""
+    @staticmethod
+    def shadow_gross_pnl_pct(position: dict[str, Any], exit_price: float) -> float:
+        """Return direction-aware gross shadow PnL percent before cost model."""
 
         entry = float(position["entry"])
         if entry <= 0:
             raise ValueError("shadow entry must be positive")
         if str(position.get("side") or "") == "Sell":
-            gross = (entry - exit_price) / entry * 100.0
-        else:
-            gross = (exit_price - entry) / entry * 100.0
+            return (entry - exit_price) / entry * 100.0
+        return (exit_price - entry) / entry * 100.0
+
+    def shadow_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
+        """Return direction-aware net shadow PnL percent after estimated costs."""
+
+        gross = self.shadow_gross_pnl_pct(position, exit_price)
         if self._app._settings is None:
             return gross
         taker_fee_pct = float(self._app._settings.DEFAULT_LINEAR_TAKER_FEE_RATE) * 100.0

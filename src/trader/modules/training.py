@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 import os
 import sys
 import time
@@ -547,6 +548,26 @@ class TrainingModule(ModuleTaskMixin):
 
                 min_signals = max(10, int(self._app._settings.MODEL_AUTO_PROMOTE_MIN_SIGNALS))
                 min_lift = float(self._app._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
+                min_wf_bps = float(self._app._settings.MODEL_AUTO_PROMOTE_MIN_WF_BPS)
+                required_quality = str(self._app._settings.MODEL_AUTO_PROMOTE_MIN_QUALITY or "GOOD").upper()
+
+                raw_metrics = latest_model.get("metrics")
+                if isinstance(raw_metrics, str) and raw_metrics.strip():
+                    try:
+                        model_metrics = json.loads(raw_metrics)
+                    except json.JSONDecodeError:
+                        model_metrics = {}
+                elif isinstance(raw_metrics, dict):
+                    model_metrics = raw_metrics
+                else:
+                    model_metrics = {}
+                challenger_wf_bps = model_metrics.get("walk_forward_expectancy_bps")
+                if challenger_wf_bps is None:
+                    challenger_wf_bps = model_metrics.get("walk_forward_bps")
+                if challenger_wf_bps is None:
+                    challenger_wf_bps = model_metrics.get("wf_mean_bps")
+                challenger_wf_bps = float(challenger_wf_bps) if challenger_wf_bps is not None else None
+                model_quality = str(model_metrics.get("quality") or "").upper()
 
                 # Build promotion checklist
                 def check(ok: bool, label: str) -> str:
@@ -554,14 +575,15 @@ class TrainingModule(ModuleTaskMixin):
 
                 has_signals = resolved_count >= min_signals
                 has_lift = lift_bps is not None and float(lift_bps) >= min_lift
+                has_wf = challenger_wf_bps is not None and challenger_wf_bps >= min_wf_bps
+                has_quality = bool(model_quality) and model_quality == required_quality
                 beats_champion = lift_bps is not None and float(lift_bps) > champion_wf_bps
                 is_challenger = status == "SHADOW_CHALLENGER"
                 promotion_reasons: list[str] = []
                 promotion_engine_allows = False
                 promotion_engine_checked = False
                 if (
-                    self._app._settings.MODEL_AUTO_PROMOTE_ENABLED
-                    and is_challenger
+                    is_challenger
                     and version
                     and version != "—"
                     and self._app._trade_journal is not None
@@ -581,6 +603,7 @@ class TrainingModule(ModuleTaskMixin):
                         promotion_reasons = [f"promotion_check_failed:{promo_exc}"]
 
                 lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "н/д"
+                wf_str = f"{challenger_wf_bps:+.2f} bps" if challenger_wf_bps is not None else "н/д"
                 precision_str = f"{float(pass_precision) * 100:.1f}%" if pass_precision is not None else "н/д"
 
                 lines = [
@@ -621,6 +644,8 @@ class TrainingModule(ModuleTaskMixin):
                     check(is_challenger, f"Статус SHADOW_CHALLENGER → {status}"),
                     check(has_signals, f"Resolved GATE ≥ {min_signals} → сейчас {resolved_count}"),
                     check(has_lift, f"Lift ≥ {min_lift:+.1f} bps → сейчас {lift_str}"),
+                    check(has_wf, f"Walk-forward ≥ {min_wf_bps:+.1f} bps → сейчас {wf_str}"),
+                    check(has_quality, f"Quality = {required_quality} → сейчас {model_quality or 'н/д'}"),
                     check(
                         beats_champion,
                         f"Лучше чемпиона ({champion_wf_bps:+.2f} bps) → {lift_str}",
@@ -630,11 +655,11 @@ class TrainingModule(ModuleTaskMixin):
                     f"Canary: <code>{'включён' if self._app._settings.MODEL_GATE_CANARY_ENABLED else 'выключен'}</code>",
                 ]
 
-                if all([is_challenger, has_signals, has_lift, beats_champion]) and (
-                    not self._app._settings.MODEL_AUTO_PROMOTE_ENABLED
-                    or not promotion_engine_checked
-                    or promotion_engine_allows
-                ):
+                checklist_ready = all(
+                    [is_challenger, has_signals, has_lift, has_wf, has_quality, beats_champion]
+                )
+
+                if promotion_engine_checked and promotion_engine_allows:
                     lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")
                 elif promotion_engine_checked and not promotion_engine_allows:
                     safe_reasons = ", ".join(html.escape(reason) for reason in promotion_reasons[:4])
@@ -662,8 +687,16 @@ class TrainingModule(ModuleTaskMixin):
                         missing.append(f"ещё {min_signals - resolved_count} resolved GATE")
                     if not has_lift:
                         missing.append("lift > 0")
+                    if not has_wf:
+                        missing.append(f"walk-forward ≥ {min_wf_bps:+.1f} bps")
+                    if not has_quality:
+                        missing.append(f"quality={required_quality}")
                     if not beats_champion and has_lift:
                         missing.append(f"обогнать чемпиона на {champion_wf_bps - float(lift_bps or 0):+.2f} bps")
+                    if checklist_ready and not self._app._settings.MODEL_AUTO_PROMOTE_ENABLED:
+                        missing.append("включить MODEL_AUTO_PROMOTE_ENABLED")
+                    elif checklist_ready and not promotion_engine_checked:
+                        missing.append("проверка auto-promoter")
                     lines.append(f"\n⏳ Не хватает: {', '.join(missing)}")
 
                 await self._app._telegram_bot.notify("\n".join(lines))

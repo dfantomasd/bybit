@@ -177,6 +177,8 @@ class Settings(BaseSettings):
     SHADOW_PROBE_SYMBOL_MIN_SAMPLES: int = 6
     SHADOW_PROBE_SYMBOL_MIN_AVG_BPS: float = -1.0
     SHADOW_PROBE_STATS_LOOKBACK_DAYS: int = 7
+    SHADOW_PROBE_ALLOWED_REGIMES: str = "BULL_TREND,BEAR_TREND"
+    """Comma-separated market regimes where shadow probes may fire. SIDEWAYS/UNCERTAIN are excluded by default."""
     SHADOW_MIN_ATR_MULTIPLE: float = 0.35
     """Min stop/ATR ratio in shadow sizing (scalp SL is 0.5×ATR; lower value avoids tick-round rejects)."""
     TREND_STRATEGY_ENABLED: bool = True

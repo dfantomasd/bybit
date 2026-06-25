@@ -533,6 +533,8 @@ class TradeJournal:
             );
             CREATE INDEX IF NOT EXISTS idx_model_versions_status
                 ON model_versions (status, created_at DESC);
+            ALTER TABLE model_versions
+                ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
 
             -- Model promotion audit log. Columns cover both automatic
             -- DB-backed promotion and older manual/pure-eval audit payloads.

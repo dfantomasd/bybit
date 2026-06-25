@@ -22,6 +22,7 @@ def _policy_module(
         SHADOW_PROBE_SYMBOL_MIN_SAMPLES=5,
         SHADOW_PROBE_SYMBOL_MIN_AVG_BPS=-1.0,
         SHADOW_PROBE_SYMBOL_WARMUP_SECONDS=300,
+        SHADOW_PROBE_ALLOWED_REGIMES="BULL_TREND,BEAR_TREND",
     )
     app = SimpleNamespace(
         _settings=settings,
@@ -78,8 +79,20 @@ def test_shadow_probe_symbol_warmup_blocks_recent_subscriptions() -> None:
     policy = _policy_module()
     policy.record_shadow_probe_symbol_subscribed(["WLDUSDT"])
 
-    assert policy.shadow_probe_symbol_warmed_up("XRPUSDT") is True
+    assert policy.shadow_probe_symbol_warmed_up("XRPUSDT") is False
     assert policy.shadow_probe_symbol_warmed_up("WLDUSDT") is False
 
     policy._app._shadow_probe_symbol_subscribed_at["WLDUSDT"] = datetime.now(tz=UTC) - timedelta(seconds=400)
     assert policy.shadow_probe_symbol_warmed_up("WLDUSDT") is True
+
+
+def test_shadow_probe_regime_allows_trending_only() -> None:
+    from trader.domain.enums import MarketRegime
+
+    policy = _policy_module()
+    bull = SimpleNamespace(regime=MarketRegime.BULL_TREND)
+    sideways = SimpleNamespace(regime=MarketRegime.SIDEWAYS)
+
+    assert policy.shadow_probe_regime_allows(bull) is True
+    assert policy.shadow_probe_regime_allows(sideways) is False
+    assert policy.shadow_probe_regime_allows(None) is False

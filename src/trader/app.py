@@ -615,6 +615,9 @@ class TradingApplication:
     def _shadow_probe_symbol_warmed_up(self, symbol: str) -> bool:
         return self._modules.signal_policy.shadow_probe_symbol_warmed_up(symbol)
 
+    def _shadow_probe_regime_allows(self, regime_ctx: Any | None) -> bool:
+        return self._modules.signal_policy.shadow_probe_regime_allows(regime_ctx)
+
     def _record_shadow_probe_symbol_subscribed(self, symbols: list[str]) -> None:
         self._modules.signal_policy.record_shadow_probe_symbol_subscribed(symbols)
 
@@ -628,6 +631,9 @@ class TradingApplication:
 
     def _shadow_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
         return self._modules.signal_policy.shadow_pnl_pct(position, exit_price)
+
+    def _shadow_gross_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
+        return self._modules.signal_policy.shadow_gross_pnl_pct(position, exit_price)
 
     def _shadow_loss_guard_blocks(self) -> bool:
         return self._modules.signal_policy.shadow_loss_guard_blocks()

@@ -355,6 +355,7 @@ class TradingLoopModule(AppBoundModule):
             if hit_info:
                 hit, exit_price = hit_info
                 pnl_pct = self._app._shadow_pnl_pct(pos, exit_price)
+                gross_pnl_pct = self._app._shadow_gross_pnl_pct(pos, exit_price)
                 log.info(
                     "shadow.position_closed",
                     symbol=symbol,
@@ -365,6 +366,7 @@ class TradingLoopModule(AppBoundModule):
                     high=high,
                     low=low,
                     pnl_pct=round(pnl_pct, 3),
+                    gross_pnl_pct=round(gross_pnl_pct, 3),
                 )
                 self._app._record_shadow_close(symbol, hit, pnl_pct)
                 del _shadow_positions[symbol]
@@ -374,11 +376,12 @@ class TradingLoopModule(AppBoundModule):
                 if self._app._telegram_bot is not None:
                     try:
                         label = "✅ TP" if hit == "TP" else "🛑 SL"
-                        pnl_sign = "+" if pnl_pct >= 0 else ""
+                        net_sign = "+" if pnl_pct >= 0 else ""
+                        gross_sign = "+" if gross_pnl_pct >= 0 else ""
                         await self._app._telegram_bot.notify(
                             f"{label} {symbol} {pos['side']} closed\n"
                             f"Entry: {pos['entry']:.4f} → Exit: {exit_price:.4f}\n"
-                            f"PnL: {pnl_sign}{pnl_pct:.2f}% [SHADOW]"
+                            f"PnL: gross {gross_sign}{gross_pnl_pct:.2f}% | net {net_sign}{pnl_pct:.2f}% [SHADOW]"
                         )
                     except Exception as exc:
                         log.debug("telegram.shadow_exit_notify_failed", error=str(exc))
@@ -452,6 +455,19 @@ class TradingLoopModule(AppBoundModule):
                 return
 
             if proposal is None:
+                return
+
+            if proposal.strategy_id == "shadow_probe_v1" and not self._app._shadow_probe_regime_allows(regime_ctx):
+                self._app._record_diag("shadow_probe_regime_blocked")
+                log.debug(
+                    "strategy_loop.shadow_probe_regime_blocked",
+                    symbol=symbol,
+                    regime=(
+                        regime_ctx.regime.value
+                        if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                        else None
+                    ),
+                )
                 return
 
             # Cooldown: suppress duplicate proposals for the same symbol within one candle
