@@ -71,9 +71,9 @@ services:
       - key: STARTUP_WARMUP_SECONDS
         value: "0"
       - key: SCALP_STRICT_SHADOW
-        value: "false"
-      - key: SHADOW_RELAX_SCALP_FILTERS
         value: "true"
+      - key: SHADOW_RELAX_SCALP_FILTERS
+        value: "false"
       - key: SHADOW_PROBE_ENABLED
         value: "true"
       - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
@@ -147,9 +147,9 @@ services:
       - key: OUTCOME_RESOLVER_BATCH_LIMIT
         value: "300"
       - key: PERFORMANCE_FILTER_ENABLED
-        value: "false"
+        value: "true"
       - key: SHADOW_LOSS_GUARD_ENABLED
-        value: "false"
+        value: "true"
       - key: SHADOW_LOSS_GUARD_MIN_CLOSED
         value: "3"
       - key: SHADOW_LOSS_GUARD_WINDOW
@@ -334,7 +334,7 @@ services:
       - key: MODEL_AUTO_PROMOTE_MIN_LIFT_BPS
         value: "0.5"
       - key: MODEL_AUTO_PROMOTE_MIN_QUALITY
-        value: "WEAK"
+        value: "GOOD"
       - key: MODEL_SHADOW_GATE_ENABLED
         value: "true"
       - key: MODEL_SHADOW_GATE_THRESHOLD

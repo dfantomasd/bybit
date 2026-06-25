@@ -948,12 +948,19 @@ class TrainingModule(ModuleTaskMixin):
         while not self._app._shutdown_event.is_set():
             if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
                 try:
-                    stats = await self._app._trade_journal.get_bucket_stats()
-                    symbol_side_stats = await self._app._trade_journal.get_symbol_side_stats()
+                    horizon_minutes = int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES)
+                    stats = await self._app._trade_journal.get_bucket_stats(
+                        horizon_minutes=horizon_minutes,
+                    )
+                    symbol_side_stats = await self._app._trade_journal.get_symbol_side_stats(
+                        horizon_minutes=horizon_minutes,
+                    )
                     probe_side_stats = await self._app._trade_journal.get_shadow_probe_symbol_side_stats(
+                        horizon_minutes=horizon_minutes,
                         lookback_days=self._app._settings.SHADOW_PROBE_STATS_LOOKBACK_DAYS,
                     )
                     probe_symbol_stats = await self._app._trade_journal.get_shadow_probe_symbol_stats(
+                        horizon_minutes=horizon_minutes,
                         lookback_days=self._app._settings.SHADOW_PROBE_STATS_LOOKBACK_DAYS,
                     )
                     self._app._bucket_stats = stats
@@ -989,6 +996,7 @@ class TrainingModule(ModuleTaskMixin):
                     ]
                     log.info(
                         "bucket_stats.refreshed",
+                        horizon_minutes=horizon_minutes,
                         buckets=len(stats),
                         blocked=len(blocked),
                         blocked_keys=blocked[:10],
