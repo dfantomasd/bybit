@@ -49,7 +49,7 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
     proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=0.5, available_balance_usd=25.0)
 
     assert proposal is not None
-    assert proposal.strategy_id == "shadow_probe_v1"
+    assert proposal.strategy_id == "shadow_probe_hv_v2"
     assert proposal.side == OrderSide.BUY
     assert proposal.take_profit is not None
     assert proposal.stop_loss is not None

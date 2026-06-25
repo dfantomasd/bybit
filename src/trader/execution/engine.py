@@ -907,7 +907,9 @@ class ExecutionEngine:
         symbol = proposal.symbol
         _t_engine_start = datetime.now(UTC)
         notional_buffer_pct = self._min_notional_buffer_for_balance(available_balance)
-        shadow_probe = self._shadow_mode and proposal.strategy_id == "shadow_probe_v1"
+        from trader.strategies.shadow_probe import is_shadow_probe_strategy
+
+        shadow_probe = self._shadow_mode and is_shadow_probe_strategy(proposal.strategy_id)
 
         # 1. Deduplication ─────────────────────────────────────────────
         if self.has_open_position(symbol):

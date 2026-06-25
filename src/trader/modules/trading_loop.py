@@ -476,7 +476,9 @@ class TradingLoopModule(AppBoundModule):
                 )
                 return
 
-            if proposal.strategy_id == "shadow_probe_v1" and not self._app._shadow_probe_regime_allows(regime_ctx):
+            from trader.strategies.shadow_probe import is_shadow_probe_strategy
+
+            if is_shadow_probe_strategy(proposal.strategy_id) and not self._app._shadow_probe_regime_allows(regime_ctx):
                 self._app._record_diag("shadow_probe_regime_blocked")
                 log.debug(
                     "strategy_loop.shadow_probe_regime_blocked",

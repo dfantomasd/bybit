@@ -18,7 +18,7 @@ from trader.domain.models import FeatureVector, InstrumentInfo, TradeProposal
 from trader.risk.net_edge import NetEdgeParams, passes_min_net_edge
 from trader.strategies.base import BaseStrategy
 
-_STRATEGY_ID = "shadow_probe_v1"
+SHADOW_PROBE_STRATEGY_ID = "shadow_probe_hv_v2"
 _PRICE_DECIMALS = Decimal("0.00000001")
 # Worst-case qty shrink from confidence/regime/VWAP penalties after risk sizing.
 _PROBE_WORST_CASE_QTY_MULTIPLIER = Decimal("0.25")
@@ -26,6 +26,12 @@ _PROBE_WORST_CASE_QTY_MULTIPLIER = Decimal("0.25")
 
 def _price(value: float) -> Decimal:
     return Decimal(str(value)).quantize(_PRICE_DECIMALS)
+
+
+def is_shadow_probe_strategy(strategy_id: str) -> bool:
+    """Return True for versioned SHADOW probe strategy ids."""
+
+    return str(strategy_id).startswith("shadow_probe_")
 
 
 def _round_qty_down(qty: Decimal, step: Decimal) -> Decimal:
@@ -115,7 +121,7 @@ class ShadowProbeStrategy(BaseStrategy):
 
     @property
     def strategy_id(self) -> str:
-        return _STRATEGY_ID
+        return SHADOW_PROBE_STRATEGY_ID
 
     def _cooldown_active(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
@@ -245,7 +251,7 @@ class ShadowProbeStrategy(BaseStrategy):
         confidence = min(0.62, 0.50 + min(0.10, abs(float(atr_pct)) * 20.0))
         return TradeProposal(
             proposal_id=uuid.uuid4(),
-            strategy_id=_STRATEGY_ID,
+            strategy_id=SHADOW_PROBE_STRATEGY_ID,
             symbol=feature_vector.symbol,
             market_type=MarketType.LINEAR,
             side=side,

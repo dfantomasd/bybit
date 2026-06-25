@@ -611,7 +611,7 @@ class Settings(BaseSettings):
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
-    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_v1"
+    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_hv_v2"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
     TRAIN_INCLUDE_CANDLE_BASELINE: bool = False
     """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines.

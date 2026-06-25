@@ -1550,8 +1550,9 @@ class TradeJournal:
         *,
         horizon_minutes: int = 15,
         lookback_days: int = 7,
+        strategy_id: str = "shadow_probe_hv_v2",
     ) -> dict[tuple[str, str], tuple[float, int]]:
-        """Per-(symbol, side) expectancy for shadow_probe_v1 paper baselines."""
+        """Per-(symbol, side) expectancy for one probe research version."""
 
         rows = await self._fetch(
             """
@@ -1568,13 +1569,14 @@ class TradeJournal:
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND pe.decision = 'SHADOW_BASELINE'
               AND pe.strategy_signal IN ('Buy', 'Sell')
-              AND COALESCE(pe.metadata->>'strategy_id', '') = 'shadow_probe_v1'
+              AND COALESCE(pe.metadata->>'strategy_id', '') = $4
               AND pe.created_at > now() - ($2::text || ' days')::interval
             GROUP BY 1, 2
             """,
             horizon_minutes,
             str(lookback_days),
             LABEL_SCHEMA_VERSION,
+            strategy_id,
         )
         return {
             (str(r["symbol"]), str(r["side"])): (
@@ -1589,8 +1591,9 @@ class TradeJournal:
         *,
         horizon_minutes: int = 15,
         lookback_days: int = 7,
+        strategy_id: str = "shadow_probe_hv_v2",
     ) -> dict[str, tuple[float, int]]:
-        """Per-symbol aggregate expectancy for shadow_probe_v1 paper baselines."""
+        """Per-symbol aggregate expectancy for one probe research version."""
 
         rows = await self._fetch(
             """
@@ -1605,13 +1608,14 @@ class TradeJournal:
               AND po.label_schema_version = $3
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND pe.decision = 'SHADOW_BASELINE'
-              AND COALESCE(pe.metadata->>'strategy_id', '') = 'shadow_probe_v1'
+              AND COALESCE(pe.metadata->>'strategy_id', '') = $4
               AND pe.created_at > now() - ($2::text || ' days')::interval
             GROUP BY 1
             """,
             horizon_minutes,
             str(lookback_days),
             LABEL_SCHEMA_VERSION,
+            strategy_id,
         )
         return {
             str(r["symbol"]): (
