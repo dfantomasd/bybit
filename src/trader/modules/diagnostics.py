@@ -226,6 +226,7 @@ class DiagnosticsModule(AppBoundModule):
             "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
             "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
             "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
+            "shadow_probe_regime_blocked": int(diag.get("hour_shadow_probe_regime_blocked") or 0),
         }
         top_blocker = (
             max(blockers, key=lambda k: (blockers[k], 1 if ":" in k else 0)) if any(blockers.values()) else default
@@ -411,6 +412,7 @@ class DiagnosticsModule(AppBoundModule):
                 self._app._last_retention_run_at.isoformat() if self._app._last_retention_run_at is not None else None
             ),
             "hour_shadow_loss_guard_blocked": hour_counts.get("shadow_loss_guard_blocked", 0),
+            "hour_shadow_probe_regime_blocked": hour_counts.get("shadow_probe_regime_blocked", 0),
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._app._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)

@@ -135,6 +135,18 @@ def test_top_blocker_includes_engine_skip_reasons():
     assert blockers["post_signal_size_rejected"] == 1
 
 
+def test_top_blocker_exposes_shadow_probe_regime_filter():
+    app = _make_app()
+
+    top, blockers = app._top_blocker_from_diag(
+        {"hour_shadow_probe_regime_blocked": 7},
+        default="unknown",
+    )
+
+    assert top == "shadow_probe_regime_blocked"
+    assert blockers["shadow_probe_regime_blocked"] == 7
+
+
 def test_get_diagnostics_exposes_specific_risk_rejection_counts():
     app = _make_app()
     app._record_diag("risk_rejected")
