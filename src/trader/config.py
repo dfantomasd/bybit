@@ -142,7 +142,7 @@ class Settings(BaseSettings):
     SHADOW_PROBE_ENABLED: bool = True
     """Enable SHADOW-only paper probes so model/order outcomes accumulate when live strategies are silent."""
     SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
-    SHADOW_PROBE_COOLDOWN_SECONDS: int = 300
+    SHADOW_PROBE_COOLDOWN_SECONDS: int = 180
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
     SHADOW_PROBE_MIN_TP_PCT: float = 0.75
     """Minimum gross TP distance for paper probes; must exceed round-trip costs."""
@@ -154,13 +154,13 @@ class Settings(BaseSettings):
     """Safety buffer when pre-checking probe notional against exchange min_notional."""
     SHADOW_PROBE_SYMBOL_WARMUP_SECONDS: int = 300
     """Skip probe entries on symbols for this long after screener subscription."""
-    SHADOW_PROBE_MAX_OPEN_POSITIONS: int = 2
+    SHADOW_PROBE_MAX_OPEN_POSITIONS: int = 4
     """Maximum total open positions allowed before new shadow probes are blocked."""
-    SHADOW_PROBE_BURST_MAX_SIGNALS: int = 3
+    SHADOW_PROBE_BURST_MAX_SIGNALS: int = 6
     """Maximum probe signals allowed inside the burst window."""
     SHADOW_PROBE_BURST_WINDOW_SECONDS: int = 300
     """Rolling window used by the probe burst limiter."""
-    SHADOW_PROBE_BURST_COOLDOWN_SECONDS: int = 600
+    SHADOW_PROBE_BURST_COOLDOWN_SECONDS: int = 300
     """Global pause after the probe burst limit is reached."""
     SHADOW_PROBE_SELL_ENABLED: bool = False
     """Allow SELL-side paper probes. Disabled by default while SELL baseline is negative."""
@@ -172,13 +172,18 @@ class Settings(BaseSettings):
     """Require non-negative recent paper baseline for a symbol+side before new probe entries."""
     SHADOW_PROBE_BASELINE_MIN_AVG_BPS: float = 0.0
     SHADOW_PROBE_BASELINE_MIN_SAMPLES: int = 6
-    SHADOW_PROBE_SYMBOL_TOP_N: int = 6
+    SHADOW_PROBE_SYMBOL_TOP_N: int = 10
     """When >0, restrict probes to top-N symbols by recent paper baseline. 0 disables the cap."""
     SHADOW_PROBE_SYMBOL_MIN_SAMPLES: int = 6
     SHADOW_PROBE_SYMBOL_MIN_AVG_BPS: float = -1.0
     SHADOW_PROBE_STATS_LOOKBACK_DAYS: int = 7
-    SHADOW_PROBE_ALLOWED_REGIMES: str = "BULL_TREND,BEAR_TREND"
-    """Comma-separated market regimes where shadow probes may fire. SIDEWAYS/UNCERTAIN are excluded by default."""
+    SHADOW_PROBE_ALLOWED_REGIMES: str = "HIGH_VOLATILITY"
+    """Comma-separated market regimes where shadow probes may fire.
+
+    Production defaults target the only currently positive out-of-sample
+    regime. These are paper probes only; live entries remain independently
+    gated.
+    """
     SHADOW_MIN_ATR_MULTIPLE: float = 0.35
     """Min stop/ATR ratio in shadow sizing (scalp SL is 0.5×ATR; lower value avoids tick-round rejects)."""
     TREND_STRATEGY_ENABLED: bool = True
