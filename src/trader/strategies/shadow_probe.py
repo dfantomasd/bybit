@@ -74,6 +74,7 @@ class ShadowProbeStrategy(BaseStrategy):
         instrument_info_provider: Callable[[str], InstrumentInfo | None] | None = None,
         side_blocked: Callable[[str, str], bool] | None = None,
         symbol_allowed: Callable[[str], bool] | None = None,
+        regime_allows: Callable[[FeatureVector], bool] | None = None,
         open_positions_count: Callable[[], int] | None = None,
         max_open_positions: int = 2,
         burst_max_signals: int = 3,
@@ -97,6 +98,7 @@ class ShadowProbeStrategy(BaseStrategy):
         self._instrument_info_provider = instrument_info_provider
         self._side_blocked = side_blocked
         self._symbol_allowed = symbol_allowed
+        self._regime_allows = regime_allows
         self._open_positions_count = open_positions_count
         self._max_open_positions = max(1, int(max_open_positions))
         self._burst_max_signals = max(1, int(burst_max_signals))
@@ -190,6 +192,8 @@ class ShadowProbeStrategy(BaseStrategy):
         if self._burst_limited(now):
             return None
         if self._symbol_allowed is not None and not self._symbol_allowed(feature_vector.symbol):
+            return None
+        if self._regime_allows is not None and not self._regime_allows(feature_vector):
             return None
         if feature_vector.quality_score < self._min_quality:
             return None

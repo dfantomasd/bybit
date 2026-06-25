@@ -170,7 +170,7 @@ async def test_db_diagnostics_preserves_partial_results_when_one_section_times_o
     assert diag["latest_candle_1m"] == latest
     assert diag["feature_snapshots"] == 0
     assert diag["prediction_outcomes"] == 321
-    assert diag["training_eligible_15m"] == 123
+    assert diag["training_eligible_15m"] == 0
     assert "feature_snapshot_readiness_count" in str(diag["last_read_error"])
 
 

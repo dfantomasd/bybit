@@ -39,6 +39,30 @@ def _instrument_info(*, min_notional: str = "5", qty_step: str = "0.1") -> Instr
     )
 
 
+def test_shadow_probe_blocks_disallowed_regime_before_proposal() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        regime_allows=lambda _vec: False,
+        cooldown_seconds=30,
+    )
+
+    proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is None
+
+
+def test_shadow_probe_allows_matching_regime() -> None:
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        regime_allows=lambda _vec: True,
+        cooldown_seconds=30,
+    )
+
+    proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is not None
+
+
 def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
     strategy = ShadowProbeStrategy(
         imbalance_provider=lambda _symbol: 0.10,

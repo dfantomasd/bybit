@@ -149,8 +149,14 @@ class _Journal:
             "quality": metrics.get("quality", "GOOD"),
         }
 
-    async def get_returns_for_model(self, model_version: str, limit: int, horizon_minutes: int | None = None) -> list:
-        del limit, horizon_minutes
+    async def get_returns_for_model(
+        self,
+        model_version: str,
+        limit: int,
+        horizon_minutes: int | None = None,
+        label_schema_version: str | None = None,
+    ) -> list:
+        del limit, horizon_minutes, label_schema_version
         if model_version == "RULE_BASELINE_V1":
             return [0.0] * 80
         if model_version in self.models:

@@ -672,7 +672,7 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
                 return [
                     {
                         "feature_schema_hash": "schema5",
-                        "sample_count": 900,
+                        "sample_count": 1200,
                         "latest_at": datetime(2026, 6, 7, 10, 0, tzinfo=UTC),
                     }
                 ]
@@ -699,10 +699,11 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
 
     diag = await journal.get_db_diagnostics()
 
-    assert diag["training_eligible_by_horizon"] == {"5": 900, "15": 100}
+    assert diag["training_eligible_by_horizon"] == {"5": 1200, "15": 0}
     assert diag["newest_training_schema_by_horizon"]["5"]["feature_schema_hash"] == "schema5"
     assert diag["newest_training_schema_by_horizon"]["15"]["sample_count"] == 100
-    assert diag["newest_training_schema_by_horizon"]["5"]["best_schema_count"] == 900
+    assert diag["newest_training_schema_by_horizon"]["5"]["best_schema_count"] == 1200
+    assert diag["newest_training_schema_by_horizon"]["5"]["trainable_schema_count"] == 1200
 
 
 def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
@@ -717,7 +718,7 @@ def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     assert "active_horizon" in src
     assert "actual_training_samples" in src
     assert "training_samples_compatible" in src
-    assert "label_schema_mismatch" in src
+    assert "schema_incompatible" in src or "label_schema_mismatch" in src
     assert "enough_label_schema_change" in src
     assert "preflight_blocked" in src
     assert "trainable_15m=" not in src

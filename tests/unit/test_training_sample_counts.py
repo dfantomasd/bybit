@@ -42,8 +42,41 @@ async def test_training_snapshot_uses_best_schema_count_for_readiness() -> None:
     assert snapshot.newest_schema_count == 120
     assert snapshot.newest_schema_hash == "new_schema"
     assert snapshot.training_ready is False
+    assert snapshot.trainable_schema_count == 0
+    assert snapshot.trainable_schema_hash == ""
     assert snapshot.by_strategy_pool["scalp_micro_v1"] == 120
     assert len(calls) == 3
+
+
+@pytest.mark.asyncio
+async def test_training_snapshot_trainable_schema_matches_train_selection() -> None:
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        if "GROUP BY feature_schema_hash" in query:
+            return [
+                {"feature_schema_hash": "new_schema", "sample_count": 1200, "latest_at": "2026-06-21"},
+                {"feature_schema_hash": "old_schema", "sample_count": 900, "latest_at": "2026-06-20"},
+            ]
+        if "GROUP BY pool" in query:
+            return [{"pool": "shadow_probe_hv_v2", "sample_count": 1200}]
+        if "GROUP BY label_threshold_bps" in query:
+            return [{"threshold": "2.0", "sample_count": 1200}]
+        return []
+
+    snapshot = await fetch_training_sample_snapshot(
+        mock_fetch,
+        horizon_minutes=5,
+        label_schema_version="directional_net_v2",
+        label_threshold_bps=2.0,
+        strategy_allowlist=["shadow_probe_hv_v2"],
+        include_candle_baseline=False,
+        min_samples=1000,
+    )
+
+    assert snapshot.best_schema_count == 1200
+    assert snapshot.best_schema_hash == "new_schema"
+    assert snapshot.trainable_schema_count == 1200
+    assert snapshot.trainable_schema_hash == "new_schema"
+    assert snapshot.training_ready is True
 
 
 @pytest.mark.asyncio

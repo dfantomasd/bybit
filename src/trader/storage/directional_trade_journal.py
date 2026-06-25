@@ -577,7 +577,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         label_thresholds_by_horizon: dict[str, dict[str, int]] = {}
         for horizon_key, snapshot in snapshots.items():
             # Auto-train and train.py require one feature schema to reach min_samples.
-            training_by_horizon[horizon_key] = snapshot.best_schema_count
+            training_by_horizon[horizon_key] = snapshot.trainable_schema_count
             filtered_total_by_horizon[horizon_key] = snapshot.filtered_distinct_candles
             label_thresholds_by_horizon[horizon_key] = snapshot.by_label_threshold
             newest_schema_by_horizon[horizon_key] = {
@@ -585,6 +585,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 "sample_count": snapshot.newest_schema_count,
                 "best_schema_count": snapshot.best_schema_count,
                 "best_schema_hash": snapshot.best_schema_hash,
+                "trainable_schema_count": snapshot.trainable_schema_count,
+                "trainable_schema_hash": snapshot.trainable_schema_hash,
                 "horizon_minutes": horizon_key,
                 "label_schema_version": label_schema,
                 "label_threshold_bps": label_threshold,

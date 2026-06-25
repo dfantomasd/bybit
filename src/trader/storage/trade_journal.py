@@ -2296,6 +2296,7 @@ class TradeJournal:
         model_version: str,
         limit: int = 200,
         horizon_minutes: int | None = None,
+        label_schema_version: str | None = None,
     ) -> list[float]:
         """Return recent resolved net returns (bps) for a model version, newest first.
 
@@ -2304,6 +2305,7 @@ class TradeJournal:
         """
         if not self.is_enabled:
             return []
+        resolved_label_schema = label_schema_version or active_label_schema_version(use_tpsl_exit=True)
         if horizon_minutes is not None:
             rows = await self._fetch(
                 """
@@ -2321,7 +2323,7 @@ class TradeJournal:
                 model_version,
                 int(limit),
                 int(horizon_minutes),
-                LABEL_SCHEMA_VERSION,
+                resolved_label_schema,
             )
         else:
             rows = await self._fetch(
@@ -2338,7 +2340,7 @@ class TradeJournal:
                 """,
                 model_version,
                 int(limit),
-                LABEL_SCHEMA_VERSION,
+                resolved_label_schema,
             )
         return [float(r["net_return_bps"]) for r in rows]
 

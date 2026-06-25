@@ -11,6 +11,7 @@ from decimal import Decimal
 from typing import Any
 
 from trader.domain.enums import TradingMode
+from trader.domain.models import FeatureVector
 from trader.modules.base import AppBoundModule
 from trader.monitoring.logging import get_logger
 from trader.runtime.constants import (
@@ -159,6 +160,15 @@ class TradingLoopModule(AppBoundModule):
                     symbol
                 )
 
+            def _probe_regime_allows(feature_vector: FeatureVector) -> bool:
+                if self._app._regime_classifier is None:
+                    return False
+                try:
+                    regime_ctx = self._app._regime_classifier.classify(feature_vector)
+                except Exception:
+                    return False
+                return self._app._shadow_probe_regime_allows(regime_ctx)
+
             research_v2 = bool(self._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2)
             probe_max_open_positions = 4 if research_v2 else self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS
             probe_burst_max_signals = 6 if research_v2 else self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS
@@ -180,6 +190,7 @@ class TradingLoopModule(AppBoundModule):
                         or not self._app._shadow_probe_quality_allows(symbol, side)
                     ),
                     symbol_allowed=_probe_symbol_allowed,
+                    regime_allows=_probe_regime_allows,
                     open_positions_count=(
                         self._app._execution_engine.open_position_count
                         if self._app._execution_engine is not None
@@ -473,21 +484,6 @@ class TradingLoopModule(AppBoundModule):
                     side=proposal.side.value,
                     strategy_id=proposal.strategy_id,
                     stats=self._app._strategy_stats.get(proposal.strategy_id),
-                )
-                return
-
-            from trader.strategies.shadow_probe import is_shadow_probe_strategy
-
-            if is_shadow_probe_strategy(proposal.strategy_id) and not self._app._shadow_probe_regime_allows(regime_ctx):
-                self._app._record_diag("shadow_probe_regime_blocked")
-                log.debug(
-                    "strategy_loop.shadow_probe_regime_blocked",
-                    symbol=symbol,
-                    regime=(
-                        regime_ctx.regime.value
-                        if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
-                        else None
-                    ),
                 )
                 return
 

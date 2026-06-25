@@ -21,6 +21,8 @@ class TrainingSampleSnapshot:
     best_schema_hash: str
     newest_schema_count: int
     newest_schema_hash: str
+    trainable_schema_count: int
+    trainable_schema_hash: str
     training_ready: bool
     by_schema: dict[str, int]
     by_strategy_pool: dict[str, int]
@@ -162,6 +164,14 @@ async def fetch_training_sample_snapshot(
         best_schema_hash = str(best_row["feature_schema_hash"])
         best_schema_count = int(best_row["sample_count"])
 
+    trainable_schema_hash = ""
+    trainable_schema_count = 0
+    trainable_rows = [row for row in schema_rows if int(row["sample_count"]) >= min_samples]
+    if trainable_rows:
+        selected = trainable_rows[0]
+        trainable_schema_hash = str(selected["feature_schema_hash"])
+        trainable_schema_count = int(selected["sample_count"])
+
     return TrainingSampleSnapshot(
         horizon_minutes=horizon_minutes,
         filtered_distinct_candles=filtered_distinct,
@@ -169,7 +179,9 @@ async def fetch_training_sample_snapshot(
         best_schema_hash=best_schema_hash,
         newest_schema_count=newest_schema_count,
         newest_schema_hash=newest_schema_hash,
-        training_ready=best_schema_count >= min_samples,
+        trainable_schema_count=trainable_schema_count,
+        trainable_schema_hash=trainable_schema_hash,
+        training_ready=trainable_schema_count >= min_samples,
         by_schema=by_schema,
         by_strategy_pool={str(row["pool"]): int(row["sample_count"]) for row in pool_rows},
         by_label_threshold={str(row["threshold"]): int(row["sample_count"]) for row in threshold_rows},

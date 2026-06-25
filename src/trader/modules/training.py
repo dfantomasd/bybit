@@ -163,8 +163,17 @@ class TrainingModule(ModuleTaskMixin):
                     newest_schema_hash and current_schema_hash and newest_schema_hash != current_schema_hash
                 )
                 label_schema_compatible = bool(latest_model.get("schema_compatible", True))
-                label_schema_mismatch = bool(latest_model) and not label_schema_compatible
-                bypass_train_cooldown = label_schema_mismatch or (
+                schema_incompatible = bool(latest_model) and not label_schema_compatible
+                label_schema_mismatch = schema_incompatible
+                incompatible_reason = None
+                if schema_incompatible:
+                    if schema_mismatch and not label_schema_compatible:
+                        incompatible_reason = "feature_and_label_schema"
+                    elif schema_mismatch:
+                        incompatible_reason = "feature_schema"
+                    else:
+                        incompatible_reason = "label_schema"
+                bypass_train_cooldown = schema_incompatible or (
                     schema_mismatch and newest_schema_samples >= schema_change_min_samples
                 )
                 if min_train_interval_s > 0 and latest_success_samples > 0 and not bypass_train_cooldown:
@@ -222,12 +231,15 @@ class TrainingModule(ModuleTaskMixin):
                     or enough_weak_retrain
                     or enough_drift_retrain
                 ):
-                    if label_schema_mismatch and trainable > 0:
+                    if schema_incompatible and trainable > 0:
                         log.warning(
-                            "model_auto_training.label_schema_mismatch_accumulating",
+                            "model_auto_training.schema_incompatible_accumulating",
                             trainable=trainable,
                             min_samples=min_samples,
                             compatible_latest_samples=compatible_latest_samples,
+                            incompatible_reason=incompatible_reason,
+                            feature_schema_mismatch=schema_mismatch,
+                            label_schema_mismatch=not label_schema_compatible,
                         )
                     elif schema_mismatch and newest_schema_samples > 0:
                         log.warning(

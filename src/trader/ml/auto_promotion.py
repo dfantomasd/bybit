@@ -289,11 +289,13 @@ class AutoPromotionEngine:
             challenger_version,
             limit=self._config.returns_limit,
             horizon_minutes=self._config.horizon_minutes,
+            label_schema_version=self._config.label_schema_version,
         )
         baseline_returns = await self._journal.get_returns_for_model(
             "RULE_BASELINE_V1",
             limit=self._config.returns_limit,
             horizon_minutes=self._config.horizon_minutes,
+            label_schema_version=self._config.label_schema_version,
         )
         p_value: float | None = None
         mean_diff_bps: float | None = None
@@ -420,6 +422,7 @@ class AutoPromotionEngine:
             champion_version,
             limit=self._config.returns_limit,
             horizon_minutes=self._config.horizon_minutes,
+            label_schema_version=self._config.label_schema_version,
         )
         drawdown_bps = _float_or_none(metrics.get("max_drawdown_bps"))
         if drawdown_bps is None and returns:

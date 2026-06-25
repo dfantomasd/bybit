@@ -120,6 +120,12 @@ class ExecutionRuntimeModule(AppBoundModule):
 
         shadow = self._app._initial_shadow_mode()
         is_canary = self._app._settings.TRADING_MODE == TradingMode.CANARY_LIVE
+        max_open_positions = self._app._settings.MAX_POSITIONS
+        if shadow and self._app._settings.SHADOW_PROBE_ENABLED:
+            if self._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2:
+                max_open_positions = 4
+            else:
+                max_open_positions = self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS
         self._app._execution_engine = ExecutionEngine(
             adapter=self._app._bybit_adapter,
             risk_manager=self._app._risk_manager,
@@ -136,7 +142,7 @@ class ExecutionRuntimeModule(AppBoundModule):
             max_concurrent_pending_entries=self._app._settings.MAX_CONCURRENT_PENDING_ENTRIES,
             max_queue_utilization_pct=float(self._app._settings.MAX_QUEUE_UTILIZATION_PCT),
             max_same_side_positions=self._app._settings.MAX_SAME_SIDE_POSITIONS,
-            max_open_positions=self._app._settings.MAX_POSITIONS,
+            max_open_positions=max_open_positions,
             startup_warmup_seconds=self._app._settings.STARTUP_WARMUP_SECONDS,
             is_canary=is_canary,
             fee_provider=self._app._fee_provider,
