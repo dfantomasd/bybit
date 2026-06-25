@@ -669,13 +669,22 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             str(row["pool"]): int(row.get("samples", row.get("sample_count", 0)) or 0) for row in legacy_breakdown_rows
         }
         other_active = sum(
-            count for pool_name, count in active_pool.items() if pool_name not in {"scalp_micro_v1", "candle_baseline"}
+            count
+            for pool_name, count in active_pool.items()
+            if pool_name
+            not in {
+                "scalp_micro_v1",
+                "shadow_probe_hv_v2",
+                "candle_baseline",
+                "candle_sampler_v1",
+            }
         )
         result["training_pool_breakdown"] = {
             "active_schema": label_schema,
             "eligible_filtered_5m": int(training_by_horizon.get("5", 0) or 0),
             "filtered_total_5m": int(filtered_total_by_horizon.get("5", 0) or 0),
             "scalp_micro_v1_active_schema": int(active_pool.get("scalp_micro_v1", 0)),
+            "shadow_probe_hv_v2_active_schema": int(active_pool.get("shadow_probe_hv_v2", 0)),
             "candle_baseline_active_schema": int(active_pool.get("candle_baseline", 0)),
             "candle_sampler_v1_active_schema": int(active_pool.get("candle_sampler_v1", 0)),
             "other_active_schema": int(other_active),

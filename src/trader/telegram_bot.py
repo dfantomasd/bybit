@@ -3523,6 +3523,7 @@ class TelegramMonitorBot:
                 "label_schema_version", "n/a"
             )
             scalp_active = int(pool_breakdown.get("scalp_micro_v1_active_schema", 0) or 0)
+            probe_hv_active = int(pool_breakdown.get("shadow_probe_hv_v2_active_schema", 0) or 0)
             legacy_candle_v1 = int(pool_breakdown.get("legacy_v1_candle_baseline", 0) or 0)
             other_active = int(pool_breakdown.get("other_active_schema", 0) or 0)
             candle_sampler_active = int(pool_breakdown.get("candle_sampler_v1_active_schema", 0) or 0)
@@ -3626,11 +3627,12 @@ class TelegramMonitorBot:
                 f"allowlist=<code>{html.escape(allowlist_display)}</code>, "
                 f"candle_baseline=<code>{include_candle_display}</code>",
                 f"Пул scalp (активная schema): <code>{scalp_active}</code> | "
+                f"HV probe v2: <code>{probe_hv_active}</code> | "
                 f"legacy candle v1 (исключён): <code>{legacy_candle_v1}</code>",
             ]
             if candle_sampler_active or other_active:
                 lines.append(
-                    f"Прочие пулы v2 (не в allowlist): candle_sampler=<code>{candle_sampler_active}</code>, "
+                    f"Исключённые/прочие пулы v2: candle_sampler=<code>{candle_sampler_active}</code>, "
                     f"другое=<code>{other_active}</code>"
                 )
             if db_model_version and not schema_compatible:
