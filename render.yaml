@@ -154,6 +154,12 @@ services:
         value: "30"
       - key: HOUR_BLOCK_AVG_BPS
         value: "-10.0"
+      - key: STRATEGY_BLOCK_ENABLED
+        value: "true"
+      - key: STRATEGY_MIN_SAMPLES
+        value: "20"
+      - key: STRATEGY_BLOCK_AVG_BPS
+        value: "0.0"
       - key: SHADOW_LOSS_GUARD_ENABLED
         value: "true"
       - key: SHADOW_LOSS_GUARD_MIN_CLOSED

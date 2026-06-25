@@ -456,6 +456,16 @@ class TradingLoopModule(AppBoundModule):
 
             if proposal is None:
                 return
+            if self._app._strategy_blocked(proposal.strategy_id):
+                self._app._record_diag("strategy_expectancy_blocked")
+                log.info(
+                    "strategy_loop.strategy_expectancy_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                    stats=self._app._strategy_stats.get(proposal.strategy_id),
+                )
+                return
 
             if proposal.strategy_id == "shadow_probe_v1" and not self._app._shadow_probe_regime_allows(regime_ctx):
                 self._app._record_diag("shadow_probe_regime_blocked")

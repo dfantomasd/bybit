@@ -955,6 +955,9 @@ class TrainingModule(ModuleTaskMixin):
                     hour_stats = await self._app._trade_journal.get_hour_stats(
                         horizon_minutes=horizon_minutes,
                     )
+                    strategy_stats = await self._app._trade_journal.get_strategy_stats(
+                        horizon_minutes=horizon_minutes,
+                    )
                     symbol_side_stats = await self._app._trade_journal.get_symbol_side_stats(
                         horizon_minutes=horizon_minutes,
                     )
@@ -968,6 +971,7 @@ class TrainingModule(ModuleTaskMixin):
                     )
                     self._app._bucket_stats = stats
                     self._app._hour_stats = hour_stats
+                    self._app._strategy_stats = strategy_stats
                     self._app._symbol_side_stats = symbol_side_stats
                     self._app._shadow_probe_side_stats = probe_side_stats
                     self._app._shadow_probe_symbol_stats = probe_symbol_stats
@@ -997,6 +1001,12 @@ class TrainingModule(ModuleTaskMixin):
                         for hour, (avg, cnt) in hour_stats.items()
                         if cnt >= self._app._settings.HOUR_MIN_SAMPLES and avg < self._app._settings.HOUR_BLOCK_AVG_BPS
                     ]
+                    blocked_strategies = [
+                        strategy_id
+                        for strategy_id, (avg, cnt) in strategy_stats.items()
+                        if cnt >= self._app._settings.STRATEGY_MIN_SAMPLES
+                        and avg < self._app._settings.STRATEGY_BLOCK_AVG_BPS
+                    ]
                     blocked_probe_sides = [
                         key
                         for key, (avg, cnt) in probe_side_stats.items()
@@ -1011,6 +1021,8 @@ class TrainingModule(ModuleTaskMixin):
                         blocked_keys=blocked[:10],
                         hours=len(hour_stats),
                         blocked_hours=blocked_hours,
+                        strategies=len(strategy_stats),
+                        blocked_strategies=blocked_strategies,
                         symbol_sides=len(symbol_side_stats),
                         blocked_symbol_sides=blocked_symbol_sides[:10],
                         probe_symbol_sides=len(probe_side_stats),

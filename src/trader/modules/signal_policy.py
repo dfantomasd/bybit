@@ -350,6 +350,22 @@ class SignalPolicyModule(AppBoundModule):
             and avg_bps < self._app._settings.SYMBOL_SIDE_BLOCK_AVG_BPS
         )
 
+    def strategy_blocked(self, strategy_id: str) -> bool:
+        """Block a strategy after its exploration sample proves net-negative."""
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return False
+        if not self._app._settings.STRATEGY_BLOCK_ENABLED:
+            return False
+        stats = self._app._strategy_stats.get(strategy_id)
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return bool(
+            count >= self._app._settings.STRATEGY_MIN_SAMPLES and avg_bps < self._app._settings.STRATEGY_BLOCK_AVG_BPS
+        )
+
     def shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
         """Block probe entries on symbol+side pairs with negative paper baseline."""
 

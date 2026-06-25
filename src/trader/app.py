@@ -81,6 +81,8 @@ class TradingApplication:
         self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
         # Coarser UTC-hour fallback when three-dimensional buckets are sparse.
         self._hour_stats: dict[int, tuple[float, int]] = {}
+        # Strategy-level net expectancy used after the ensemble selects a proposal.
+        self._strategy_stats: dict[str, tuple[float, int]] = {}
         # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
         self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Shadow probe paper stats (active even in SHADOW mode)
@@ -639,6 +641,9 @@ class TradingApplication:
 
     def _symbol_side_blocked(self, symbol: str, side: str) -> bool:
         return self._modules.signal_policy.symbol_side_blocked(symbol, side)
+
+    def _strategy_blocked(self, strategy_id: str) -> bool:
+        return self._modules.signal_policy.strategy_blocked(strategy_id)
 
     def _shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
         return self._modules.signal_policy.shadow_probe_side_blocked(symbol, side)

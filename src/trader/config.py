@@ -261,6 +261,12 @@ class Settings(BaseSettings):
     """Minimum resolved outcomes in an hour before the fallback gate can block."""
     HOUR_BLOCK_AVG_BPS: float = -10.0
     """Block an UTC hour when average net return is below this threshold."""
+    STRATEGY_BLOCK_ENABLED: bool = True
+    """Block strategies whose resolved net expectancy is not positive."""
+    STRATEGY_MIN_SAMPLES: int = 20
+    """Exploration budget before a strategy must prove positive net expectancy."""
+    STRATEGY_BLOCK_AVG_BPS: float = 0.0
+    """Block a strategy once its average net return falls below this threshold."""
     SYMBOL_SIDE_BLOCK_ENABLED: bool = True
     """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
     SYMBOL_SIDE_MIN_SAMPLES: int = 20

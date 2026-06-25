@@ -1515,6 +1515,36 @@ class TradeJournal:
         )
         return {int(row["hour_utc"]): (float(row["avg_bps"]), int(row["cnt"])) for row in rows}
 
+    async def get_strategy_stats(
+        self,
+        *,
+        horizon_minutes: int = 15,
+        lookback_days: int = 30,
+    ) -> dict[str, tuple[float, int]]:
+        """Per-strategy net expectancy for resolved baseline signals."""
+
+        rows = await self._fetch(
+            """
+            SELECT
+                COALESCE(pe.metadata->>'strategy_id', 'UNKNOWN') AS strategy_id,
+                avg(po.net_return_bps) AS avg_bps,
+                count(*) AS cnt
+            FROM prediction_outcomes po
+            JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+            WHERE po.net_return_bps IS NOT NULL
+              AND po.horizon_minutes = $1
+              AND po.label_schema_version = $3
+              AND pe.model_version = 'RULE_BASELINE_V1'
+              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+              AND pe.created_at > now() - ($2::text || ' days')::interval
+            GROUP BY 1
+            """,
+            horizon_minutes,
+            str(lookback_days),
+            LABEL_SCHEMA_VERSION,
+        )
+        return {str(row["strategy_id"]): (float(row["avg_bps"]), int(row["cnt"])) for row in rows}
+
     async def get_shadow_probe_symbol_side_stats(
         self,
         *,

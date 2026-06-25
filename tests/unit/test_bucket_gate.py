@@ -20,6 +20,9 @@ def _make_app(**overrides) -> TradingApplication:
         "HOUR_BLOCK_ENABLED": True,
         "HOUR_MIN_SAMPLES": 30,
         "HOUR_BLOCK_AVG_BPS": -10.0,
+        "STRATEGY_BLOCK_ENABLED": True,
+        "STRATEGY_MIN_SAMPLES": 20,
+        "STRATEGY_BLOCK_AVG_BPS": 0.0,
         "SYMBOL_SIDE_BLOCK_ENABLED": True,
         "SYMBOL_SIDE_MIN_SAMPLES": 20,
         "SYMBOL_SIDE_BLOCK_AVG_BPS": -2.0,
@@ -158,6 +161,24 @@ class TestBucketGate:
         app = _make_app(SYMBOL_SIDE_BLOCK_ENABLED=False)
         app._symbol_side_stats = {("ADAUSDT", "Buy"): (-10.0, 100)}
         assert app._symbol_side_blocked("ADAUSDT", "Buy") is False
+
+    def test_negative_strategy_blocks_after_exploration_budget(self) -> None:
+        app = _make_active_app()
+        app._strategy_stats = {"scalp_micro_v1": (-12.0, 20)}
+
+        assert app._strategy_blocked("scalp_micro_v1") is True
+
+    def test_strategy_remains_exploratory_below_min_samples(self) -> None:
+        app = _make_active_app()
+        app._strategy_stats = {"scalp_micro_v1": (-50.0, 19)}
+
+        assert app._strategy_blocked("scalp_micro_v1") is False
+
+    def test_positive_strategy_remains_enabled(self) -> None:
+        app = _make_active_app()
+        app._strategy_stats = {"scalp_micro_v1": (2.0, 50)}
+
+        assert app._strategy_blocked("scalp_micro_v1") is False
 
     def test_shadow_loss_guard_waits_for_min_closed(self) -> None:
         app = _make_app()
