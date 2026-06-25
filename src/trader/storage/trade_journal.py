@@ -2673,10 +2673,35 @@ class TradeJournal:
                 """,
                 *args,
             )
+            strategy_rows = await self._fetch(
+                """
+                SELECT COALESCE(pe.metadata->>'strategy_id', 'UNKNOWN') AS strategy_id,
+                       count(*) AS count,
+                       avg(po.gross_return_bps) AS avg_gross_return_bps,
+                       avg(po.cost_bps) AS avg_cost_bps,
+                       avg(po.net_return_bps) AS avg_net_return_bps,
+                       sum(po.net_return_bps) AS total_net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.label_schema_version = $1
+                  AND po.horizon_minutes = $2
+                  AND po.net_return_bps IS NOT NULL
+                GROUP BY strategy_id
+                ORDER BY avg_net_return_bps DESC
+                """,
+                *args,
+            )
 
             def row_dict(row: Any) -> dict[str, Any]:
                 data = dict(row)
-                for key in ("avg_net_return_bps", "total_net_return_bps"):
+                for key in (
+                    "avg_gross_return_bps",
+                    "avg_cost_bps",
+                    "avg_net_return_bps",
+                    "total_net_return_bps",
+                ):
                     if data.get(key) is not None:
                         data[key] = float(data[key])
                 if data.get("count") is not None:
@@ -2695,6 +2720,7 @@ class TradeJournal:
                 "hours": [row_dict(row) for row in hour_rows],
                 "regimes": [row_dict(row) for row in regime_rows],
                 "weekdays": [row_dict(row) for row in weekday_rows],
+                "strategies": [row_dict(row) for row in strategy_rows],
             }
         except Exception as exc:
             self._last_read_error_at = datetime.now(tz=UTC)

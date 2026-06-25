@@ -158,6 +158,16 @@ async def test_pnl_analysis_renders_canonical_regime_and_weekday_returns() -> No
                     "total_net_return_bps": -10876.36,
                 }
             ],
+            "strategies": [
+                {
+                    "strategy_id": "scalp_micro_v1",
+                    "count": 25,
+                    "avg_gross_return_bps": 1.0,
+                    "avg_cost_bps": 27.0,
+                    "avg_net_return_bps": -26.0,
+                    "total_net_return_bps": -650.0,
+                }
+            ],
         }
     )
     update = _fake_update()
@@ -167,6 +177,8 @@ async def test_pnl_analysis_renders_canonical_regime_and_weekday_returns() -> No
     text = update.effective_message.reply_text.call_args.args[0]
     assert "BULL_TREND: <code>69</code>, avg <code>-12.34</code>, Σ <code>-851.5</code>" in text
     assert "2: <code>418</code>, avg <code>-26.02</code>, Σ <code>-10876.4</code>" in text
+    assert "⛔ <code>scalp_micro_v1</code>: <code>25</code>" in text
+    assert "gross <code>+1.00</code>, costs <code>27.00</code>, net <code>-26.00 bps</code>" in text
 
 
 @pytest.mark.asyncio

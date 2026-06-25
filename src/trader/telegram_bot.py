@@ -1982,6 +1982,7 @@ class TelegramMonitorBot:
         symbol_worst = data.get("symbols_worst") or data.get("worst_symbols") or []
         regimes = data.get("regimes") or []
         weekdays = data.get("weekdays") or []
+        strategies = data.get("strategies") or []
         hours = {int(row.get("hour") or row.get("hour_utc") or 0): row for row in data.get("hours") or []}
         horizon = int(data.get("horizon_minutes") or self._train_defaults()[1])
         label_schema = str(data.get("label_schema_version") or "directional_net_v2")
@@ -2039,6 +2040,22 @@ class TelegramMonitorBot:
             )
             for row in weekdays
         )
+        lines.append("\n<b>По стратегиям</b>")
+        if strategies:
+            for row in strategies:
+                strategy_id = html.escape(str(row.get("strategy_id") or "UNKNOWN"))
+                count = int(row.get("count") or 0)
+                gross = float(row.get("avg_gross_return_bps") or 0.0)
+                costs = float(row.get("avg_cost_bps") or 0.0)
+                net = float(_net_value(row, "avg_net_bps", "avg_net_return_bps") or 0.0)
+                status = "✅" if net >= 0 else "⛔" if count >= 20 else "🧪"
+                lines.append(
+                    f"{status} <code>{strategy_id}</code>: <code>{count}</code>, "
+                    f"gross <code>{gross:+.2f}</code>, costs <code>{costs:.2f}</code>, "
+                    f"net <code>{net:+.2f} bps</code>"
+                )
+        else:
+            lines.append("Нет размеченных strategy_id.")
         await self._reply(update, "\n".join(lines), reply_markup=self._main_menu())
 
     async def _cmd_compare(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
