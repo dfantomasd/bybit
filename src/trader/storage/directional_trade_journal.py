@@ -482,7 +482,30 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         """Expose only current-schema labels and models to diagnostics."""
 
         result = await super().get_db_diagnostics(lite=lite)
-        result["label_schema_version"] = LABEL_SCHEMA_VERSION
+        allowlist, include_candle, label_schema, label_threshold = _training_eligibility_params()
+        settings = _optional_settings()
+        result["label_schema_version"] = label_schema
+        result["training_label_threshold_bps"] = label_threshold
+        result["training_config"] = {
+            "strategy_allowlist": allowlist or [],
+            "runtime_strategy_allowlist": allowlist or [],
+            "include_candle_baseline": include_candle,
+            "label_schema_version": label_schema,
+            "label_threshold_bps": label_threshold,
+            "auto_train_horizon_minutes": (
+                int(settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES) if settings is not None else 5
+            ),
+        }
+        if lite:
+            latest_model = result.get("latest_model_version") or {}
+            metrics = self._model_metrics_dict(latest_model)
+            model_label_schema = str(metrics.get("label_schema_version") or "")
+            if latest_model:
+                actual_samples = int(latest_model.get("training_samples", 0) or 0)
+                schema_compatible = model_label_schema == label_schema
+                latest_model["actual_training_samples"] = actual_samples
+                latest_model["schema_compatible"] = schema_compatible
+                latest_model["training_samples_compatible"] = actual_samples if schema_compatible else 0
         if not self.is_enabled or lite:
             return result
 

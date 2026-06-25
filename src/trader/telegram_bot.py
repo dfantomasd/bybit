@@ -4811,7 +4811,12 @@ class TelegramMonitorBot:
                     lines.append("Shadow gate: <code>загружается в фоне</code>")
                     lines.append("")
                 lines += [
-                    f"Данных для обучения ({model_horizon}m): <code>{eligible}</code>",
+                    (
+                        f"Данных для обучения ({model_horizon}m): <code>не менее {eligible}</code> "
+                        "(быстрая оценка)"
+                        if info.get("lite")
+                        else f"Данных для обучения ({model_horizon}m): <code>{eligible}</code>"
+                    ),
                 ]
         else:
             lines.append("Данные недоступны")
