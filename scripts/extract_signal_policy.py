@@ -126,7 +126,6 @@ def patch_app(lines: list[str], ranges: dict[str, tuple[int, int]]) -> list[str]
 
         delegate = DELEGATES[old]
         if is_static:
-            replacement = f"    @staticmethod\n    def {old}(...) -> None:\n        raise NotImplementedError\n"
             # handle static separately below
             indent = "    "
             if is_async:

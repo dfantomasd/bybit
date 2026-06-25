@@ -115,7 +115,14 @@ def rename_def(body: str, old: str, new: str) -> str:
     return re.sub(rf"def {re.escape(old)}\(", f"def {new}(", body, count=1)
 
 
-def build_module(class_name: str, mapping: dict[str, str], ranges: dict[str, tuple[int, int]], lines: list[str], module: str, header: str) -> str:
+def build_module(
+    class_name: str,
+    mapping: dict[str, str],
+    ranges: dict[str, tuple[int, int]],
+    lines: list[str],
+    module: str,
+    header: str,
+) -> str:
     chunks: list[str] = []
     for old, new in mapping.items():
         start, end = ranges[old]
@@ -134,7 +141,9 @@ def delegate_body(old: str, delegate: str, sig_line: str) -> str:
     return f"    def {params}\n        {delegate}\n"
 
 
-def patch_app(lines: list[str], ranges: dict[str, tuple[int, int]], mapping: dict[str, str], delegates: dict[str, str]) -> None:
+def patch_app(
+    lines: list[str], ranges: dict[str, tuple[int, int]], mapping: dict[str, str], delegates: dict[str, str]
+) -> None:
     for old in sorted(mapping, key=lambda k: ranges[k][0], reverse=True):
         start, end = ranges[old]
         sig_line = lines[start - 1]
@@ -219,7 +228,9 @@ class OperatorControlsModule(AppBoundModule):
     lifecycle_path = Path("src/trader/modules/lifecycle.py")
     operator_path = Path("src/trader/modules/operator_controls.py")
     lifecycle_path.write_text(build_module("LifecycleModule", LIFECYCLE, ranges, lines, "lifecycle", lifecycle_header))
-    operator_path.write_text(build_module("OperatorControlsModule", OPERATOR, ranges, lines, "operator", operator_header))
+    operator_path.write_text(
+        build_module("OperatorControlsModule", OPERATOR, ranges, lines, "operator", operator_header)
+    )
 
     all_mapping = {**LIFECYCLE, **OPERATOR}
     all_delegates = {**LIFECYCLE_DELEGATES, **OPERATOR_DELEGATES}

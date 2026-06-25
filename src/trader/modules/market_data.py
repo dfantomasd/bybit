@@ -256,13 +256,13 @@ class MarketDataModule(ModuleTaskMixin):
     async def _seed_interval_from_db(self, symbol: str, interval: str) -> bool:
         """Seed CandleStore from Postgres when enough confirmed candles already exist."""
         assert self._app._settings is not None
-        if not self._app._settings.CANDLE_SEED_USE_DB_CACHE:
+        if not bool(getattr(self._app._settings, "CANDLE_SEED_USE_DB_CACHE", False)):
             return False
         if self._app._trade_journal is None or not self._app._trade_journal.is_enabled:
             return False
         if self._app._candle_store is None:
             return False
-        min_bars = max(1, int(self._app._settings.CANDLE_SEED_DB_MIN_BARS))
+        min_bars = max(1, int(getattr(self._app._settings, "CANDLE_SEED_DB_MIN_BARS", _MIN_SEED_BARS)))
         try:
             rows = await self._app._trade_journal.get_recent_market_candles(symbol, interval, _MIN_SEED_BARS)
         except Exception as exc:

@@ -148,7 +148,7 @@ def replace_method_bodies(lines: list[str], tree: ast.Module) -> list[str]:
             replacements.append((body_start, end, header, new_body))
 
     # Apply from bottom to top
-    for body_start, end, header, new_body in sorted(replacements, key=lambda x: x[0], reverse=True):
+    for body_start, end, _header, new_body in sorted(replacements, key=lambda x: x[0], reverse=True):
         lines[body_start:end] = [new_body]
 
     return lines
@@ -176,7 +176,7 @@ def main() -> None:
         raise SystemExit("Could not find constants block")
 
     # Insert imports after log = get_logger line
-    log_idx = next(i for i, l in enumerate(lines) if l.startswith("log = get_logger"))
+    log_idx = next(i for i, line in enumerate(lines) if line.startswith("log = get_logger"))
     lines[const_start:const_end] = []
     # adjust log_idx after deletion
     if log_idx > const_end:
@@ -221,9 +221,11 @@ def main() -> None:
     )
     if not old_run_block:
         raise SystemExit("Could not find run() background tasks block")
-    text = text[: old_run_block.start()] + (
-        "            await self._trading_loop.start()\n\n" + RUN_REPLACEMENT + "\n"
-    ) + text[old_run_block.end() :]
+    text = (
+        text[: old_run_block.start()]
+        + ("            await self._trading_loop.start()\n\n" + RUN_REPLACEMENT + "\n")
+        + text[old_run_block.end() :]
+    )
 
     # Update startup calls in run to use modules (optional - delegates work via app methods)
     APP_PATH.write_text(text)

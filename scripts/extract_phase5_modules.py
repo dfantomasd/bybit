@@ -110,7 +110,14 @@ def add_static_decorators(body: str) -> str:
     )
 
 
-def build_module(class_name: str, header: str, mapping: dict[str, tuple[str, bool]], ranges: dict[str, tuple[int, int]], all_lines: list[str], kind: str) -> str:
+def build_module(
+    class_name: str,
+    header: str,
+    mapping: dict[str, tuple[str, bool]],
+    ranges: dict[str, tuple[int, int]],
+    all_lines: list[str],
+    kind: str,
+) -> str:
     out = header
     for old, (new, is_static) in mapping.items():
         start, end = ranges[old]

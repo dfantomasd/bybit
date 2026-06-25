@@ -49,7 +49,8 @@ class SignalPolicyModule(AppBoundModule):
 
     def scalp_strict_shadow(self) -> bool:
         """SCALP paper-trading should mirror LIVE quality gates."""
-        assert self._app._settings is not None
+        if self._app._settings is None:
+            return False
         return self.is_scalp_profile() and self._app._settings.SCALP_STRICT_SHADOW and self.initial_shadow_mode()
 
     def expectancy_gates_apply(self) -> bool:

@@ -590,12 +590,7 @@ class TrainingModule(ModuleTaskMixin):
                 promotion_reasons: list[str] = []
                 promotion_engine_allows = False
                 promotion_engine_checked = False
-                if (
-                    is_challenger
-                    and version
-                    and version != "—"
-                    and self._app._trade_journal is not None
-                ):
+                if is_challenger and version and version != "—" and self._app._trade_journal is not None:
                     try:
                         from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
 
@@ -663,9 +658,7 @@ class TrainingModule(ModuleTaskMixin):
                     f"Canary: <code>{'включён' if self._app._settings.MODEL_GATE_CANARY_ENABLED else 'выключен'}</code>",
                 ]
 
-                checklist_ready = all(
-                    [is_challenger, has_signals, has_lift, has_wf, has_quality, beats_champion]
-                )
+                checklist_ready = all([is_challenger, has_signals, has_lift, has_wf, has_quality, beats_champion])
 
                 if promotion_engine_checked and promotion_engine_allows:
                     lines.append("\n🟢 <b>Все условия выполнены — промоут скоро!</b>")

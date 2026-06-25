@@ -126,7 +126,9 @@ def patch_app(all_lines: list[str], tree: ast.Module) -> list[str]:
                 continue
             if not item.body:
                 continue
-            replacements.append((item.body[0].lineno - 1, item.end_lineno or item.lineno, f"        {DELEGATES[item.name]}\n"))
+            replacements.append(
+                (item.body[0].lineno - 1, item.end_lineno or item.lineno, f"        {DELEGATES[item.name]}\n")
+            )
     for body_start, end, new_body in sorted(replacements, key=lambda x: x[0], reverse=True):
         all_lines[body_start:end] = [new_body]
     return all_lines
