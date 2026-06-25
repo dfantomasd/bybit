@@ -4812,8 +4812,7 @@ class TelegramMonitorBot:
                     lines.append("")
                 lines += [
                     (
-                        f"Данных для обучения ({model_horizon}m): <code>не менее {eligible}</code> "
-                        "(быстрая оценка)"
+                        f"Данных для обучения ({model_horizon}m): <code>не менее {eligible}</code> (быстрая оценка)"
                         if info.get("lite")
                         else f"Данных для обучения ({model_horizon}m): <code>{eligible}</code>"
                     ),

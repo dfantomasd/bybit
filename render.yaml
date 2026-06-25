@@ -282,9 +282,9 @@ services:
       - key: MODEL_AUTO_TRAIN_HORIZON_MINUTES
         value: "5"
       - key: TRAIN_STRATEGY_ALLOWLIST
-        value: "scalp_micro_v1,candle_sampler_v1,shadow_probe_v1"
+        value: "scalp_micro_v1,shadow_probe_v1"
       - key: TRAIN_INCLUDE_CANDLE_BASELINE
-        value: "true"
+        value: "false"
       - key: TRAIN_EXCLUDE_NEGATIVE_BUCKETS
         value: "true"
       - key: TRAIN_LABEL_SPREAD_BPS

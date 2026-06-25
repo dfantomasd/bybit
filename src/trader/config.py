@@ -600,10 +600,15 @@ class Settings(BaseSettings):
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
-    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,candle_sampler_v1,shadow_probe_v1"
+    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_v1"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
-    TRAIN_INCLUDE_CANDLE_BASELINE: bool = True
-    """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines."""
+    TRAIN_INCLUDE_CANDLE_BASELINE: bool = False
+    """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines.
+
+    Keep disabled for the production scalp model: unconditional candle samples
+    overwhelm the much smaller strategy-signal pool and teach market direction
+    rather than the expectancy of entries the bot can actually execute.
+    """
     TRAIN_LABEL_SPREAD_BPS: float = 4.0
     """Spread component in the training label cost model (scalp max spread is ~5 bps)."""
     TRAIN_MIN_BUCKET_SAMPLES: int = 50
