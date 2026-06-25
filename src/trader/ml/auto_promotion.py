@@ -12,7 +12,7 @@ import structlog
 from trader.ml.challenger import ModelStatus
 from trader.ml.model_selection import model_selection_metrics
 from trader.training.bootstrap import bootstrap_pvalue
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import LABEL_SCHEMA_VERSION, active_label_schema_version
 
 log = structlog.get_logger(__name__)
 
@@ -115,6 +115,7 @@ class AutoPromotionConfig:
     max_champion_drawdown_bps: float = 1500.0
     min_champion_wf_bps: float = 0.0
     returns_limit: int = 200
+    label_schema_version: str = LABEL_SCHEMA_VERSION
 
     @classmethod
     def from_settings(cls, settings: Any) -> AutoPromotionConfig:
@@ -141,6 +142,9 @@ class AutoPromotionConfig:
             bootstrap_iterations=max(100, int(getattr(settings, "MODEL_AUTO_PROMOTE_BOOTSTRAP_ITERATIONS", 1000))),
             min_bootstrap_samples=max(2, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_BOOTSTRAP_SAMPLES", 50))),
             horizon_minutes=int(getattr(settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 15)),
+            label_schema_version=active_label_schema_version(
+                use_tpsl_exit=bool(getattr(settings, "MODEL_LABEL_USE_TPSL_EXIT", False))
+            ),
             max_champion_drawdown_bps=float(getattr(settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0)),
             min_champion_wf_bps=float(getattr(settings, "MODEL_CHAMPION_MIN_WF_BPS", 0.0)),
         )
@@ -232,7 +236,7 @@ class AutoPromotionEngine:
 
         if status not in {ModelStatus.SHADOW_CHALLENGER, ModelStatus.VALIDATED}:
             reasons.append(f"bad_status:{status}")
-        if label_schema != LABEL_SCHEMA_VERSION:
+        if label_schema != self._config.label_schema_version:
             reasons.append(f"incompatible_label_schema:{label_schema or 'missing'}")
         if training_samples < self._config.min_training_samples:
             reasons.append(f"insufficient_training_samples:{training_samples}<{self._config.min_training_samples}")
@@ -254,7 +258,7 @@ class AutoPromotionEngine:
         gate = await self._journal.get_shadow_gate_stats(
             challenger_version,
             self._config.horizon_minutes,
-            LABEL_SCHEMA_VERSION,
+            self._config.label_schema_version,
         )
         total_count = _int_or_zero(gate.get("total_count"))
         pass_count = _int_or_zero(gate.get("pass_count"))
@@ -484,7 +488,7 @@ class AutoPromotionEngine:
             """,
             champion_version,
             self._config.min_shadow_signals,
-            LABEL_SCHEMA_VERSION,
+            self._config.label_schema_version,
         )
         rollback_version = str(rollback_row["version"]) if rollback_row else None
         if reasons and rollback_version is None:

@@ -11,7 +11,7 @@ import pytest
 
 from trader.ml.auto_promotion import AutoPromotionConfig, AutoPromotionEngine
 from trader.ml.challenger import ModelStatus
-from trader.training.labels import LABEL_SCHEMA_VERSION
+from trader.training.labels import LABEL_SCHEMA_VERSION, LABEL_SCHEMA_VERSION_TPSL
 
 
 def _model(
@@ -207,6 +207,19 @@ async def test_should_promote_allows_weak_when_min_quality_is_weak() -> None:
     decision = await engine.should_promote(None, "weak")
 
     assert decision.promote is True
+
+
+@pytest.mark.asyncio
+async def test_should_promote_uses_configured_tpsl_label_schema() -> None:
+    challenger = _model("dnv2")
+    challenger["metrics"]["label_schema_version"] = LABEL_SCHEMA_VERSION_TPSL
+    journal = _Journal([challenger])
+    config = replace(_config(), label_schema_version=LABEL_SCHEMA_VERSION_TPSL)
+    engine = AutoPromotionEngine(trade_journal=journal, config=config)
+
+    decision = await engine.should_promote(None, "dnv2")
+
+    assert not any(reason.startswith("incompatible_label_schema") for reason in decision.reasons)
 
 
 @pytest.mark.asyncio

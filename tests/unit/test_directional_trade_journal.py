@@ -157,6 +157,8 @@ async def test_profitable_sell_is_persisted_as_positive_directional_outcome() ->
     assert saved["max_favorable_excursion_bps"] == pytest.approx(150.0)
     assert saved["label"] == 1
     assert saved["label_schema_version"] == LABEL_SCHEMA_VERSION_TPSL
+    assert "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in journal.queries[0]
+    assert "OR fs.training_eligible = true" in journal.queries[0]
 
 
 @pytest.mark.asyncio
