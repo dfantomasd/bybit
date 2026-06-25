@@ -96,3 +96,13 @@ def test_shadow_probe_regime_allows_trending_only() -> None:
     assert policy.shadow_probe_regime_allows(bull) is True
     assert policy.shadow_probe_regime_allows(sideways) is False
     assert policy.shadow_probe_regime_allows(None) is False
+
+
+def test_shadow_probe_research_v2_targets_high_volatility() -> None:
+    from trader.domain.enums import MarketRegime
+
+    policy = _policy_module()
+    policy._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2 = True
+
+    assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.HIGH_VOLATILITY)) is True
+    assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.BULL_TREND)) is False

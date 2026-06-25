@@ -76,6 +76,8 @@ services:
         value: "false"
       - key: SHADOW_PROBE_ENABLED
         value: "true"
+      - key: SHADOW_PROBE_RESEARCH_PROFILE_V2
+        value: "true"
       - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
         value: "0.08"
       - key: SHADOW_PROBE_COOLDOWN_SECONDS

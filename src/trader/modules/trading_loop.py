@@ -159,6 +159,14 @@ class TradingLoopModule(AppBoundModule):
                     symbol
                 )
 
+            research_v2 = bool(self._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2)
+            probe_max_open_positions = 4 if research_v2 else self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS
+            probe_burst_max_signals = 6 if research_v2 else self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS
+            probe_burst_cooldown_seconds = (
+                300 if research_v2 else self._app._settings.SHADOW_PROBE_BURST_COOLDOWN_SECONDS
+            )
+            probe_cooldown_seconds = 180 if research_v2 else self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS
+
             strategies.append(
                 ShadowProbeStrategy(
                     imbalance_provider=(
@@ -177,12 +185,12 @@ class TradingLoopModule(AppBoundModule):
                         if self._app._execution_engine is not None
                         else None
                     ),
-                    max_open_positions=self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS,
-                    burst_max_signals=self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS,
+                    max_open_positions=probe_max_open_positions,
+                    burst_max_signals=probe_burst_max_signals,
                     burst_window_seconds=self._app._settings.SHADOW_PROBE_BURST_WINDOW_SECONDS,
-                    burst_cooldown_seconds=self._app._settings.SHADOW_PROBE_BURST_COOLDOWN_SECONDS,
+                    burst_cooldown_seconds=probe_burst_cooldown_seconds,
                     min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
-                    cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
+                    cooldown_seconds=probe_cooldown_seconds,
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                     min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                     min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
@@ -194,17 +202,18 @@ class TradingLoopModule(AppBoundModule):
             )
             log.info(
                 "shadow_probe.enabled",
+                research_profile_v2=research_v2,
                 min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
-                cooldown_seconds=self._app._settings.SHADOW_PROBE_COOLDOWN_SECONDS,
+                cooldown_seconds=probe_cooldown_seconds,
                 max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                 min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                 min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
                 min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
                 symbol_top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
                 symbol_warmup_seconds=self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS,
-                max_open_positions=self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS,
-                burst_max_signals=self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS,
-                burst_cooldown_seconds=self._app._settings.SHADOW_PROBE_BURST_COOLDOWN_SECONDS,
+                max_open_positions=probe_max_open_positions,
+                burst_max_signals=probe_burst_max_signals,
+                burst_cooldown_seconds=probe_burst_cooldown_seconds,
                 sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
             )
 

@@ -141,6 +141,12 @@ class Settings(BaseSettings):
     """When SHADOW and not SCALP_STRICT_SHADOW, loosen scalp gates for paper-trade data collection."""
     SHADOW_PROBE_ENABLED: bool = True
     """Enable SHADOW-only paper probes so model/order outcomes accumulate when live strategies are silent."""
+    SHADOW_PROBE_RESEARCH_PROFILE_V2: bool = True
+    """Apply the current research profile in code.
+
+    This version switch is intentionally separate from the older per-setting
+    Render variables so a deploy cannot silently retain a stale probe policy.
+    """
     SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
     SHADOW_PROBE_COOLDOWN_SECONDS: int = 180
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0

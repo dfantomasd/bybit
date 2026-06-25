@@ -431,11 +431,14 @@ class SignalPolicyModule(AppBoundModule):
         """Block probes in choppy/uncertain regimes where OBI mean-reversion loses."""
 
         assert self._app._settings is not None
-        allowed = {
-            part.strip()
-            for part in str(self._app._settings.SHADOW_PROBE_ALLOWED_REGIMES or "").split(",")
-            if part.strip()
-        }
+        if bool(getattr(self._app._settings, "SHADOW_PROBE_RESEARCH_PROFILE_V2", False)):
+            allowed = {"HIGH_VOLATILITY"}
+        else:
+            allowed = {
+                part.strip()
+                for part in str(self._app._settings.SHADOW_PROBE_ALLOWED_REGIMES or "").split(",")
+                if part.strip()
+            }
         if not allowed:
             return True
         if regime_ctx is None or getattr(regime_ctx, "regime", None) is None:
