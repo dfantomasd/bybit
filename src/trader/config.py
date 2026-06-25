@@ -255,6 +255,12 @@ class Settings(BaseSettings):
     """Block a bucket when its average net return is below this (bps)."""
     BUCKET_STATS_REFRESH_SECONDS: int = 3600
     """How often the in-memory bucket statistics are refreshed from Postgres."""
+    HOUR_BLOCK_ENABLED: bool = True
+    """Fallback gate for toxic UTC hours when regime buckets are too sparse."""
+    HOUR_MIN_SAMPLES: int = 30
+    """Minimum resolved outcomes in an hour before the fallback gate can block."""
+    HOUR_BLOCK_AVG_BPS: float = -10.0
+    """Block an UTC hour when average net return is below this threshold."""
     SYMBOL_SIDE_BLOCK_ENABLED: bool = True
     """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
     SYMBOL_SIDE_MIN_SAMPLES: int = 20

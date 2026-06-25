@@ -79,6 +79,8 @@ class TradingApplication:
         self._feature_pipeline: Any | None = None
         # Regime-bucket expectancy stats: {(regime, volatility, hour): (avg_bps, count)}
         self._bucket_stats: dict[tuple[str, str, int], tuple[float, int]] = {}
+        # Coarser UTC-hour fallback when three-dimensional buckets are sparse.
+        self._hour_stats: dict[int, tuple[float, int]] = {}
         # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
         self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Shadow probe paper stats (active even in SHADOW mode)

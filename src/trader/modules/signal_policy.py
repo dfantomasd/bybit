@@ -301,7 +301,7 @@ class SignalPolicyModule(AppBoundModule):
         assert self._app._settings is not None
         if not self.expectancy_gates_apply():
             return False
-        if not self._app._settings.BUCKET_BLOCK_ENABLED or not self._app._bucket_stats:
+        if not self._app._settings.BUCKET_BLOCK_ENABLED:
             return False
         regime = (
             regime_ctx.regime.value
@@ -315,11 +315,18 @@ class SignalPolicyModule(AppBoundModule):
         )
         hour = datetime.now(tz=UTC).hour
         stats = self._app._bucket_stats.get((regime, volatility, hour))
-        if stats is None:
+        if stats is not None:
+            avg_bps, count = stats
+            if count >= self._app._settings.BUCKET_MIN_SAMPLES and avg_bps < self._app._settings.BUCKET_BLOCK_AVG_BPS:
+                return True
+        if not self._app._settings.HOUR_BLOCK_ENABLED:
             return False
-        avg_bps, count = stats
+        hour_stats = self._app._hour_stats.get(hour)
+        if hour_stats is None:
+            return False
+        hour_avg_bps, hour_count = hour_stats
         return bool(
-            count >= self._app._settings.BUCKET_MIN_SAMPLES and avg_bps < self._app._settings.BUCKET_BLOCK_AVG_BPS
+            hour_count >= self._app._settings.HOUR_MIN_SAMPLES and hour_avg_bps < self._app._settings.HOUR_BLOCK_AVG_BPS
         )
 
     def symbol_side_blocked(self, symbol: str, side: str) -> bool:

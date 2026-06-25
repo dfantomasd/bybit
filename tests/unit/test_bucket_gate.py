@@ -17,6 +17,9 @@ def _make_app(**overrides) -> TradingApplication:
         "BUCKET_BLOCK_ENABLED": True,
         "BUCKET_MIN_SAMPLES": 30,
         "BUCKET_BLOCK_AVG_BPS": -2.0,
+        "HOUR_BLOCK_ENABLED": True,
+        "HOUR_MIN_SAMPLES": 30,
+        "HOUR_BLOCK_AVG_BPS": -10.0,
         "SYMBOL_SIDE_BLOCK_ENABLED": True,
         "SYMBOL_SIDE_MIN_SAMPLES": 20,
         "SYMBOL_SIDE_BLOCK_AVG_BPS": -2.0,
@@ -97,6 +100,24 @@ class TestBucketGate:
         app = _make_app()
         app._bucket_stats = {_key(regime="BEAR_TREND"): (-10.0, 100)}
         assert app._bucket_blocked(_regime_ctx(regime="BULL_TREND")) is False
+
+    def test_toxic_hour_blocks_when_specific_bucket_is_sparse(self) -> None:
+        app = _make_active_app()
+        app._hour_stats = {datetime.now(tz=UTC).hour: (-25.0, 61)}
+
+        assert app._bucket_blocked(_regime_ctx()) is True
+
+    def test_hour_fallback_requires_enough_samples(self) -> None:
+        app = _make_active_app()
+        app._hour_stats = {datetime.now(tz=UTC).hour: (-50.0, 29)}
+
+        assert app._bucket_blocked(_regime_ctx()) is False
+
+    def test_positive_hour_does_not_block(self) -> None:
+        app = _make_active_app()
+        app._hour_stats = {datetime.now(tz=UTC).hour: (4.0, 61)}
+
+        assert app._bucket_blocked(_regime_ctx()) is False
 
     def test_disabled_setting_never_blocks(self) -> None:
         app = _make_app(BUCKET_BLOCK_ENABLED=False)
