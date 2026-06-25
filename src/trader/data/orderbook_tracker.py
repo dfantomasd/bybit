@@ -156,3 +156,8 @@ class OrderbookTracker:
 
     def tracked_symbols(self) -> list[str]:
         return sorted(self._latest.keys())
+
+    def remove_symbol(self, symbol: str) -> None:
+        sym = symbol.upper()
+        self._history.pop(sym, None)
+        self._latest.pop(sym, None)

@@ -472,6 +472,16 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     STARTER_OPTIMIZED_MODE: bool = True
     """Apply Render Starter memory/CPU conservative defaults."""
+    STARTER_LIGHT_WS_FEEDS: bool = True
+    """On Starter, skip publicTrade/allLiquidation WS feeds (keeps klines + selective orderbook)."""
+    STARTER_SHADOW_MINIMAL_STRATEGIES: bool = True
+    """On Starter+SHADOW, disable advanced alpha strategies to save RAM/CPU."""
+    STARTER_DEFER_TRAINING_UNDER_LOAD: bool = True
+    """Skip auto-training while the load governor has reduced the feature universe."""
+    WS_PUBLIC_EVENT_QUEUE_MAXSIZE: int = 5000
+    """Max buffered public WS events before backpressure/drops."""
+    FLOW_TRACKER_HISTORY_SLOTS: int = 512
+    """Ring buffer size per symbol in FlowTracker."""
 
     # ------------------------------------------------------------------
     # Burst / entry rate limiting
@@ -718,10 +728,44 @@ class Settings(BaseSettings):
             return [int(item.strip()) for item in stripped.split(",") if item.strip()]
         raise TypeError("TELEGRAM_ALLOWED_CHAT_IDS must be a list or string")
 
+    def _apply_starter_memory_caps(self) -> None:
+        """Clamp resource-heavy settings to Starter-safe ceilings."""
+        ceilings: dict[str, int | float] = {
+            "SCREENER_WIDE_MAX_SYMBOLS": 15,
+            "SCREENER_FEATURE_MAX_SYMBOLS": 8,
+            "SCREENER_EXECUTION_CANDIDATES": 6,
+            "MAX_ORDERBOOK_ACTIVE_SYMBOLS": 4,
+            "CANDLE_STORE_MAX_BARS_1M": 150,
+            "CANDLE_STORE_MAX_BARS_5M": 150,
+            "CANDLE_STORE_MAX_BARS_15M": 120,
+            "CANDLE_STORE_MAX_BARS_1H": 80,
+            "OUTCOME_RESOLVER_BATCH_LIMIT": 300,
+            "LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS": 4,
+            "FLOW_TRACKER_HISTORY_SLOTS": 128,
+            "WS_PUBLIC_EVENT_QUEUE_MAXSIZE": 2000,
+        }
+        for field, ceiling in ceilings.items():
+            current = getattr(self, field)
+            if isinstance(current, int | float) and current > ceiling:
+                setattr(self, field, type(current)(ceiling))
+
+        self.MODEL_ONLINE_LEARNING_ENABLED = False
+        if self.STARTER_LIGHT_WS_FEEDS:
+            self.TRADE_FLOW_FEED_ENABLED = False
+            self.LIQUIDATION_FEED_ENABLED = False
+        if self.STARTER_SHADOW_MINIMAL_STRATEGIES and self.TRADING_MODE == TradingMode.SHADOW:
+            self.ORDER_FLOW_STRATEGY_ENABLED = False
+            self.FUNDING_ARB_STRATEGY_ENABLED = False
+            self.LIQUIDATION_HUNTING_STRATEGY_ENABLED = False
+            self.MARKET_MAKING_STRATEGY_ENABLED = False
+            self.STAT_ARB_STRATEGY_ENABLED = False
+
     def model_post_init(self, __context: Any) -> None:
         """Enforce critical safety invariants after field parsing."""
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
             self.SCREENER_MAX_PRICE_USD = 25.0
+        if self.STARTER_OPTIMIZED_MODE:
+            self._apply_starter_memory_caps()
 
         # TESTNET mode must use testnet endpoints to avoid spending real money.
         # SHADOW mode is safe with mainnet endpoints because orders are never

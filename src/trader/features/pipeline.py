@@ -201,6 +201,13 @@ class FeaturePipeline:
         """Clear the seeding guard after all intervals are loaded and recomputed."""
         self._seeding_symbols.discard(symbol)
 
+    def evict_symbol(self, symbol: str) -> None:
+        """Drop all cached vectors and seeding state for a removed symbol."""
+        sym = symbol.upper()
+        self._seeding_symbols.discard(sym)
+        for key in [k for k in self._latest if k[0] == sym]:
+            self.evict_cached_vector(key[0], key[1])
+
     def invalidate_symbol(self, symbol: str) -> None:
         """Remove cached feature vectors for a symbol after its candles are reseeded."""
         from trader.features.source_candle_guard import clear_source_bindings_for_symbol

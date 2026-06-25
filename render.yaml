@@ -41,10 +41,16 @@ services:
       # Starter-optimized screener
       - key: STARTER_OPTIMIZED_MODE
         value: "true"
+      - key: STARTER_LIGHT_WS_FEEDS
+        value: "true"
+      - key: STARTER_SHADOW_MINIMAL_STRATEGIES
+        value: "true"
+      - key: STARTER_DEFER_TRAINING_UNDER_LOAD
+        value: "true"
       - key: SCREENER_WIDE_MAX_SYMBOLS
-        value: "30"
+        value: "15"
       - key: SCREENER_FEATURE_MAX_SYMBOLS
-        value: "20"
+        value: "8"
       - key: SCREENER_EXECUTION_CANDIDATES
         value: "6"
       - key: SCREENER_REFRESH_SECONDS
@@ -123,7 +129,23 @@ services:
       - key: SHADOW_MIN_ATR_MULTIPLE
         value: "0.35"
       - key: MAX_ORDERBOOK_ACTIVE_SYMBOLS
-        value: "6"
+        value: "4"
+      - key: WS_PUBLIC_EVENT_QUEUE_MAXSIZE
+        value: "2000"
+      - key: FLOW_TRACKER_HISTORY_SLOTS
+        value: "128"
+      - key: CANDLE_STORE_MAX_BARS_1M
+        value: "150"
+      - key: CANDLE_STORE_MAX_BARS_5M
+        value: "150"
+      - key: CANDLE_STORE_MAX_BARS_15M
+        value: "120"
+      - key: CANDLE_STORE_MAX_BARS_1H
+        value: "80"
+      - key: LOAD_GOVERNOR_MIN_FEATURE_SYMBOLS
+        value: "4"
+      - key: OUTCOME_RESOLVER_BATCH_LIMIT
+        value: "300"
       - key: PERFORMANCE_FILTER_ENABLED
         value: "false"
       - key: SHADOW_LOSS_GUARD_ENABLED
@@ -201,7 +223,7 @@ services:
       - key: MODEL_DRIFT_AUTO_RETRAIN
         value: "false"
       - key: MODEL_ONLINE_LEARNING_ENABLED
-        value: "true"
+        value: "false"
       - key: MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY
         value: "25"
       # Adaptive load governor
@@ -224,21 +246,21 @@ services:
         value: "5,15"
       # Advanced alpha feeds/strategies
       - key: TRADE_FLOW_FEED_ENABLED
-        value: "true"
+        value: "false"
       - key: LIQUIDATION_FEED_ENABLED
-        value: "true"
+        value: "false"
       - key: FLOW_TRACKER_WINDOW_SECONDS
         value: "60"
       - key: ORDER_FLOW_STRATEGY_ENABLED
-        value: "true"
+        value: "false"
       - key: FUNDING_ARB_STRATEGY_ENABLED
-        value: "true"
+        value: "false"
       - key: LIQUIDATION_HUNTING_STRATEGY_ENABLED
-        value: "true"
+        value: "false"
       - key: MARKET_MAKING_STRATEGY_ENABLED
-        value: "true"
+        value: "false"
       - key: STAT_ARB_STRATEGY_ENABLED
-        value: "true"
+        value: "false"
       - key: STRATEGY_PRIORITY_ORDER
         value: "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
       - key: SCALP_STRATEGY_PRIORITY_ORDER

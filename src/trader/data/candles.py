@@ -131,6 +131,12 @@ class CandleStore:
     def intervals(self, symbol: str) -> list[str]:
         return [iv for sym, iv in self._data if sym == symbol.upper()]
 
+    def remove_symbol(self, symbol: str) -> None:
+        """Drop all in-memory candles for a symbol (e.g. after screener rotation)."""
+        sym = symbol.upper()
+        for key in [k for k in self._data if k[0] == sym]:
+            del self._data[key]
+
     def __repr__(self) -> str:
         parts = {f"{s}/{iv}": len(buf) for (s, iv), buf in self._data.items()}
         return f"CandleStore({parts})"

@@ -49,6 +49,7 @@ class MarketDataModule(ModuleTaskMixin):
             self._app._last_candle_sample_at.pop(symbol, None)
             self._app._last_signal_at.pop(symbol, None)
             self._app._shadow_probe_symbol_subscribed_at.pop(symbol, None)
+            self._app._evict_symbol_runtime_state(symbol)
 
     async def start_screener(self) -> list[str]:
         """Run the market screener and return initial symbol list."""
@@ -615,6 +616,7 @@ class MarketDataModule(ModuleTaskMixin):
             self._app._flow_tracker = FlowTracker(
                 window_s=self._app._settings.FLOW_TRACKER_WINDOW_SECONDS,
                 large_trade_notional_usd=self._app._settings.FLOW_LARGE_TRADE_NOTIONAL_USD,
+                history_slots=max(32, int(self._app._settings.FLOW_TRACKER_HISTORY_SLOTS)),
             )
             flow_symbols = self._app._screener.execution_candidates if self._app._screener is not None else symbols[:5]
             for symbol in flow_symbols:
@@ -629,7 +631,9 @@ class MarketDataModule(ModuleTaskMixin):
         # size the buffer so a consumer stall never drops a confirmed kline.
         from trader.domain.events import BaseEvent
 
-        event_queue: asyncio.Queue[BaseEvent] = asyncio.Queue(maxsize=5000)
+        event_queue: asyncio.Queue[BaseEvent] = asyncio.Queue(
+            maxsize=max(500, int(self._app._settings.WS_PUBLIC_EVENT_QUEUE_MAXSIZE))
+        )
 
         self._app._ws_public = BybitPublicWebSocket(
             endpoint=f"{selector.ws_public_base}/{category}",

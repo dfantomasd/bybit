@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import html
 import json
 import os
@@ -65,6 +66,13 @@ class TrainingModule(ModuleTaskMixin):
                 pass
 
             if self._app._training_task is not None and not self._app._training_task.done():
+                continue
+
+            if (
+                getattr(self._app._settings, "STARTER_DEFER_TRAINING_UNDER_LOAD", True)
+                and self._app._runtime_under_memory_pressure()
+            ):
+                log.info("model_auto_training.deferred", reason="load_governor_reduced")
                 continue
 
             # Back off for 30 minutes after a training failure to avoid an infinite
@@ -854,6 +862,7 @@ class TrainingModule(ModuleTaskMixin):
                 log.debug("model_gate.quality_refresh_failed", error=str(diag_exc))
         if self._app._telegram_bot is not None:
             await self._app._telegram_bot.notify(text)
+        gc.collect()
 
     async def maybe_apply_online_learning(self) -> None:
         assert self._app._settings is not None

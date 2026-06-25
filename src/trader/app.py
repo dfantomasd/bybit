@@ -170,7 +170,39 @@ class TradingApplication:
     def _new_candle_store(self) -> Any:
         from trader.data.candles import CandleStore
 
-        return CandleStore(max_bars=500, max_bars_by_interval=self._candle_store_caps())
+        default_cap = 250
+        if self._settings is not None and self._settings.STARTER_OPTIMIZED_MODE:
+            default_cap = 150
+        return CandleStore(max_bars=default_cap, max_bars_by_interval=self._candle_store_caps())
+
+    def _runtime_under_memory_pressure(self) -> bool:
+        """True when load governor has narrowed the active feature universe."""
+        if self._screener is None:
+            return False
+        original = getattr(self._screener, "_original_feature_max", self._screener._feature_max)
+        return int(self._screener._feature_max) < int(original)
+
+    def _evict_symbol_runtime_state(self, symbol: str) -> None:
+        """Release in-memory market/feature state after screener rotation."""
+        sym = symbol.upper()
+        if self._candle_store is not None:
+            self._candle_store.remove_symbol(sym)
+        if self._feature_pipeline is not None:
+            self._feature_pipeline.evict_symbol(sym)
+        if self._orderbook_tracker is not None:
+            self._orderbook_tracker.remove_symbol(sym)
+        if self._flow_tracker is not None:
+            self._flow_tracker.remove_symbol(sym)
+
+    def _symbol_microstructure_topics_enabled(self, symbol: str) -> bool:
+        """Orderbook/trade/liquidation WS topics only for execution candidates on Starter."""
+        if self._settings is None:
+            return True
+        if not self._settings.STARTER_OPTIMIZED_MODE:
+            return True
+        if self._screener is None:
+            return False
+        return symbol in set(self._screener.execution_candidates)
 
     def _active_symbols(self) -> list[str]:
         """Return screener's current active symbols, or fallback list if screener is absent/empty."""
@@ -202,16 +234,19 @@ class TradingApplication:
         raw = getattr(self._settings, "MARKET_CANDLE_PERSIST_INTERVALS", "1")
         return interval in {part.strip() for part in str(raw).split(",") if part.strip()}
 
-    def _ws_topics_for_symbol(self, symbol: str) -> list[str]:
+    def _ws_topics_for_symbol(self, symbol: str, *, microstructure: bool | None = None) -> list[str]:
         """Build public WS topic list for one symbol."""
+        if microstructure is None:
+            microstructure = self._symbol_microstructure_topics_enabled(symbol)
         topics = [f"kline.{interval}.{symbol}" for interval in self._market_data_intervals()]
         topics.append(f"tickers.{symbol}")
-        if self._settings is not None and self._settings.ORDERBOOK_FEED_ENABLED:
-            topics.append(f"orderbook.50.{symbol}")
-        if self._settings is not None and self._settings.TRADE_FLOW_FEED_ENABLED:
-            topics.append(f"publicTrade.{symbol}")
-        if self._settings is not None and self._settings.LIQUIDATION_FEED_ENABLED:
-            topics.append(f"allLiquidation.{symbol}")
+        if self._settings is not None and microstructure:
+            if self._settings.ORDERBOOK_FEED_ENABLED:
+                topics.append(f"orderbook.50.{symbol}")
+            if self._settings.TRADE_FLOW_FEED_ENABLED:
+                topics.append(f"publicTrade.{symbol}")
+            if self._settings.LIQUIDATION_FEED_ENABLED:
+                topics.append(f"allLiquidation.{symbol}")
         return topics
 
     # ------------------------------------------------------------------

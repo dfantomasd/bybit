@@ -92,6 +92,23 @@ class TestSettingsDefaults:
         settings = self._make_settings(STARTER_OPTIMIZED_MODE="false", SCREENER_MAX_PRICE_USD="0")
         assert settings.SCREENER_MAX_PRICE_USD == 0.0  # type: ignore[union-attr]
 
+    def test_starter_mode_clamps_heavy_settings(self) -> None:
+        settings = self._make_settings(
+            STARTER_OPTIMIZED_MODE="true",
+            TRADING_MODE="SHADOW",
+            SCREENER_WIDE_MAX_SYMBOLS="30",
+            SCREENER_FEATURE_MAX_SYMBOLS="20",
+            WS_PUBLIC_EVENT_QUEUE_MAXSIZE="5000",
+            ORDER_FLOW_STRATEGY_ENABLED="true",
+            TRADE_FLOW_FEED_ENABLED="true",
+        )
+        assert settings.SCREENER_WIDE_MAX_SYMBOLS == 15  # type: ignore[union-attr]
+        assert settings.SCREENER_FEATURE_MAX_SYMBOLS == 8  # type: ignore[union-attr]
+        assert settings.WS_PUBLIC_EVENT_QUEUE_MAXSIZE == 2000  # type: ignore[union-attr]
+        assert settings.TRADE_FLOW_FEED_ENABLED is False  # type: ignore[union-attr]
+        assert settings.ORDER_FLOW_STRATEGY_ENABLED is False  # type: ignore[union-attr]
+        assert settings.MODEL_ONLINE_LEARNING_ENABLED is False  # type: ignore[union-attr]
+
     def test_single_telegram_chat_id_string(self) -> None:
         settings = self._make_settings(TELEGRAM_ALLOWED_CHAT_IDS="-1003976706688")
         assert settings.TELEGRAM_ALLOWED_CHAT_IDS == [-1003976706688]  # type: ignore[union-attr]

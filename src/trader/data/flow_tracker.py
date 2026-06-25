@@ -131,3 +131,8 @@ class FlowTracker:
         cutoff = (now or datetime.now(tz=UTC)) - timedelta(seconds=self._window_s)
         while prints and prints[0].ts < cutoff:
             prints.popleft()
+
+    def remove_symbol(self, symbol: str) -> None:
+        sym = symbol.upper()
+        self._trades.pop(sym, None)
+        self._liquidations.pop(sym, None)
