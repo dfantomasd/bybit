@@ -51,8 +51,20 @@ def _proposal(
 ) -> TradeProposal | None:
     if current_price <= 0 or atr_pct <= 0:
         return None
+
+    # 1. Adjust tp_mult based on confidence (higher confidence = more aggressive TP)
+    confidence_adjustment = 1.0 + (confidence - 0.55) * 0.5
+    adjusted_tp_mult = tp_mult * confidence_adjustment
+
     sl_dist = max(atr_pct * sl_mult, 0.001)
-    tp_dist = max(atr_pct * tp_mult, sl_dist * 1.5)
+    tp_dist = max(atr_pct * adjusted_tp_mult, sl_dist * 1.5)
+
+    # 2. Ensure minimum R:R ratio (1.5x or better)
+    min_rr_ratio = 1.5
+    actual_rr_ratio = tp_dist / sl_dist
+    if actual_rr_ratio < min_rr_ratio:
+        tp_dist = sl_dist * min_rr_ratio
+
     if cost_params is not None and not passes_min_net_edge(
         tp_dist,
         cost_params,
@@ -60,10 +72,34 @@ def _proposal(
         spread_bps=spread_bps,
     ):
         return None
-    qty_usd = min(available_balance_usd * 0.005 / sl_dist, available_balance_usd * 0.20, 150.0)
+
+    # 3. Base position sizing (0.5% of portfolio per 1% stop loss)
+    qty_usd = available_balance_usd * 0.005 / sl_dist
+    qty_usd = min(qty_usd, available_balance_usd * 0.20, 150.0)
+
+    # 4. Edge-aware sizing: better edge = larger position (up to 20% more)
+    from trader.risk.net_edge import net_edge_pct as calc_net_edge_pct
+    try:
+        net_edge = calc_net_edge_pct(
+            tp_dist * 100,
+            taker_fee_pct=cost_params.taker_fee_pct if cost_params else 0.055,
+            spread_bps=spread_bps or 8.0,
+            expected_slippage_pct=cost_params.expected_slippage_pct if cost_params else 0.03,
+            funding_buffer_pct=cost_params.funding_buffer_pct if cost_params else 0.01,
+            safety_margin_pct=cost_params.safety_margin_pct if cost_params else 0.05,
+        )
+        if net_edge > 0.30:
+            qty_usd *= 1.15  # 15% more for excellent edge
+        elif net_edge > 0.25:
+            qty_usd *= 1.08  # 8% more for good edge
+        # else: standard sizing
+    except Exception:
+        pass  # Fall back to standard sizing
+
     if qty_usd < 5.0:
         return None
     qty = qty_usd / current_price
+
     if side == OrderSide.BUY:
         stop = current_price * (1 - sl_dist)
         take = current_price * (1 + tp_dist)
@@ -72,6 +108,7 @@ def _proposal(
         stop = current_price * (1 + sl_dist)
         take = current_price * (1 - tp_dist)
         regime = MarketRegime.BEAR_TREND
+
     return TradeProposal(
         proposal_id=uuid.uuid4(),
         strategy_id=strategy_id,
