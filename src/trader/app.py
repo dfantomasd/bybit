@@ -121,6 +121,17 @@ class TradingApplication:
         self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None
+        # ML unified controller and models
+        self._ml_controller: Any | None = None
+        self._ml_integrator: Any | None = None
+        self._kelly_predictor: Any | None = None
+        self._regime_predictor: Any | None = None
+        self._signal_fusion: Any | None = None
+        self._spread_predictor: Any | None = None
+        self._stoploss_optimizer: Any | None = None
+        self._entry_exit_optimizer: Any | None = None
+        self._kelly_scheduler: Any | None = None
+        self._kelly_trainer: Any | None = None
         self._performance_blocked_symbols: set[str] = set()
         self._closed_pnl_refreshed_at: datetime | None = None
         self._positions_managed_at: datetime | None = None

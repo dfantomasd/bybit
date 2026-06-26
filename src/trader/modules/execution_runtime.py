@@ -40,32 +40,56 @@ class ExecutionRuntimeModule(AppBoundModule):
         breakers = CircuitBreakerManager(risk_limits=limits)
         kill_switch = KillSwitch()
 
-        # Initialize ML Kelly predictor and adapter
+        # Initialize unified ML system with all 5 models
         try:
             from trader.ml.kelly_predictor import MLKellyPredictor
-            from trader.ml.kelly_scheduler import KellyTrainingScheduler
-            from trader.ml.kelly_training import KellyTrainer
+            from trader.ml.regime_predictor_enhanced import RegimePredictorEnhanced
+            from trader.ml.signal_fusion_enhanced import SignalFusionEnhanced
+            from trader.ml.spread_predictor_enhanced import SpreadPredictorEnhanced
+            from trader.ml.stoploss_optimizer_enhanced import StopLossOptimizerEnhanced
+            from trader.ml.entry_exit_optimizer_enhanced import EntryExitOptimizerEnhanced
+            from trader.ml.unified_controller import UnifiedMLController
 
+            # Initialize each model
             kelly_predictor = MLKellyPredictor()
-            kelly_trainer = KellyTrainer()
-            kelly_scheduler = KellyTrainingScheduler(
-                kelly_trainer=kelly_trainer,
+            regime_predictor = RegimePredictorEnhanced()
+            signal_fusion = SignalFusionEnhanced()
+            spread_predictor = SpreadPredictorEnhanced()
+            stoploss_optimizer = StopLossOptimizerEnhanced()
+            entry_exit_optimizer = EntryExitOptimizerEnhanced()
+
+            # Create unified controller
+            ml_controller = UnifiedMLController(
                 kelly_predictor=kelly_predictor,
-                min_trades_per_training=50,
-                min_hours_between_trainings=24,
+                regime_predictor=regime_predictor,
+                signal_fusion=signal_fusion,
+                spread_predictor=spread_predictor,
+                stoploss_optimizer=stoploss_optimizer,
+                entry_exit_optimizer=entry_exit_optimizer,
+                model_dir="/tmp/ml_models",
+                auto_save=True,
             )
+
+            # Try to load previously trained models
+            await ml_controller.load_models()
+
+            # Store in app
+            self._app._ml_controller = ml_controller
+            self._app._kelly_predictor = kelly_predictor
+            self._app._regime_predictor = regime_predictor
+            self._app._signal_fusion = signal_fusion
+            self._app._spread_predictor = spread_predictor
+            self._app._stoploss_optimizer = stoploss_optimizer
+            self._app._entry_exit_optimizer = entry_exit_optimizer
+
             kelly_adapter = KellyAdapter(ml_kelly_predictor=kelly_predictor)
 
-            self._app._kelly_predictor = kelly_predictor
-            self._app._kelly_trainer = kelly_trainer
-            self._app._kelly_scheduler = kelly_scheduler
-
-            log.info("kelly_predictor.initialized")
-        except ImportError as e:
-            log.warning(f"kelly_predictor.import_failed: {e}, using fallback")
+            log.info("ml_unified_controller.initialized")
+        except Exception as e:
+            log.warning(f"ml_unified_controller.import_failed: {e}, using fallback")
             kelly_adapter = KellyAdapter()
+            self._app._ml_controller = None
             self._app._kelly_predictor = None
-            self._app._kelly_scheduler = None
 
         self._app._risk_manager = RiskManager(
             risk_profile=profile,
@@ -193,6 +217,21 @@ class ExecutionRuntimeModule(AppBoundModule):
                 self._app._settings.SHADOW_MIN_ATR_MULTIPLE if shadow and not self._app._scalp_strict_shadow() else None
             ),
         )
+
+        # Initialize ML integration for ExecutionEngine
+        if self._app._ml_controller is not None:
+            try:
+                from trader.ml.execution_integration import ExecutionMLIntegrator
+
+                ml_integrator = ExecutionMLIntegrator(ml_controller=self._app._ml_controller)
+                self._app._ml_integrator = ml_integrator
+                self._app._execution_engine._ml_integrator = ml_integrator
+                log.info("ml_integration.enabled_in_execution_engine")
+            except Exception as e:
+                log.warning(f"ml_integration.setup_failed: {e}")
+                self._app._ml_integrator = None
+        else:
+            self._app._ml_integrator = None
 
         # P0.2: Restore unresolved pending entries from durable storage before any new entries.
         await self._app._restore_execution_pending_entries()
@@ -653,6 +692,33 @@ class ExecutionRuntimeModule(AppBoundModule):
                 )
             self._app._performance_blocked_symbols = blocked
             self._app._closed_pnl_refreshed_at = now
+
+            # Trigger ML model retraining on closed trades
+            if self._app._ml_controller is not None and self._app._ml_integrator is not None:
+                try:
+                    # Get recent trades for context
+                    recent_trades = await self._app._trade_journal.get_recent_closed_trades(limit=20)
+                    if recent_trades:
+                        # Build trade outcomes for ML
+                        for trade in recent_trades:
+                            trade_outcome = {
+                                "symbol": trade.get("symbol", ""),
+                                "pnl_usd": trade.get("pnl_usdt", 0),
+                                "pnl_bps": trade.get("net_bps", 0),
+                                "entry_price": trade.get("entry", 0),
+                                "exit_price": trade.get("exit", 0),
+                                "side": trade.get("side", "LONG"),
+                                "qty": trade.get("qty", 0),
+                            }
+                            # Record for ML training
+                            await self._app._ml_integrator.record_trade_outcome(
+                                trade_data=trade_outcome,
+                                recent_trades=recent_trades,
+                            )
+                        log.debug(f"ml_training.triggered_on_closed_trades: {len(recent_trades)}")
+                except Exception as ml_exc:
+                    log.debug(f"ml_training.trigger_failed: {str(ml_exc)}")
+
         except Exception as exc:
             log.debug("performance_filter.refresh_failed", error=str(exc))
 
