@@ -168,13 +168,32 @@ class MeanReversionStrategy(BaseStrategy):
         vol_z = f.get("volume_zscore")
 
         if feature_vector.quality_score < 0.6 or rsi is None or atr_pct is None:
+            log.debug(
+                "mean_reversion.rejected_low_quality",
+                symbol=feature_vector.symbol,
+                quality=feature_vector.quality_score,
+                rsi_available=rsi is not None,
+                atr_available=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _MR_ATR_MIN or atr_pct > _MR_ATR_MAX:
+            log.debug(
+                "mean_reversion.rejected_atr_out_of_bounds",
+                symbol=feature_vector.symbol,
+                atr_pct=round(atr_pct, 4),
+                min_atr=_MR_ATR_MIN,
+                max_atr=_MR_ATR_MAX,
+            )
             return None
 
         # Volume should be normal or above (not dead market)
         if vol_z is not None and vol_z < -1.5:
+            log.debug(
+                "mean_reversion.rejected_low_volume",
+                symbol=feature_vector.symbol,
+                volume_zscore=round(vol_z, 2),
+            )
             return None
 
         if rsi < _MR_RSI_BUY:
@@ -260,12 +279,32 @@ class MACDZeroCrossStrategy(BaseStrategy):
         adx = f.get("adx_14")
 
         if feature_vector.quality_score < 0.6 or macd_hist is None or atr_pct is None:
+            log.debug(
+                "macd_zerocross.rejected_low_quality",
+                symbol=symbol,
+                quality=feature_vector.quality_score,
+                macd_available=macd_hist is not None,
+                atr_available=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _MC_ATR_MIN or atr_pct > _MC_ATR_MAX:
+            log.debug(
+                "macd_zerocross.rejected_atr_out_of_bounds",
+                symbol=symbol,
+                atr_pct=round(atr_pct, 4),
+                min_atr=_MC_ATR_MIN,
+                max_atr=_MC_ATR_MAX,
+            )
             return None
 
         if adx is not None and adx < _MC_ADX_MIN:
+            log.debug(
+                "macd_zerocross.rejected_low_adx",
+                symbol=symbol,
+                adx=round(adx, 3),
+                min_adx=_MC_ADX_MIN,
+            )
             return None
 
         # Check rate limiting
@@ -368,15 +407,41 @@ class ATRBreakoutStrategy(BaseStrategy):
         log_return = f.get("log_return_1", 0.0) or 0.0
 
         if feature_vector.quality_score < 0.6 or atr_pct is None:
+            log.debug(
+                "atr_breakout.rejected_low_quality",
+                symbol=symbol,
+                quality=feature_vector.quality_score,
+                atr_available=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _AB_ATR_MIN or atr_pct > _AB_ATR_MAX:
+            log.debug(
+                "atr_breakout.rejected_atr_out_of_bounds",
+                symbol=symbol,
+                atr_pct=round(atr_pct, 4),
+                min_atr=_AB_ATR_MIN,
+                max_atr=_AB_ATR_MAX,
+            )
             return None
 
         if vol_z is None or vol_z < _AB_VOLUME_MIN:
+            log.debug(
+                "atr_breakout.rejected_low_volume",
+                symbol=symbol,
+                volume_zscore=round(vol_z, 2) if vol_z else None,
+                min_volume_zscore=_AB_VOLUME_MIN,
+            )
             return None
 
         if adx is not None and adx > _AB_ADX_MAX:
+            log.debug(
+                "atr_breakout.rejected_adx_too_high",
+                symbol=symbol,
+                adx=round(adx, 3),
+                max_adx=_AB_ADX_MAX,
+                reason="trend_too_established",
+            )
             return None
 
         last = self._last_signal_at.get(symbol)
@@ -385,6 +450,12 @@ class ATRBreakoutStrategy(BaseStrategy):
             if symbol not in self._price_history:
                 self._price_history[symbol] = deque(maxlen=self._lookback)
             self._price_history[symbol].append(current_price)
+            log.debug(
+                "atr_breakout.rejected_cooldown",
+                symbol=symbol,
+                seconds_since_last=round((datetime.now(UTC) - last).total_seconds(), 1),
+                cooldown_seconds=_AB_COOLDOWN_SECONDS,
+            )
             return None
 
         # Track price history
@@ -394,6 +465,13 @@ class ATRBreakoutStrategy(BaseStrategy):
         # Need history to detect breakout
         if len(self._price_history[symbol]) < 5:
             self._price_history[symbol].append(current_price)
+            log.debug(
+                "atr_breakout.rejected_warmup",
+                symbol=symbol,
+                history_bars=len(self._price_history[symbol]),
+                required_bars=5,
+                reason="accumulating_price_history",
+            )
             return None
 
         prices = list(self._price_history[symbol])

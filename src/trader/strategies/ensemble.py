@@ -120,11 +120,17 @@ class StrategyEnsemble:
             buy_priority = max(self._priority(p, priorities) for p in buys)
             sell_priority = max(self._priority(p, priorities) for p in sells)
             if buy_priority == sell_priority:
-                log.info(
+                log.warning(
                     "ensemble.conflict_blocked_equal_priority",
                     symbol=feature_vector.symbol,
-                    buy_strategies=[p.strategy_id for p in buys],
-                    sell_strategies=[p.strategy_id for p in sells],
+                    buy_count=len(buys),
+                    sell_count=len(sells),
+                    buy_strategies_with_confidence=[
+                        f"{p.strategy_id}:{round(p.confidence, 3)}" for p in buys
+                    ],
+                    sell_strategies_with_confidence=[
+                        f"{p.strategy_id}:{round(p.confidence, 3)}" for p in sells
+                    ],
                     priority=buy_priority,
                 )
                 return None
@@ -136,7 +142,10 @@ class StrategyEnsemble:
                 selected_side=agreed[0].side.value,
                 selected_priority=max(self._priority(p, priorities) for p in agreed),
                 selected_strategies=[p.strategy_id for p in agreed],
+                selected_confidence=[round(p.confidence, 3) for p in agreed],
                 suppressed_strategies=[p.strategy_id for p in suppressed],
+                suppressed_confidence=[round(p.confidence, 3) for p in suppressed],
+                suppressed_count=len(suppressed),
             )
         else:
             agreed = buys if buys else sells

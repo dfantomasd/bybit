@@ -369,7 +369,7 @@ class TradingLoopModule(AppBoundModule):
                         min_spread_bps=self._app._settings.MARKET_MAKING_MIN_SPREAD_BPS,
                         max_spread_bps=self._app._settings.MARKET_MAKING_MAX_SPREAD_BPS,
                         cost_params=alpha_cost_params,
-                        min_net_return_pct=alpha_min_net,
+                        min_net_return_pct=self._app._settings.MIN_NET_MARKET_MAKING_PCT,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="market_making_v1")
@@ -380,7 +380,7 @@ class TradingLoopModule(AppBoundModule):
                     StatisticalArbitrageStrategy(
                         min_zscore=self._app._settings.STAT_ARB_MIN_ZSCORE,
                         cost_params=alpha_cost_params,
-                        min_net_return_pct=alpha_min_net,
+                        min_net_return_pct=self._app._settings.MIN_NET_STAT_ARB_PCT,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="statistical_arbitrage_v1")
