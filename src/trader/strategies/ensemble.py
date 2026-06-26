@@ -16,8 +16,9 @@ from typing import Any
 
 import structlog
 
-from trader.domain.models import FeatureVector, TradeProposal
+from trader.domain.models import FeatureVector, RegimeContext, TradeProposal
 from trader.strategies.base import BaseStrategy
+from trader.strategies.regime_adapter import RegimeAwarePrioritizer
 
 log = structlog.get_logger(__name__)
 
@@ -52,16 +53,35 @@ class StrategyEnsemble:
         self._confirmation_sources = confirmation_sources or set()
         self._min_confirmation_sources = max(1, int(min_confirmation_sources))
 
-    def _priority(self, proposal: TradeProposal) -> int:
-        return self._strategy_priorities.get(proposal.strategy_id, 0)
+    def _priority(self, proposal: TradeProposal, priorities: dict[str, int] | None = None) -> int:
+        p = priorities or self._strategy_priorities
+        return p.get(proposal.strategy_id, 0)
 
     def evaluate_all(
         self,
         feature_vector: FeatureVector,
         current_price: float,
         available_balance_usd: float,
+        regime_ctx: RegimeContext | None = None,
     ) -> TradeProposal | None:
-        """Run all strategies and return the best-combined proposal, or None."""
+        """Run all strategies and return the best-combined proposal, or None.
+
+        Args:
+            feature_vector: Current price/technical features
+            current_price: Current market price
+            available_balance_usd: Available capital for position sizing
+            regime_ctx: Current market regime (optional, for adaptive prioritization)
+        """
+        # Adjust priorities based on current market regime
+        priorities = self._strategy_priorities
+        regime_adapted = False
+        if regime_ctx is not None:
+            priorities = RegimeAwarePrioritizer.compute_priorities(
+                regime_ctx=regime_ctx,
+                base_priorities=self._strategy_priorities,
+            )
+            regime_adapted = priorities != self._strategy_priorities
+
         proposals: list[TradeProposal] = []
 
         for strategy in self._strategies:
@@ -97,8 +117,8 @@ class StrategyEnsemble:
         sells = [p for p in proposals if p.side == OrderSide.SELL]
 
         if buys and sells:
-            buy_priority = max(self._priority(p) for p in buys)
-            sell_priority = max(self._priority(p) for p in sells)
+            buy_priority = max(self._priority(p, priorities) for p in buys)
+            sell_priority = max(self._priority(p, priorities) for p in sells)
             if buy_priority == sell_priority:
                 log.info(
                     "ensemble.conflict_blocked_equal_priority",
@@ -114,7 +134,7 @@ class StrategyEnsemble:
                 "ensemble.conflict_resolved_by_priority",
                 symbol=feature_vector.symbol,
                 selected_side=agreed[0].side.value,
-                selected_priority=max(self._priority(p) for p in agreed),
+                selected_priority=max(self._priority(p, priorities) for p in agreed),
                 selected_strategies=[p.strategy_id for p in agreed],
                 suppressed_strategies=[p.strategy_id for p in suppressed],
             )
@@ -122,7 +142,7 @@ class StrategyEnsemble:
             agreed = buys if buys else sells
 
         # Pick highest-confidence proposal and boost by agreement
-        best = max(agreed, key=lambda p: (self._priority(p), p.confidence))
+        best = max(agreed, key=lambda p: (self._priority(p, priorities), p.confidence))
         if best.strategy_id in self._confirmation_required_for:
             confirming_sources = {
                 proposal.strategy_id
@@ -142,8 +162,17 @@ class StrategyEnsemble:
 
         agreement_bonus = self._agree_bonus * (len(agreed) - 1)
 
+        # Apply regime-aware confidence adjustments
+        alignment_multiplier = RegimeAwarePrioritizer.confidence_adjustment_for_alignment(
+            proposal_side=best.side.value,
+            regime_ctx=regime_ctx,
+        )
+
         # Rebuild with updated confidence (frozen model, need model_copy)
         new_conf = min(best.confidence + agreement_bonus, 0.95)
+        if alignment_multiplier != 1.0:
+            new_conf = min(new_conf * alignment_multiplier, 0.95)
+
         if new_conf < self._min_confidence:
             log.info(
                 "ensemble.proposal_below_min_confidence",
@@ -164,6 +193,10 @@ class StrategyEnsemble:
             confidence=round(new_conf, 3),
             strategy_count=len(agreed),
             strategy_id=best.strategy_id,
-            priority=self._priority(best),
+            priority=self._priority(best, priorities),
+            regime=regime_ctx.regime.value if regime_ctx else "unknown",
+            regime_confidence=round(regime_ctx.confidence, 3) if regime_ctx else None,
+            alignment_multiplier=round(alignment_multiplier, 3),
+            regime_adapted_priorities=regime_adapted,
         )
         return best

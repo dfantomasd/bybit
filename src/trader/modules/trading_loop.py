@@ -14,6 +14,7 @@ from trader.domain.enums import TradingMode
 from trader.domain.models import FeatureVector
 from trader.modules.base import AppBoundModule
 from trader.monitoring.logging import get_logger
+from trader.strategies.regime_adapter import RegimeAwarePrioritizer
 from trader.runtime.constants import (
     _BALANCE_REFRESH_INTERVAL,
     _FALLBACK_BALANCE_USD,
@@ -556,6 +557,7 @@ class TradingLoopModule(AppBoundModule):
                     feature_vector=vec,
                     current_price=current_price,
                     available_balance_usd=float(balance),
+                    regime_ctx=regime_ctx,
                 )
             except Exception as exc:
                 log.warning("strategy_loop.ensemble_error", symbol=symbol, error=str(exc))
@@ -783,7 +785,13 @@ class TradingLoopModule(AppBoundModule):
             # --- Champion Canary gate: independent of shadow scoring ---
             # score_live() returns None when no compatible directional_net Champion exists.
             # In active execution, an enabled gate must fail closed.
-            if settings.MODEL_GATE_CANARY_ENABLED and self._app._model_registry is not None:
+            # Regime-aware gating: disable LOGREG in SIDEWAYS/VOLATILE where it performs poorly
+            ml_gate_enabled = (
+                settings.MODEL_GATE_CANARY_ENABLED
+                and RegimeAwarePrioritizer.should_apply_ml_gate(regime_ctx)
+                and self._app._model_registry is not None
+            )
+            if ml_gate_enabled:
                 if not self._app._initial_shadow_mode() and not snapshot_id:
                     self._app._record_diag("model_gate_canary_blocked")
                     log.warning(
