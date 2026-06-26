@@ -168,13 +168,35 @@ class MeanReversionStrategy(BaseStrategy):
         vol_z = f.get("volume_zscore")
 
         if feature_vector.quality_score < 0.6 or rsi is None or atr_pct is None:
+            log.debug(
+                "basic.rejected_low_quality",
+                strategy_id=self.strategy_id,
+                symbol=feature_vector.symbol,
+                quality_score=feature_vector.quality_score,
+                has_rsi=rsi is not None,
+                has_atr=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _MR_ATR_MIN or atr_pct > _MR_ATR_MAX:
+            log.debug(
+                "basic.rejected_atr_out_of_bounds",
+                strategy_id=self.strategy_id,
+                symbol=feature_vector.symbol,
+                atr_pct=atr_pct,
+                min_atr=_MR_ATR_MIN,
+                max_atr=_MR_ATR_MAX,
+            )
             return None
 
         # Volume should be normal or above (not dead market)
         if vol_z is not None and vol_z < -1.5:
+            log.debug(
+                "basic.rejected_low_volume",
+                strategy_id=self.strategy_id,
+                symbol=feature_vector.symbol,
+                volume_zscore=vol_z,
+            )
             return None
 
         if rsi < _MR_RSI_BUY:
@@ -260,12 +282,35 @@ class MACDZeroCrossStrategy(BaseStrategy):
         adx = f.get("adx_14")
 
         if feature_vector.quality_score < 0.6 or macd_hist is None or atr_pct is None:
+            log.debug(
+                "basic.rejected_low_quality",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                quality_score=feature_vector.quality_score,
+                has_macd_hist=macd_hist is not None,
+                has_atr=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _MC_ATR_MIN or atr_pct > _MC_ATR_MAX:
+            log.debug(
+                "basic.rejected_atr_out_of_bounds",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                atr_pct=atr_pct,
+                min_atr=_MC_ATR_MIN,
+                max_atr=_MC_ATR_MAX,
+            )
             return None
 
         if adx is not None and adx < _MC_ADX_MIN:
+            log.debug(
+                "basic.rejected_low_adx",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                adx=adx,
+                min_adx=_MC_ADX_MIN,
+            )
             return None
 
         # Check rate limiting
@@ -368,19 +413,54 @@ class ATRBreakoutStrategy(BaseStrategy):
         log_return = f.get("log_return_1", 0.0) or 0.0
 
         if feature_vector.quality_score < 0.6 or atr_pct is None:
+            log.debug(
+                "basic.rejected_low_quality",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                quality_score=feature_vector.quality_score,
+                has_atr=atr_pct is not None,
+            )
             return None
 
         if atr_pct < _AB_ATR_MIN or atr_pct > _AB_ATR_MAX:
+            log.debug(
+                "basic.rejected_atr_out_of_bounds",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                atr_pct=atr_pct,
+                min_atr=_AB_ATR_MIN,
+                max_atr=_AB_ATR_MAX,
+            )
             return None
 
         if vol_z is None or vol_z < _AB_VOLUME_MIN:
+            log.debug(
+                "basic.rejected_low_volume",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                volume_zscore=vol_z,
+                min_volume=_AB_VOLUME_MIN,
+            )
             return None
 
         if adx is not None and adx > _AB_ADX_MAX:
+            log.debug(
+                "basic.rejected_adx_too_high",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                adx=adx,
+                max_adx=_AB_ADX_MAX,
+            )
             return None
 
         last = self._last_signal_at.get(symbol)
         if last is not None and (datetime.now(UTC) - last).total_seconds() < _AB_COOLDOWN_SECONDS:
+            log.debug(
+                "basic.rejected_cooldown",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                cooldown_seconds=_AB_COOLDOWN_SECONDS,
+            )
             # Still append to history even if rate-limited
             if symbol not in self._price_history:
                 self._price_history[symbol] = deque(maxlen=self._lookback)
@@ -393,6 +473,13 @@ class ATRBreakoutStrategy(BaseStrategy):
 
         # Need history to detect breakout
         if len(self._price_history[symbol]) < 5:
+            log.debug(
+                "basic.rejected_warmup",
+                strategy_id=self.strategy_id,
+                symbol=symbol,
+                history_bars=len(self._price_history[symbol]),
+                needed_bars=5,
+            )
             self._price_history[symbol].append(current_price)
             return None
 

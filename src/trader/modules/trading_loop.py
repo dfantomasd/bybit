@@ -368,7 +368,7 @@ class TradingLoopModule(AppBoundModule):
                         min_spread_bps=self._app._settings.MARKET_MAKING_MIN_SPREAD_BPS,
                         max_spread_bps=self._app._settings.MARKET_MAKING_MAX_SPREAD_BPS,
                         cost_params=alpha_cost_params,
-                        min_net_return_pct=alpha_min_net,
+                        min_net_return_pct=self._app._settings.MIN_NET_MARKET_MAKING_PCT,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="market_making_v1")
@@ -379,7 +379,7 @@ class TradingLoopModule(AppBoundModule):
                     StatisticalArbitrageStrategy(
                         min_zscore=self._app._settings.STAT_ARB_MIN_ZSCORE,
                         cost_params=alpha_cost_params,
-                        min_net_return_pct=alpha_min_net,
+                        min_net_return_pct=self._app._settings.MIN_NET_STAT_ARB_PCT,
                     )
                 )
                 log.info("advanced_alpha.strategy_active", strategy_id="statistical_arbitrage_v1")
@@ -391,11 +391,31 @@ class TradingLoopModule(AppBoundModule):
                 priority_order=priority_order,
             )
 
+        # Configure confluence signals: allow basic strategies to pass alone,
+        # but commodity strategies (ema_crossover) require confirmation
+        basic_strategy_ids = {"mean_reversion_v1", "macd_zerocross_v1", "atr_breakout_v1"}
+        confirmation_required_for = {"ema_crossover_v1", "scalp_micro_v1"}
+        confirmation_sources = basic_strategy_ids | {
+            "funding_arbitrage_v1",
+            "volatility_squeeze_v1",
+            "order_flow_v1",
+            "liquidation_hunting_v1",
+        }
+
         self._app._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
             health_checker=self._app._health_checker,
             min_confidence=profile_cfg.min_confidence,
             strategy_priorities=strategy_priorities,
+            confirmation_required_for=confirmation_required_for,
+            confirmation_sources=confirmation_sources,
+            min_confirmation_sources=1,
+        )
+        log.info(
+            "ensemble.configured",
+            strategies=[s.strategy_id for s in strategies],
+            confirmation_required_for=confirmation_required_for,
+            confirmation_sources=confirmation_sources,
         )
         await self._app._refresh_closed_pnl_memory()
 
@@ -530,6 +550,7 @@ class TradingLoopModule(AppBoundModule):
                     feature_vector=vec,
                     current_price=current_price,
                     available_balance_usd=float(balance),
+                    regime_ctx=regime_ctx,
                 )
             except Exception as exc:
                 log.warning("strategy_loop.ensemble_error", symbol=symbol, error=str(exc))
