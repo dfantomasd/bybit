@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     This version switch is intentionally separate from the older per-setting
     Render variables so a deploy cannot silently retain a stale probe policy.
     """
+    SHADOW_PROBE_PAPER_COLLECTION_MODE: bool = True
+    """Widen probe regimes in SHADOW so ML labels accumulate (no live orders)."""
+    SHADOW_PROBE_PAPER_REGIMES: str = "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN"
+    """Regimes allowed for shadow_probe_hv_v2 when paper collection mode is on."""
     SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
     SHADOW_PROBE_COOLDOWN_SECONDS: int = 180
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
@@ -758,11 +762,15 @@ class Settings(BaseSettings):
 
     def _apply_starter_memory_caps(self) -> None:
         """Clamp resource-heavy settings to Starter-safe ceilings."""
+        ob_ceiling = 4
+        if self.SHADOW_PROBE_PAPER_COLLECTION_MODE:
+            ob_ceiling = min(6, max(4, int(self.SCREENER_EXECUTION_CANDIDATES)))
+
         ceilings: dict[str, int | float] = {
             "SCREENER_WIDE_MAX_SYMBOLS": 15,
             "SCREENER_FEATURE_MAX_SYMBOLS": 8,
             "SCREENER_EXECUTION_CANDIDATES": 6,
-            "MAX_ORDERBOOK_ACTIVE_SYMBOLS": 4,
+            "MAX_ORDERBOOK_ACTIVE_SYMBOLS": ob_ceiling,
             "CANDLE_STORE_MAX_BARS_1M": 150,
             "CANDLE_STORE_MAX_BARS_5M": 150,
             "CANDLE_STORE_MAX_BARS_15M": 120,
@@ -802,6 +810,10 @@ class Settings(BaseSettings):
             self.SCREENER_MAX_PRICE_USD = 25.0
         if self.STARTER_OPTIMIZED_MODE:
             self._apply_starter_memory_caps()
+        if self.STARTER_OPTIMIZED_MODE and self.SHADOW_PROBE_PAPER_COLLECTION_MODE:
+            min_ob = min(6, max(4, int(self.SCREENER_EXECUTION_CANDIDATES)))
+            if self.MAX_ORDERBOOK_ACTIVE_SYMBOLS < min_ob:
+                self.MAX_ORDERBOOK_ACTIVE_SYMBOLS = min_ob
 
         # TESTNET mode must use testnet endpoints to avoid spending real money.
         # SHADOW mode is safe with mainnet endpoints because orders are never

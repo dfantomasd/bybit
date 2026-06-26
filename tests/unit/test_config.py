@@ -230,6 +230,18 @@ class TestSettingsSafetyGates:
         assert settings.TRAIN_STRATEGY_ALLOWLIST == "custom_v1"  # type: ignore[union-attr]
         assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is True  # type: ignore[union-attr]
 
+    def test_paper_collection_raises_orderbook_ceiling_on_starter(self) -> None:
+        settings = self._make_settings(
+            TRADING_MODE="SHADOW",
+            BYBIT_USE_TESTNET="false",
+            STARTER_OPTIMIZED_MODE="true",
+            SHADOW_PROBE_PAPER_COLLECTION_MODE="true",
+            SCREENER_EXECUTION_CANDIDATES="6",
+            MAX_ORDERBOOK_ACTIVE_SYMBOLS="4",
+        )
+
+        assert settings.MAX_ORDERBOOK_ACTIVE_SYMBOLS == 6  # type: ignore[union-attr]
+
     def test_live_trading_mode_allowed_when_live_mode_true(self) -> None:
         """LIVE mode is permitted only when LIVE_MODE=true and LIVE_ARMED=true are set."""
         settings = self._make_settings(

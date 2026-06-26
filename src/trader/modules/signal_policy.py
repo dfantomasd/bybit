@@ -432,7 +432,17 @@ class SignalPolicyModule(AppBoundModule):
 
         assert self._app._settings is not None
         if bool(getattr(self._app._settings, "SHADOW_PROBE_RESEARCH_PROFILE_V2", False)):
-            allowed = {"HIGH_VOLATILITY"}
+            if bool(getattr(self._app._settings, "SHADOW_PROBE_PAPER_COLLECTION_MODE", False)):
+                allowed = {
+                    part.strip()
+                    for part in str(
+                        getattr(self._app._settings, "SHADOW_PROBE_PAPER_REGIMES", "")
+                        or "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN"
+                    ).split(",")
+                    if part.strip()
+                }
+            else:
+                allowed = {"HIGH_VOLATILITY"}
         else:
             allowed = {
                 part.strip()
