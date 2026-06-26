@@ -389,6 +389,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 pe.prediction_id,
                 pe.symbol,
                 pe.strategy_signal,
+                pe.decision,
+                pe.order_link_id,
                 fs.candle_open_time AS entry_time,
                 fs.feature_names,
                 fs.feature_values
@@ -424,6 +426,26 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             symbol = str(row["symbol"])
             side = str(row["strategy_signal"])
             entry_time = row["entry_time"]
+            decision = row.get("decision")
+
+            # For GATE_PASS signals, verify the order was actually filled before creating label.
+            # GATE_BLOCK and SHADOW_BASELINE signals can use counterfactual outcomes for training.
+            # Note: order_link_id must be populated by execution_engine for this check to work.
+            if decision == "GATE_PASS":
+                order_link_id = row.get("order_link_id")
+                if order_link_id:
+                    filled_check = await self._fetch(
+                        """
+                        SELECT 1
+                        FROM order_events
+                        WHERE order_link_id = $1
+                          AND status IN ('FILLED', 'PARTIALLY_FILLED')
+                        LIMIT 1
+                        """,
+                        order_link_id,
+                    )
+                    if not filled_check:
+                        continue
 
             entry_rows = await self._fetch(
                 """
