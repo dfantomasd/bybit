@@ -534,16 +534,20 @@ class TradeJournal:
                 score double precision NOT NULL,
                 strategy_signal text,
                 decision text,
-                metadata jsonb
+                metadata jsonb,
+                order_link_id text
             );
             ALTER TABLE prediction_events
-                ADD COLUMN IF NOT EXISTS metadata jsonb;
+                ADD COLUMN IF NOT EXISTS metadata jsonb,
+                ADD COLUMN IF NOT EXISTS order_link_id text;
             CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
                 ON prediction_events (symbol, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_prediction_events_model_time
                 ON prediction_events (model_version, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_prediction_events_model_decision_time
                 ON prediction_events (model_version, decision, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_prediction_events_order_link_id
+                ON prediction_events (order_link_id) WHERE order_link_id IS NOT NULL;
 
             -- Outcome labels for training (resolved after horizon_minutes)
             CREATE TABLE IF NOT EXISTS prediction_outcomes (
@@ -2132,15 +2136,16 @@ class TradeJournal:
         decision: str | None = None,
         feature_snapshot_id: str | None = None,
         metadata: dict[str, Any] | None = None,
+        order_link_id: str | None = None,
     ) -> str:
         """Write a shadow-mode prediction event; return prediction_id."""
         rows = await self._fetch(
             """
             INSERT INTO prediction_events (
                 symbol, interval, model_version, feature_snapshot_id,
-                score, strategy_signal, decision, metadata
+                score, strategy_signal, decision, metadata, order_link_id
             )
-            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8::jsonb)
+            VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8::jsonb, $9)
             RETURNING prediction_id
             """,
             symbol,
@@ -2151,8 +2156,22 @@ class TradeJournal:
             strategy_signal,
             decision,
             json.dumps(metadata or {}),
+            order_link_id,
         )
         return str(rows[0]["prediction_id"]) if rows else ""
+
+    async def link_prediction_to_order(self, prediction_id: str, order_link_id: str) -> None:
+        """Link an existing prediction_event to its executed order."""
+        await self._execute(
+            """
+            UPDATE prediction_events
+            SET order_link_id = $1
+            WHERE prediction_id = $2::uuid
+              AND order_link_id IS NULL
+            """,
+            order_link_id,
+            prediction_id,
+        )
 
     async def resolve_prediction_outcomes(
         self,
