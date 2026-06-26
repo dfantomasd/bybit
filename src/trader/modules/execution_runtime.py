@@ -24,6 +24,7 @@ class ExecutionRuntimeModule(AppBoundModule):
         from trader.risk.drawdown import DrawdownTracker
         from trader.risk.exposure import ExposureTracker
         from trader.risk.kill_switch import KillSwitch
+        from trader.risk.kelly_adapter import KellyAdapter
         from trader.risk.manager import RiskManager
         from trader.risk.profiles import get_risk_limits
 
@@ -39,6 +40,33 @@ class ExecutionRuntimeModule(AppBoundModule):
         breakers = CircuitBreakerManager(risk_limits=limits)
         kill_switch = KillSwitch()
 
+        # Initialize ML Kelly predictor and adapter
+        try:
+            from trader.ml.kelly_predictor import MLKellyPredictor
+            from trader.ml.kelly_scheduler import KellyTrainingScheduler
+            from trader.ml.kelly_training import KellyTrainer
+
+            kelly_predictor = MLKellyPredictor()
+            kelly_trainer = KellyTrainer()
+            kelly_scheduler = KellyTrainingScheduler(
+                kelly_trainer=kelly_trainer,
+                kelly_predictor=kelly_predictor,
+                min_trades_per_training=50,
+                min_hours_between_trainings=24,
+            )
+            kelly_adapter = KellyAdapter(ml_kelly_predictor=kelly_predictor)
+
+            self._app._kelly_predictor = kelly_predictor
+            self._app._kelly_trainer = kelly_trainer
+            self._app._kelly_scheduler = kelly_scheduler
+
+            log.info("kelly_predictor.initialized")
+        except ImportError as e:
+            log.warning(f"kelly_predictor.import_failed: {e}, using fallback")
+            kelly_adapter = KellyAdapter()
+            self._app._kelly_predictor = None
+            self._app._kelly_scheduler = None
+
         self._app._risk_manager = RiskManager(
             risk_profile=profile,
             drawdown_tracker=drawdown,
@@ -50,6 +78,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                 and self._app._settings.TRADING_MODE in (TradingMode.LIVE, TradingMode.CANARY_LIVE)
             ),
             max_correlated_positions=int(self._app._settings.MAX_CORRELATED_POSITIONS),
+            kelly_adapter=kelly_adapter,
         )
         self._app._kill_switch = kill_switch
         log.info(
