@@ -36,6 +36,7 @@ from trader.risk.circuit_breakers import CircuitBreakerManager
 from trader.risk.drawdown import DrawdownTracker
 from trader.risk.exposure import ExposureTracker
 from trader.risk.kill_switch import KillSwitch
+from trader.risk.kelly_adapter import KellyAdapter, KellyAdapterContext
 from trader.risk.profiles import RiskLimits, get_risk_limits
 from trader.risk.sizing import PositionSizer
 
@@ -121,6 +122,7 @@ class RiskManager:
         min_notional_safety_buffer_pct: float = 3.0,
         require_liquidity_for_sizing: bool = False,
         max_correlated_positions: int = 0,
+        kelly_adapter: KellyAdapter | None = None,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -134,6 +136,7 @@ class RiskManager:
         self._require_liquidity_for_sizing = require_liquidity_for_sizing
         self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
         self._max_correlated_positions = max(0, int(max_correlated_positions))
+        self._kelly_adapter = kelly_adapter or KellyAdapter()
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -354,7 +357,27 @@ class RiskManager:
         # ----------------------------------------------------------------
         # 11. Calculate position size
         # ----------------------------------------------------------------
-        desired_risk_pct = self._limits.risk_per_trade_max_pct
+        # Use ML-based Kelly sizing via adapter; fallback to profile limits
+        kelly_fraction, fractional_kelly, kelly_reasoning = await self._kelly_adapter.predict_kelly_sizing(
+            context=KellyAdapterContext(
+                recent_trades=[],  # Would be populated from trade history if available
+                current_price=proposal.entry_price or Decimal("1"),
+                recent_returns_bps=[],  # Would be populated from recent trades
+                all_returns_bps=[],  # Would be populated from trade history
+                volatility_regime=0,  # Would be set from regime_context
+                current_drawdown_pct=float(drawdown_pct),
+                max_drawdown_pct=float(self._drawdown.max_drawdown_pct),
+                strategy_id=getattr(proposal, "strategy_id", "unknown"),
+                symbol=proposal.symbol,
+                total_trades=self._exposure.position_count,
+            )
+        )
+        # Convert Kelly fraction (0.01-0.25) to risk percentage (clamped to profile range)
+        desired_risk_pct = min(
+            kelly_fraction * Decimal("100"),
+            self._limits.risk_per_trade_max_pct,
+        )
+
         data_quality_score = 1.0
         event_risk_score = 0.0
 
