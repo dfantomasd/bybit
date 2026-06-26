@@ -27,6 +27,9 @@ class FeatureExtractor:
         current_volatility: float = 1.5,
         hour_of_day: int = 12,
         day_of_week: int = 0,
+        days_since_start: int = 1,
+        strategy_id: str = "default",
+        symbol: str = "BTCUSDT",
     ) -> Any:
         """Извлечь KellyPredictorFeatures для Kelly predictor.
 
@@ -61,6 +64,16 @@ class FeatureExtractor:
 
             current_dd, max_dd = self._calculate_drawdown(returns)
 
+            # Determine volatility_regime from current_volatility
+            if current_volatility < 0.5:
+                volatility_regime = 0  # low
+            elif current_volatility < 1.0:
+                volatility_regime = 1  # moderate
+            elif current_volatility < 2.0:
+                volatility_regime = 2  # high
+            else:
+                volatility_regime = 3  # extreme
+
             return KellyPredictorFeatures(
                 recent_win_rate=float(win_rate),
                 recent_avg_win_bps=float(avg_win),
@@ -75,6 +88,13 @@ class FeatureExtractor:
                 max_drawdown_pct=float(max_dd),
                 drawdown_severity=self._get_drawdown_severity(current_dd),
                 in_drawdown=current_dd < 0,
+                volatility_regime=volatility_regime,
+                hour_of_day=hour_of_day,
+                day_of_week=day_of_week,
+                days_since_start=days_since_start,
+                strategy_id=strategy_id,
+                symbol=symbol,
+                total_trades=len(recent_trades),
             )
         except Exception as e:
             logger.error(f"extract_kelly_features failed: {e}")

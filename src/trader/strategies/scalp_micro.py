@@ -1,25 +1,26 @@
-"""Micro-scalping strategy with hard cost control.
-
-Designed for high-frequency small-edge entries where fees, spread and slippage
-dominate. Every signal must clear an explicit net-edge check: expected move
-minus round-trip taker fees, spread and slippage must exceed
-``min_net_return_pct`` or the signal is dropped.
+"""VWAP-Pullback micro-strategy with orderbook and multi-EMA confirmation.
 
 Entry logic
 -----------
-BUY:
-  - EMA9 crosses above EMA21 on the last confirmed bar (fresh cross only)
-  - RSI14 < 70 (not overbought)
-  - Volume impulse: last volume > 1.5 x SMA(volume, 20)
-  - Spread <= max_spread_bps (default 3 bps)
-  - Price bouncing from the low of the last 5 candles
-  - ADX14 >= 20 (no flat market)
+BUY (long scalp):
+  - ewma_tier_signal > threshold  → EMAs stacked bullishly
+  - vwap_distance_pct in [-0.6, +0.2]  → price pulled back near VWAP, not free-falling
+  - ob_imbalance_l5 > threshold  → buyers visible in L5 order book
+  - macd_hist > 0  → momentum positive / recovering
+  - rsi_14 in [0.32, 0.67]  → not overbought/oversold
+  - adx_14 > threshold  → detectable trend (not pure noise)
+  - volume_zscore > -1.2  → not a dead market
 SELL: mirrored.
 
-Exits (fixed, no trailing)
---------------------------
-  TP = entry +/- ATR(14) * 1.0
-  SL = entry -/+ ATR(14) * 0.5   (reward:risk ~= 2:1)
+Economic basis: VWAP acts as an intraday anchor. When price pulls back toward
+VWAP in the direction of the EMA stack with buy-side book pressure and
+recovering MACD momentum, there is a measurable edge in the direction of
+continuation after the pullback completes.
+
+Exits
+-----
+  TP = entry +/- ATR(14) * 1.6   (reward:risk ~= 2.46)
+  SL = entry -/+ ATR(14) * 0.65
 
 Rate limits
 -----------
@@ -41,27 +42,32 @@ import structlog
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide
 from trader.domain.models import FeatureVector, TradeProposal
-from trader.features.technical import ema
 from trader.strategies.base import BaseStrategy
 
 log = structlog.get_logger(__name__)
 
 _STRATEGY_ID = "scalp_micro_v1"
 
-_EMA_FAST = 9
-_EMA_SLOW = 21
-_RSI_OVERBOUGHT = 0.70  # rsi_14 feature is normalised to [0, 1]
-_RSI_OVERSOLD = 0.30
-_ADX_FLAT = 0.20  # adx_14 feature is normalised to [0, 1]; 0.20 == ADX 20
-_ADX_FLAT_SHADOW = 0.15  # shadow: allow slightly flatter markets for data collection
-_VOLUME_IMPULSE_MULT = 1.5
-_VOLUME_IMPULSE_MULT_SHADOW = 1.2
-_BOUNCE_LOOKBACK = 5
-_BOUNCE_ZONE_ATR_MULT = 0.35  # price must be within this many ATRs of the extreme
-_TP_ATR_MULT = 1.0
-_SL_ATR_MULT = 0.5
-_MIN_ATR_PCT = 0.0005  # skip dead markets: TP would be inside the spread
-_MAX_ATR_PCT = 0.03  # skip violent markets: SL gets blown through
+# === VWAP Pullback thresholds ===
+_EWMA_THRESHOLD = 0.003          # multi-EMA bullish/bearish stack strength
+_EWMA_THRESHOLD_SHADOW = 0.001   # relaxed for shadow data collection
+_OB_IMBALANCE_THRESHOLD = 0.08   # L5 book imbalance required for direction confirmation
+_OB_IMBALANCE_THRESHOLD_SHADOW = 0.05
+_VWAP_BUY_LOW = -0.6             # BUY: price at most 0.6% below VWAP (not free-falling)
+_VWAP_BUY_HIGH = 0.2             # BUY: price at most 0.2% above VWAP (no breakout chasing)
+_VWAP_SELL_LOW = -0.2            # SELL: price at most 0.2% below VWAP
+_VWAP_SELL_HIGH = 0.6            # SELL: price at most 0.6% above VWAP (pullback from above)
+_RSI_BUY_MIN = 0.32              # BUY: not oversold
+_RSI_BUY_MAX = 0.67              # BUY: not overbought
+_RSI_SELL_MIN = 0.33             # SELL: not oversold
+_RSI_SELL_MAX = 0.68             # SELL: not overbought
+_ADX_THRESHOLD = 0.18            # normalised ADX (0.18 == ADX 18); flat markets rejected
+_ADX_THRESHOLD_SHADOW = 0.14
+_VOLUME_ZSCORE_MIN = -1.2        # reject completely dead markets
+_TP_ATR_MULT = 1.6               # reward:risk ~= 2.46
+_SL_ATR_MULT = 0.65
+_MIN_ATR_PCT = 0.0005            # skip dead markets where TP would be inside the spread
+_MAX_ATR_PCT = 0.03              # skip violent markets where SL gets blown through
 
 _PRICE_DECIMALS = Decimal("0.00000001")
 
@@ -71,10 +77,14 @@ def _price(value: float) -> Decimal:
 
 
 class ScalpMicroStrategy(BaseStrategy):
-    """Cost-aware micro-scalping strategy.
+    """Cost-aware VWAP-pullback micro-scalping strategy.
+
+    Signals come entirely from the FeatureVector (pipeline-computed). The
+    candle_store argument is retained for interface compatibility but not read
+    during evaluation.
 
     Args:
-        candle_store:       CandleStore for closes/highs/lows/volumes series.
+        candle_store:       Retained for interface compatibility; not used.
         interval:           Candle interval the strategy operates on (e.g. "1").
         spread_provider:    Callable(symbol) -> current spread in bps, or None
                             when unknown. Unknown spread fails closed (no signal).
@@ -89,15 +99,14 @@ class ScalpMicroStrategy(BaseStrategy):
         max_position_notional_usd: Hard notional cap per position.
         min_qty_usd:        Exchange minimum notional.
         diag_hook:          Optional callable(reason) for rejection diagnostics
-                            (e.g. "spread_rejected", "scalp_net_edge_rejected").
-        imbalance_provider: Callable(symbol) -> latest L5 orderbook imbalance in
-                            [-1, 1], or None when unknown. Unknown fails closed
-                            because micro-scalps need current book confirmation.
-        min_imbalance:      Required |imbalance| agreeing with the signal side
-                            (BUY needs >= +min, SELL needs <= -min).
+                            (e.g. "spread_rejected", "imbalance_missing").
+        imbalance_provider: Retained for interface compatibility; not used.
+                            OB confirmation comes from ob_imbalance_l5 feature.
+        min_imbalance:      Retained for interface compatibility; not used.
+        shadow_relaxed:     When True, loosens all thresholds and skips hard
+                            net-edge / OB-data fails to maximise paper data volume.
     """
 
-    # Shared across all instances: global trade-rate governor
     _global_signal_times: ClassVar[deque[datetime]] = deque(maxlen=256)
 
     def __init__(
@@ -106,7 +115,7 @@ class ScalpMicroStrategy(BaseStrategy):
         interval: str = "1",
         spread_provider: Callable[[str], float | None] | None = None,
         taker_fee_pct: float = 0.055,
-        expected_slippage_pct: float = 0.03,  # per side (one-way); doubled for round trip
+        expected_slippage_pct: float = 0.03,
         min_net_return_pct: float = 0.05,
         max_spread_bps: float = 3.0,
         cooldown_seconds: int = 60,
@@ -132,8 +141,8 @@ class ScalpMicroStrategy(BaseStrategy):
         self._max_position_notional_usd = max_position_notional_usd
         self._min_qty_usd = min_qty_usd
         self._diag_hook = diag_hook
-        self._imbalance_provider = imbalance_provider
-        self._min_imbalance = min_imbalance
+        self._imbalance_provider = imbalance_provider  # kept for interface compat
+        self._min_imbalance = min_imbalance            # kept for interface compat
         self._shadow_relaxed = shadow_relaxed
         self._last_signal_at: dict[str, datetime] = {}
 
@@ -187,52 +196,73 @@ class ScalpMicroStrategy(BaseStrategy):
         rsi14 = f.get("rsi_14")
         adx14 = f.get("adx_14")
         atr_pct = f.get("atr_14_pct")
-        if rsi14 is None or atr_pct is None:
-            return None
+        ewma = f.get("ewma_tier_signal")
+        vwap_dist = f.get("vwap_distance_pct")
+        ob_imbalance = f.get("ob_imbalance_l5")
+        ob_present = f.get("ob_data_present", 0.0)
+        macd_hist = f.get("macd_hist")
+        vol_z = f.get("volume_zscore")
 
-        # Flat-market filter: no scalping when there is no movement to capture
-        adx_floor = _ADX_FLAT_SHADOW if self._shadow_relaxed else _ADX_FLAT
-        if adx14 is None or adx14 < adx_floor:
+        if rsi14 is None or atr_pct is None or ewma is None or vwap_dist is None:
             return None
 
         if atr_pct < _MIN_ATR_PCT or atr_pct > _MAX_ATR_PCT:
             return None
 
-        closes = list(self._store.closes(symbol, self._interval))
-        highs = list(self._store.highs(symbol, self._interval))
-        lows = list(self._store.lows(symbol, self._interval))
-        volumes = list(self._store.volumes(symbol, self._interval))
-        if len(closes) < _EMA_SLOW + 2 or len(volumes) < 21 or len(lows) < _BOUNCE_LOOKBACK + 1:
+        adx_floor = _ADX_THRESHOLD_SHADOW if self._shadow_relaxed else _ADX_THRESHOLD
+        if adx14 is None or adx14 < adx_floor:
             return None
 
-        # --- EMA cross on the last confirmed bar (fresh cross only) ---
-        ema_fast = ema(closes, _EMA_FAST)
-        ema_slow = ema(closes, _EMA_SLOW)
-        if len(ema_fast) < 2 or len(ema_slow) < 2:
+        if vol_z is not None and vol_z < _VOLUME_ZSCORE_MIN:
             return None
-        fast_now, fast_prev = ema_fast[-1], ema_fast[-2]
-        slow_now, slow_prev = ema_slow[-1], ema_slow[-2]
-        crossed_up = fast_prev <= slow_prev and fast_now > slow_now
-        crossed_down = fast_prev >= slow_prev and fast_now < slow_now
-        trend_continuation = False
-        if not crossed_up and not crossed_down:
+
+        ewma_threshold = _EWMA_THRESHOLD_SHADOW if self._shadow_relaxed else _EWMA_THRESHOLD
+
+        # --- Determine candidate direction ---
+        buy_candidate = (
+            ewma > ewma_threshold
+            and _VWAP_BUY_LOW < vwap_dist < _VWAP_BUY_HIGH
+            and _RSI_BUY_MIN < rsi14 < _RSI_BUY_MAX
+            and (macd_hist is None or macd_hist > 0)
+        )
+        sell_candidate = (
+            ewma < -ewma_threshold
+            and _VWAP_SELL_LOW < vwap_dist < _VWAP_SELL_HIGH
+            and _RSI_SELL_MIN < rsi14 < _RSI_SELL_MAX
+            and (macd_hist is None or macd_hist < 0)
+        )
+
+        side: OrderSide | None = None
+        if buy_candidate:
+            side = OrderSide.BUY
+        elif sell_candidate:
+            side = OrderSide.SELL
+
+        if side is None:
+            return None
+
+        # --- Orderbook imbalance confirmation from FeatureVector ---
+        ob_threshold = _OB_IMBALANCE_THRESHOLD_SHADOW if self._shadow_relaxed else _OB_IMBALANCE_THRESHOLD
+        if ob_present < 1.0:
             if self._shadow_relaxed:
-                if fast_now > slow_now and rsi14 < _RSI_OVERBOUGHT:
-                    crossed_up = True
-                    trend_continuation = True
-                elif fast_now < slow_now and rsi14 > _RSI_OVERSOLD:
-                    crossed_down = True
-                    trend_continuation = True
-                else:
-                    return None
+                log.debug("scalp_micro.ob_missing_shadow", symbol=symbol)
             else:
+                self._diag("imbalance_missing")
                 return None
-
-        # --- Volume impulse ---
-        vol_mult = _VOLUME_IMPULSE_MULT_SHADOW if self._shadow_relaxed else _VOLUME_IMPULSE_MULT
-        vol_sma20 = sum(volumes[-21:-1]) / 20 if len(volumes) >= 21 else 0.0
-        if vol_sma20 <= 0 or volumes[-1] < vol_mult * vol_sma20:
-            return None
+        else:
+            imb = ob_imbalance if ob_imbalance is not None else 0.0
+            confirms = (imb >= ob_threshold if side == OrderSide.BUY else imb <= -ob_threshold)
+            if not confirms:
+                if self._shadow_relaxed:
+                    log.debug(
+                        "scalp_micro.imbalance_skipped_shadow",
+                        symbol=symbol,
+                        side=side.value,
+                        imbalance=round(imb, 3),
+                    )
+                else:
+                    self._diag("imbalance_rejected")
+                    return None
 
         # --- Spread filter (fail closed: unknown spread = no trade) ---
         spread_bps = self._spread_provider(symbol) if self._spread_provider is not None else None
@@ -248,64 +278,8 @@ class ScalpMicroStrategy(BaseStrategy):
             )
             return None
 
-        atr_abs = atr_pct * current_price
-        bounce_zone = atr_abs * _BOUNCE_ZONE_ATR_MULT
-
-        side: OrderSide | None = None
-        if crossed_up and rsi14 < _RSI_OVERBOUGHT:
-            if trend_continuation:
-                side = OrderSide.BUY
-            else:
-                low5 = min(lows[-_BOUNCE_LOOKBACK:])
-                if current_price > low5 and (current_price - low5) <= bounce_zone + atr_abs:
-                    side = OrderSide.BUY
-        elif crossed_down and rsi14 > _RSI_OVERSOLD:
-            if trend_continuation:
-                side = OrderSide.SELL
-            else:
-                high5 = max(highs[-_BOUNCE_LOOKBACK:])
-                if current_price < high5 and (high5 - current_price) <= bounce_zone + atr_abs:
-                    side = OrderSide.SELL
-        if side is None:
-            return None
-
-        # --- Orderbook imbalance confirmation ---
-        imbalance: float | None = None
-        if self._imbalance_provider is not None:
-            try:
-                imbalance = self._imbalance_provider(symbol)
-            except Exception as exc:
-                log.debug("scalp_micro.imbalance_provider_failed", symbol=symbol, error=str(exc))
-                imbalance = None
-        if imbalance is None:
-            if self._shadow_relaxed:
-                log.debug("scalp_micro.imbalance_skipped_shadow", symbol=symbol)
-            else:
-                self._diag("imbalance_missing")
-                return None
-        elif imbalance is not None:
-            confirms = imbalance >= self._min_imbalance if side == OrderSide.BUY else imbalance <= -self._min_imbalance
-            if not confirms:
-                if self._shadow_relaxed:
-                    log.debug(
-                        "scalp_micro.imbalance_skipped_shadow",
-                        symbol=symbol,
-                        side=side.value,
-                        imbalance=round(imbalance, 3),
-                        min_imbalance=self._min_imbalance,
-                    )
-                else:
-                    self._diag("imbalance_rejected")
-                    log.debug(
-                        "scalp_micro.imbalance_rejected",
-                        symbol=symbol,
-                        side=side.value,
-                        imbalance=round(imbalance, 3),
-                        min_imbalance=self._min_imbalance,
-                    )
-                    return None
-
         # --- Net edge check: gross edge is the TP distance ---
+        atr_abs = atr_pct * current_price
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0
         net_edge_pct = self._net_edge_pct(gross_edge_pct, spread_bps)
         if not self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
@@ -347,16 +321,17 @@ class ScalpMicroStrategy(BaseStrategy):
             sl = entry + atr_abs * _SL_ATR_MULT
             regime = MarketRegime.BEAR_TREND
 
-        # Confidence scales with how much net edge clears the minimum
         confidence = min(0.90, 0.55 + min(0.25, net_edge_pct / max(self._min_net_return_pct, 1e-9) * 0.05))
-        if trend_continuation:
-            confidence = min(confidence, 0.58)
 
         self._register_signal(symbol)
+        ob_imb_str = f"{ob_imbalance:.3f}" if ob_imbalance is not None else "N/A"
         log.info(
             "scalp_micro.signal",
             symbol=symbol,
             side=side.value,
+            ewma=round(ewma, 5),
+            vwap_dist_pct=round(vwap_dist, 3),
+            ob_imbalance=ob_imb_str,
             net_edge_pct=round(net_edge_pct, 4),
             spread_bps=round(spread_bps, 2),
             atr_pct=round(atr_pct, 5),
@@ -377,7 +352,8 @@ class ScalpMicroStrategy(BaseStrategy):
             confidence=confidence,
             regime=regime,
             rationale=(
-                f"scalp: EMA{_EMA_FAST}x{_EMA_SLOW} cross, vol impulse, "
+                f"vwap_pullback: ewma={ewma:.4f}, vwap_dist={vwap_dist:.2f}%, "
+                f"ob_imb={ob_imb_str}, "
                 f"spread={spread_bps:.1f}bps, net_edge={net_edge_pct:.3f}%"
             ),
         )

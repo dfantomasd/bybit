@@ -1,71 +1,58 @@
-"""Tests for the cost-aware micro-scalping strategy."""
+"""Tests for the VWAP-Pullback micro-scalping strategy."""
 
 from __future__ import annotations
 
 import uuid
-from datetime import UTC, datetime, timedelta
+from collections.abc import Callable
+from datetime import UTC, datetime
 
-from trader.data.candles import Candle, CandleStore
 from trader.domain.enums import OrderSide
 from trader.domain.models import FeatureVector
 from trader.strategies.scalp_micro import ScalpMicroStrategy
 
 _SYMBOL = "TESTUSDT"
 _INTERVAL = "1"
+_PRICE = 100.0
 
 
-def _make_store(closes: list[float], volumes: list[float]) -> CandleStore:
-    store = CandleStore(max_bars=500)
-    base = datetime(2026, 6, 11, tzinfo=UTC)
-    for i, (close, vol) in enumerate(zip(closes, volumes, strict=True)):
-        prev = closes[i - 1] if i > 0 else close
-        store.add(
-            _SYMBOL,
-            _INTERVAL,
-            Candle(
-                open_time=base + timedelta(minutes=i),
-                open=prev,
-                high=max(prev, close) * 1.001,
-                low=min(prev, close) * 0.999,
-                close=close,
-                volume=vol,
-                confirm=True,
-            ),
-        )
-    return store
-
-
-def _vector(rsi: float = 0.50, adx: float = 0.30, atr_pct: float = 0.004) -> FeatureVector:
-    names = ["rsi_14", "adx_14", "atr_14_pct"]
+def _vector(
+    rsi: float = 0.50,
+    adx: float = 0.30,
+    atr_pct: float = 0.004,
+    ewma: float = 0.005,        # bullish stack (> 0.003 threshold)
+    vwap_dist: float = -0.3,    # pulled back into VWAP zone for BUY (-0.6 to +0.2)
+    ob_imb: float = 0.20,       # buyers in book
+    ob_present: float = 1.0,
+    macd_hist: float = 0.0001,  # positive momentum
+    vol_z: float = 0.5,
+) -> FeatureVector:
+    names = [
+        "rsi_14", "adx_14", "atr_14_pct",
+        "ewma_tier_signal", "vwap_distance_pct",
+        "ob_imbalance_l5", "ob_data_present",
+        "macd_hist", "volume_zscore",
+    ]
+    values = [rsi, adx, atr_pct, ewma, vwap_dist, ob_imb, ob_present, macd_hist, vol_z]
     return FeatureVector(
         feature_id=uuid.uuid4(),
         symbol=_SYMBOL,
         timestamp=datetime.now(tz=UTC),
-        values=[rsi, adx, atr_pct],
+        values=values,
         feature_names=names,
         quality_score=1.0,
         lookback_bars=60,
     )
 
 
-def _cross_up_data() -> tuple[list[float], list[float]]:
-    """Closes engineered so EMA9 crosses above EMA21 on the last bar with a volume
-    spike, while price stays within the bounce zone of the 5-bar low."""
-    closes = [100.0 - i * 0.01 for i in range(40)]  # shallow downtrend (EMAs close)
-    closes += [closes[-1] + 0.2 * (i + 1) for i in range(2)]  # fresh pop up
-    volumes = [100.0] * (len(closes) - 1) + [500.0]  # impulse on last bar
-    return closes, volumes
-
-
 def _strategy(
-    store: CandleStore,
     spread_bps: float | None = 1.0,
     taker_fee_pct: float = 0.055,
+    shadow_relaxed: bool = False,
+    diag_hook: Callable[[str], None] | None = None,
     **kwargs,
 ) -> ScalpMicroStrategy:
-    rejections: list[str] = kwargs.pop("rejections", [])
     return ScalpMicroStrategy(
-        candle_store=store,
+        candle_store=None,
         interval=_INTERVAL,
         spread_provider=lambda _s: spread_bps,
         taker_fee_pct=taker_fee_pct,
@@ -75,8 +62,8 @@ def _strategy(
         cooldown_seconds=60,
         max_trades_per_minute=10,
         max_position_notional_usd=100.0,
-        diag_hook=rejections.append,
-        imbalance_provider=kwargs.pop("imbalance_provider", lambda _s: 0.30),
+        shadow_relaxed=shadow_relaxed,
+        diag_hook=diag_hook,
         **kwargs,
     )
 
@@ -85,181 +72,177 @@ class TestScalpMicroStrategy:
     def setup_method(self) -> None:
         ScalpMicroStrategy._global_signal_times.clear()
 
-    def test_buy_signal_on_cross_up_with_impulse(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
-        proposal = strat.evaluate(_vector(), closes[-1], 1000.0)
+    # ------------------------------------------------------------------
+    # Happy-path signal generation
+    # ------------------------------------------------------------------
+
+    def test_buy_signal_on_vwap_pullback(self) -> None:
+        strat = _strategy()
+        proposal = strat.evaluate(_vector(), _PRICE, 1000.0)
         assert proposal is not None
         assert proposal.side == OrderSide.BUY
-        assert proposal.take_profit is not None and proposal.stop_loss is not None
-        # TP distance must be ~2x SL distance (reward:risk 2:1)
+
+    def test_sell_signal_on_vwap_pullback(self) -> None:
+        strat = _strategy()
+        sell_vec = _vector(
+            ewma=-0.005,       # bearish stack
+            vwap_dist=0.3,     # price 0.3% above VWAP (pullback from above)
+            ob_imb=-0.20,      # sellers in book
+            macd_hist=-0.0001, # negative momentum
+            rsi=0.50,
+        )
+        proposal = strat.evaluate(sell_vec, _PRICE, 1000.0)
+        assert proposal is not None
+        assert proposal.side == OrderSide.SELL
+
+    def test_reward_risk_ratio(self) -> None:
+        strat = _strategy()
+        proposal = strat.evaluate(_vector(), _PRICE, 1000.0)
+        assert proposal is not None
         entry = float(proposal.entry_price)
         tp_dist = float(proposal.take_profit) - entry
         sl_dist = entry - float(proposal.stop_loss)
         assert tp_dist > 0 and sl_dist > 0
-        assert abs(tp_dist / sl_dist - 2.0) < 0.05
+        # TP = 1.6 * ATR, SL = 0.65 * ATR → ratio ≈ 2.46
+        assert abs(tp_dist / sl_dist - (1.6 / 0.65)) < 0.05
+
+    # ------------------------------------------------------------------
+    # Signal filter rejections
+    # ------------------------------------------------------------------
 
     def test_wide_spread_rejected(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
         rejections: list[str] = []
-        strat = _strategy(store, spread_bps=5.0, rejections=rejections)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        strat = _strategy(spread_bps=5.0, diag_hook=rejections.append)
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is None
         assert "spread_rejected" in rejections
 
     def test_unknown_spread_fails_closed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store, spread_bps=None)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        strat = _strategy(spread_bps=None)
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is None
 
     def test_flat_market_adx_rejected(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
-        assert strat.evaluate(_vector(adx=0.15), closes[-1], 1000.0) is None
+        strat = _strategy()
+        assert strat.evaluate(_vector(adx=0.15), _PRICE, 1000.0) is None
 
     def test_net_edge_rejected_when_costs_exceed_edge(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
         rejections: list[str] = []
-        # Round-trip fees 0.4% > gross TP edge 0.2% (ATR 0.4% * 0.5) → reject
-        strat = _strategy(store, taker_fee_pct=0.2, rejections=rejections)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        # atr=0.4%, TP=1.6×ATR → gross=0.64%; fees 0.4*2=0.80% > gross → net negative
+        strat = _strategy(taker_fee_pct=0.40, diag_hook=rejections.append)
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is None
         assert "scalp_net_edge_rejected" in rejections
 
-    def test_no_volume_impulse_no_signal(self) -> None:
-        closes, _ = _cross_up_data()
-        volumes = [100.0] * len(closes)  # flat volume, no impulse
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+    def test_ewma_too_weak_no_signal(self) -> None:
+        # EWMA below threshold: no strong directional trend
+        strat = _strategy()
+        assert strat.evaluate(_vector(ewma=0.001), _PRICE, 1000.0) is None
+
+    def test_ewma_neutral_no_signal(self) -> None:
+        strat = _strategy()
+        assert strat.evaluate(_vector(ewma=0.0), _PRICE, 1000.0) is None
+
+    def test_vwap_too_high_for_buy_no_signal(self) -> None:
+        # Price 0.5% above VWAP → not a pullback, skip BUY
+        strat = _strategy()
+        assert strat.evaluate(_vector(vwap_dist=0.5), _PRICE, 1000.0) is None
+
+    def test_vwap_free_fall_no_buy_signal(self) -> None:
+        # Price 0.8% below VWAP → free-fall, skip BUY
+        strat = _strategy()
+        assert strat.evaluate(_vector(vwap_dist=-0.8), _PRICE, 1000.0) is None
+
+    def test_rsi_overbought_no_buy_signal(self) -> None:
+        strat = _strategy()
+        assert strat.evaluate(_vector(rsi=0.75), _PRICE, 1000.0) is None
+
+    def test_rsi_oversold_no_buy_signal(self) -> None:
+        strat = _strategy()
+        assert strat.evaluate(_vector(rsi=0.25), _PRICE, 1000.0) is None
+
+    def test_macd_negative_blocks_buy(self) -> None:
+        strat = _strategy()
+        assert strat.evaluate(_vector(macd_hist=-0.0001), _PRICE, 1000.0) is None
+
+    def test_dead_market_volume_rejected(self) -> None:
+        strat = _strategy()
+        assert strat.evaluate(_vector(vol_z=-2.0), _PRICE, 1000.0) is None
+
+    # ------------------------------------------------------------------
+    # Orderbook imbalance
+    # ------------------------------------------------------------------
+
+    def test_ob_missing_fails_closed(self) -> None:
+        rejections: list[str] = []
+        strat = _strategy(diag_hook=rejections.append)
+        assert strat.evaluate(_vector(ob_present=0.0), _PRICE, 1000.0) is None
+        assert "imbalance_missing" in rejections
+
+    def test_ob_imbalance_against_buy_rejected(self) -> None:
+        rejections: list[str] = []
+        strat = _strategy(diag_hook=rejections.append)
+        # Book shows sellers, not buyers
+        assert strat.evaluate(_vector(ob_imb=-0.30), _PRICE, 1000.0) is None
+        assert "imbalance_rejected" in rejections
+
+    def test_ob_weak_imbalance_rejected(self) -> None:
+        rejections: list[str] = []
+        strat = _strategy(diag_hook=rejections.append)
+        # Imbalance below 0.08 threshold
+        assert strat.evaluate(_vector(ob_imb=0.05), _PRICE, 1000.0) is None
+        assert "imbalance_rejected" in rejections
+
+    def test_ob_missing_allowed_in_shadow_relaxed(self) -> None:
+        strat = _strategy(shadow_relaxed=True)
+        assert strat.evaluate(_vector(ob_present=0.0), _PRICE, 1000.0) is not None
+
+    def test_ob_weak_imbalance_allowed_in_shadow_relaxed(self) -> None:
+        strat = _strategy(shadow_relaxed=True)
+        # 0.03 < shadow threshold (0.05) but allowed in shadow mode
+        assert strat.evaluate(_vector(ob_imb=0.03), _PRICE, 1000.0) is not None
+
+    # ------------------------------------------------------------------
+    # Shadow-relaxed mode
+    # ------------------------------------------------------------------
+
+    def test_shadow_relaxed_allows_negative_net_edge(self) -> None:
+        rejections: list[str] = []
+        strat = _strategy(taker_fee_pct=0.40, shadow_relaxed=True, diag_hook=rejections.append)
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is not None
+        assert "scalp_net_edge_rejected" not in rejections
+
+    def test_shadow_relaxed_allows_weaker_ewma(self) -> None:
+        strat = _strategy(shadow_relaxed=True)
+        # 0.002 < normal threshold 0.003 but > shadow threshold 0.001
+        assert strat.evaluate(_vector(ewma=0.002), _PRICE, 1000.0) is not None
+
+    def test_shadow_relaxed_allows_weaker_adx(self) -> None:
+        strat = _strategy(shadow_relaxed=True)
+        # 0.16 < normal threshold 0.18 but > shadow threshold 0.14
+        assert strat.evaluate(_vector(adx=0.16), _PRICE, 1000.0) is not None
+
+    # ------------------------------------------------------------------
+    # Rate limiting
+    # ------------------------------------------------------------------
 
     def test_symbol_cooldown(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
-        first = strat.evaluate(_vector(), closes[-1], 1000.0)
+        strat = _strategy()
+        first = strat.evaluate(_vector(), _PRICE, 1000.0)
         assert first is not None
-        second = strat.evaluate(_vector(), closes[-1], 1000.0)
+        second = strat.evaluate(_vector(), _PRICE, 1000.0)
         assert second is None  # within cooldown
 
     def test_global_rate_limit(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
+        strat = _strategy()
         now = datetime.now(tz=UTC)
         for _ in range(10):
             ScalpMicroStrategy._global_signal_times.append(now)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is None
+
+    # ------------------------------------------------------------------
+    # Position sizing
+    # ------------------------------------------------------------------
 
     def test_notional_cap_applied(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store)
-        proposal = strat.evaluate(_vector(), closes[-1], 100_000.0)
+        strat = _strategy()
+        proposal = strat.evaluate(_vector(), _PRICE, 100_000.0)
         assert proposal is not None
         assert float(proposal.requested_notional_usd) <= 100.0
-
-    def test_imbalance_confirms_buy(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(store, imbalance_provider=lambda _s: 0.30, min_imbalance=0.15)
-        proposal = strat.evaluate(_vector(), closes[-1], 1000.0)
-        assert proposal is not None
-        assert proposal.side == OrderSide.BUY
-
-    def test_imbalance_against_buy_rejected(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        # Book pressure is on the ask side → BUY signal must be dropped
-        strat = _strategy(
-            store,
-            rejections=rejections,
-            imbalance_provider=lambda _s: -0.40,
-            min_imbalance=0.15,
-        )
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
-        assert "imbalance_rejected" in rejections
-
-    def test_weak_imbalance_rejected(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        # Positive but below the 0.15 threshold → not a confirmation
-        strat = _strategy(
-            store,
-            rejections=rejections,
-            imbalance_provider=lambda _s: 0.05,
-            min_imbalance=0.15,
-        )
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
-        assert "imbalance_rejected" in rejections
-
-    def test_weak_imbalance_allowed_in_shadow_relaxed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        strat = _strategy(
-            store,
-            rejections=rejections,
-            imbalance_provider=lambda _s: 0.05,
-            min_imbalance=0.15,
-            shadow_relaxed=True,
-        )
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
-        assert "imbalance_rejected" not in rejections
-
-    def test_net_edge_allowed_in_shadow_relaxed_when_costs_exceed_edge(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        strat = _strategy(
-            store,
-            taker_fee_pct=0.2,
-            rejections=rejections,
-            shadow_relaxed=True,
-        )
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
-        assert "scalp_net_edge_rejected" not in rejections
-
-    def test_missing_imbalance_fails_closed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        strat = _strategy(store, rejections=rejections, imbalance_provider=lambda _s: None, min_imbalance=0.15)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
-        assert "imbalance_missing" in rejections
-
-    def test_missing_imbalance_allowed_in_shadow_relaxed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        strat = _strategy(
-            store,
-            imbalance_provider=lambda _s: None,
-            min_imbalance=0.15,
-            shadow_relaxed=True,
-        )
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is not None
-
-    def test_missing_imbalance_provider_fails_closed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-        strat = _strategy(store, rejections=rejections, imbalance_provider=None, min_imbalance=0.15)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
-        assert "imbalance_missing" in rejections
-
-    def test_imbalance_provider_error_fails_closed(self) -> None:
-        closes, volumes = _cross_up_data()
-        store = _make_store(closes, volumes)
-        rejections: list[str] = []
-
-        def broken_provider(_symbol: str) -> float:
-            raise RuntimeError("book feed stale")
-
-        strat = _strategy(store, rejections=rejections, imbalance_provider=broken_provider, min_imbalance=0.15)
-        assert strat.evaluate(_vector(), closes[-1], 1000.0) is None
-        assert "imbalance_missing" in rejections
