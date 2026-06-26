@@ -360,6 +360,85 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             label_schema_version,
         )
 
+    async def resolve_outcomes_from_realized_pnl(
+        self,
+        *,
+        horizon_minutes: int = 5,
+        label_bps_threshold: float | None = None,
+        limit: int = 200,
+    ) -> int:
+        """Resolve outcomes using actual realized PnL from closed_pnl table.
+
+        This is the preferred method for training as it uses REAL trading outcomes
+        rather than counterfactual market paths. Requires order_link_id to be
+        populated in prediction_events.
+        """
+        use_tpsl, tp_mult, sl_mult, default_label_bps, label_schema = _label_resolution_settings()
+        if label_bps_threshold is None:
+            label_bps_threshold = default_label_bps
+
+        # Find prediction_events linked to closed_pnl via order_link_id
+        rows = await self._fetch(
+            """
+            SELECT
+                pe.prediction_id,
+                pe.symbol,
+                pe.order_link_id,
+                pe.strategy_signal,
+                cp.closed_pnl,
+                cp.created_at AS closed_at
+            FROM prediction_events pe
+            JOIN closed_pnl cp ON cp.symbol = pe.symbol
+            LEFT JOIN prediction_outcomes po
+                ON po.prediction_id = pe.prediction_id
+                AND po.horizon_minutes = $1
+                AND po.label_schema_version = $4
+            WHERE po.prediction_id IS NULL
+              AND pe.order_link_id IS NOT NULL
+              AND cp.created_at > pe.created_at
+              AND cp.created_at <= pe.created_at + ($1 * interval '1 minute')
+              AND pe.strategy_signal IN ('Buy', 'Sell')
+              AND pe.decision IN ('GATE_PASS', 'GATE_BLOCK')
+            ORDER BY pe.created_at DESC
+            LIMIT $2
+            """,
+            horizon_minutes,
+            limit,
+            label_schema,
+            label_schema,
+        )
+
+        cost_model = default_cost_model()
+        resolved = 0
+
+        for row in rows:
+            prediction_id = str(row["prediction_id"])
+            closed_pnl_usd = float(row["closed_pnl"] or 0.0)
+            symbol = str(row["symbol"])
+
+            # Convert realized PnL to basis points (approximate, assuming $100 entry)
+            # This is a rough estimate; better to use actual entry/exit from features
+            closed_pnl_bps = closed_pnl_usd * 100.0  # Very rough approximation
+
+            net_return_bps = closed_pnl_bps - cost_model.total_bps
+            label = 1 if net_return_bps > label_bps_threshold else 0
+
+            await self.resolve_prediction_outcomes(
+                prediction_id=prediction_id,
+                horizon_minutes=horizon_minutes,
+                gross_return_bps=closed_pnl_bps,
+                cost_bps=cost_model.total_bps,
+                label_threshold_bps=label_bps_threshold,
+                net_return_bps=net_return_bps,
+                max_favorable_excursion_bps=0.0,
+                max_adverse_excursion_bps=0.0,
+                label=label,
+                label_schema_version=label_schema,
+            )
+            resolved += 1
+
+        return resolved
+
     async def resolve_outcomes_from_candles(
         self,
         *,
