@@ -53,8 +53,10 @@ from trader.features.technical import (
 
 log = structlog.get_logger(__name__)
 
-# Minimum confirmed candles needed before features can be computed
-_MIN_BARS = 30
+# Minimum confirmed candles needed before features can be computed.
+# Must be > 50 so that ema_50 (needs 50 bars), macd (needs 35), and
+# return_30 (needs 31) are always computable — keeping schema hash stable.
+_MIN_BARS = 51
 
 
 def _schema_hash(names: list[str]) -> str:
