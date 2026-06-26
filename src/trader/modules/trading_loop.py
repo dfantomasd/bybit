@@ -250,6 +250,11 @@ class TradingLoopModule(AppBoundModule):
                 StatisticalArbitrageStrategy,
                 VolatilitySqueezeBreakoutStrategy,
             )
+            from trader.strategies.basic_strategies import (
+                ATRBreakoutStrategy,
+                MACDZeroCrossStrategy,
+                MeanReversionStrategy,
+            )
 
             alpha_cost_params = NetEdgeParams(
                 taker_fee_pct=self._app._settings.DEFAULT_LINEAR_TAKER_FEE_RATE * 100,
@@ -319,6 +324,39 @@ class TradingLoopModule(AppBoundModule):
                 log.info("advanced_alpha.strategy_active", strategy_id="volatility_squeeze_v1")
             else:
                 log.info("advanced_alpha.strategy_disabled", strategy_id="volatility_squeeze_v1")
+
+            # === Basic proven strategies ===
+            if self._app._settings.MEAN_REVERSION_STRATEGY_ENABLED:
+                strategies.append(
+                    MeanReversionStrategy(
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
+                log.info("basic.strategy_active", strategy_id="mean_reversion_v1")
+            else:
+                log.info("basic.strategy_disabled", strategy_id="mean_reversion_v1")
+            if self._app._settings.MACD_ZEROCROSS_STRATEGY_ENABLED:
+                strategies.append(
+                    MACDZeroCrossStrategy(
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
+                log.info("basic.strategy_active", strategy_id="macd_zerocross_v1")
+            else:
+                log.info("basic.strategy_disabled", strategy_id="macd_zerocross_v1")
+            if self._app._settings.ATR_BREAKOUT_STRATEGY_ENABLED:
+                strategies.append(
+                    ATRBreakoutStrategy(
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
+                log.info("basic.strategy_active", strategy_id="atr_breakout_v1")
+            else:
+                log.info("basic.strategy_disabled", strategy_id="atr_breakout_v1")
+
             if self._app._settings.MARKET_MAKING_STRATEGY_ENABLED:
                 strategies.append(
                     MarketMakingStrategy(

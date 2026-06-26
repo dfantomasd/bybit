@@ -245,6 +245,12 @@ class Settings(BaseSettings):
     """BB bandwidth threshold below which we detect a squeeze."""
     VOLATILITY_SQUEEZE_COOLDOWN_SECONDS: int = 120
     """Per-symbol cooldown between squeeze-breakout signals."""
+    MEAN_REVERSION_STRATEGY_ENABLED: bool = True
+    """Enable simple RSI mean-reversion entries (oversold/overbought)."""
+    MACD_ZEROCROSS_STRATEGY_ENABLED: bool = True
+    """Enable MACD histogram zero-cross momentum reversal entries."""
+    ATR_BREAKOUT_STRATEGY_ENABLED: bool = True
+    """Enable ATR range breakout entries with volume confirmation."""
     MARKET_MAKING_STRATEGY_ENABLED: bool = True
     """Enable maker-first mean-reversion proxy for the current single-order engine."""
     MARKET_MAKING_MIN_SPREAD_BPS: float = 1.2
@@ -254,6 +260,7 @@ class Settings(BaseSettings):
     STAT_ARB_MIN_ZSCORE: float = 2.0
     STRATEGY_PRIORITY_ORDER: str = (
         "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
+        "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1,"
         "volatility_squeeze_v1,statistical_arbitrage_v1,market_making_v1,"
         "scalp_micro_v1,ema_crossover_v1"
     )
@@ -804,6 +811,9 @@ class Settings(BaseSettings):
             self.FUNDING_ARB_STRATEGY_ENABLED = False
             self.LIQUIDATION_HUNTING_STRATEGY_ENABLED = False
             self.VOLATILITY_SQUEEZE_STRATEGY_ENABLED = False
+            self.MEAN_REVERSION_STRATEGY_ENABLED = False
+            self.MACD_ZEROCROSS_STRATEGY_ENABLED = False
+            self.ATR_BREAKOUT_STRATEGY_ENABLED = False
             self.MARKET_MAKING_STRATEGY_ENABLED = False
             self.STAT_ARB_STRATEGY_ENABLED = False
 
