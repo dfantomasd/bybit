@@ -214,6 +214,12 @@ class TradingLoopModule(AppBoundModule):
             log.info(
                 "shadow_probe.enabled",
                 research_profile_v2=research_v2,
+                paper_collection_mode=bool(self._app._settings.SHADOW_PROBE_PAPER_COLLECTION_MODE),
+                paper_regimes=(
+                    self._app._settings.SHADOW_PROBE_PAPER_REGIMES
+                    if self._app._settings.SHADOW_PROBE_PAPER_COLLECTION_MODE
+                    else None
+                ),
                 min_abs_imbalance=self._app._settings.SHADOW_PROBE_MIN_ABS_IMBALANCE,
                 cooldown_seconds=probe_cooldown_seconds,
                 max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,

@@ -71,25 +71,29 @@ services:
       - key: STARTUP_WARMUP_SECONDS
         value: "0"
       - key: SCALP_STRICT_SHADOW
-        value: "true"
-      - key: SHADOW_RELAX_SCALP_FILTERS
         value: "false"
+      - key: SHADOW_RELAX_SCALP_FILTERS
+        value: "true"
       - key: SHADOW_PROBE_ENABLED
         value: "true"
       - key: SHADOW_PROBE_RESEARCH_PROFILE_V2
         value: "true"
+      - key: SHADOW_PROBE_PAPER_COLLECTION_MODE
+        value: "true"
+      - key: SHADOW_PROBE_PAPER_REGIMES
+        value: "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN"
       - key: SHADOW_PROBE_MIN_ABS_IMBALANCE
-        value: "0.08"
+        value: "0.05"
       - key: SHADOW_PROBE_COOLDOWN_SECONDS
-        value: "180"
+        value: "90"
       - key: SHADOW_PROBE_MAX_NOTIONAL_USD
         value: "8.0"
       - key: SHADOW_PROBE_MIN_TP_PCT
-        value: "0.75"
+        value: "0.45"
       - key: SHADOW_PROBE_MIN_SL_PCT
-        value: "0.40"
+        value: "0.25"
       - key: SHADOW_PROBE_MIN_NET_RETURN_PCT
-        value: "0.30"
+        value: "0.12"
       - key: SHADOW_PROBE_MAX_OPEN_POSITIONS
         value: "4"
       - key: SHADOW_PROBE_BURST_MAX_SIGNALS
@@ -99,19 +103,19 @@ services:
       - key: SHADOW_PROBE_BURST_COOLDOWN_SECONDS
         value: "300"
       - key: SHADOW_PROBE_SYMBOL_WARMUP_SECONDS
-        value: "300"
+        value: "60"
       - key: SHADOW_PROBE_ALLOWED_REGIMES
         value: "HIGH_VOLATILITY"
       - key: SHADOW_PROBE_SELL_ENABLED
-        value: "false"
-      - key: SHADOW_PROBE_SIDE_BLOCK_ENABLED
         value: "true"
+      - key: SHADOW_PROBE_SIDE_BLOCK_ENABLED
+        value: "false"
       - key: SHADOW_PROBE_SIDE_MIN_SAMPLES
         value: "8"
       - key: SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
         value: "-3.0"
       - key: SHADOW_PROBE_QUALITY_FILTER_ENABLED
-        value: "true"
+        value: "false"
       - key: SHADOW_PROBE_BASELINE_MIN_AVG_BPS
         value: "0.0"
       - key: SHADOW_PROBE_BASELINE_MIN_SAMPLES
@@ -131,7 +135,7 @@ services:
       - key: SHADOW_MIN_ATR_MULTIPLE
         value: "0.35"
       - key: MAX_ORDERBOOK_ACTIVE_SYMBOLS
-        value: "4"
+        value: "6"
       - key: WS_PUBLIC_EVENT_QUEUE_MAXSIZE
         value: "2000"
       - key: FLOW_TRACKER_HISTORY_SLOTS
