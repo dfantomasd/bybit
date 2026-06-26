@@ -91,16 +91,17 @@ class ExecutionMLIntegrator:
             )
 
             regime_features = extractor.extract_regime_features(
-                volatility_pct=current_volatility,
+                realized_vol_pct=current_volatility,
             )
 
             signal_context = extractor.extract_signal_context(
                 market_regime=current_regime,
                 recent_trades=recent_trades,
+                volatility_pct=current_volatility,
             )
 
             spread_features = extractor.extract_spread_features(
-                volatility_pct=current_volatility,
+                price_volatility_bps=current_volatility * 100,
             )
 
             stoploss_context = extractor.extract_stoploss_context(
@@ -170,16 +171,17 @@ class ExecutionMLIntegrator:
             )
 
             regime_features = extractor.extract_regime_features(
-                volatility_pct=current_volatility,
+                realized_vol_pct=current_volatility,
             )
 
             signal_context = extractor.extract_signal_context(
                 market_regime=current_regime,
                 recent_trades=recent_trades,
+                volatility_pct=current_volatility,
             )
 
             spread_features = extractor.extract_spread_features(
-                volatility_pct=current_volatility,
+                price_volatility_bps=current_volatility * 100,
             )
 
             stoploss_context = extractor.extract_stoploss_context(

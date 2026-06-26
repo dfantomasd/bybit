@@ -149,7 +149,7 @@ class StopLossOptimizerEnhanced:
         except Exception as e:
             logger.error(f"stoploss_training_failed: {e}")
 
-    def calculate_optimal_stop(
+    async def calculate_optimal_stop(
         self,
         context: StopLossContextEnhanced,
         use_support_level: bool = True,
