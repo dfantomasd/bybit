@@ -27,6 +27,9 @@ class FeatureExtractor:
         current_volatility: float = 1.5,
         hour_of_day: int = 12,
         day_of_week: int = 0,
+        days_since_start: int = 1,
+        strategy_id: str = "default",
+        symbol: str = "BTCUSDT",
     ) -> Any:
         """Извлечь KellyPredictorFeatures для Kelly predictor.
 
@@ -40,21 +43,58 @@ class FeatureExtractor:
             win_rate = wins / len(recent_trades) if recent_trades else 0.5
 
             returns = [trade.get("pnl_bps", 0) for trade in recent_trades]
+            winning_returns = [r for r in returns if r > 0]
+            losing_returns = [r for r in returns if r < 0]
+
             if not returns or len(returns) < 2:
                 std_dev = 50.0
+                skewness = 0.0
+                var_95 = 0.0
             else:
                 mean_return = sum(returns) / len(returns)
                 variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
                 std_dev = variance ** 0.5 if variance > 0 else 50.0
+                skewness = 0.0
+                var_95 = min(returns) if returns else 0.0
+
+            avg_win = sum(winning_returns) / len(winning_returns) if winning_returns else 10.0
+            avg_loss = sum(losing_returns) / len(losing_returns) if losing_returns else -5.0
+            profit_factor = abs(sum(winning_returns) / sum(losing_returns)) if losing_returns else 1.0
+            pnl_trend = (returns[-1] - returns[0]) / len(returns) if returns else 0.0
+
+            current_dd, max_dd = self._calculate_drawdown(returns)
+
+            # Determine volatility_regime from current_volatility
+            if current_volatility < 0.5:
+                volatility_regime = 0  # low
+            elif current_volatility < 1.0:
+                volatility_regime = 1  # moderate
+            elif current_volatility < 2.0:
+                volatility_regime = 2  # high
+            else:
+                volatility_regime = 3  # extreme
 
             return KellyPredictorFeatures(
                 recent_win_rate=float(win_rate),
+                recent_avg_win_bps=float(avg_win),
+                recent_avg_loss_bps=float(avg_loss),
+                recent_profit_factor=float(profit_factor),
+                recent_pnl_trend=float(pnl_trend),
                 std_dev_bps=float(std_dev),
-                kurtosis=3.0,  # Normal distribution default
-                drawdown_pct=self._calculate_drawdown(returns),
-                volatility_regime="high" if current_volatility > 2.0 else ("medium" if current_volatility > 1.0 else "low"),
+                skewness=float(skewness),
+                kurtosis=3.0,
+                var_95_bps=float(var_95),
+                current_drawdown_pct=float(current_dd),
+                max_drawdown_pct=float(max_dd),
+                drawdown_severity=self._get_drawdown_severity(current_dd),
+                in_drawdown=current_dd < 0,
+                volatility_regime=volatility_regime,
                 hour_of_day=hour_of_day,
                 day_of_week=day_of_week,
+                days_since_start=days_since_start,
+                strategy_id=strategy_id,
+                symbol=symbol,
+                total_trades=len(recent_trades),
             )
         except Exception as e:
             logger.error(f"extract_kelly_features failed: {e}")
@@ -292,14 +332,18 @@ class FeatureExtractor:
             return None
 
     @staticmethod
-    def _calculate_drawdown(returns: list[float]) -> float:
-        """Вычислить максимальный drawdown."""
+    def _calculate_drawdown(returns: list[float]) -> tuple[float, float]:
+        """Вычислить текущий и максимальный drawdown.
+
+        Возвращает (current_drawdown_pct, max_drawdown_pct)
+        """
         if not returns:
-            return 0.0
+            return 0.0, 0.0
 
         cumulative = 0.0
         peak = 0.0
         max_dd = 0.0
+        current_dd = 0.0
 
         for r in returns:
             cumulative += r
@@ -308,8 +352,24 @@ class FeatureExtractor:
             dd = peak - cumulative
             if dd > max_dd:
                 max_dd = dd
+            current_dd = dd
 
-        return (max_dd / 10000) if returns else 0.0
+        # Конвертировать в проценты
+        return (-current_dd / 10000) if returns else 0.0, (-max_dd / 10000) if returns else 0.0
+
+    @staticmethod
+    def _get_drawdown_severity(drawdown_pct: float) -> int:
+        """Определить серьёзность drawdown (0-4)."""
+        if drawdown_pct >= 0:
+            return 0
+        elif drawdown_pct > -1.0:
+            return 1
+        elif drawdown_pct > -2.5:
+            return 2
+        elif drawdown_pct > -5.0:
+            return 3
+        else:
+            return 4
 
     def add_trade_return(self, pnl_bps: float) -> None:
         """Добавить результат сделки."""
