@@ -419,7 +419,7 @@ class RiskManager:
                 all_returns_bps=recent_returns_bps,  # Use recent as all-time for now
                 volatility_regime=self._get_volatility_regime_code(regime_context.regime) if regime_context else 0,
                 current_drawdown_pct=float(drawdown_pct),
-                max_drawdown_pct=float(self._drawdown.max_drawdown_pct),
+                max_drawdown_pct=float(drawdown_pct),
                 strategy_id=getattr(proposal, "strategy_id", "unknown"),
                 symbol=proposal.symbol,
                 total_trades=self._exposure.position_count,

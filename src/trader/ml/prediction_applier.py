@@ -9,12 +9,13 @@ Transforms ML predictions into trading improvements:
 
 from __future__ import annotations
 
-import logging
 from dataclasses import dataclass
 from decimal import Decimal
 from typing import Any, Optional
 
-logger = logging.getLogger(__name__)
+from trader.monitoring.logging import get_logger
+
+logger = get_logger(__name__)
 
 
 @dataclass
