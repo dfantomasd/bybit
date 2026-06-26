@@ -136,14 +136,33 @@ class UnifiedMLController:
         Вызывает все 5 моделей параллельно (async).
         """
         try:
+            # Helper async функции для каждой модели
+            async def call_kelly():
+                return await self.kelly.predict(kelly_features) if kelly_features else None
+
+            async def call_regime():
+                return await self.regime.predict(regime_features) if regime_features else None
+
+            async def call_signals():
+                return await self.signals.fuse_signals(signal_context) if signal_context else None
+
+            async def call_spread():
+                return await self.spread.predict(spread_features) if spread_features else None
+
+            async def call_stoploss():
+                return await self.stoploss.calculate_optimal_stop(stoploss_context) if stoploss_context else None
+
+            async def call_entry_exit():
+                return await self.entry_exit.get_optimization(candle_context) if self.entry_exit and candle_context else None
+
             # Запустить все модели параллельно (только если features не None)
             results = await asyncio.gather(
-                self.kelly.predict(kelly_features) if kelly_features is not None else None,
-                self.regime.predict(regime_features) if regime_features is not None else None,
-                self.signals.fuse_signals(signal_context) if signal_context is not None else None,
-                self.spread.predict(spread_features) if spread_features is not None else None,
-                self.stoploss.calculate_optimal_stop(stoploss_context) if stoploss_context is not None else None,
-                self.entry_exit.get_optimization(candle_context) if self.entry_exit and candle_context else None,
+                call_kelly(),
+                call_regime(),
+                call_signals(),
+                call_spread(),
+                call_stoploss(),
+                call_entry_exit(),
                 return_exceptions=True,
             )
 

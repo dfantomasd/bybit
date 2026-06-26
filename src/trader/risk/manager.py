@@ -417,7 +417,7 @@ class RiskManager:
                 current_price=proposal.entry_price or Decimal("1"),
                 recent_returns_bps=recent_returns_bps,
                 all_returns_bps=recent_returns_bps,  # Use recent as all-time for now
-                volatility_regime=int(regime_context.regime.value) if regime_context else 0,
+                volatility_regime=self._get_volatility_regime_code(regime_context.regime) if regime_context else 0,
                 current_drawdown_pct=float(drawdown_pct),
                 max_drawdown_pct=float(self._drawdown.max_drawdown_pct),
                 strategy_id=getattr(proposal, "strategy_id", "unknown"),
@@ -743,6 +743,18 @@ class RiskManager:
             approved_qty=None,
             capital=capital,
         )
+
+    @staticmethod
+    def _get_volatility_regime_code(regime: Any) -> int:
+        """Преобразовать MarketRegime в числовой код (0-3)."""
+        regime_str = str(regime.value) if hasattr(regime, 'value') else str(regime)
+
+        if "HIGH_VOLATILITY" in regime_str or "BULL_TREND" in regime_str or "BEAR_TREND" in regime_str:
+            return 2  # high
+        elif "SIDEWAYS" in regime_str or "LOW_LIQUIDITY" in regime_str:
+            return 1  # medium
+        else:  # UNCERTAIN, EVENT_RISK
+            return 1  # medium (conservative default)
 
     def _make_decision(
         self,
