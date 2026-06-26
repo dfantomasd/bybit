@@ -248,6 +248,7 @@ class TradingLoopModule(AppBoundModule):
                 MarketMakingStrategy,
                 OrderFlowStrategy,
                 StatisticalArbitrageStrategy,
+                VolatilitySqueezeBreakoutStrategy,
             )
 
             alpha_cost_params = NetEdgeParams(
@@ -306,6 +307,18 @@ class TradingLoopModule(AppBoundModule):
                     strategy_id="liquidation_hunting_v1",
                     reason="flow_tracker_missing",
                 )
+            if self._app._settings.VOLATILITY_SQUEEZE_STRATEGY_ENABLED:
+                strategies.append(
+                    VolatilitySqueezeBreakoutStrategy(
+                        squeeze_bw_threshold=self._app._settings.VOLATILITY_SQUEEZE_BB_BANDWIDTH,
+                        cooldown_seconds=self._app._settings.VOLATILITY_SQUEEZE_COOLDOWN_SECONDS,
+                        cost_params=alpha_cost_params,
+                        min_net_return_pct=alpha_min_net,
+                    )
+                )
+                log.info("advanced_alpha.strategy_active", strategy_id="volatility_squeeze_v1")
+            else:
+                log.info("advanced_alpha.strategy_disabled", strategy_id="volatility_squeeze_v1")
             if self._app._settings.MARKET_MAKING_STRATEGY_ENABLED:
                 strategies.append(
                     MarketMakingStrategy(

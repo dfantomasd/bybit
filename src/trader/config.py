@@ -231,11 +231,20 @@ class Settings(BaseSettings):
     ORDER_FLOW_MIN_BOOK_IMBALANCE: float = 0.18
     FUNDING_ARB_STRATEGY_ENABLED: bool = True
     """Enable funding-rate mean-reversion entries."""
-    FUNDING_ARB_MIN_ABS_BPS: float = 5.0
+    FUNDING_ARB_MIN_ABS_BPS: float = 8.0
+    """Minimum absolute funding rate (bps) to trigger fade. Raised from 5→8 to reduce noise."""
     LIQUIDATION_HUNTING_STRATEGY_ENABLED: bool = True
     """Enable liquidation-exhaustion fade entries."""
-    LIQUIDATION_HUNTING_MIN_NOTIONAL_USD: float = 20_000.0
-    LIQUIDATION_HUNTING_MIN_IMBALANCE: float = 0.65
+    LIQUIDATION_HUNTING_MIN_NOTIONAL_USD: float = 50_000.0
+    """Minimum liquidation notional (USD) to trigger fade. Raised from $20k→$50k."""
+    LIQUIDATION_HUNTING_MIN_IMBALANCE: float = 0.72
+    """Minimum liquidation directional imbalance. Raised from 0.65→0.72."""
+    VOLATILITY_SQUEEZE_STRATEGY_ENABLED: bool = True
+    """Enable Bollinger Band squeeze-breakout entries."""
+    VOLATILITY_SQUEEZE_BB_BANDWIDTH: float = 0.018
+    """BB bandwidth threshold below which we detect a squeeze."""
+    VOLATILITY_SQUEEZE_COOLDOWN_SECONDS: int = 120
+    """Per-symbol cooldown between squeeze-breakout signals."""
     MARKET_MAKING_STRATEGY_ENABLED: bool = True
     """Enable maker-first mean-reversion proxy for the current single-order engine."""
     MARKET_MAKING_MIN_SPREAD_BPS: float = 1.2
@@ -245,7 +254,8 @@ class Settings(BaseSettings):
     STAT_ARB_MIN_ZSCORE: float = 2.0
     STRATEGY_PRIORITY_ORDER: str = (
         "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
-        "statistical_arbitrage_v1,market_making_v1,scalp_micro_v1,ema_crossover_v1"
+        "volatility_squeeze_v1,statistical_arbitrage_v1,market_making_v1,"
+        "scalp_micro_v1,ema_crossover_v1"
     )
     """Higher-priority strategies win ensemble conflicts when directions disagree."""
 
@@ -793,6 +803,7 @@ class Settings(BaseSettings):
             self.ORDER_FLOW_STRATEGY_ENABLED = False
             self.FUNDING_ARB_STRATEGY_ENABLED = False
             self.LIQUIDATION_HUNTING_STRATEGY_ENABLED = False
+            self.VOLATILITY_SQUEEZE_STRATEGY_ENABLED = False
             self.MARKET_MAKING_STRATEGY_ENABLED = False
             self.STAT_ARB_STRATEGY_ENABLED = False
 
