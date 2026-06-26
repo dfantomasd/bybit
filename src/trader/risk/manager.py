@@ -123,6 +123,7 @@ class RiskManager:
         require_liquidity_for_sizing: bool = False,
         max_correlated_positions: int = 0,
         kelly_adapter: KellyAdapter | None = None,
+        trade_journal: Any | None = None,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -137,6 +138,7 @@ class RiskManager:
         self._min_notional_safety_buffer_pct = Decimal(str(min_notional_safety_buffer_pct))
         self._max_correlated_positions = max(0, int(max_correlated_positions))
         self._kelly_adapter = kelly_adapter or KellyAdapter()
+        self._trade_journal = trade_journal
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -358,13 +360,26 @@ class RiskManager:
         # 11. Calculate position size
         # ----------------------------------------------------------------
         # Use ML-based Kelly sizing via adapter; fallback to profile limits
+        # Fetch recent trades for context enrichment
+        recent_trades = []
+        recent_returns_bps = []
+        if self._trade_journal is not None:
+            try:
+                recent_trades = await self._trade_journal.get_recent_closed_trades(limit=20)
+                # Extract returns from trades
+                recent_returns_bps = [
+                    float(trade.get("net_bps", 0)) for trade in recent_trades if trade.get("net_bps") is not None
+                ]
+            except Exception as e:
+                self._log.debug(f"kelly_sizing.trade_history_fetch_failed: {e}")
+
         kelly_fraction, fractional_kelly, kelly_reasoning = await self._kelly_adapter.predict_kelly_sizing(
             context=KellyAdapterContext(
-                recent_trades=[],  # Would be populated from trade history if available
+                recent_trades=recent_trades,
                 current_price=proposal.entry_price or Decimal("1"),
-                recent_returns_bps=[],  # Would be populated from recent trades
-                all_returns_bps=[],  # Would be populated from trade history
-                volatility_regime=0,  # Would be set from regime_context
+                recent_returns_bps=recent_returns_bps,
+                all_returns_bps=recent_returns_bps,  # Use recent as all-time for now
+                volatility_regime=int(regime_context.regime.value) if regime_context else 0,
                 current_drawdown_pct=float(drawdown_pct),
                 max_drawdown_pct=float(self._drawdown.max_drawdown_pct),
                 strategy_id=getattr(proposal, "strategy_id", "unknown"),
