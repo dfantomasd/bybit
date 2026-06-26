@@ -117,8 +117,9 @@ def test_order_flow_strategy_rejects_missing_book_confirmation() -> None:
 
 
 def test_funding_arbitrage_fades_positive_funding() -> None:
+    # RSI must be elevated (>=0.60) for SELL fade; OI must be rising
     proposal = FundingArbitrageStrategy(min_abs_funding_bps=5.0).evaluate(
-        _vector(funding_rate_bps_clipped=8.0, oi_change_pct_60m_clipped=0.2),
+        _vector(funding_rate_bps_clipped=8.0, oi_change_pct_60m_clipped=0.2, rsi_14=0.70),
         10.0,
         1000.0,
     )
@@ -147,10 +148,14 @@ def test_funding_arbitrage_requires_oi_and_momentum_features() -> None:
 
 
 def test_liquidation_hunting_fades_sell_liquidation_cluster() -> None:
+    # SELL liquidations = shorts closed → price fell too far → fade by BUY
+    # RSI must be oversold (<= 0.30); volume_zscore absent → check skipped
     tracker = FlowTracker()
     tracker.record_liquidation(_SYMBOL, OrderSide.SELL, Decimal("10"), Decimal("3000"))
 
-    proposal = LiquidationHuntingStrategy(tracker, min_liq_notional_usd=10_000).evaluate(_vector(), 10.0, 1000.0)
+    proposal = LiquidationHuntingStrategy(tracker, min_liq_notional_usd=10_000).evaluate(
+        _vector(rsi_14=0.25), 10.0, 1000.0
+    )
 
     assert proposal is not None
     assert proposal.side == OrderSide.BUY
