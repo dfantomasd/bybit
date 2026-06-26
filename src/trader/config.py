@@ -120,9 +120,9 @@ class Settings(BaseSettings):
     MIN_NET_ALPHA_RETURN_PCT: float = 0.15
     """Minimum expected NET return (percent) for advanced-alpha entries after costs."""
     MIN_NET_MARKET_MAKING_PCT: float = 0.06
-    """Minimum expected NET return (percent) for market-making (tighter spreads). Realistic for 0.8x TP/SL."""
+    """Minimum expected NET return (percent) for market-making entries after costs."""
     MIN_NET_STAT_ARB_PCT: float = 0.07
-    """Minimum expected NET return (percent) for statistical arbitrage (momentum reversion). Realistic for 0.9x TP/SL."""
+    """Minimum expected NET return (percent) for statistical arbitrage entries after costs."""
     SCALP_COOLDOWN_SECONDS: int = 60
     """Minimum seconds between scalp signals per symbol."""
     SCALP_MAX_TRADES_PER_MINUTE: int = 10

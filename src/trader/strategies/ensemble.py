@@ -76,11 +76,21 @@ class StrategyEnsemble:
         priorities = self._strategy_priorities
         regime_adapted = False
         if regime_ctx is not None:
-            priorities = RegimeAwarePrioritizer.compute_priorities(
-                regime_ctx=regime_ctx,
-                base_priorities=self._strategy_priorities,
-            )
-            regime_adapted = priorities != self._strategy_priorities
+            try:
+                priorities = RegimeAwarePrioritizer.compute_priorities(
+                    regime_ctx=regime_ctx,
+                    base_priorities=self._strategy_priorities,
+                )
+                regime_adapted = priorities != self._strategy_priorities
+            except Exception as e:
+                log.warning(
+                    "ensemble.regime_adaptation_error",
+                    symbol=feature_vector.symbol,
+                    error=str(e),
+                )
+                # Fall back to base priorities if regime adaptation fails
+                priorities = self._strategy_priorities
+                regime_adapted = False
 
         proposals: list[TradeProposal] = []
 

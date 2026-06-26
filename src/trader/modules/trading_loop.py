@@ -14,7 +14,6 @@ from trader.domain.enums import TradingMode
 from trader.domain.models import FeatureVector
 from trader.modules.base import AppBoundModule
 from trader.monitoring.logging import get_logger
-from trader.strategies.regime_adapter import RegimeAwarePrioritizer
 from trader.runtime.constants import (
     _BALANCE_REFRESH_INTERVAL,
     _FALLBACK_BALANCE_USD,
@@ -392,17 +391,16 @@ class TradingLoopModule(AppBoundModule):
                 priority_order=priority_order,
             )
 
-        # Configure confluence signals for better signal reliability
-        # All basic strategies can provide confirmation for each other
-        basic_strategy_ids = {
-            "mean_reversion_v1",
-            "macd_zerocross_v1",
-            "atr_breakout_v1",
+        # Configure confluence signals: allow basic strategies to pass alone,
+        # but commodity strategies (ema_crossover) require confirmation
+        basic_strategy_ids = {"mean_reversion_v1", "macd_zerocross_v1", "atr_breakout_v1"}
+        confirmation_required_for = {"ema_crossover_v1", "scalp_micro_v1"}
+        confirmation_sources = basic_strategy_ids | {
+            "funding_arbitrage_v1",
+            "volatility_squeeze_v1",
+            "order_flow_v1",
+            "liquidation_hunting_v1",
         }
-        # Currently, no strategy strictly requires confirmation, but agreement boosts confidence
-        # This allows individual strategies to trade alone while rewarding confluence
-        confirmation_required_for = set()
-        confirmation_sources = basic_strategy_ids
 
         self._app._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
@@ -413,17 +411,12 @@ class TradingLoopModule(AppBoundModule):
             confirmation_sources=confirmation_sources,
             min_confirmation_sources=1,
         )
-
         log.info(
-            "ensemble.confluence_enabled",
-            agreement_bonus_pct=0.05 * 100,  # 5% confidence boost per agreeing strategy
-            confirmation_sources=sorted(confirmation_sources),
-            basic_strategies_enabled=[
-                s.strategy_id for s in strategies
-                if s.strategy_id in basic_strategy_ids
-            ],
+            "ensemble.configured",
+            strategies=[s.strategy_id for s in strategies],
+            confirmation_required_for=confirmation_required_for,
+            confirmation_sources=confirmation_sources,
         )
-
         await self._app._refresh_closed_pnl_memory()
 
         # Initialise ML registry when shadow scoring, canary gate, or live decisions need it.
@@ -785,13 +778,7 @@ class TradingLoopModule(AppBoundModule):
             # --- Champion Canary gate: independent of shadow scoring ---
             # score_live() returns None when no compatible directional_net Champion exists.
             # In active execution, an enabled gate must fail closed.
-            # Regime-aware gating: disable LOGREG in SIDEWAYS/VOLATILE where it performs poorly
-            ml_gate_enabled = (
-                settings.MODEL_GATE_CANARY_ENABLED
-                and RegimeAwarePrioritizer.should_apply_ml_gate(regime_ctx)
-                and self._app._model_registry is not None
-            )
-            if ml_gate_enabled:
+            if settings.MODEL_GATE_CANARY_ENABLED and self._app._model_registry is not None:
                 if not self._app._initial_shadow_mode() and not snapshot_id:
                     self._app._record_diag("model_gate_canary_blocked")
                     log.warning(
