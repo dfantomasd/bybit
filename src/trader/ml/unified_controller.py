@@ -136,14 +136,45 @@ class UnifiedMLController:
         Вызывает все 5 моделей параллельно (async).
         """
         try:
-            # Запустить все модели параллельно (только если features не None)
+            # Helper async functions to handle None cases
+            async def call_kelly() -> Any:
+                if kelly_features is not None:
+                    return await self.kelly.predict(kelly_features)
+                return None
+
+            async def call_regime() -> Any:
+                if regime_features is not None:
+                    return await self.regime.predict(regime_features)
+                return None
+
+            async def call_signals() -> Any:
+                if signal_context is not None:
+                    return await self.signals.fuse_signals(signal_context)
+                return None
+
+            async def call_spread() -> Any:
+                if spread_features is not None:
+                    return await self.spread.predict(spread_features)
+                return None
+
+            async def call_stoploss() -> Any:
+                if stoploss_context is not None:
+                    return await self.stoploss.calculate_optimal_stop(stoploss_context)
+                return None
+
+            async def call_entry_exit() -> Any:
+                if self.entry_exit and candle_context:
+                    return await self.entry_exit.get_optimization(candle_context)
+                return None
+
+            # Запустить все модели параллельно
             results = await asyncio.gather(
-                self.kelly.predict(kelly_features) if kelly_features is not None else None,
-                self.regime.predict(regime_features) if regime_features is not None else None,
-                self.signals.fuse_signals(signal_context) if signal_context is not None else None,
-                self.spread.predict(spread_features) if spread_features is not None else None,
-                self.stoploss.calculate_optimal_stop(stoploss_context) if stoploss_context is not None else None,
-                self.entry_exit.get_optimization(candle_context) if self.entry_exit and candle_context else None,
+                call_kelly(),
+                call_regime(),
+                call_signals(),
+                call_spread(),
+                call_stoploss(),
+                call_entry_exit(),
                 return_exceptions=True,
             )
 

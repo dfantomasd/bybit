@@ -148,7 +148,7 @@ class PredictionApplier:
             take_signal = entry_confidence > 0.45
 
             # Also check if signal is strong enough
-            if abs(ml_context.fused_signal) < 0.2 and ml_context.regime == "SIDEWAYS":
+            if abs(ml_context.fused_signal) < 0.2 and ml_context.current_regime == "SIDEWAYS":
                 # Sideways market with weak signal = too risky
                 take_signal = False
 
