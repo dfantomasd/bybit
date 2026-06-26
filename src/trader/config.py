@@ -117,7 +117,7 @@ class Settings(BaseSettings):
     """Minimum expected NET return (percent) after fees+spread+slippage for a scalp."""
     MIN_NET_TREND_RETURN_PCT: float = 0.10
     """Minimum expected NET return (percent) for EMA trend entries after costs."""
-    MIN_NET_ALPHA_RETURN_PCT: float = 0.20
+    MIN_NET_ALPHA_RETURN_PCT: float = 0.15
     """Minimum expected NET return (percent) for advanced-alpha entries after costs."""
     SCALP_COOLDOWN_SECONDS: int = 60
     """Minimum seconds between scalp signals per symbol."""
