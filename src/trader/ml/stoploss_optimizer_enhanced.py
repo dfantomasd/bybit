@@ -23,6 +23,9 @@ try:
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
+    logger.warning("XGBoost not available, using simple numpy-based models")
+    from trader.ml.simple_models import SimpleEnsembleRegressor
+    XGBRegressor = SimpleEnsembleRegressor
 
 
 @dataclass
