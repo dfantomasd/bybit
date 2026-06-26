@@ -240,6 +240,10 @@ class TradingLoopModule(AppBoundModule):
             or self._app._settings.LIQUIDATION_HUNTING_STRATEGY_ENABLED
             or self._app._settings.MARKET_MAKING_STRATEGY_ENABLED
             or self._app._settings.STAT_ARB_STRATEGY_ENABLED
+            or self._app._settings.MEAN_REVERSION_STRATEGY_ENABLED
+            or self._app._settings.MACD_ZEROCROSS_STRATEGY_ENABLED
+            or self._app._settings.ATR_BREAKOUT_STRATEGY_ENABLED
+            or self._app._settings.VOLATILITY_SQUEEZE_STRATEGY_ENABLED
         ):
             from trader.risk.net_edge import NetEdgeParams
             from trader.strategies.advanced_alpha import (
