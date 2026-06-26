@@ -130,8 +130,8 @@ def _proposal(
 # MEAN REVERSION (RSI Extremes)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_MR_RSI_BUY = 0.30         # Buy when oversold
-_MR_RSI_SELL = 0.70        # Sell when overbought
+_MR_RSI_BUY = 0.35         # Buy when oversold (expanded from 0.30 to catch more signals in sideways)
+_MR_RSI_SELL = 0.65        # Sell when overbought (expanded from 0.70)
 _MR_ADX_MIN = 0.10         # Allow even weak trends
 _MR_ATR_MIN = 0.0003
 _MR_ATR_MAX = 0.025
@@ -140,8 +140,8 @@ _MR_ATR_MAX = 0.025
 class MeanReversionStrategy(BaseStrategy):
     """Simple RSI mean reversion: fade extremes.
 
-    BUY: RSI < 0.30 (oversold) + volume above normal + ATR in bounds
-    SELL: RSI > 0.70 (overbought) + volume above normal + ATR in bounds
+    BUY: RSI < 0.35 (oversold) + volume above normal + ATR in bounds
+    SELL: RSI > 0.65 (overbought) + volume above normal + ATR in bounds
 
     Edge: RSI extremes are statistical mean-reversion setups.
     Simplicity = reliability. 5-10 signals per symbol per day.
@@ -207,11 +207,11 @@ class MeanReversionStrategy(BaseStrategy):
                 current_price=current_price,
                 available_balance_usd=available_balance_usd,
                 atr_pct=atr_pct,
-                confidence=0.58 + min(0.15, (0.30 - rsi) * 0.5),
+                confidence=0.58 + min(0.15, (_MR_RSI_BUY - rsi) * 0.5),
                 rationale=f"mean_reversion buy oversold rsi={rsi:.2f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.4,
+                tp_mult=2.0,
                 sl_mult=0.7,
             )
 
@@ -223,11 +223,11 @@ class MeanReversionStrategy(BaseStrategy):
                 current_price=current_price,
                 available_balance_usd=available_balance_usd,
                 atr_pct=atr_pct,
-                confidence=0.58 + min(0.15, (rsi - 0.70) * 0.5),
+                confidence=0.58 + min(0.15, (rsi - _MR_RSI_SELL) * 0.5),
                 rationale=f"mean_reversion sell overbought rsi={rsi:.2f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.4,
+                tp_mult=2.0,
                 sl_mult=0.7,
             )
 
@@ -240,7 +240,7 @@ class MeanReversionStrategy(BaseStrategy):
 
 _MC_ATR_MIN = 0.0003
 _MC_ATR_MAX = 0.025
-_MC_ADX_MIN = 0.12        # Need some trend structure
+_MC_ADX_MIN = 0.08        # Lowered from 0.12 to catch more signals in low-trend markets
 _MC_COOLDOWN_SECONDS = 120  # Avoid double-signals in same bar
 
 
@@ -339,7 +339,7 @@ class MACDZeroCrossStrategy(BaseStrategy):
                 rationale=f"macd_zerocross buy histogram {last_hist:.5f}→{macd_hist:.5f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.5,
+                tp_mult=2.0,
                 sl_mult=0.75,
             )
 
@@ -357,7 +357,7 @@ class MACDZeroCrossStrategy(BaseStrategy):
                 rationale=f"macd_zerocross sell histogram {last_hist:.5f}→{macd_hist:.5f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.5,
+                tp_mult=2.0,
                 sl_mult=0.75,
             )
 
@@ -370,7 +370,7 @@ class MACDZeroCrossStrategy(BaseStrategy):
 
 _AB_ATR_MIN = 0.0004
 _AB_ATR_MAX = 0.025
-_AB_VOLUME_MIN = 0.8       # Volume must be near or above average
+_AB_VOLUME_MIN = 0.5       # Lowered from 0.8 to catch moderate volume breakouts
 _AB_ADX_MAX = 0.35         # Skip already-established trends
 _AB_COOLDOWN_SECONDS = 180  # Avoid whipsaws
 
@@ -502,7 +502,7 @@ class ATRBreakoutStrategy(BaseStrategy):
                 rationale=f"atr_breakout buy above {recent_high:.8f} vol_z={vol_z:.2f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.6,
+                tp_mult=2.0,
                 sl_mult=0.8,
             )
 
@@ -521,7 +521,7 @@ class ATRBreakoutStrategy(BaseStrategy):
                 rationale=f"atr_breakout sell below {recent_low:.8f} vol_z={vol_z:.2f}",
                 cost_params=self._cost_params,
                 min_net_return_pct=self._min_net_return_pct,
-                tp_mult=1.6,
+                tp_mult=2.0,
                 sl_mult=0.8,
             )
 

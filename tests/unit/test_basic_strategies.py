@@ -134,8 +134,8 @@ class TestATRBreakoutStrategy:
         strat = ATRBreakoutStrategy()
         for i in range(1, 6):
             strat.evaluate(_vector(vol_z=1.0), _PRICE, 1000.0)
-        proposal = strat.evaluate(_vector(vol_z=0.5, log_return=0.0005), _PRICE + 0.05, 1000.0)
-        assert proposal is None  # vol_z < 0.8
+        proposal = strat.evaluate(_vector(vol_z=0.3, log_return=0.0005), _PRICE + 0.05, 1000.0)
+        assert proposal is None  # vol_z < 0.5
 
     def test_reject_established_trend(self) -> None:
         strat = ATRBreakoutStrategy()
