@@ -265,7 +265,7 @@ class TradingLoopModule(AppBoundModule):
                 expected_slippage_pct=self._app._settings.EXPECTED_SLIPPAGE_PCT,
                 max_spread_bps=self._app._settings.SCREENER_MAX_SPREAD_BPS,
                 funding_buffer_pct=self._app._settings.FUNDING_BUFFER_PCT,
-                safety_margin_pct=0.01,
+                safety_margin_pct=self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT,
             )
             alpha_min_net = self._app._settings.MIN_NET_ALPHA_RETURN_PCT
 
