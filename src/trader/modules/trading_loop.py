@@ -391,12 +391,38 @@ class TradingLoopModule(AppBoundModule):
                 priority_order=priority_order,
             )
 
+        # Configure confluence signals for better signal reliability
+        # All basic strategies can provide confirmation for each other
+        basic_strategy_ids = {
+            "mean_reversion_v1",
+            "macd_zerocross_v1",
+            "atr_breakout_v1",
+        }
+        # Currently, no strategy strictly requires confirmation, but agreement boosts confidence
+        # This allows individual strategies to trade alone while rewarding confluence
+        confirmation_required_for = set()
+        confirmation_sources = basic_strategy_ids
+
         self._app._strategy_ensemble = StrategyEnsemble(
             strategies=strategies,
             health_checker=self._app._health_checker,
             min_confidence=profile_cfg.min_confidence,
             strategy_priorities=strategy_priorities,
+            confirmation_required_for=confirmation_required_for,
+            confirmation_sources=confirmation_sources,
+            min_confirmation_sources=1,
         )
+
+        log.info(
+            "ensemble.confluence_enabled",
+            agreement_bonus_pct=0.05 * 100,  # 5% confidence boost per agreeing strategy
+            confirmation_sources=sorted(confirmation_sources),
+            basic_strategies_enabled=[
+                s.strategy_id for s in strategies
+                if s.strategy_id in basic_strategy_ids
+            ],
+        )
+
         await self._app._refresh_closed_pnl_memory()
 
         # Initialise ML registry when shadow scoring, canary gate, or live decisions need it.
