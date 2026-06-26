@@ -136,13 +136,13 @@ class UnifiedMLController:
         Вызывает все 5 моделей параллельно (async).
         """
         try:
-            # Запустить все модели параллельно
+            # Запустить все модели параллельно (только если features не None)
             results = await asyncio.gather(
-                self.kelly.predict(kelly_features),
-                self.regime.predict(regime_features),
-                self.signals.fuse_signals(signal_context),
-                self.spread.predict(spread_features),
-                self.stoploss.calculate_optimal_stop(stoploss_context),
+                self.kelly.predict(kelly_features) if kelly_features is not None else None,
+                self.regime.predict(regime_features) if regime_features is not None else None,
+                self.signals.fuse_signals(signal_context) if signal_context is not None else None,
+                self.spread.predict(spread_features) if spread_features is not None else None,
+                self.stoploss.calculate_optimal_stop(stoploss_context) if stoploss_context is not None else None,
                 self.entry_exit.get_optimization(candle_context) if self.entry_exit and candle_context else None,
                 return_exceptions=True,
             )
