@@ -811,9 +811,6 @@ class Settings(BaseSettings):
             self.FUNDING_ARB_STRATEGY_ENABLED = False
             self.LIQUIDATION_HUNTING_STRATEGY_ENABLED = False
             self.VOLATILITY_SQUEEZE_STRATEGY_ENABLED = False
-            self.MEAN_REVERSION_STRATEGY_ENABLED = False
-            self.MACD_ZEROCROSS_STRATEGY_ENABLED = False
-            self.ATR_BREAKOUT_STRATEGY_ENABLED = False
             self.MARKET_MAKING_STRATEGY_ENABLED = False
             self.STAT_ARB_STRATEGY_ENABLED = False
 
