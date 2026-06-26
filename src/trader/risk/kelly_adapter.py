@@ -7,7 +7,7 @@ Extracts features, handles fallback, and provides recommended sizing adjustments
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, Optional
@@ -38,7 +38,7 @@ class KellyAdapterContext:
     total_trades: int
 
     # Temporal
-    timestamp: datetime = dataclass(default_factory=lambda: datetime.now(UTC))
+    timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
 
 
 class KellyAdapter:
