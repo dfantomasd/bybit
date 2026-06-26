@@ -124,6 +124,7 @@ class RiskManager:
         max_correlated_positions: int = 0,
         kelly_adapter: KellyAdapter | None = None,
         trade_journal: Any | None = None,
+        ml_controller: Any | None = None,
     ) -> None:
         self._profile = risk_profile
         self._limits: RiskLimits = get_risk_limits(risk_profile)
@@ -139,6 +140,16 @@ class RiskManager:
         self._max_correlated_positions = max(0, int(max_correlated_positions))
         self._kelly_adapter = kelly_adapter or KellyAdapter()
         self._trade_journal = trade_journal
+        self._ml_controller = ml_controller
+
+        # Initialize ML prediction applier if controller available
+        self._ml_applier = None
+        if ml_controller is not None:
+            try:
+                from trader.ml.prediction_applier import PredictionApplier
+                self._ml_applier = PredictionApplier(ml_controller)
+            except Exception as e:
+                self._log.debug(f"ml_applier_init_failed: {e}")
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
@@ -164,7 +175,34 @@ class RiskManager:
         triggered_rules: list[str] = []
 
         # ----------------------------------------------------------------
-        # 1. Kill switch check
+        # 1. ML FILTERING — skip low confidence signals early
+        # ----------------------------------------------------------------
+        if self._ml_applier is not None and self._trade_journal is not None:
+            try:
+                recent_trades = await self._trade_journal.get_recent_closed_trades(limit=20)
+                should_take, reason = await self._ml_applier.should_take_trade(
+                    proposal=proposal,
+                    recent_trades=recent_trades,
+                    current_price=proposal.entry_price or Decimal("1"),
+                    market_regime=regime_context.regime.value if regime_context else "SIDEWAYS",
+                )
+                if not should_take:
+                    self._log.info(
+                        "execution.filtered_by_ml",
+                        symbol=proposal.symbol,
+                        reason=reason,
+                    )
+                    return self._reject(
+                        proposal,
+                        f"ml_filter: {reason}",
+                        ["ml_filtered"],
+                        capital,
+                    )
+            except Exception as e:
+                self._log.debug(f"ml_filtering_failed: {e}")
+
+        # ----------------------------------------------------------------
+        # 2. Kill switch check
         # ----------------------------------------------------------------
         if self._kill_switch.is_active:
             if not self._kill_switch.new_entries_allowed():
@@ -176,7 +214,7 @@ class RiskManager:
                 )
 
         # ----------------------------------------------------------------
-        # 2. Circuit breakers — safe mode
+        # 3. Circuit breakers — safe mode
         # ----------------------------------------------------------------
         if self._breakers.should_emergency():
             return self._reject(
@@ -206,7 +244,7 @@ class RiskManager:
             )
 
         # ----------------------------------------------------------------
-        # 3. Regime check
+        # 4. Regime check
         # ----------------------------------------------------------------
         regime = proposal.regime
         if regime_context is not None:
@@ -387,9 +425,32 @@ class RiskManager:
                 total_trades=self._exposure.position_count,
             )
         )
+
+        # ================================================================
+        # ML POSITION SIZING OPTIMIZATION
+        # ================================================================
+        position_size_adjustment = Decimal("1.0")
+        if self._ml_applier is not None and self._trade_journal is not None:
+            try:
+                recent_trades = await self._trade_journal.get_recent_closed_trades(limit=20)
+                optimized = await self._ml_applier.optimize_entry(
+                    proposal=proposal,
+                    recent_trades=recent_trades,
+                    current_price=proposal.entry_price or Decimal("1"),
+                    market_regime=regime_context.regime.value if regime_context else "SIDEWAYS",
+                )
+                position_size_adjustment = Decimal(str(optimized.position_size_adjustment))
+                self._log.debug(
+                    "position_size.ml_optimized",
+                    adjustment=float(position_size_adjustment),
+                    confidence=optimized.entry_confidence,
+                )
+            except Exception as e:
+                self._log.debug(f"position_size_optimization_failed: {e}")
+
         # Convert Kelly fraction (0.01-0.25) to risk percentage (clamped to profile range)
         desired_risk_pct = min(
-            kelly_fraction * Decimal("100"),
+            kelly_fraction * Decimal("100") * position_size_adjustment,
             self._limits.risk_per_trade_max_pct,
         )
 

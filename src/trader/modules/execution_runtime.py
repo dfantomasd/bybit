@@ -104,6 +104,7 @@ class ExecutionRuntimeModule(AppBoundModule):
             max_correlated_positions=int(self._app._settings.MAX_CORRELATED_POSITIONS),
             kelly_adapter=kelly_adapter,
             trade_journal=self._app._trade_journal,
+            ml_controller=self._app._ml_controller,
         )
         self._app._kill_switch = kill_switch
         log.info(
