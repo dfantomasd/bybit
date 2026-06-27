@@ -825,7 +825,12 @@ class Settings(BaseSettings):
             # render.yaml changes. Keep the versioned research cohort isolated
             # in every Settings consumer (runtime, diagnostics, and trainer
             # subprocess) regardless of stale deployment overrides.
-            self.TRAIN_STRATEGY_ALLOWLIST = "scalp_micro_v1,shadow_probe_hv_v2"
+            # Include basic ensemble strategies so their signals feed training
+            # data and speed up schema-change sample accumulation.
+            self.TRAIN_STRATEGY_ALLOWLIST = (
+                "scalp_micro_v1,shadow_probe_hv_v2,"
+                "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
+            )
             self.TRAIN_INCLUDE_CANDLE_BASELINE = False
 
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
