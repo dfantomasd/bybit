@@ -2844,7 +2844,10 @@ class TelegramMonitorBot:
             "• <b>Candle-sampler checks</b> — модель оценивает каждую подтверждённую свечу: "
             f"scored=<code>{int((candle_sampler or {}).get('scored') or 0)}</code>, "
             f"pass=<code>{int((candle_sampler or {}).get('gate_pass') or 0)}</code>, "
-            f"block=<code>{int((candle_sampler or {}).get('gate_block') or 0)}</code>",
+            f"block=<code>{int((candle_sampler or {}).get('gate_block') or 0)}</code>, "
+            f"thr=<code>{html.escape(str((candle_sampler or {}).get('threshold', 'n/a')))}</code>/"
+            f"<code>{html.escape(str((candle_sampler or {}).get('threshold_source', 'n/a')))}</code>, "
+            f"pass-rate=<code>{html.escape(str((candle_sampler or {}).get('pass_rate_pct', 'n/a')))}%</code>",
             "• <b>Shadow closes</b>: "
             f"total=<code>{int(shadow_closes.get('total') or 0)}</code>, "
             f"TP=<code>{int(shadow_closes.get('tp') or 0)}</code>, "

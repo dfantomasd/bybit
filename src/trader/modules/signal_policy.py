@@ -123,6 +123,42 @@ class SignalPolicyModule(AppBoundModule):
         exploratory_threshold = sorted_scores[index]
         return min(strict_threshold, exploratory_threshold), "adaptive"
 
+    def candle_sampler_shadow_gate_stats(self) -> dict[str, Any]:
+        """Summarise the rolling shadow-only sampler threshold state."""
+
+        strict_threshold = self.model_gate_threshold(None) if self._app._settings is not None else 0.52
+        scores = list(self._app._candle_sampler_shadow_scores)
+        if not scores:
+            return {
+                "score_count": 0,
+                "threshold": round(strict_threshold, 6),
+                "threshold_source": "strict",
+                "pass_rate_pct": None,
+            }
+
+        min_pass_rate_setting = (
+            self._app._settings.CANDLE_SAMPLER_SHADOW_GATE_MIN_PASS_RATE_PCT
+            if self._app._settings is not None
+            else 20.0
+        )
+        min_pass_rate = min(100.0, max(0.0, float(min_pass_rate_setting)))
+        threshold = strict_threshold
+        threshold_source = "strict"
+        if min_pass_rate > 0.0 and len(scores) >= 20:
+            sorted_scores = sorted(scores)
+            quantile = 1.0 - (min_pass_rate / 100.0)
+            index = min(len(sorted_scores) - 1, max(0, int(round(quantile * (len(sorted_scores) - 1)))))
+            threshold = min(strict_threshold, sorted_scores[index])
+            threshold_source = "adaptive"
+
+        pass_count = sum(1 for score in scores if score >= threshold)
+        return {
+            "score_count": len(scores),
+            "threshold": round(threshold, 6),
+            "threshold_source": threshold_source,
+            "pass_rate_pct": round(pass_count / len(scores) * 100.0, 2),
+        }
+
     def update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
         latest_model = DiagnosticsModule.dict_or_empty(diag.get("latest_model_version"))
         metrics = DiagnosticsModule.dict_or_empty(latest_model.get("metrics"))

@@ -167,6 +167,12 @@ class TestCandleSampler:
         assert threshold < 0.52
         assert threshold >= 0.31
 
+        stats = app._modules.signal_policy.candle_sampler_shadow_gate_stats()
+        assert stats["score_count"] == 20
+        assert stats["threshold_source"] == "adaptive"
+        assert stats["threshold"] == pytest.approx(threshold)
+        assert stats["pass_rate_pct"] > 0.0
+
     @pytest.mark.asyncio
     async def test_no_challenger_records_only_baseline(self) -> None:
         app = _make_app()
