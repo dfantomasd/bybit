@@ -181,6 +181,7 @@ class TradeProposal(BaseModel):
     # Risk / reward estimate
     expected_return: float | None = None
     expected_risk: float | None = None
+    spread_bps: float | None = None
 
     # Regime at time of proposal
     regime: MarketRegime = MarketRegime.UNCERTAIN

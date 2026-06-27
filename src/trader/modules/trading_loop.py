@@ -984,6 +984,7 @@ class TradingLoopModule(AppBoundModule):
                     "entry": float(entry_price),
                     "tp": float(proposal.take_profit),
                     "sl": float(proposal.stop_loss),
+                    "spread_bps": proposal.spread_bps,
                     "opened_at": datetime.now(tz=UTC),
                 }
 

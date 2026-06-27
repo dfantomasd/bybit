@@ -110,6 +110,7 @@ class TestScalpMicroStrategy:
         assert tp_dist > 0 and sl_dist > 0
         # TP = 1.6 * ATR, SL = 0.65 * ATR → ratio ≈ 2.46
         assert abs(tp_dist / sl_dist - (1.6 / 0.65)) < 0.05
+        assert proposal.spread_bps == 1.0
 
     # ------------------------------------------------------------------
     # Signal filter rejections

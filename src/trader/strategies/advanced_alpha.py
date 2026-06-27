@@ -97,6 +97,7 @@ def _proposal(
         confidence=max(0.0, min(confidence, 0.95)),
         expected_return=tp_dist * 100.0,
         expected_risk=sl_dist * 100.0,
+        spread_bps=spread_bps,
         regime=regime,
         feature_id=feature_id,
         rationale=rationale,

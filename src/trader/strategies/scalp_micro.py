@@ -350,6 +350,7 @@ class ScalpMicroStrategy(BaseStrategy):
             stop_loss=_price(sl),
             take_profit=_price(tp),
             confidence=confidence,
+            spread_bps=spread_bps,
             regime=regime,
             rationale=(
                 f"vwap_pullback: ewma={ewma:.4f}, vwap_dist={vwap_dist:.2f}%, "

@@ -121,6 +121,7 @@ def _proposal(
         stop_loss=_price(stop),
         take_profit=_price(take),
         confidence=max(0.0, min(confidence, 0.95)),
+        spread_bps=spread_bps,
         regime=regime,
         rationale=rationale,
     )

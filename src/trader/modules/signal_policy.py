@@ -690,7 +690,10 @@ class SignalPolicyModule(AppBoundModule):
             return gross
         taker_fee_pct = float(self._app._settings.DEFAULT_LINEAR_TAKER_FEE_RATE) * 100.0
         round_trip_fee_pct = taker_fee_pct * 2.0
-        spread_pct = float(self._app._settings.SCREENER_MAX_SPREAD_BPS) / 100.0
+        spread_bps = position.get("spread_bps")
+        if spread_bps is None:
+            spread_bps = self._app._settings.TRAIN_LABEL_SPREAD_BPS
+        spread_pct = float(spread_bps) / 100.0
         slippage_pct = float(self._app._settings.EXPECTED_SLIPPAGE_PCT) * 2.0
         return gross - round_trip_fee_pct - spread_pct - slippage_pct
 
