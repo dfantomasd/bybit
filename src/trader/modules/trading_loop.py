@@ -394,7 +394,7 @@ class TradingLoopModule(AppBoundModule):
         # Configure confluence signals: allow basic strategies to pass alone,
         # but commodity strategies (ema_crossover) require confirmation
         basic_strategy_ids = {"mean_reversion_v1", "macd_zerocross_v1", "atr_breakout_v1"}
-        confirmation_required_for = {"ema_crossover_v1", "scalp_micro_v1"}
+        confirmation_required_for = {"ema_crossover_v1"}
         confirmation_sources = basic_strategy_ids | {
             "funding_arbitrage_v1",
             "volatility_squeeze_v1",
