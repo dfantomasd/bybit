@@ -211,10 +211,24 @@ class TestSettingsSafetyGates:
             TRADING_MODE="SHADOW",
             BYBIT_USE_TESTNET="false",
             SHADOW_PROBE_RESEARCH_PROFILE_V2="true",
+            SHADOW_PROBE_MIN_TP_PCT="0.75",
+            SHADOW_PROBE_MIN_SL_PCT="0.40",
+            SHADOW_PROBE_MIN_NET_RETURN_PCT="0.30",
+            SHADOW_PROBE_SYMBOL_WARMUP_SECONDS="300",
+            SHADOW_PROBE_SELL_ENABLED="false",
+            SHADOW_PROBE_SIDE_BLOCK_ENABLED="true",
+            SHADOW_PROBE_QUALITY_FILTER_ENABLED="true",
             TRAIN_STRATEGY_ALLOWLIST="scalp_micro_v1,candle_sampler_v1,shadow_probe_v1",
             TRAIN_INCLUDE_CANDLE_BASELINE="true",
         )
 
+        assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.45  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_SL_PCT == 0.25  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_NET_RETURN_PCT == 0.12  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS == 60  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_SELL_ENABLED is True  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is False  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is False  # type: ignore[union-attr]
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
             "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
         )

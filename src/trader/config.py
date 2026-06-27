@@ -153,7 +153,7 @@ class Settings(BaseSettings):
     """
     SHADOW_PROBE_PAPER_COLLECTION_MODE: bool = True
     """Widen probe regimes in SHADOW so ML labels accumulate (no live orders)."""
-    SHADOW_PROBE_PAPER_REGIMES: str = "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN"
+    SHADOW_PROBE_PAPER_REGIMES: str = "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN,BULL_TREND,BEAR_TREND"
     """Regimes allowed for shadow_probe_hv_v2 when paper collection mode is on."""
     SHADOW_PROBE_MIN_ABS_IMBALANCE: float = 0.08
     SHADOW_PROBE_COOLDOWN_SECONDS: int = 180
@@ -827,6 +827,13 @@ class Settings(BaseSettings):
             # subprocess) regardless of stale deployment overrides.
             # Include basic ensemble strategies so their signals feed training
             # data and speed up schema-change sample accumulation.
+            self.SHADOW_PROBE_MIN_TP_PCT = 0.45
+            self.SHADOW_PROBE_MIN_SL_PCT = 0.25
+            self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
+            self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60
+            self.SHADOW_PROBE_SELL_ENABLED = True
+            self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = False
+            self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = False
             self.TRAIN_STRATEGY_ALLOWLIST = (
                 "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
             )

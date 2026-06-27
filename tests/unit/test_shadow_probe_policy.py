@@ -115,9 +115,10 @@ def test_shadow_probe_paper_collection_expands_regimes() -> None:
     policy = _policy_module()
     policy._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2 = True
     policy._app._settings.SHADOW_PROBE_PAPER_COLLECTION_MODE = True
-    policy._app._settings.SHADOW_PROBE_PAPER_REGIMES = "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN"
+    policy._app._settings.SHADOW_PROBE_PAPER_REGIMES = "SIDEWAYS,HIGH_VOLATILITY,UNCERTAIN,BULL_TREND,BEAR_TREND"
 
     assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.SIDEWAYS)) is True
     assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.HIGH_VOLATILITY)) is True
     assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.UNCERTAIN)) is True
-    assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.BULL_TREND)) is False
+    assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.BULL_TREND)) is True
+    assert policy.shadow_probe_regime_allows(SimpleNamespace(regime=MarketRegime.BEAR_TREND)) is True

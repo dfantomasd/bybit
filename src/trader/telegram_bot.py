@@ -1445,8 +1445,11 @@ class TelegramMonitorBot:
             return
         await self._reply(update, text, reply_markup=reply_markup)
 
-    _DB_DIAG_TIMEOUT_LITE_S = 15.0
-    _DB_DIAG_TIMEOUT_FULL_S = 25.0
+    # Keep the Telegram-side guard slightly above the provider-side timeout.
+    # Otherwise the outer wait_for may fire first and lose the provider's
+    # richer fallback (journal connected/configured + runtime candle counts).
+    _DB_DIAG_TIMEOUT_LITE_S = 20.0
+    _DB_DIAG_TIMEOUT_FULL_S = 35.0
 
     def _apply_db_diag_fallbacks(self, diag: dict[str, Any]) -> None:
         if self._controller is not None and self._controller.enrich_db_diag_fallbacks is not None:
