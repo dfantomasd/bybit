@@ -3541,54 +3541,47 @@ class TradeJournal:
                 result["storage_stats"] = await _read_or_default("storage_stats", {}, self.get_storage_stats)
                 return result
 
-            result["candles_by_interval"] = await _read_or_default(
-                "candle_readiness_counts",
-                {},
-                self.get_candle_readiness_counts,
+            (
+                candles_by_interval,
+                latest_candle_1m,
+                feature_snapshots,
+                prediction_outcomes,
+                by_horizon_rows,
+                labelled_samples_15m,
+            ) = await asyncio.gather(
+                _read_or_default("candle_readiness_counts", {}, self.get_candle_readiness_counts),
+                _read_or_default("latest_candle_1m", None, lambda: self.get_latest_candle_time("1")),
+                _read_or_default("feature_snapshot_readiness_count", 0, self.get_feature_snapshot_readiness_count),
+                _read_or_default("prediction_outcome_readiness_count", 0, self.get_prediction_outcome_readiness_count),
+                _read_or_default(
+                    "prediction_outcomes_by_horizon",
+                    [],
+                    lambda: self._fetch(
+                        """
+                        SELECT horizon_minutes, count(*) AS cnt
+                        FROM (
+                            SELECT horizon_minutes
+                            FROM prediction_outcomes
+                            WHERE label IS NOT NULL
+                            LIMIT 4000
+                        ) capped
+                        GROUP BY horizon_minutes
+                        ORDER BY horizon_minutes
+                        """
+                    ),
+                ),
+                _read_or_default("labelled_15m_readiness_count", 0, self.get_labelled_15m_readiness_count),
             )
-            latest_candle_1m = await _read_or_default(
-                "latest_candle_1m",
-                None,
-                lambda: self.get_latest_candle_time("1"),
-            )
+            result["candles_by_interval"] = candles_by_interval
             result["latest_candle_1m"] = latest_candle_1m
             if latest_candle_1m is not None:
                 result["last_confirmed_candle_age_s"] = max(
                     0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                 )
-            result["feature_snapshots"] = await _read_or_default(
-                "feature_snapshot_readiness_count",
-                0,
-                self.get_feature_snapshot_readiness_count,
-            )
-            result["prediction_outcomes"] = await _read_or_default(
-                "prediction_outcome_readiness_count",
-                0,
-                self.get_prediction_outcome_readiness_count,
-            )
-            rows = await _read_or_default(
-                "prediction_outcomes_by_horizon",
-                [],
-                lambda: self._fetch(
-                    """
-                    SELECT horizon_minutes, count(*) AS cnt
-                    FROM (
-                        SELECT horizon_minutes
-                        FROM prediction_outcomes
-                        WHERE label IS NOT NULL
-                        LIMIT 4000
-                    ) capped
-                    GROUP BY horizon_minutes
-                    ORDER BY horizon_minutes
-                    """
-                ),
-            )
-            result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in rows}
-            result["labelled_samples_15m"] = await _read_or_default(
-                "labelled_15m_readiness_count",
-                0,
-                self.get_labelled_15m_readiness_count,
-            )
+            result["feature_snapshots"] = int(feature_snapshots or 0)
+            result["prediction_outcomes"] = int(prediction_outcomes or 0)
+            result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in by_horizon_rows}
+            result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
 
