@@ -160,13 +160,29 @@ class SignalPolicyModule(AppBoundModule):
         }
 
     def update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
+        active_model = DiagnosticsModule.dict_or_empty(diag.get("active_model_version"))
         latest_model = DiagnosticsModule.dict_or_empty(diag.get("latest_model_version"))
-        metrics = DiagnosticsModule.dict_or_empty(latest_model.get("metrics"))
-        gate = DiagnosticsModule.dict_or_empty(diag.get("shadow_gate_15m"))
+        model = active_model or latest_model
+        metrics = DiagnosticsModule.dict_or_empty(model.get("metrics"))
+        model_horizon = str(
+            diag.get("model_gate_horizon_minutes")
+            or metrics.get("horizon_minutes")
+            or metrics.get("model_horizon_minutes")
+            or "15"
+        )
+        gate_by_horizon = DiagnosticsModule.dict_or_empty(diag.get("shadow_gate_by_horizon"))
+        gate = DiagnosticsModule.dict_or_empty(gate_by_horizon.get(model_horizon))
+        if not gate:
+            gate = DiagnosticsModule.dict_or_empty(diag.get(f"shadow_gate_{model_horizon}m"))
+        if not gate:
+            gate = DiagnosticsModule.dict_or_empty(diag.get("shadow_gate_15m"))
         self._app._model_gate_quality = {
+            "model_version": model.get("version"),
+            "model_status": model.get("status"),
             "quality": metrics.get("quality"),
             "lift_bps": metrics.get("lift_bps"),
             "best_threshold": metrics.get("best_threshold"),
+            "horizon_minutes": int(model_horizon) if str(model_horizon).isdigit() else model_horizon,
             "gate_total_count": gate.get("total_count", 0) or 0,
             "gate_lift_vs_all_bps": gate.get("lift_vs_all_bps"),
         }

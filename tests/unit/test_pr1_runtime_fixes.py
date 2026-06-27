@@ -107,6 +107,43 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
     assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
 
 
+def test_model_gate_quality_uses_active_model_not_latest_challenger() -> None:
+    """CANARY quality cache must describe the model used by score_live()."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+
+    app._update_model_gate_quality_from_diag(
+        {
+            "model_gate_horizon_minutes": 5,
+            "active_model_version": {
+                "version": "champ",
+                "status": "CHAMPION",
+                "metrics": {"quality": "WEAK", "lift_bps": -1.0, "best_threshold": 0.58, "horizon_minutes": 5},
+            },
+            "latest_model_version": {
+                "version": "fresh_challenger",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "GOOD", "lift_bps": 9.0, "best_threshold": 0.66, "horizon_minutes": 5},
+            },
+            "shadow_gate_by_horizon": {
+                "5": {
+                    "total_count": 88,
+                    "lift_vs_all_bps": 1.4,
+                }
+            },
+        }
+    )
+
+    assert app._model_gate_quality["model_version"] == "champ"
+    assert app._model_gate_quality["model_status"] == "CHAMPION"
+    assert app._model_gate_quality["quality"] == "WEAK"
+    assert app._model_gate_quality["lift_bps"] == -1.0
+    assert app._model_gate_quality["horizon_minutes"] == 5
+    assert app._model_gate_quality["gate_total_count"] == 88
+    assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.4
+
+
 def test_model_features_include_proposal_side() -> None:
     """Directional labels must expose the proposed side as an explicit ML feature."""
     from trader.app import TradingApplication
