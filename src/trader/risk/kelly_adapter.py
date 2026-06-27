@@ -101,6 +101,8 @@ class KellyAdapter:
 
         recent_avg_win_bps = 0.0
         recent_avg_loss_bps = 0.0
+        win_amounts: list[float] = []
+        loss_amounts: list[float] = []
         if recent_trades:
             win_amounts = [t.get("pnl_bps", 0) for t in recent_trades if t.get("pnl_bps", 0) > 0]
             loss_amounts = [t.get("pnl_bps", 0) for t in recent_trades if t.get("pnl_bps", 0) < 0]
@@ -108,7 +110,7 @@ class KellyAdapter:
             recent_avg_loss_bps = np.mean(loss_amounts) if loss_amounts else -10.0
 
         recent_profit_factor = (
-            abs(sum(w for w in win_amounts)) / abs(sum(loss_amounts)) if win_amounts and loss_amounts else 1.0
+            abs(sum(win_amounts)) / abs(sum(loss_amounts)) if win_amounts and loss_amounts else 1.0
         )
 
         recent_pnl_trend = 0.0
