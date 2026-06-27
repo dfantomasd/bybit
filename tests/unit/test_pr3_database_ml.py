@@ -711,6 +711,62 @@ async def test_db_diagnostics_reports_training_samples_by_horizon() -> None:
     assert diag["newest_training_schema_by_horizon"]["5"]["trainable_schema_count"] == 1200
 
 
+@pytest.mark.asyncio
+async def test_paper_pnl_uses_recent_window_then_chronological_equity() -> None:
+    """Paper PnL must reflect the latest live-like window, not the oldest rows."""
+    from trader.storage.directional_trade_journal import DirectionalTradeJournal
+
+    journal = DirectionalTradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+    queries: list[str] = []
+
+    async def mock_fetch(query: str, *_args: Any) -> list[dict[str, Any]]:
+        queries.append(query)
+        return [{"net_return_bps": 1.0}]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    paper = await journal._paper_pnl_for_model("v_test", 5, "schema123")
+
+    assert paper["baseline"]["count"] == 1
+    assert paper["model_gate"]["count"] == 1
+    assert len(queries) == 2
+    assert all("ORDER BY pe.created_at DESC" in query for query in queries)
+    assert all("LIMIT 1000" in query for query in queries)
+    assert all(") recent\n            ORDER BY created_at ASC" in query for query in queries)
+
+
+@pytest.mark.asyncio
+async def test_challenger_returns_for_bootstrap_use_gate_pass_only() -> None:
+    """Auto-promoter bootstrap should measure trades the model would allow."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake", enabled=True)
+    journal._pool = MagicMock()
+    queries: list[str] = []
+
+    async def mock_fetch(query: str, *_args: Any) -> list[dict[str, Any]]:
+        queries.append(query)
+        return [{"net_return_bps": 2.0}]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    challenger_returns = await journal.get_returns_for_model(
+        "v_challenger",
+        horizon_minutes=5,
+        label_schema_version=LABEL_SCHEMA_VERSION_TPSL,
+    )
+    baseline_returns = await journal.get_returns_for_model(
+        "RULE_BASELINE_V1",
+        horizon_minutes=5,
+        label_schema_version=LABEL_SCHEMA_VERSION_TPSL,
+    )
+
+    assert challenger_returns == [2.0]
+    assert baseline_returns == [2.0]
+    assert "pe.decision = 'GATE_PASS'" in queries[0]
+    assert "COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'" in queries[1]
+
+
 def test_auto_trainer_reads_configured_horizon_sample_count() -> None:
     """Guard against regressing to mixed 5m/15m readiness counters."""
     import inspect

@@ -2377,41 +2377,79 @@ class TradeJournal:
             return []
         resolved_label_schema = label_schema_version or active_label_schema_version(use_tpsl_exit=True)
         if horizon_minutes is not None:
-            rows = await self._fetch(
-                """
-                SELECT po.net_return_bps
-                FROM prediction_outcomes po
-                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
-                WHERE pe.model_version = $1
-                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
-                  AND po.net_return_bps IS NOT NULL
-                  AND po.label_schema_version = $4
-                  AND po.horizon_minutes = $3
-                ORDER BY po.resolved_at DESC NULLS LAST
-                LIMIT $2
-                """,
-                model_version,
-                int(limit),
-                int(horizon_minutes),
-                resolved_label_schema,
-            )
+            if model_version == "RULE_BASELINE_V1":
+                rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_outcomes po
+                    JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                    WHERE pe.model_version = $1
+                      AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                      AND po.net_return_bps IS NOT NULL
+                      AND po.label_schema_version = $4
+                      AND po.horizon_minutes = $3
+                    ORDER BY po.resolved_at DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    model_version,
+                    int(limit),
+                    int(horizon_minutes),
+                    resolved_label_schema,
+                )
+            else:
+                rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_outcomes po
+                    JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
+                      AND po.net_return_bps IS NOT NULL
+                      AND po.label_schema_version = $4
+                      AND po.horizon_minutes = $3
+                    ORDER BY po.resolved_at DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    model_version,
+                    int(limit),
+                    int(horizon_minutes),
+                    resolved_label_schema,
+                )
         else:
-            rows = await self._fetch(
-                """
-                SELECT po.net_return_bps
-                FROM prediction_outcomes po
-                JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
-                WHERE pe.model_version = $1
-                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
-                  AND po.net_return_bps IS NOT NULL
-                  AND po.label_schema_version = $3
-                ORDER BY po.resolved_at DESC NULLS LAST
-                LIMIT $2
-                """,
-                model_version,
-                int(limit),
-                resolved_label_schema,
-            )
+            if model_version == "RULE_BASELINE_V1":
+                rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_outcomes po
+                    JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                    WHERE pe.model_version = $1
+                      AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                      AND po.net_return_bps IS NOT NULL
+                      AND po.label_schema_version = $3
+                    ORDER BY po.resolved_at DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    model_version,
+                    int(limit),
+                    resolved_label_schema,
+                )
+            else:
+                rows = await self._fetch(
+                    """
+                    SELECT po.net_return_bps
+                    FROM prediction_outcomes po
+                    JOIN prediction_events pe ON pe.prediction_id = po.prediction_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
+                      AND po.net_return_bps IS NOT NULL
+                      AND po.label_schema_version = $3
+                    ORDER BY po.resolved_at DESC NULLS LAST
+                    LIMIT $2
+                    """,
+                    model_version,
+                    int(limit),
+                    resolved_label_schema,
+                )
         return [float(r["net_return_bps"]) for r in rows]
 
     async def get_shadow_gate_stats(

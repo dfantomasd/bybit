@@ -155,35 +155,43 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         _allowlist, _include_candle, label_schema, _label_threshold = _training_eligibility_params()
         baseline_rows = await self._fetch(
             """
-            SELECT po.net_return_bps
-            FROM prediction_events pe
-            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-            WHERE pe.model_version = 'RULE_BASELINE_V1'
-              AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
-              AND po.horizon_minutes = $1
-              AND po.label IS NOT NULL
-              AND po.label_schema_version = $2
-              AND pe.strategy_signal IN ('Buy', 'Sell')
-            ORDER BY pe.created_at ASC
-            LIMIT 1000
+            SELECT net_return_bps
+            FROM (
+                SELECT pe.created_at, po.net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                WHERE pe.model_version = 'RULE_BASELINE_V1'
+                  AND COALESCE(pe.decision, '') <> 'SHADOW_CANDLE'
+                  AND po.horizon_minutes = $1
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $2
+                  AND pe.strategy_signal IN ('Buy', 'Sell')
+                ORDER BY pe.created_at DESC
+                LIMIT 1000
+            ) recent
+            ORDER BY created_at ASC
             """,
             int(horizon_minutes),
             label_schema,
         )
         gate_rows = await self._fetch(
             """
-            SELECT po.net_return_bps
-            FROM prediction_events pe
-            JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-            JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
-            WHERE pe.model_version = $1
-              AND pe.decision = 'GATE_PASS'
-              AND po.horizon_minutes = $2
-              AND po.label IS NOT NULL
-              AND po.label_schema_version = $3
-              AND ($4::text = '' OR fs.feature_schema_hash = $4)
-            ORDER BY pe.created_at ASC
-            LIMIT 1000
+            SELECT net_return_bps
+            FROM (
+                SELECT pe.created_at, po.net_return_bps
+                FROM prediction_events pe
+                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                WHERE pe.model_version = $1
+                  AND pe.decision = 'GATE_PASS'
+                  AND po.horizon_minutes = $2
+                  AND po.label IS NOT NULL
+                  AND po.label_schema_version = $3
+                  AND ($4::text = '' OR fs.feature_schema_hash = $4)
+                ORDER BY pe.created_at DESC
+                LIMIT 1000
+            ) recent
+            ORDER BY created_at ASC
             """,
             model_version,
             int(horizon_minutes),
