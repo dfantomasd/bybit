@@ -6,7 +6,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
-from trader.training.eligibility import training_strategy_filter_sql
+from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 
 FetchRows = Callable[..., Awaitable[list[Any]]]
 
@@ -56,6 +56,7 @@ def _eligible_samples_cte(strategy_filter: str) -> str:
               AND fs.training_eligible = true
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND pe.strategy_signal IN ('Buy', 'Sell')
+              AND {training_decision_filter_sql("$5")}
               AND {strategy_filter}
         ),
         deduped AS (

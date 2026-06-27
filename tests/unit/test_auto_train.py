@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from trader.training.auto_train import TrainableSnapshot, resolve_training_horizon
-from trader.training.eligibility import training_strategy_filter_sql
+from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 
 
 def test_training_strategy_filter_includes_candle_baselines_when_enabled() -> None:
@@ -12,6 +12,16 @@ def test_training_strategy_filter_includes_candle_baselines_when_enabled() -> No
     assert "HISTORICAL_REAL" in sql
     assert "$5::boolean IS TRUE" in sql
     assert "strategy_id' IS NULL" not in sql
+
+
+def test_training_decision_filter_includes_candle_baselines_only_when_enabled() -> None:
+    sql = training_decision_filter_sql("$5")
+    assert "SHADOW_BASELINE" in sql
+    assert "GATE_PASS" in sql
+    assert "GATE_BLOCK" in sql
+    assert "SHADOW_CANDLE" in sql
+    assert "HISTORICAL_REAL" in sql
+    assert "$5::boolean IS TRUE" in sql
 
 
 def test_training_strategy_filter_exclusive_when_allowlist_set() -> None:

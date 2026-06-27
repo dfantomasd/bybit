@@ -641,12 +641,13 @@ class Settings(BaseSettings):
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
     TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_hv_v2"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
-    TRAIN_INCLUDE_CANDLE_BASELINE: bool = False
+    TRAIN_INCLUDE_CANDLE_BASELINE: bool = True
     """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines.
 
-    Keep disabled for the production scalp model: unconditional candle samples
-    overwhelm the much smaller strategy-signal pool and teach market direction
-    rather than the expectancy of entries the bot can actually execute.
+    This is safe for live execution because challenger promotion still requires
+    positive walk-forward, shadow-gate lift, and paper-gate PnL. Keeping it on
+    prevents fresh v2 outcomes collected by the candle sampler from being
+    invisible to auto-training when strategy-signal samples are sparse.
     """
     TRAIN_LABEL_SPREAD_BPS: float = 4.0
     """Spread component in the training label cost model (scalp max spread is ~5 bps)."""
@@ -847,7 +848,7 @@ class Settings(BaseSettings):
             self.TRAIN_STRATEGY_ALLOWLIST = (
                 "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
             )
-            self.TRAIN_INCLUDE_CANDLE_BASELINE = False
+            self.TRAIN_INCLUDE_CANDLE_BASELINE = True
 
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
             self.SCREENER_MAX_PRICE_USD = 25.0

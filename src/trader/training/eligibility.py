@@ -4,6 +4,7 @@ from __future__ import annotations
 
 # Candle-sampling baselines store RULE_BASELINE_V1 labels without strategy_id.
 _CANDLE_BASELINE_DECISIONS = ("SHADOW_CANDLE", "HISTORICAL_REAL")
+_STRATEGY_BASELINE_DECISIONS = ("GATE_PASS", "GATE_BLOCK", "SHADOW_BASELINE")
 
 
 def training_strategy_filter_sql(
@@ -31,5 +32,24 @@ def training_strategy_filter_sql(
         OR (
             {include_candle_baseline_param}::boolean IS TRUE
             AND COALESCE(pe.decision, '') IN ({decisions})
+        )
+    )"""
+
+
+def training_decision_filter_sql(include_candle_baseline_param: str = "$5") -> str:
+    """Return SQL predicate for decisions train.py may consume.
+
+    Strategy signals use ``SHADOW_BASELINE`` / gate decisions. Candle baselines
+    are only included when TRAIN_INCLUDE_CANDLE_BASELINE is enabled, matching
+    ``training_strategy_filter_sql`` so diagnostics and training do not drift.
+    """
+
+    strategy_decisions = ", ".join(f"'{item}'" for item in _STRATEGY_BASELINE_DECISIONS)
+    candle_decisions = ", ".join(f"'{item}'" for item in _CANDLE_BASELINE_DECISIONS)
+    return f"""(
+        COALESCE(pe.decision, '') IN ({strategy_decisions})
+        OR (
+            {include_candle_baseline_param}::boolean IS TRUE
+            AND COALESCE(pe.decision, '') IN ({candle_decisions})
         )
     )"""

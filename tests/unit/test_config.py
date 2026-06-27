@@ -236,7 +236,7 @@ class TestSettingsSafetyGates:
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
             "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
         )
-        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is False  # type: ignore[union-attr]
+        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is True  # type: ignore[union-attr]
 
     def test_legacy_profile_keeps_explicit_training_pool(self) -> None:
         settings = self._make_settings(
