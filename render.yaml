@@ -316,6 +316,8 @@ services:
       - key: CANARY_MAX_TOTAL_EXPOSURE_PCT
         value: "45"
       # ML shadow model (shadow scoring only; no live influence)
+      - key: ML_UNIFIED_MODEL_DIR
+        value: data/ml_unified_models
       - key: MODEL_ENABLED
         value: "false"
       - key: MODEL_TYPE

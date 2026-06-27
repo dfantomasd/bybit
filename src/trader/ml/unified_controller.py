@@ -73,7 +73,7 @@ class UnifiedMLController:
         spread_predictor: Any,
         stoploss_optimizer: Any,
         entry_exit_optimizer: Any = None,
-        model_dir: str = "/tmp/ml_models",  # noqa: S108
+        model_dir: str = "data/ml_unified_models",
         auto_save: bool = True,
     ) -> None:
         """Инициализация контроллера.

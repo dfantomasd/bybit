@@ -50,8 +50,10 @@ class ExecutionRuntimeModule(AppBoundModule):
             from trader.ml.stoploss_optimizer_enhanced import StopLossOptimizerEnhanced
             from trader.ml.unified_controller import UnifiedMLController
 
+            model_dir = self._app._settings.ML_UNIFIED_MODEL_DIR
+
             # Initialize each model
-            kelly_predictor = MLKellyPredictor()
+            kelly_predictor = MLKellyPredictor(model_dir=model_dir)
             regime_predictor = RegimePredictorEnhanced()
             signal_fusion = SignalFusionEnhanced()
             spread_predictor = SpreadPredictorEnhanced()
@@ -66,7 +68,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                 spread_predictor=spread_predictor,
                 stoploss_optimizer=stoploss_optimizer,
                 entry_exit_optimizer=entry_exit_optimizer,
-                model_dir="/tmp/ml_models",  # noqa: S108
+                model_dir=model_dir,
                 auto_save=True,
             )
 
