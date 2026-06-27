@@ -400,6 +400,7 @@ class TradingLoopModule(AppBoundModule):
             "volatility_squeeze_v1",
             "order_flow_v1",
             "liquidation_hunting_v1",
+            "shadow_probe_hv_v2",
         }
 
         self._app._strategy_ensemble = StrategyEnsemble(

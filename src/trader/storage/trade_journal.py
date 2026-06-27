@@ -1807,8 +1807,10 @@ class TradeJournal:
         ingestion and training queries.
         """
         targets = {"1": 1000, "5": 200, "15": 200, "60": 100}
-        counts: dict[str, int] = {}
-        for interval, target in targets.items():
+        intervals = list(targets.keys())
+        target_vals = [targets[i] for i in intervals]
+
+        async def _count_one(interval: str, target: int) -> int:
             rows = await self._fetch(
                 """
                 SELECT count(*) AS cnt
@@ -1823,8 +1825,10 @@ class TradeJournal:
                 interval,
                 target,
             )
-            counts[interval] = int(rows[0]["cnt"]) if rows else 0
-        return counts
+            return int(rows[0]["cnt"]) if rows else 0
+
+        results = await asyncio.gather(*(_count_one(iv, tgt) for iv, tgt in zip(intervals, target_vals)))
+        return {iv: cnt for iv, cnt in zip(intervals, results)}
 
     async def get_candle_counts_per_symbol(self) -> dict[tuple[str, str], int]:
         """Return {(symbol, interval): confirmed count} for backfill gap detection."""
