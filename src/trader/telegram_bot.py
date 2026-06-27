@@ -3536,7 +3536,7 @@ class TelegramMonitorBot:
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
             training_config = db_diag.get("training_config", {}) or {}
             pool_breakdown = db_diag.get("training_pool_breakdown", {}) or {}
-            labelled_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
+            trainable_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
             filtered_total_5m = int(pool_breakdown.get("filtered_total_5m", 0) or 0)
             loose_v2_5m = int((db_diag.get("prediction_outcomes_by_horizon", {}) or {}).get(str(model_horizon), 0) or 0)
             train_allowlist = training_config.get("strategy_allowlist") or []
@@ -3590,7 +3590,7 @@ class TelegramMonitorBot:
 
             data_note = (
                 "данные собираются"
-                if connected and labelled_model_horizon >= 1000
+                if connected and trainable_model_horizon >= 1000
                 else "мало данных для уверенного обучения"
             )
             training_note = "модель-кандидат обучена" if db_model_version else "модель еще не обучена"
@@ -3632,14 +3632,14 @@ class TelegramMonitorBot:
                 lines.append(f"Invalid snapshots: <code>{invalid_snaps}</code>")
             lines += [
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
-                f"Готово для обучения ({model_horizon}m): <code>{labelled_model_horizon}</code>",
+                f"Готово для обучения ({model_horizon}m): <code>{trainable_model_horizon}</code>",
             ]
-            if loose_v2_5m and labelled_model_horizon < loose_v2_5m:
+            if loose_v2_5m and trainable_model_horizon < loose_v2_5m:
                 lines.append(
                     f"Размечено v2 без фильтра scalp: <code>{loose_v2_5m}</code> "
                     f"(в пуле allowlist всего: <code>{filtered_total_5m}</code>)"
                 )
-            if scalp_active == 0 and labelled_model_horizon < 1000:
+            if scalp_active == 0 and trainable_model_horizon < 1000:
                 lines.append(
                     "⚠️ <i>Scalp-пул пуст: обучение ждёт сигналы scalp_micro_v1. "
                     "Сейчас v2-метки в основном от candle_sampler (не входит в allowlist).</i>"
@@ -3704,10 +3704,10 @@ class TelegramMonitorBot:
             # ── Roadmap к реальным деньгам ──────────────────────────────────
             lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
             # 1. Данные
-            lbl_ok = int(labelled_model_horizon or 0) >= 1000
+            lbl_ok = int(trainable_model_horizon or 0) >= 1000
             lines.append(
-                f"{'✅' if lbl_ok else '❌'} Семплов ({model_horizon}m) ≥ 1000 → сейчас: "
-                f"<code>{labelled_model_horizon}</code>"
+                f"{'✅' if lbl_ok else '❌'} Совместимых trainable-семплов ({model_horizon}m) ≥ 1000 → сейчас: "
+                f"<code>{trainable_model_horizon}</code>"
             )
             # 2. Модель обучена, quality GOOD
             trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
