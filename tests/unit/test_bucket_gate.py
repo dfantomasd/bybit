@@ -198,7 +198,7 @@ class TestBucketGate:
         assert app._shadow_loss_guard_blocks() is True
 
     def test_shadow_loss_guard_disabled_setting_never_blocks(self) -> None:
-        app = _make_app(SHADOW_LOSS_GUARD_ENABLED=False)
+        app = _make_app(SHADOW_LOSS_GUARD_ENABLED=False, SHADOW_PROBE_RESEARCH_PROFILE_V2=False)
 
         app._record_shadow_close("XRPUSDT", "SL", -0.3)
         app._record_shadow_close("ADAUSDT", "SL", -0.2)

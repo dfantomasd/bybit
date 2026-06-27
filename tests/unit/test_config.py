@@ -222,6 +222,7 @@ class TestSettingsSafetyGates:
             SHADOW_PROBE_SELL_ENABLED="false",
             SHADOW_PROBE_SIDE_BLOCK_ENABLED="true",
             SHADOW_PROBE_QUALITY_FILTER_ENABLED="true",
+            SHADOW_LOSS_GUARD_ENABLED="false",
             TRAIN_STRATEGY_ALLOWLIST="scalp_micro_v1,candle_sampler_v1,shadow_probe_v1",
             TRAIN_INCLUDE_CANDLE_BASELINE="true",
         )
@@ -234,6 +235,7 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is False  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is False  # type: ignore[union-attr]
         assert settings.SCALP_STRICT_SHADOW is True  # type: ignore[union-attr]
+        assert settings.SHADOW_LOSS_GUARD_ENABLED is True  # type: ignore[union-attr]
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
             "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
         )
