@@ -47,7 +47,7 @@ class TestScalpStrictShadow:
         assert app._symbol_side_blocked("ADAUSDT", "Buy") is False
 
     def test_scalp_strict_shadow_can_be_disabled(self) -> None:
-        app = _make_app(SCALP_STRICT_SHADOW=False)
+        app = _make_app(SCALP_STRICT_SHADOW=False, SHADOW_PROBE_RESEARCH_PROFILE_V2=False)
         app._symbol_side_stats = {("ADAUSDT", "Buy"): (-5.0, 25)}
         assert app._symbol_side_blocked("ADAUSDT", "Buy") is False
 

@@ -233,6 +233,7 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_PROBE_SELL_ENABLED is True  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is False  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is False  # type: ignore[union-attr]
+        assert settings.SCALP_STRICT_SHADOW is True  # type: ignore[union-attr]
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
             "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
         )

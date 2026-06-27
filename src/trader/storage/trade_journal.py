@@ -1827,8 +1827,8 @@ class TradeJournal:
             )
             return int(rows[0]["cnt"]) if rows else 0
 
-        results = await asyncio.gather(*(_count_one(iv, tgt) for iv, tgt in zip(intervals, target_vals)))
-        return {iv: cnt for iv, cnt in zip(intervals, results)}
+        results = await asyncio.gather(*(_count_one(iv, tgt) for iv, tgt in zip(intervals, target_vals, strict=True)))
+        return dict(zip(intervals, results, strict=True))
 
     async def get_candle_counts_per_symbol(self) -> dict[tuple[str, str], int]:
         """Return {(symbol, interval): confirmed count} for backfill gap detection."""
@@ -3580,7 +3580,9 @@ class TradeJournal:
                 )
             result["feature_snapshots"] = int(feature_snapshots or 0)
             result["prediction_outcomes"] = int(prediction_outcomes or 0)
-            result["prediction_outcomes_by_horizon"] = {str(row["horizon_minutes"]): int(row["cnt"]) for row in by_horizon_rows}
+            result["prediction_outcomes_by_horizon"] = {
+                str(row["horizon_minutes"]): int(row["cnt"]) for row in by_horizon_rows
+            }
             result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]

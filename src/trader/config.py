@@ -139,7 +139,7 @@ class Settings(BaseSettings):
         "statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
     )
     """Strategy priority override used when RISK_PROFILE=SCALP."""
-    SCALP_STRICT_SHADOW: bool = False
+    SCALP_STRICT_SHADOW: bool = True
     """On SCALP+SHADOW, apply expectancy and net-edge gates like LIVE (no toxic paper trades)."""
     SHADOW_RELAX_SCALP_FILTERS: bool = True
     """When SHADOW and not SCALP_STRICT_SHADOW, loosen scalp gates for paper-trade data collection."""
@@ -845,6 +845,7 @@ class Settings(BaseSettings):
             self.SHADOW_PROBE_SELL_ENABLED = True
             self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = False
             self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = False
+            self.SCALP_STRICT_SHADOW = True
             self.TRAIN_STRATEGY_ALLOWLIST = (
                 "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
             )
