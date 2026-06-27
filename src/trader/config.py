@@ -602,6 +602,9 @@ class Settings(BaseSettings):
     # ------------------------------------------------------------------
     # ML / model
     # ------------------------------------------------------------------
+    ML_UNIFIED_MODEL_DIR: str = "data/ml_unified_models"
+    """Directory for unified ML artifacts (Kelly, regime, fusion, spread, stoploss).
+    Prefer a persistent volume path on Render; /tmp is cleared on redeploy."""
     MODEL_ENABLED: bool = True
     """Enable lightweight supervised challenger model."""
     MODEL_ALLOW_LIVE_DECISIONS: bool = False

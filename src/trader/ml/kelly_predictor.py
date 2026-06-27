@@ -152,7 +152,7 @@ class KellyPredictorBase:
 class MLKellyPredictor(KellyPredictorBase):
     """ML-based Kelly predictor using XGBoost."""
 
-    def __init__(self, model_dir: str = "/tmp/kelly_models") -> None:  # noqa: S108
+    def __init__(self, model_dir: str = "data/ml_unified_models") -> None:
         self.model_dir = model_dir
         self.kelly_model: XGBRegressor | None = None  # Predicts kelly_fraction
         self.fractional_model: XGBRegressor | None = None  # Predicts fractional_kelly

@@ -80,6 +80,10 @@ class TestSettingsDefaults:
         settings = self._make_settings()
         assert settings.market_candle_persist_intervals() == frozenset({"1", "5", "15", "60"})  # type: ignore[union-attr]
 
+    def test_ml_unified_model_dir_default(self) -> None:
+        settings = self._make_settings()
+        assert settings.ML_UNIFIED_MODEL_DIR == "data/ml_unified_models"  # type: ignore[union-attr]
+
     def test_starter_mode_defaults_to_small_account_price_cap(self) -> None:
         settings = self._make_settings(STARTER_OPTIMIZED_MODE="true", SCREENER_MAX_PRICE_USD="0")
         assert settings.SCREENER_MAX_PRICE_USD == 25.0  # type: ignore[union-attr]
