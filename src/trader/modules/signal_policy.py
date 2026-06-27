@@ -510,8 +510,21 @@ class SignalPolicyModule(AppBoundModule):
             )
 
     @staticmethod
-    def shadow_exit_hit(position: dict[str, Any], *, high: float, low: float) -> tuple[str, float] | None:
-        """Return the first conservative TP/SL hit for one shadow candle."""
+    def shadow_exit_hit(
+        position: dict[str, Any],
+        *,
+        high: float,
+        low: float,
+        current_price: float | None = None,
+        now: datetime | None = None,
+        max_hold_seconds: int | None = None,
+    ) -> tuple[str, float] | None:
+        """Return the first conservative shadow exit for one candle.
+
+        TP/SL wins first. If neither is touched, an optional time exit frees
+        SHADOW research slots at the model horizon instead of letting paper
+        positions occupy all slots indefinitely in a sideways market.
+        """
 
         side = str(position.get("side") or "")
         tp = float(position["tp"])
@@ -525,7 +538,12 @@ class SignalPolicyModule(AppBoundModule):
                 return "TP", tp
             if sl_hit:
                 return "SL", sl
-            return None
+            return SignalPolicyModule.shadow_time_exit_hit(
+                position,
+                current_price=current_price,
+                now=now,
+                max_hold_seconds=max_hold_seconds,
+            )
         if side == "Sell":
             tp_hit = low <= tp
             sl_hit = high >= sl
@@ -535,8 +553,37 @@ class SignalPolicyModule(AppBoundModule):
                 return "TP", tp
             if sl_hit:
                 return "SL", sl
-            return None
+            return SignalPolicyModule.shadow_time_exit_hit(
+                position,
+                current_price=current_price,
+                now=now,
+                max_hold_seconds=max_hold_seconds,
+            )
         return None
+
+    @staticmethod
+    def shadow_time_exit_hit(
+        position: dict[str, Any],
+        *,
+        current_price: float | None,
+        now: datetime | None,
+        max_hold_seconds: int | None,
+    ) -> tuple[str, float] | None:
+        """Close a SHADOW paper position at horizon when TP/SL did not hit."""
+
+        if current_price is None or current_price <= 0 or not max_hold_seconds or max_hold_seconds <= 0:
+            return None
+        opened_at = position.get("opened_at")
+        if not isinstance(opened_at, datetime):
+            return None
+        if opened_at.tzinfo is None:
+            opened_at = opened_at.replace(tzinfo=UTC)
+        current_time = now or datetime.now(tz=UTC)
+        if current_time.tzinfo is None:
+            current_time = current_time.replace(tzinfo=UTC)
+        if (current_time - opened_at).total_seconds() < max_hold_seconds:
+            return None
+        return "TIME", float(current_price)
 
     @staticmethod
     def shadow_gross_pnl_pct(position: dict[str, Any], exit_price: float) -> float:

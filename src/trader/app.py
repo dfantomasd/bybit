@@ -678,8 +678,21 @@ class TradingApplication:
         self._modules.signal_policy.record_shadow_close(symbol, reason, pnl_pct)
 
     @staticmethod
-    def _shadow_exit_hit(position: dict[str, Any], *, high: float, low: float) -> tuple[str, float] | None:
-        return SignalPolicyModule.shadow_exit_hit(position, high=high, low=low)
+    def _shadow_exit_hit(
+        position: dict[str, Any],
+        *,
+        high: float,
+        low: float,
+        current_price: float | None = None,
+        max_hold_seconds: int | None = None,
+    ) -> tuple[str, float] | None:
+        return SignalPolicyModule.shadow_exit_hit(
+            position,
+            high=high,
+            low=low,
+            current_price=current_price,
+            max_hold_seconds=max_hold_seconds,
+        )
 
     def _shadow_pnl_pct(self, position: dict[str, Any], exit_price: float) -> float:
         return self._modules.signal_policy.shadow_pnl_pct(position, exit_price)

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 from trader.app import TradingApplication
@@ -238,6 +238,34 @@ class TestBucketGate:
 
         assert TradingApplication._shadow_exit_hit(buy, high=103.0, low=98.5) == ("SL", 99.0)
         assert TradingApplication._shadow_exit_hit(sell, high=101.5, low=97.5) == ("SL", 101.0)
+
+    def test_shadow_exit_time_closes_unhit_position_at_horizon(self) -> None:
+        opened_at = datetime.now(tz=UTC) - timedelta(minutes=6)
+        pos = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0, "opened_at": opened_at}
+
+        hit = TradingApplication._shadow_exit_hit(
+            pos,
+            high=100.8,
+            low=99.4,
+            current_price=100.3,
+            max_hold_seconds=300,
+        )
+
+        assert hit == ("TIME", 100.3)
+
+    def test_shadow_exit_time_waits_until_horizon(self) -> None:
+        opened_at = datetime.now(tz=UTC) - timedelta(minutes=3)
+        pos = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0, "opened_at": opened_at}
+
+        hit = TradingApplication._shadow_exit_hit(
+            pos,
+            high=100.8,
+            low=99.4,
+            current_price=100.3,
+            max_hold_seconds=300,
+        )
+
+        assert hit is None
 
     def test_trend_mtf_confirmation_accepts_aligned_buy(self) -> None:
         app = _make_app(TREND_MTF_CONFIRMATION_ENABLED=True, TREND_CONFIRMATION_INTERVALS="5,15")

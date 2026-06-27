@@ -452,7 +452,14 @@ class TradingLoopModule(AppBoundModule):
             pos = _shadow_positions.get(symbol)
             if pos is None:
                 return
-            hit_info = self._app._shadow_exit_hit(pos, high=high, low=low)
+            max_hold_seconds = max(60, int(self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES) * 60)
+            hit_info = self._app._shadow_exit_hit(
+                pos,
+                high=high,
+                low=low,
+                current_price=current_price,
+                max_hold_seconds=max_hold_seconds,
+            )
             if hit_info:
                 hit, exit_price = hit_info
                 pnl_pct = self._app._shadow_pnl_pct(pos, exit_price)
@@ -476,7 +483,7 @@ class TradingLoopModule(AppBoundModule):
                 self._app._trailing_stop_keys.discard(symbol)
                 if self._app._telegram_bot is not None:
                     try:
-                        label = "✅ TP" if hit == "TP" else "🛑 SL"
+                        label = "✅ TP" if hit == "TP" else ("⏱ TIME" if hit == "TIME" else "🛑 SL")
                         net_sign = "+" if pnl_pct >= 0 else ""
                         gross_sign = "+" if gross_pnl_pct >= 0 else ""
                         await self._app._telegram_bot.notify(
