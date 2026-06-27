@@ -23,8 +23,8 @@ class ExecutionRuntimeModule(AppBoundModule):
         from trader.risk.circuit_breakers import CircuitBreakerManager
         from trader.risk.drawdown import DrawdownTracker
         from trader.risk.exposure import ExposureTracker
-        from trader.risk.kill_switch import KillSwitch
         from trader.risk.kelly_adapter import KellyAdapter
+        from trader.risk.kill_switch import KillSwitch
         from trader.risk.manager import RiskManager
         from trader.risk.profiles import get_risk_limits
 
@@ -42,12 +42,12 @@ class ExecutionRuntimeModule(AppBoundModule):
 
         # Initialize unified ML system with all 5 models
         try:
+            from trader.ml.entry_exit_optimizer_enhanced import EntryExitOptimizerEnhanced
             from trader.ml.kelly_predictor import MLKellyPredictor
             from trader.ml.regime_predictor_enhanced import RegimePredictorEnhanced
             from trader.ml.signal_fusion_enhanced import SignalFusionEnhanced
             from trader.ml.spread_predictor_enhanced import SpreadPredictorEnhanced
             from trader.ml.stoploss_optimizer_enhanced import StopLossOptimizerEnhanced
-            from trader.ml.entry_exit_optimizer_enhanced import EntryExitOptimizerEnhanced
             from trader.ml.unified_controller import UnifiedMLController
 
             # Initialize each model
@@ -66,7 +66,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                 spread_predictor=spread_predictor,
                 stoploss_optimizer=stoploss_optimizer,
                 entry_exit_optimizer=entry_exit_optimizer,
-                model_dir="/tmp/ml_models",
+                model_dir="/tmp/ml_models",  # noqa: S108
                 auto_save=True,
             )
 

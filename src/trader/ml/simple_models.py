@@ -1,11 +1,10 @@
 """Simple ML models using only numpy/pandas - no heavy dependencies."""
+# ruff: noqa: N803,N806
 
 from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Any, Optional
 
 import numpy as np
 
@@ -26,7 +25,7 @@ class SimpleModelState:
 class SimpleLinearModel:
     """Simple linear regression model using numpy only."""
 
-    def __init__(self, n_features: int = 20):
+    def __init__(self, n_features: int = 20) -> None:
         self.n_features = n_features
         self.weights = np.zeros(n_features, dtype=np.float32)
         self.bias = 0.0
@@ -45,13 +44,13 @@ class SimpleLinearModel:
         X_norm = (X - self.feature_means) / self.feature_stds
 
         # Simple linear regression via gradient descent
-        for epoch in range(epochs):
+        for _epoch in range(epochs):
             # Forward pass
             predictions = X_norm @ self.weights + self.bias
 
             # Compute loss and gradients
             errors = predictions - y
-            loss = (errors ** 2).mean()
+            loss = (errors**2).mean()
 
             # Gradient descent
             dw = (2.0 / len(y)) * (X_norm.T @ errors)
@@ -82,7 +81,7 @@ class SimpleLinearModel:
 class SimpleClassifier:
     """Simple logistic regression classifier using numpy only."""
 
-    def __init__(self, n_features: int = 20):
+    def __init__(self, n_features: int = 20) -> None:
         self.n_features = n_features
         self.weights = np.zeros(n_features, dtype=np.float32)
         self.bias = 0.0
@@ -108,7 +107,7 @@ class SimpleClassifier:
         y_binary = (y > 0.5).astype(np.float32)
 
         # Logistic regression via gradient descent
-        for epoch in range(epochs):
+        for _epoch in range(epochs):
             # Forward pass
             z = X_norm @ self.weights + self.bias
             predictions = self.sigmoid(z)
@@ -147,7 +146,7 @@ class SimpleClassifier:
 class SimpleEnsembleRegressor:
     """Ensemble of simple linear models."""
 
-    def __init__(self, n_features: int = 20, n_models: int = 3):
+    def __init__(self, n_features: int = 20, n_models: int = 3) -> None:
         self.n_features = n_features
         self.n_models = n_models
         self.models = [SimpleLinearModel(n_features) for _ in range(n_models)]
@@ -159,7 +158,7 @@ class SimpleEnsembleRegressor:
             raise ValueError(f"Expected {self.n_features} features, got {X.shape[1]}")
 
         losses = []
-        for i, model in enumerate(self.models):
+        for model in self.models:
             # Add some noise to y to create diversity
             y_noisy = y + np.random.normal(0, 0.01 * y.std(), len(y))
             loss = model.fit(X, y_noisy, learning_rate=0.01, epochs=10)

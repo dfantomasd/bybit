@@ -35,8 +35,8 @@ from trader.domain.models import (
 from trader.risk.circuit_breakers import CircuitBreakerManager
 from trader.risk.drawdown import DrawdownTracker
 from trader.risk.exposure import ExposureTracker
-from trader.risk.kill_switch import KillSwitch
 from trader.risk.kelly_adapter import KellyAdapter, KellyAdapterContext
+from trader.risk.kill_switch import KillSwitch
 from trader.risk.profiles import RiskLimits, get_risk_limits
 from trader.risk.sizing import PositionSizer
 
@@ -147,6 +147,7 @@ class RiskManager:
         if ml_controller is not None:
             try:
                 from trader.ml.prediction_applier import PredictionApplier
+
                 self._ml_applier = PredictionApplier(ml_controller)
             except Exception as e:
                 self._log.debug(f"ml_applier_init_failed: {e}")
@@ -747,7 +748,7 @@ class RiskManager:
     @staticmethod
     def _get_volatility_regime_code(regime: Any) -> int:
         """Преобразовать MarketRegime в числовой код (0-3)."""
-        regime_str = str(regime.value) if hasattr(regime, 'value') else str(regime)
+        regime_str = str(regime.value) if hasattr(regime, "value") else str(regime)
 
         if "HIGH_VOLATILITY" in regime_str or "BULL_TREND" in regime_str or "BEAR_TREND" in regime_str:
             return 2  # high

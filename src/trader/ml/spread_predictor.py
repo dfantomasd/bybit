@@ -8,8 +8,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
@@ -17,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -39,9 +38,9 @@ class SpreadPredictorFeatures:
 class SpreadPredictor:
     """Предсказывает оптимальные моменты для входа по спреду."""
 
-    def __init__(self, model_dir: str = "/tmp/spread_models"):
+    def __init__(self, model_dir: str = "/tmp/spread_models") -> None:  # noqa: S108
         self.model_dir = model_dir
-        self.spread_model: Optional[XGBRegressor] = None
+        self.spread_model: XGBRegressor | None = None
         self.last_training_time = datetime.now(UTC)
         self.min_training_samples = 100
 
@@ -64,16 +63,19 @@ class SpreadPredictor:
                 if not features:
                     continue
 
-                x = np.array([
-                    features.hour_of_day,
-                    features.day_of_week,
-                    features.recent_volatility_bps,
-                    features.avg_spread_last_hour_bps,
-                    features.trend_direction,
-                    features.volume_ratio,
-                    features.time_since_market_open_hours,
-                    float(features.is_funding_time),
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        features.hour_of_day,
+                        features.day_of_week,
+                        features.recent_volatility_bps,
+                        features.avg_spread_last_hour_bps,
+                        features.trend_direction,
+                        features.volume_ratio,
+                        features.time_since_market_open_hours,
+                        float(features.is_funding_time),
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
                 y_spreads.append(record.get("actual_spread_bps", 20.0))
@@ -109,16 +111,19 @@ class SpreadPredictor:
             return 25.0, "Model not trained, using estimate"
 
         try:
-            x = np.array([
-                features.hour_of_day,
-                features.day_of_week,
-                features.recent_volatility_bps,
-                features.avg_spread_last_hour_bps,
-                features.trend_direction,
-                features.volume_ratio,
-                features.time_since_market_open_hours,
-                float(features.is_funding_time),
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    features.hour_of_day,
+                    features.day_of_week,
+                    features.recent_volatility_bps,
+                    features.avg_spread_last_hour_bps,
+                    features.trend_direction,
+                    features.volume_ratio,
+                    features.time_since_market_open_hours,
+                    float(features.is_funding_time),
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             predicted_spread = float(self.spread_model.predict(x)[0])
             predicted_spread = max(1.0, min(100.0, predicted_spread))

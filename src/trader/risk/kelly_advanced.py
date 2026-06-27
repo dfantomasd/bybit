@@ -12,8 +12,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
@@ -39,13 +37,15 @@ class AdvancedKellyConfig:
     dd_extreme_pct: float = 15.0
 
     # Drawdown multipliers (how much to reduce Kelly)
-    dd_multipliers: dict[str, float] = field(default_factory=lambda: {
-        "none": 1.0,
-        "mild": 0.95,
-        "moderate": 0.85,
-        "severe": 0.65,
-        "extreme": 0.40,
-    })
+    dd_multipliers: dict[str, float] = field(
+        default_factory=lambda: {
+            "none": 1.0,
+            "mild": 0.95,
+            "moderate": 0.85,
+            "severe": 0.65,
+            "extreme": 0.40,
+        }
+    )
 
     # Fat tail detection
     fat_tail_kurtosis_threshold: float = 4.0
@@ -105,7 +105,7 @@ class AdvancedKellySizer:
     Maintains history and smooths Kelly changes over time.
     """
 
-    def __init__(self, config: AdvancedKellyConfig | None = None):
+    def __init__(self, config: AdvancedKellyConfig | None = None) -> None:
         self.config = config or AdvancedKellyConfig()
         self.kelly_history: list[float] = []
         self.fractional_history: list[float] = []
@@ -267,8 +267,8 @@ class AdvancedKellySizer:
                 "has_fat_tails": False,
             }
 
-        skew = float((np.mean((arr - mean) ** 3) / (std ** 3)))
-        kurt = float((np.mean((arr - mean) ** 4) / (std ** 4)))
+        skew = float(np.mean((arr - mean) ** 3) / (std**3))
+        kurt = float(np.mean((arr - mean) ** 4) / (std**4))
         var_95 = float(np.percentile(arr, 5))
         losses = arr[arr < 0]
         cvar_95 = float(np.mean(losses)) if len(losses) > 0 else 0.0
@@ -335,10 +335,7 @@ class AdvancedKellySizer:
 
     def _smooth_kelly(self, kelly_new: float) -> float:
         """Apply exponential smoothing to Kelly changes."""
-        kelly_smoothed = (
-            self.config.ema_alpha * kelly_new
-            + (1 - self.config.ema_alpha) * self.last_kelly_adjusted
-        )
+        kelly_smoothed = self.config.ema_alpha * kelly_new + (1 - self.config.ema_alpha) * self.last_kelly_adjusted
         self.last_kelly_adjusted = kelly_smoothed
         self.kelly_history.append(kelly_smoothed)
         return kelly_smoothed
@@ -375,7 +372,7 @@ class AdvancedKellySizer:
         # Adjust for drawdown recovery
         if dd_analysis["in_drawdown"]:
             recovery_pct = dd_analysis["current_pct"] / max(dd_analysis["max_pct"], 0.001)
-            frac *= (1 - recovery_pct * 0.5)
+            frac *= 1 - recovery_pct * 0.5
 
         frac = max(self.config.fractional_min, min(frac, self.config.fractional_max))
         self.fractional_history.append(frac)

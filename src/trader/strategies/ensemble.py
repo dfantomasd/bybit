@@ -135,12 +135,8 @@ class StrategyEnsemble:
                     symbol=feature_vector.symbol,
                     buy_count=len(buys),
                     sell_count=len(sells),
-                    buy_strategies_with_confidence=[
-                        f"{p.strategy_id}:{round(p.confidence, 3)}" for p in buys
-                    ],
-                    sell_strategies_with_confidence=[
-                        f"{p.strategy_id}:{round(p.confidence, 3)}" for p in sells
-                    ],
+                    buy_strategies_with_confidence=[f"{p.strategy_id}:{round(p.confidence, 3)}" for p in buys],
+                    sell_strategies_with_confidence=[f"{p.strategy_id}:{round(p.confidence, 3)}" for p in sells],
                     priority=buy_priority,
                 )
                 return None

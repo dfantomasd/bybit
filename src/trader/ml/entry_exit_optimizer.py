@@ -9,7 +9,6 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
@@ -17,6 +16,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -57,9 +57,9 @@ class EntryExitRecommendation:
 class EntryExitOptimizer:
     """Оптимизирует точку входа и выхода для максимизации профита."""
 
-    def __init__(self):
-        self.entry_model: Optional[XGBRegressor] = None  # Предсказывает лучший момент входа
-        self.tp_model: Optional[XGBRegressor] = None  # Предсказывает оптимальный TP уровень
+    def __init__(self) -> None:
+        self.entry_model: XGBRegressor | None = None  # Предсказывает лучший момент входа
+        self.tp_model: XGBRegressor | None = None  # Предсказывает оптимальный TP уровень
         self.min_training_samples = 100
 
     async def train(self, training_data: list[dict]) -> None:
@@ -84,15 +84,18 @@ class EntryExitOptimizer:
                     continue
 
                 # Вектор признаков
-                x = np.array([
-                    float(context.rsi),
-                    context.atr_pct,
-                    context.recent_volatility,
-                    context.trend_strength,
-                    context.momentum,
-                    context.volume_ratio,
-                    context.time_into_candle_pct,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        float(context.rsi),
+                        context.atr_pct,
+                        context.recent_volatility,
+                        context.trend_strength,
+                        context.momentum,
+                        context.volume_ratio,
+                        context.time_into_candle_pct,
+                    ],
+                    dtype=np.float32,
+                )
 
                 # Для модели входа
                 x_list_entry.append(x)
@@ -155,15 +158,18 @@ class EntryExitOptimizer:
             return self._get_default_recommendation(context, side)
 
         try:
-            x = np.array([
-                float(context.rsi),
-                context.atr_pct,
-                context.recent_volatility,
-                context.trend_strength,
-                context.momentum,
-                context.volume_ratio,
-                context.time_into_candle_pct,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    float(context.rsi),
+                    context.atr_pct,
+                    context.recent_volatility,
+                    context.trend_strength,
+                    context.momentum,
+                    context.volume_ratio,
+                    context.time_into_candle_pct,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # Предсказать лучший момент входа
             entry_offset_pct = float(self.entry_model.predict(x)[0])

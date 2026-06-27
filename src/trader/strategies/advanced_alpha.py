@@ -221,13 +221,13 @@ class OrderFlowStrategy(BaseStrategy):
 #   R:R improved to ~2.7 (tp=1.5, sl=0.55) from 1.54 (tp=1.0, sl=0.65)
 #   Volatility cap: skip panic markets (realized_vol > 2.5%)
 
-_FA_MIN_FUNDING_BPS = 8.0        # absolute threshold; 5 was too noisy
-_FA_MAX_FUNDING_BPS = 80.0       # clip to avoid stale/corrupt data
-_FA_RSI_SELL_MIN = 0.60          # price elevated enough to fade
-_FA_RSI_BUY_MAX = 0.40           # price depressed enough to fade
-_FA_MAX_1BAR_RETURN = 0.004      # reject if still in explosive momentum
-_FA_MAX_REALIZED_VOL = 0.025     # skip panic markets (> 2.5% vol)
-_FA_OI_MIN_CHANGE = 0.0          # OI must be non-negative (positions building)
+_FA_MIN_FUNDING_BPS = 8.0  # absolute threshold; 5 was too noisy
+_FA_MAX_FUNDING_BPS = 80.0  # clip to avoid stale/corrupt data
+_FA_RSI_SELL_MIN = 0.60  # price elevated enough to fade
+_FA_RSI_BUY_MAX = 0.40  # price depressed enough to fade
+_FA_MAX_1BAR_RETURN = 0.004  # reject if still in explosive momentum
+_FA_MAX_REALIZED_VOL = 0.025  # skip panic markets (> 2.5% vol)
+_FA_OI_MIN_CHANGE = 0.0  # OI must be non-negative (positions building)
 
 
 class FundingArbitrageStrategy(BaseStrategy):
@@ -336,12 +336,9 @@ class FundingArbitrageStrategy(BaseStrategy):
             available_balance_usd=available_balance_usd,
             atr_pct=atr_pct,
             confidence=confidence,
-            rationale=(
-                f"funding_squeeze: funding={funding:.2f}bps oi={oi_change:.3f} "
-                f"rsi={rsi:.2f} r1={r1:.4f}"
-            ),
+            rationale=(f"funding_squeeze: funding={funding:.2f}bps oi={oi_change:.3f} rsi={rsi:.2f} r1={r1:.4f}"),
             feature_id=feature_vector.feature_id,
-            tp_mult=1.5,    # R:R ≈ 2.73
+            tp_mult=1.5,  # R:R ≈ 2.73
             sl_mult=0.55,
             **_cost_kwargs(self),
         )
@@ -359,13 +356,13 @@ class FundingArbitrageStrategy(BaseStrategy):
 #   R:R improved to ~2.77 (tp=1.8, sl=0.65) — counter-trend needs bigger TP
 #   ATR cap: skip panic-spike markets
 
-_LH_MIN_NOTIONAL = 50_000.0    # must be a real cascade, not minor noise
-_LH_MIN_IMBALANCE = 0.72       # strong directional liquidation dominance
-_LH_RSI_SELL_MIN = 0.70        # RSI overbought = longs got squeezed too far
-_LH_RSI_BUY_MAX = 0.30         # RSI oversold = shorts got squeezed too far
-_LH_VOLUME_SPIKE_MIN = 1.5     # volume z-score: volume must spike with cascade
-_LH_MAX_ATR_PCT = 0.025        # skip extreme panic candles
-_LH_COOLDOWN_SECONDS = 300     # 5 minutes between signals per symbol
+_LH_MIN_NOTIONAL = 50_000.0  # must be a real cascade, not minor noise
+_LH_MIN_IMBALANCE = 0.72  # strong directional liquidation dominance
+_LH_RSI_SELL_MIN = 0.70  # RSI overbought = longs got squeezed too far
+_LH_RSI_BUY_MAX = 0.30  # RSI oversold = shorts got squeezed too far
+_LH_VOLUME_SPIKE_MIN = 1.5  # volume z-score: volume must spike with cascade
+_LH_MAX_ATR_PCT = 0.025  # skip extreme panic candles
+_LH_COOLDOWN_SECONDS = 300  # 5 minutes between signals per symbol
 
 
 class LiquidationHuntingStrategy(BaseStrategy):
@@ -435,8 +432,9 @@ class LiquidationHuntingStrategy(BaseStrategy):
 
         liq = self._flow.liquidation_stats(symbol)
         if liq is None or liq.total_notional < self._min_liq_notional_usd:
-            _reject(self.strategy_id, symbol, "insufficient_liquidation_notional",
-                    notional=liq.total_notional if liq else 0)
+            _reject(
+                self.strategy_id, symbol, "insufficient_liquidation_notional", notional=liq.total_notional if liq else 0
+            )
             return None
 
         # Volume must spike during the cascade
@@ -457,8 +455,7 @@ class LiquidationHuntingStrategy(BaseStrategy):
                 return None
             side = OrderSide.BUY
         else:
-            _reject(self.strategy_id, symbol, "liquidation_imbalance_below_threshold",
-                    imbalance=liq.imbalance)
+            _reject(self.strategy_id, symbol, "liquidation_imbalance_below_threshold", imbalance=liq.imbalance)
             return None
 
         # Confidence scales with cascade size and imbalance extremity
@@ -480,7 +477,7 @@ class LiquidationHuntingStrategy(BaseStrategy):
                 f"imb={liq.imbalance:.2f} rsi={f'{rsi:.2f}' if rsi is not None else 'N/A'}"
             ),
             feature_id=feature_vector.feature_id,
-            tp_mult=1.8,    # R:R ≈ 2.77 (counter-trend needs bigger cushion)
+            tp_mult=1.8,  # R:R ≈ 2.77 (counter-trend needs bigger cushion)
             sl_mult=0.65,
             **_cost_kwargs(self),
         )
@@ -498,16 +495,16 @@ class LiquidationHuntingStrategy(BaseStrategy):
 #   MACD histogram direction = momentum agrees
 #   ewma_tier_signal direction = EMA stack agrees
 
-_VS_SQUEEZE_BW = 0.018          # bb_bandwidth below this = squeeze
-_VS_BREAKOUT_HIGH = 0.82        # bb_pct_b above = upper band breakout
-_VS_BREAKOUT_LOW = 0.18         # bb_pct_b below = lower band breakout
-_VS_VOLUME_SPIKE_MIN = 1.0      # volume_zscore > 1 std above mean
-_VS_BODY_RATIO_MIN = 0.58       # strong directional candle
-_VS_ADX_MIN = 0.14              # some trend forming (very low bar)
-_VS_ADX_MAX = 0.45              # skip established trends (already moved)
+_VS_SQUEEZE_BW = 0.018  # bb_bandwidth below this = squeeze
+_VS_BREAKOUT_HIGH = 0.82  # bb_pct_b above = upper band breakout
+_VS_BREAKOUT_LOW = 0.18  # bb_pct_b below = lower band breakout
+_VS_VOLUME_SPIKE_MIN = 1.0  # volume_zscore > 1 std above mean
+_VS_BODY_RATIO_MIN = 0.58  # strong directional candle
+_VS_ADX_MIN = 0.14  # some trend forming (very low bar)
+_VS_ADX_MAX = 0.45  # skip established trends (already moved)
 _VS_MIN_ATR_PCT = 0.0006
-_VS_MAX_ATR_PCT = 0.022         # skip panic markets
-_VS_COOLDOWN_SECONDS = 120      # 2 minutes between signals per symbol
+_VS_MAX_ATR_PCT = 0.022  # skip panic markets
+_VS_COOLDOWN_SECONDS = 120  # 2 minutes between signals per symbol
 
 
 class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
@@ -622,23 +619,21 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
             _reject(self.strategy_id, symbol, "weak_candle_body", body_ratio=body)
             return None
         if body is not None:
-            body_direction_ok = (body > 0 if side == OrderSide.BUY else body < 0)
+            body_direction_ok = body > 0 if side == OrderSide.BUY else body < 0
             if not body_direction_ok:
                 _reject(self.strategy_id, symbol, "candle_body_against_breakout", body=body)
                 return None
 
         # MACD histogram direction must agree
         if macd_hist is not None and (
-            (side == OrderSide.BUY and macd_hist <= 0)
-            or (side == OrderSide.SELL and macd_hist >= 0)
+            (side == OrderSide.BUY and macd_hist <= 0) or (side == OrderSide.SELL and macd_hist >= 0)
         ):
             _reject(self.strategy_id, symbol, "macd_against_breakout", macd_hist=macd_hist)
             return None
 
         # EMA stack direction must agree (or neutral)
         if ewma is not None and (
-            (side == OrderSide.BUY and ewma < -0.001)
-            or (side == OrderSide.SELL and ewma > 0.001)
+            (side == OrderSide.BUY and ewma < -0.001) or (side == OrderSide.SELL and ewma > 0.001)
         ):
             _reject(self.strategy_id, symbol, "ewma_against_breakout", ewma=ewma)
             return None
@@ -660,12 +655,9 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
             available_balance_usd=available_balance_usd,
             atr_pct=atr_pct,
             confidence=confidence,
-            rationale=(
-                f"bb_squeeze_breakout: bw={bb_bw:.4f} pct_b={bb_pb:.2f} "
-                f"vol_z={vol_z:.2f} body={body:.2f}"
-            ),
+            rationale=(f"bb_squeeze_breakout: bw={bb_bw:.4f} pct_b={bb_pb:.2f} vol_z={vol_z:.2f} body={body:.2f}"),
             feature_id=feature_vector.feature_id,
-            tp_mult=1.6,    # R:R ≈ 2.46
+            tp_mult=1.6,  # R:R ≈ 2.46
             sl_mult=0.65,
             **_cost_kwargs(self),
         )

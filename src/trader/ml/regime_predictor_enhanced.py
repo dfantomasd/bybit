@@ -10,9 +10,7 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import UTC, datetime
-from typing import Optional
+from dataclasses import dataclass
 
 import numpy as np
 
@@ -20,11 +18,13 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBClassifier, XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
     logger.warning("XGBoost not available, using simple numpy-based models")
-    from trader.ml.simple_models import SimpleEnsembleRegressor, SimpleClassifier
+    from trader.ml.simple_models import SimpleClassifier, SimpleEnsembleRegressor
+
     XGBRegressor = SimpleEnsembleRegressor
     XGBClassifier = SimpleClassifier
 
@@ -100,10 +100,10 @@ class RegimePredictionMultiStep:
 class RegimePredictorEnhanced:
     """Предсказывает режимы и их переходы."""
 
-    def __init__(self):
-        self.regime_model: Optional[XGBClassifier] = None  # Текущий режим
-        self.transition_model: Optional[XGBClassifier] = None  # Переходы (5m/15m/60m)
-        self.entropy_model: Optional[XGBRegressor] = None  # Предсказывает энтропию
+    def __init__(self) -> None:
+        self.regime_model: XGBClassifier | None = None  # Текущий режим
+        self.transition_model: XGBClassifier | None = None  # Переходы (5m/15m/60m)
+        self.entropy_model: XGBRegressor | None = None  # Предсказывает энтропию
 
         self.regime_names = ["TREND_UP", "TREND_DOWN", "SIDEWAYS", "VOLATILE"]
         self.min_training_samples = 300  # Больше для качества
@@ -130,25 +130,28 @@ class RegimePredictorEnhanced:
                     continue
 
                 # 17 признаков
-                x = np.array([
-                    features.rsi,
-                    features.macd_histogram,
-                    features.macd_signal_distance,
-                    features.bb_position,
-                    features.bb_width_pct,
-                    features.realized_vol_pct,
-                    features.volatility_trend,
-                    features.volatility_acceleration,
-                    features.trend_direction,
-                    features.trend_strength,
-                    features.adx,
-                    features.di_plus,
-                    features.di_minus,
-                    features.market_entropy,
-                    features.price_acceleration,
-                    features.momentum_strength,
-                    features.buy_sell_imbalance,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        features.rsi,
+                        features.macd_histogram,
+                        features.macd_signal_distance,
+                        features.bb_position,
+                        features.bb_width_pct,
+                        features.realized_vol_pct,
+                        features.volatility_trend,
+                        features.volatility_acceleration,
+                        features.trend_direction,
+                        features.trend_strength,
+                        features.adx,
+                        features.di_plus,
+                        features.di_minus,
+                        features.market_entropy,
+                        features.price_acceleration,
+                        features.momentum_strength,
+                        features.buy_sell_imbalance,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
 
@@ -192,11 +195,13 @@ class RegimePredictorEnhanced:
             logger.info("🚀 Обучаю модель ПЕРЕХОДОВ (5m/15m/60m)...")
 
             # Объединяем все переходы в одну обучающую выборку
-            y_all_transitions = np.concatenate([
-                y_next_5m_train,
-                y_next_15m_train,
-                y_next_60m_train,
-            ])
+            y_all_transitions = np.concatenate(
+                [
+                    y_next_5m_train,
+                    y_next_15m_train,
+                    y_next_60m_train,
+                ]
+            )
             x_transitions_train = np.vstack([x_train, x_train, x_train])
 
             self.transition_model = XGBClassifier(
@@ -239,25 +244,28 @@ class RegimePredictorEnhanced:
             return self._get_fallback_prediction()
 
         try:
-            x = np.array([
-                features.rsi,
-                features.macd_histogram,
-                features.macd_signal_distance,
-                features.bb_position,
-                features.bb_width_pct,
-                features.realized_vol_pct,
-                features.volatility_trend,
-                features.volatility_acceleration,
-                features.trend_direction,
-                features.trend_strength,
-                features.adx,
-                features.di_plus,
-                features.di_minus,
-                features.market_entropy,
-                features.price_acceleration,
-                features.momentum_strength,
-                features.buy_sell_imbalance,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    features.rsi,
+                    features.macd_histogram,
+                    features.macd_signal_distance,
+                    features.bb_position,
+                    features.bb_width_pct,
+                    features.realized_vol_pct,
+                    features.volatility_trend,
+                    features.volatility_acceleration,
+                    features.trend_direction,
+                    features.trend_strength,
+                    features.adx,
+                    features.di_plus,
+                    features.di_minus,
+                    features.market_entropy,
+                    features.price_acceleration,
+                    features.momentum_strength,
+                    features.buy_sell_imbalance,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # 1. ТЕКУЩИЙ РЕЖИМ
             current_class = int(self.regime_model.predict(x)[0])
@@ -273,11 +281,15 @@ class RegimePredictorEnhanced:
 
             next_15m_class = np.argmax(transition_proba[4:8]) if len(transition_proba) > 4 else next_5m_class
             next_15m_regime = self.regime_names[next_15m_class]
-            prob_next_15m = float(transition_proba[next_15m_class] if len(transition_proba) > 4 else transition_proba[next_5m_class])
+            prob_next_15m = float(
+                transition_proba[next_15m_class] if len(transition_proba) > 4 else transition_proba[next_5m_class]
+            )
 
             next_60m_class = np.argmax(transition_proba[8:12]) if len(transition_proba) > 8 else next_15m_class
             next_60m_regime = self.regime_names[next_60m_class]
-            prob_next_60m = float(transition_proba[next_60m_class] if len(transition_proba) > 8 else transition_proba[next_15m_class])
+            prob_next_60m = float(
+                transition_proba[next_60m_class] if len(transition_proba) > 8 else transition_proba[next_15m_class]
+            )
 
             # 3. ЭНТРОПИЯ
             market_entropy = float(self.entropy_model.predict(x)[0])
@@ -290,14 +302,12 @@ class RegimePredictorEnhanced:
             entropy_trend = "ORGANIZING" if features.volatility_trend < 0 else "DETERIORATING"
 
             # 6. РЕКОМЕНДАЦИЯ
-            recommendation = self._get_recommendation(
-                current_regime, current_proba, market_entropy, trend_phase
-            )
+            recommendation = self._get_recommendation(current_regime, current_proba, market_entropy, trend_phase)
 
             # Уверенность в переходах
-            transition_confidence_5m = abs(prob_next_5m - (1/4))  # Чем дальше от 0.25, тем уверённее
-            transition_confidence_15m = abs(prob_next_15m - (1/4))
-            transition_confidence_60m = abs(prob_next_60m - (1/4))
+            transition_confidence_5m = abs(prob_next_5m - (1 / 4))  # Чем дальше от 0.25, тем уверённее
+            transition_confidence_15m = abs(prob_next_15m - (1 / 4))
+            transition_confidence_60m = abs(prob_next_60m - (1 / 4))
 
             return RegimePredictionMultiStep(
                 current_regime=current_regime,
@@ -377,7 +387,7 @@ class RegimePredictorEnhanced:
         """Построить матрицу переходов (для HMM-подхода)."""
         try:
             matrix = np.zeros((4, 4))
-            for c, n in zip(current, next_regime):
+            for c, n in zip(current, next_regime, strict=False):
                 matrix[int(c)][int(n)] += 1
 
             # Нормировать по строкам

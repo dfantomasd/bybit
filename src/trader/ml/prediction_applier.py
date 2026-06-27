@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 from trader.monitoring.logging import get_logger
 
@@ -49,7 +49,7 @@ class OptimizedTradeParams:
 class PredictionApplier:
     """Apply ML predictions to trading parameters."""
 
-    def __init__(self, ml_controller: Any):
+    def __init__(self, ml_controller: Any) -> None:
         """Initialize with ML controller.
 
         Args:
@@ -140,10 +140,7 @@ class PredictionApplier:
 
             # ==================== ENTRY DECISION ====================
             # Combine signal confidence and regime confidence
-            entry_confidence = (
-                ml_context.signal_confidence * 0.6 +
-                ml_context.regime_confidence * 0.4
-            )
+            entry_confidence = ml_context.signal_confidence * 0.6 + ml_context.regime_confidence * 0.4
 
             # Don't take signals below 0.45 confidence
             take_signal = entry_confidence > 0.45
@@ -214,7 +211,7 @@ class PredictionApplier:
             if params.regime not in ["TREND_UP", "TREND_DOWN"]:
                 # Check if signal is really strong in non-trend
                 if params.entry_confidence < 0.60:
-                    return False, f"Non-trend regime needs >0.60 confidence"
+                    return False, "Non-trend regime needs >0.60 confidence"
 
             return True, f"ML optimized: confidence {params.entry_confidence:.2f}"
 
@@ -294,9 +291,9 @@ class PredictionApplier:
             )
 
             return {
-                'take_profit_price': tp_price,
-                'trailing_stop_enabled': trailing_enabled,
-                'trailing_stop_distance_pct': trailing_distance,
+                "take_profit_price": tp_price,
+                "trailing_stop_enabled": trailing_enabled,
+                "trailing_stop_distance_pct": trailing_distance,
             }
 
         except Exception as e:
@@ -332,7 +329,7 @@ class PredictionApplier:
             tp_price = entry_price * (Decimal("1") - Decimal(str(tp_bps / 10000)))
 
         return {
-            'take_profit_price': tp_price,
-            'trailing_stop_enabled': False,
-            'trailing_stop_distance_pct': 0.0,
+            "take_profit_price": tp_price,
+            "trailing_stop_enabled": False,
+            "trailing_stop_distance_pct": 0.0,
         }

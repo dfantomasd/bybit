@@ -34,9 +34,7 @@ class RegimePerformance:
 class RegimePerfMatrix:
     """Performance matrix: strategy x regime."""
 
-    performance_data: dict[tuple[str, str], RegimePerformance] = field(
-        default_factory=dict
-    )
+    performance_data: dict[tuple[str, str], RegimePerformance] = field(default_factory=dict)
     strategies: list[str] = field(default_factory=list)
     regimes: list[str] = field(default_factory=list)
     overall_best_strategies: dict[str, str] = field(default_factory=dict)  # {regime: best_strategy}
@@ -96,6 +94,7 @@ def build_regime_performance_matrix(
 
         # Calculate Sharpe (simple version: mean / std)
         import numpy as np
+
         returns_array = np.array(returns)
         std_dev = float(np.std(returns_array))
         sharpe = (avg_return / std_dev) if std_dev > 0 else 0.0
@@ -125,10 +124,7 @@ def build_regime_performance_matrix(
     # Find best strategy per regime
     best_by_regime = {}
     for regime in regimes:
-        regime_perfs = [
-            p for (s, r), p in performance.items()
-            if r == regime and p.confidence >= 0.5
-        ]
+        regime_perfs = [p for (s, r), p in performance.items() if r == regime and p.confidence >= 0.5]
         if regime_perfs:
             best = max(regime_perfs, key=lambda p: p.profit_factor)
             best_by_regime[regime] = best.strategy_id
@@ -157,16 +153,11 @@ def get_optimal_strategy_for_regime(
         (best_strategy_id, metric_value)
     """
 
-    regime_data = [
-        p for (s, r), p in perf_matrix.performance_data.items()
-        if r == regime and p.confidence >= 0.3
-    ]
+    regime_data = [p for (s, r), p in perf_matrix.performance_data.items() if r == regime and p.confidence >= 0.3]
 
     if not regime_data:
         return None, 0.0
 
-    # Sort by metric
-    metric_value = getattr(regime_data[0], metric, 0.0)
     best = max(regime_data, key=lambda p: getattr(p, metric, 0.0))
 
     return best.strategy_id, getattr(best, metric, 0.0)
@@ -199,7 +190,6 @@ def calculate_dynamic_tp_sl(
 
     if not perf or perf.confidence < 0.3:
         # Fallback: use base ATR only
-        atr_move = entry_price * base_atr / 100.0
         sl_pct = 0.5 if conservative else 1.0  # 0.5-1% stop loss
         tp_pct = 1.0 if conservative else 2.0  # 1-2% profit target
     else:
@@ -300,7 +290,7 @@ def should_trade_in_regime(
     if perf.confidence < min_confidence:
         return {
             "should_trade": False,
-            "reason": f"Insufficient samples ({int(perf.win_count + perf.loss_count)} trades, need >{int(1/min_confidence * 5)})",
+            "reason": f"Insufficient samples ({int(perf.win_count + perf.loss_count)} trades, need >{int(1 / min_confidence * 5)})",
             "win_rate": perf.win_rate,
             "confidence": perf.confidence,
         }

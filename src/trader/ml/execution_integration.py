@@ -8,7 +8,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -48,7 +48,7 @@ class MLEnhancedContext:
 class ExecutionMLIntegrator:
     """Integrates ML predictions into execution workflow."""
 
-    def __init__(self, ml_controller: Any):
+    def __init__(self, ml_controller: Any) -> None:
         """Initialize with ML controller.
 
         Args:

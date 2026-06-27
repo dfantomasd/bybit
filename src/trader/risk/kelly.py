@@ -62,10 +62,7 @@ def calculate_kelly_fraction(
 
     # Guard: insufficient data
     if win_rate < 0 or win_rate > 1 or avg_win_bps <= 0:
-        logger.warning(
-            "kelly.calculate: invalid inputs win_rate=%s avg_win=%s",
-            win_rate, avg_win_bps
-        )
+        logger.warning("kelly.calculate: invalid inputs win_rate=%s avg_win=%s", win_rate, avg_win_bps)
         return 0.02  # conservative default
 
     # Guard: strategy loses money on average
@@ -78,10 +75,7 @@ def calculate_kelly_fraction(
     # Rearranged: f* = (p * avg_win - (1-p) * abs(avg_loss)) / avg_win
     abs_avg_loss = abs(avg_loss_bps)
 
-    kelly_fraction = (
-        (win_rate * avg_win_bps - (1 - win_rate) * abs_avg_loss)
-        / avg_win_bps
-    )
+    kelly_fraction = (win_rate * avg_win_bps - (1 - win_rate) * abs_avg_loss) / avg_win_bps
 
     # Cap at 0.25 (fractional Kelly) for safety
     kelly_fraction = max(0.0, min(kelly_fraction, 0.25))
@@ -123,9 +117,9 @@ def calculate_adaptive_kelly(
     # Regime adjustment: reduce sizing in unfavorable regimes
     regime_multiplier = {
         "HIGH_VOLATILITY": 0.7,  # reduce by 30%
-        "SIDEWAYS": 0.6,          # reduce by 40% (mean reversion regime)
-        "UNCERTAIN": 0.5,         # reduce by 50%
-        "TRENDING": 1.0,          # no adjustment
+        "SIDEWAYS": 0.6,  # reduce by 40% (mean reversion regime)
+        "UNCERTAIN": 0.5,  # reduce by 50%
+        "TRENDING": 1.0,  # no adjustment
     }.get(regime, 0.8)  # default: reduce by 20%
 
     # Confidence adjustment: reduce if we're uncertain
@@ -164,7 +158,11 @@ def calculate_portfolio_kelly(
         )
 
         # Use custom weight if provided, otherwise equal weight
-        weight = weights.get(stats.strategy_id, 1.0 / len(strategy_stats_list)) if weights else (1.0 / len(strategy_stats_list))
+        weight = (
+            weights.get(stats.strategy_id, 1.0 / len(strategy_stats_list))
+            if weights
+            else (1.0 / len(strategy_stats_list))
+        )
         total_kelly += kelly * weight
 
     # Cap portfolio Kelly at 0.20 for safety

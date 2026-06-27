@@ -11,19 +11,20 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 try:
-    from xgboost import XGBRegressor, XGBClassifier
+    from xgboost import XGBClassifier, XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
     logger.warning("XGBoost not available, using simple numpy-based models")
-    from trader.ml.simple_models import SimpleEnsembleRegressor, SimpleClassifier
+    from trader.ml.simple_models import SimpleClassifier, SimpleEnsembleRegressor
+
     XGBRegressor = SimpleEnsembleRegressor
     XGBClassifier = SimpleClassifier
 
@@ -74,10 +75,10 @@ class SignalContextEnhanced:
 class SignalFusionEnhanced:
     """Умное объединение сигналов с attention и адаптивностью."""
 
-    def __init__(self):
-        self.outcome_model: Optional[XGBRegressor] = None  # Предсказывает профит
-        self.confidence_model: Optional[XGBRegressor] = None  # Предсказывает уверенность
-        self.ensemble_weights: Optional[np.ndarray] = None  # Веса сигналов
+    def __init__(self) -> None:
+        self.outcome_model: XGBRegressor | None = None  # Предсказывает профит
+        self.confidence_model: XGBRegressor | None = None  # Предсказывает уверенность
+        self.ensemble_weights: np.ndarray | None = None  # Веса сигналов
 
         self.signal_names = ["MA", "RSI", "MACD", "Breakout", "Volume"]
         self.min_training_samples = 200
@@ -105,35 +106,38 @@ class SignalFusionEnhanced:
                     continue
 
                 # 22 признака (вместо 15 в базовой версии)
-                x = np.array([
-                    # Сигналы (5)
-                    context.signal_ma_crossover,
-                    context.signal_rsi,
-                    context.signal_macd,
-                    context.signal_breakout,
-                    context.signal_volume,
-                    # Уверенности (5)
-                    context.confidence_ma,
-                    context.confidence_rsi,
-                    context.confidence_macd,
-                    context.confidence_breakout,
-                    context.confidence_volume,
-                    # Корреляции (4)
-                    context.ma_rsi_agreement,
-                    context.ma_macd_agreement,
-                    context.rsi_macd_agreement,
-                    context.breakout_volume_agreement,
-                    # Режим (1 из 3)
-                    1.0 if context.market_regime == "trend" else 0.0,
-                    1.0 if context.market_regime == "sideways" else 0.0,
-                    1.0 if context.market_regime == "volatile" else 0.0,
-                    # История сигналов (5)
-                    context.ma_recent_accuracy,
-                    context.rsi_recent_accuracy,
-                    context.macd_recent_accuracy,
-                    context.breakout_recent_accuracy,
-                    context.volume_recent_accuracy,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        # Сигналы (5)
+                        context.signal_ma_crossover,
+                        context.signal_rsi,
+                        context.signal_macd,
+                        context.signal_breakout,
+                        context.signal_volume,
+                        # Уверенности (5)
+                        context.confidence_ma,
+                        context.confidence_rsi,
+                        context.confidence_macd,
+                        context.confidence_breakout,
+                        context.confidence_volume,
+                        # Корреляции (4)
+                        context.ma_rsi_agreement,
+                        context.ma_macd_agreement,
+                        context.rsi_macd_agreement,
+                        context.breakout_volume_agreement,
+                        # Режим (1 из 3)
+                        1.0 if context.market_regime == "trend" else 0.0,
+                        1.0 if context.market_regime == "sideways" else 0.0,
+                        1.0 if context.market_regime == "volatile" else 0.0,
+                        # История сигналов (5)
+                        context.ma_recent_accuracy,
+                        context.rsi_recent_accuracy,
+                        context.macd_recent_accuracy,
+                        context.breakout_recent_accuracy,
+                        context.volume_recent_accuracy,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
 
@@ -207,30 +211,33 @@ class SignalFusionEnhanced:
             return self._simple_voting(context)
 
         try:
-            x = np.array([
-                context.signal_ma_crossover,
-                context.signal_rsi,
-                context.signal_macd,
-                context.signal_breakout,
-                context.signal_volume,
-                context.confidence_ma,
-                context.confidence_rsi,
-                context.confidence_macd,
-                context.confidence_breakout,
-                context.confidence_volume,
-                context.ma_rsi_agreement,
-                context.ma_macd_agreement,
-                context.rsi_macd_agreement,
-                context.breakout_volume_agreement,
-                1.0 if context.market_regime == "trend" else 0.0,
-                1.0 if context.market_regime == "sideways" else 0.0,
-                1.0 if context.market_regime == "volatile" else 0.0,
-                context.ma_recent_accuracy,
-                context.rsi_recent_accuracy,
-                context.macd_recent_accuracy,
-                context.breakout_recent_accuracy,
-                context.volume_recent_accuracy,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    context.signal_ma_crossover,
+                    context.signal_rsi,
+                    context.signal_macd,
+                    context.signal_breakout,
+                    context.signal_volume,
+                    context.confidence_ma,
+                    context.confidence_rsi,
+                    context.confidence_macd,
+                    context.confidence_breakout,
+                    context.confidence_volume,
+                    context.ma_rsi_agreement,
+                    context.ma_macd_agreement,
+                    context.rsi_macd_agreement,
+                    context.breakout_volume_agreement,
+                    1.0 if context.market_regime == "trend" else 0.0,
+                    1.0 if context.market_regime == "sideways" else 0.0,
+                    1.0 if context.market_regime == "volatile" else 0.0,
+                    context.ma_recent_accuracy,
+                    context.rsi_recent_accuracy,
+                    context.macd_recent_accuracy,
+                    context.breakout_recent_accuracy,
+                    context.volume_recent_accuracy,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # 1. ПРЕДСКАЗАТЬ ИСХОД
             expected_outcome = float(self.outcome_model.predict(x)[0])
@@ -244,58 +251,60 @@ class SignalFusionEnhanced:
             attention_scores = self._compute_attention(context)
 
             # 4. ФИНАЛЬНЫЙ СИГНАЛ с attention-взвешиванием
-            signals = np.array([
-                context.signal_ma_crossover,
-                context.signal_rsi,
-                context.signal_macd,
-                context.signal_breakout,
-                context.signal_volume,
-            ])
+            signals = np.array(
+                [
+                    context.signal_ma_crossover,
+                    context.signal_rsi,
+                    context.signal_macd,
+                    context.signal_breakout,
+                    context.signal_volume,
+                ]
+            )
 
             # Применить attention веса
-            weighted_signals = signals * np.array([
-                attention_scores["MA"],
-                attention_scores["RSI"],
-                attention_scores["MACD"],
-                attention_scores["Breakout"],
-                attention_scores["Volume"],
-            ])
+            weighted_signals = signals * np.array(
+                [
+                    attention_scores["MA"],
+                    attention_scores["RSI"],
+                    attention_scores["MACD"],
+                    attention_scores["Breakout"],
+                    attention_scores["Volume"],
+                ]
+            )
 
-            final_signal = np.sum(weighted_signals) / np.sum([
-                attention_scores["MA"],
-                attention_scores["RSI"],
-                attention_scores["MACD"],
-                attention_scores["Breakout"],
-                attention_scores["Volume"],
-            ])
+            final_signal = np.sum(weighted_signals) / np.sum(
+                [
+                    attention_scores["MA"],
+                    attention_scores["RSI"],
+                    attention_scores["MACD"],
+                    attention_scores["Breakout"],
+                    attention_scores["Volume"],
+                ]
+            )
 
             # 5. ОЖИДАЕМАЯ ПРИБЫЛЬ
             expected_profit_bps = (expected_outcome - 0.5) * 200 + predicted_confidence * 100
 
             # 6. РЕКОМЕНДАЦИЯ
-            recommendation = self._get_trading_recommendation(
-                final_signal, predicted_confidence, context
-            )
+            recommendation = self._get_trading_recommendation(final_signal, predicted_confidence, context)
 
             # 7. ОБЪЯСНЕНИЕ
-            explanation = self._build_explanation(
-                context, attention_scores, predicted_confidence
-            )
+            explanation = self._build_explanation(context, attention_scores, predicted_confidence)
 
             return {
-                'final_signal': final_signal,
-                'confidence': predicted_confidence,
-                'expected_profit_bps': expected_profit_bps,
-                'signal_weights': {
+                "final_signal": final_signal,
+                "confidence": predicted_confidence,
+                "expected_profit_bps": expected_profit_bps,
+                "signal_weights": {
                     "MA": float(attention_scores["MA"]),
                     "RSI": float(attention_scores["RSI"]),
                     "MACD": float(attention_scores["MACD"]),
                     "Breakout": float(attention_scores["Breakout"]),
                     "Volume": float(attention_scores["Volume"]),
                 },
-                'attention_scores': attention_scores,
-                'recommendation': recommendation,
-                'explanation': explanation,
+                "attention_scores": attention_scores,
+                "recommendation": recommendation,
+                "explanation": explanation,
             }
 
         except Exception as e:
@@ -327,9 +336,7 @@ class SignalFusionEnhanced:
             "trend": {"MA": 1.2, "RSI": 0.8, "MACD": 1.0, "Breakout": 1.3, "Volume": 0.9},
             "sideways": {"MA": 0.7, "RSI": 1.3, "MACD": 1.0, "Breakout": 0.6, "Volume": 1.0},
             "volatile": {"MA": 0.8, "RSI": 1.1, "MACD": 0.9, "Breakout": 0.7, "Volume": 1.2},
-        }.get(context.market_regime, {
-            "MA": 1.0, "RSI": 1.0, "MACD": 1.0, "Breakout": 1.0, "Volume": 1.0
-        })
+        }.get(context.market_regime, {"MA": 1.0, "RSI": 1.0, "MACD": 1.0, "Breakout": 1.0, "Volume": 1.0})
 
         # Комбинировать веса
         final_weights = {}
@@ -389,7 +396,7 @@ class SignalFusionEnhanced:
         if total > 0:
             self.ensemble_weights = signal_importances / total
 
-        logger.debug(f"Signal weights: {dict(zip(self.signal_names, self.ensemble_weights))}")
+        logger.debug(f"Signal weights: {dict(zip(self.signal_names, self.ensemble_weights, strict=False))}")
 
     @staticmethod
     def _simple_voting(context: SignalContextEnhanced) -> dict:
@@ -406,15 +413,11 @@ class SignalFusionEnhanced:
         confidence = 0.4
 
         return {
-            'final_signal': avg_signal,
-            'confidence': confidence,
-            'expected_profit_bps': 0.0,
-            'signal_weights': {
-                "MA": 0.2, "RSI": 0.2, "MACD": 0.2, "Breakout": 0.2, "Volume": 0.2
-            },
-            'attention_scores': {
-                "MA": 0.2, "RSI": 0.2, "MACD": 0.2, "Breakout": 0.2, "Volume": 0.2
-            },
-            'recommendation': "Модель не обучена, простое голосование",
-            'explanation': "Используется резервное голосование",
+            "final_signal": avg_signal,
+            "confidence": confidence,
+            "expected_profit_bps": 0.0,
+            "signal_weights": {"MA": 0.2, "RSI": 0.2, "MACD": 0.2, "Breakout": 0.2, "Volume": 0.2},
+            "attention_scores": {"MA": 0.2, "RSI": 0.2, "MACD": 0.2, "Breakout": 0.2, "Volume": 0.2},
+            "recommendation": "Модель не обучена, простое голосование",
+            "explanation": "Используется резервное голосование",
         }

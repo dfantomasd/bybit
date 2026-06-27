@@ -12,7 +12,6 @@ import uuid
 from collections import deque
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any
 
 import structlog
 
@@ -79,6 +78,7 @@ def _proposal(
 
     # 4. Edge-aware sizing: better edge = larger position (up to 20% more)
     from trader.risk.net_edge import net_edge_pct as calc_net_edge_pct
+
     try:
         net_edge = calc_net_edge_pct(
             tp_dist * 100,
@@ -93,8 +93,8 @@ def _proposal(
         elif net_edge > 0.25:
             qty_usd *= 1.08  # 8% more for good edge
         # else: standard sizing
-    except Exception:
-        pass  # Fall back to standard sizing
+    except Exception as exc:
+        log.debug("basic_strategy.edge_sizing_failed", error=str(exc))
 
     if qty_usd < 5.0:
         return None
@@ -130,9 +130,9 @@ def _proposal(
 # MEAN REVERSION (RSI Extremes)
 # ──────────────────────────────────────────────────────────────────────────────
 
-_MR_RSI_BUY = 0.35         # Buy when oversold (expanded from 0.30 to catch more signals in sideways)
-_MR_RSI_SELL = 0.65        # Sell when overbought (expanded from 0.70)
-_MR_ADX_MIN = 0.10         # Allow even weak trends
+_MR_RSI_BUY = 0.35  # Buy when oversold (expanded from 0.30 to catch more signals in sideways)
+_MR_RSI_SELL = 0.65  # Sell when overbought (expanded from 0.70)
+_MR_ADX_MIN = 0.10  # Allow even weak trends
 _MR_ATR_MIN = 0.0003
 _MR_ATR_MAX = 0.025
 
@@ -240,7 +240,7 @@ class MeanReversionStrategy(BaseStrategy):
 
 _MC_ATR_MIN = 0.0003
 _MC_ATR_MAX = 0.025
-_MC_ADX_MIN = 0.08        # Lowered from 0.12 to catch more signals in low-trend markets
+_MC_ADX_MIN = 0.08  # Lowered from 0.12 to catch more signals in low-trend markets
 _MC_COOLDOWN_SECONDS = 120  # Avoid double-signals in same bar
 
 
@@ -370,8 +370,8 @@ class MACDZeroCrossStrategy(BaseStrategy):
 
 _AB_ATR_MIN = 0.0004
 _AB_ATR_MAX = 0.025
-_AB_VOLUME_MIN = 0.5       # Lowered from 0.8 to catch moderate volume breakouts
-_AB_ADX_MAX = 0.35         # Skip already-established trends
+_AB_VOLUME_MIN = 0.5  # Lowered from 0.8 to catch moderate volume breakouts
+_AB_ADX_MAX = 0.35  # Skip already-established trends
 _AB_COOLDOWN_SECONDS = 180  # Avoid whipsaws
 
 

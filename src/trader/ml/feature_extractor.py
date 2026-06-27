@@ -6,9 +6,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
-from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +14,7 @@ logger = logging.getLogger(__name__)
 class FeatureExtractor:
     """Извлекает полные наборы признаков для ML моделей."""
 
-    def __init__(self):
+    def __init__(self) -> None:
         self.recent_returns_bps: list[float] = []
         self.recent_spreads_bps: list[float] = []
         self.max_history = 100
@@ -53,7 +51,7 @@ class FeatureExtractor:
             else:
                 mean_return = sum(returns) / len(returns)
                 variance = sum((r - mean_return) ** 2 for r in returns) / len(returns)
-                std_dev = variance ** 0.5 if variance > 0 else 50.0
+                std_dev = variance**0.5 if variance > 0 else 50.0
                 skewness = 0.0
                 var_95 = min(returns) if returns else 0.0
 
@@ -189,7 +187,7 @@ class FeatureExtractor:
         recent_win_rate: float = 0.5,
         recent_consecutive_wins: int = 0,
         recent_consecutive_losses: int = 0,
-        recent_trades: Optional[list[dict]] = None,
+        recent_trades: list[dict] | None = None,
     ) -> Any:
         """Извлечь SignalContextEnhanced для Signal fusion."""
         try:
@@ -289,11 +287,11 @@ class FeatureExtractor:
         realized_volatility_pct: float = 1.5,
         atr_pct: float = 1.2,
         volatility_trend: float = 0.0,
-        recent_swing_lows: Optional[list[float]] = None,
-        recent_swing_highs: Optional[list[float]] = None,
+        recent_swing_lows: list[float] | None = None,
+        recent_swing_highs: list[float] | None = None,
         nearest_support_pct: float = 2.0,
         nearest_resistance_pct: float = 2.0,
-        returns_history_pct: Optional[list[float]] = None,
+        returns_history_pct: list[float] | None = None,
         var_95_pct: float = 2.0,
         cvar_95_pct: float = 3.0,
         market_regime: str = "SIDEWAYS",
@@ -301,7 +299,7 @@ class FeatureExtractor:
         recent_win_rate: float = 0.5,
         hour_of_day: int = 12,
         time_in_trade_minutes: int = 0,
-        recent_trades: Optional[list[dict]] = None,
+        recent_trades: list[dict] | None = None,
     ) -> Any:
         """Извлечь StopLossContextEnhanced для StopLoss optimizer."""
         try:

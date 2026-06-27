@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Optional
 
 import numpy as np
 
@@ -16,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBClassifier
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -38,8 +37,8 @@ class RegimeFeatures:
 class RegimePredictor:
     """Предсказывает будущие рыночные режимы."""
 
-    def __init__(self):
-        self.model: Optional[XGBClassifier] = None
+    def __init__(self) -> None:
+        self.model: XGBClassifier | None = None
         self.min_training_samples = 100
         # Классы: 0 = TREND_UP, 1 = TREND_DOWN, 2 = SIDEWAYS, 3 = VOLATILE
         self.regime_names = ["TREND_UP", "TREND_DOWN", "SIDEWAYS", "VOLATILE"]
@@ -58,16 +57,19 @@ class RegimePredictor:
                 if not features:
                     continue
 
-                x = np.array([
-                    features.recent_rsi,
-                    features.macd_histogram,
-                    features.bb_position,
-                    features.volatility_trend,
-                    features.volume_trend,
-                    features.time_of_day,
-                    features.recent_returns_std,
-                    features.trend_strength,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        features.recent_rsi,
+                        features.macd_histogram,
+                        features.bb_position,
+                        features.volatility_trend,
+                        features.volume_trend,
+                        features.time_of_day,
+                        features.recent_returns_std,
+                        features.trend_strength,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
                 regime_class = record.get("regime_class", 2)  # Default SIDEWAYS
@@ -105,16 +107,19 @@ class RegimePredictor:
             return "SIDEWAYS", 0.3  # Консервативный дефолт
 
         try:
-            x = np.array([
-                features.recent_rsi,
-                features.macd_histogram,
-                features.bb_position,
-                features.volatility_trend,
-                features.volume_trend,
-                features.time_of_day,
-                features.recent_returns_std,
-                features.trend_strength,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    features.recent_rsi,
+                    features.macd_histogram,
+                    features.bb_position,
+                    features.volatility_trend,
+                    features.volume_trend,
+                    features.time_of_day,
+                    features.recent_returns_std,
+                    features.trend_strength,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             regime_class = int(self.model.predict(x)[0])
             regime_name = self.regime_names[regime_class]

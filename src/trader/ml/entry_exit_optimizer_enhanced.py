@@ -12,19 +12,20 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 try:
-    from xgboost import XGBRegressor, XGBClassifier
+    from xgboost import XGBClassifier, XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
     logger.warning("XGBoost not available, using simple numpy-based models")
-    from trader.ml.simple_models import SimpleEnsembleRegressor, SimpleClassifier
+    from trader.ml.simple_models import SimpleClassifier, SimpleEnsembleRegressor
+
     XGBRegressor = SimpleEnsembleRegressor
     XGBClassifier = SimpleClassifier
 
@@ -105,11 +106,11 @@ class EntryExitOptimizationResult:
 class EntryExitOptimizerEnhanced:
     """Умный вход/выход с анализом микроструктуры и VWAP."""
 
-    def __init__(self):
-        self.entry_model: Optional[XGBRegressor] = None
-        self.tp_model: Optional[XGBRegressor] = None
-        self.sl_model: Optional[XGBRegressor] = None
-        self.execution_model: Optional[XGBClassifier] = None  # Какую стратегию использовать
+    def __init__(self) -> None:
+        self.entry_model: XGBRegressor | None = None
+        self.tp_model: XGBRegressor | None = None
+        self.sl_model: XGBRegressor | None = None
+        self.execution_model: XGBClassifier | None = None  # Какую стратегию использовать
 
         self.min_training_samples = 200
 
@@ -131,29 +132,32 @@ class EntryExitOptimizerEnhanced:
                     continue
 
                 # 21 признак
-                x = np.array([
-                    float(context.rsi),
-                    context.atr_pct,
-                    context.volatility_pct,
-                    context.trend_strength,
-                    context.distance_to_vwap_pct,
-                    context.vwap_trend,
-                    context.order_flow_imbalance,
-                    context.cumulative_delta,
-                    context.consolidation_range_pct,
-                    float(context.is_in_consolidation),
-                    context.bid_ask_spread_bps,
-                    context.bid_ask_imbalance,
-                    context.order_clustering,
-                    context.time_into_candle_pct,
-                    float(context.candle_direction),
-                    np.mean(context.recent_swing_lows) if context.recent_swing_lows else 0.0,
-                    np.mean(context.recent_swing_highs) if context.recent_swing_highs else 0.0,
-                    context.order_flow_imbalance ** 2,  # Нелинейный признак
-                    context.consolidation_range_pct ** 2,
-                    context.bid_ask_imbalance ** 2,
-                    context.volatility_pct * context.trend_strength,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        float(context.rsi),
+                        context.atr_pct,
+                        context.volatility_pct,
+                        context.trend_strength,
+                        context.distance_to_vwap_pct,
+                        context.vwap_trend,
+                        context.order_flow_imbalance,
+                        context.cumulative_delta,
+                        context.consolidation_range_pct,
+                        float(context.is_in_consolidation),
+                        context.bid_ask_spread_bps,
+                        context.bid_ask_imbalance,
+                        context.order_clustering,
+                        context.time_into_candle_pct,
+                        float(context.candle_direction),
+                        np.mean(context.recent_swing_lows) if context.recent_swing_lows else 0.0,
+                        np.mean(context.recent_swing_highs) if context.recent_swing_highs else 0.0,
+                        context.order_flow_imbalance**2,  # Нелинейный признак
+                        context.consolidation_range_pct**2,
+                        context.bid_ask_imbalance**2,
+                        context.volatility_pct * context.trend_strength,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
 
@@ -185,7 +189,7 @@ class EntryExitOptimizerEnhanced:
                 subsample=0.8,
             )
             self.entry_model.fit(x_train, y_entry_train)
-            logger.info(f"✅ Модель входа готова")
+            logger.info("✅ Модель входа готова")
 
             # Модель 2: Take-Profit
             logger.info("🎯 Обучаю модель TAKE-PROFIT...")
@@ -196,7 +200,7 @@ class EntryExitOptimizerEnhanced:
                 random_state=42,
             )
             self.tp_model.fit(x_train, y_tp_train)
-            logger.info(f"✅ Модель TP готова")
+            logger.info("✅ Модель TP готова")
 
             # Модель 3: Stop-Loss
             logger.info("🛑 Обучаю модель STOP-LOSS...")
@@ -207,7 +211,7 @@ class EntryExitOptimizerEnhanced:
                 random_state=42,
             )
             self.sl_model.fit(x_train, y_sl_train)
-            logger.info(f"✅ Модель SL готова")
+            logger.info("✅ Модель SL готова")
 
             # Модель 4: Стратегия выполнения
             logger.info("⚙️  Обучаю модель СТРАТЕГИИ ВЫПОЛНЕНИЯ...")
@@ -220,7 +224,7 @@ class EntryExitOptimizerEnhanced:
                 num_class=3,
             )
             self.execution_model.fit(x_train, y_execution_train)
-            logger.info(f"✅ Модель выполнения готова")
+            logger.info("✅ Модель выполнения готова")
 
             logger.info(f"🎯 Обучение входа/выхода завершено: {len(x_list)} сэмплов")
 
@@ -237,29 +241,32 @@ class EntryExitOptimizerEnhanced:
             return self._get_default_optimization(context, side)
 
         try:
-            x = np.array([
-                float(context.rsi),
-                context.atr_pct,
-                context.volatility_pct,
-                context.trend_strength,
-                context.distance_to_vwap_pct,
-                context.vwap_trend,
-                context.order_flow_imbalance,
-                context.cumulative_delta,
-                context.consolidation_range_pct,
-                float(context.is_in_consolidation),
-                context.bid_ask_spread_bps,
-                context.bid_ask_imbalance,
-                context.order_clustering,
-                context.time_into_candle_pct,
-                float(context.candle_direction),
-                np.mean(context.recent_swing_lows) if context.recent_swing_lows else 0.0,
-                np.mean(context.recent_swing_highs) if context.recent_swing_highs else 0.0,
-                context.order_flow_imbalance ** 2,
-                context.consolidation_range_pct ** 2,
-                context.bid_ask_imbalance ** 2,
-                context.volatility_pct * context.trend_strength,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    float(context.rsi),
+                    context.atr_pct,
+                    context.volatility_pct,
+                    context.trend_strength,
+                    context.distance_to_vwap_pct,
+                    context.vwap_trend,
+                    context.order_flow_imbalance,
+                    context.cumulative_delta,
+                    context.consolidation_range_pct,
+                    float(context.is_in_consolidation),
+                    context.bid_ask_spread_bps,
+                    context.bid_ask_imbalance,
+                    context.order_clustering,
+                    context.time_into_candle_pct,
+                    float(context.candle_direction),
+                    np.mean(context.recent_swing_lows) if context.recent_swing_lows else 0.0,
+                    np.mean(context.recent_swing_highs) if context.recent_swing_highs else 0.0,
+                    context.order_flow_imbalance**2,
+                    context.consolidation_range_pct**2,
+                    context.bid_ask_imbalance**2,
+                    context.volatility_pct * context.trend_strength,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # Предсказания
             entry_offset = float(self.entry_model.predict(x)[0])
@@ -324,9 +331,7 @@ class EntryExitOptimizerEnhanced:
                 emergency_exit = entry_price * (Decimal("1") + Decimal(str(emergency_distance / 100)))
 
             # Рекомендация
-            recommendation = self._get_recommendation(
-                context, entry_timing, risk_reward, prob_success
-            )
+            recommendation = self._get_recommendation(context, entry_timing, risk_reward, prob_success)
 
             explanation = (
                 f"Вход {entry_timing} по {execution_strategy}. "

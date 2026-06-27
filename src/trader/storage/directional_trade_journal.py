@@ -414,8 +414,6 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         for row in rows:
             prediction_id = str(row["prediction_id"])
             closed_pnl_usd = float(row["closed_pnl"] or 0.0)
-            symbol = str(row["symbol"])
-
             # Convert realized PnL to basis points (approximate, assuming $100 entry)
             # This is a rough estimate; better to use actual entry/exit from features
             closed_pnl_bps = closed_pnl_usd * 100.0  # Very rough approximation

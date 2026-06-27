@@ -14,13 +14,13 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass, field
-from enum import Enum
+from enum import StrEnum
 from typing import Any
 
 logger = logging.getLogger(__name__)
 
 
-class SignalType(str, Enum):
+class SignalType(StrEnum):
     """Signal types from strategies."""
 
     BUY = "BUY"
@@ -36,7 +36,7 @@ class StrategySignal:
     strategy_id: str
     signal: SignalType
     confidence: float  # 0-1, how confident the strategy is
-    strength: float    # 0-1, signal strength (volume, momentum, etc.)
+    strength: float  # 0-1, signal strength (volume, momentum, etc.)
     metadata: dict[str, Any] = field(default_factory=dict)
     regime_filter: str = "unknown"  # regime where this signal is valid
 
@@ -63,7 +63,7 @@ class EnsembleVoter:
         voting_method: str = "weighted",  # majority, weighted, unanimous, consensus
         min_agreement_pct: float = 60.0,  # 60% agreement threshold
         require_regime_alignment: bool = True,
-    ):
+    ) -> None:
         self.voting_method = voting_method
         self.min_agreement_pct = min_agreement_pct
         self.require_regime_alignment = require_regime_alignment
@@ -107,10 +107,7 @@ class EnsembleVoter:
         # Filter by regime if required
         filtered_signals = signals
         if self.require_regime_alignment:
-            filtered_signals = [
-                s for s in signals
-                if s.regime_filter in ("unknown", current_regime)
-            ]
+            filtered_signals = [s for s in signals if s.regime_filter in ("unknown", current_regime)]
             if not filtered_signals:
                 # No signals align with current regime
                 filtered_signals = signals  # fallback to all
@@ -267,7 +264,8 @@ class EnsembleVoter:
 
         # Boost confidence if component signals are strong
         agreeing_signals = [
-            s for s in component_signals
+            s
+            for s in component_signals
             if (final_signal == SignalType.BUY and s.signal == SignalType.BUY)
             or (final_signal == SignalType.SELL and s.signal == SignalType.SELL)
         ]
@@ -313,10 +311,13 @@ def create_regime_aware_ensemble(
         },
     }
 
-    config = voting_config.get(regime, {
-        "method": "weighted",
-        "min_agreement_pct": 60.0,
-    })
+    config = voting_config.get(
+        regime,
+        {
+            "method": "weighted",
+            "min_agreement_pct": 60.0,
+        },
+    )
 
     voter = EnsembleVoter(
         voting_method=config.get("method", "weighted"),

@@ -10,8 +10,9 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
-from typing import Any, Callable, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +26,7 @@ class KellyTrainingScheduler:
         kelly_predictor: Any,
         min_trades_per_training: int = 50,
         min_hours_between_trainings: int = 24,
-    ):
+    ) -> None:
         """Initialize scheduler.
 
         Args:
@@ -39,9 +40,9 @@ class KellyTrainingScheduler:
         self._min_trades = min_trades_per_training
         self._min_hours = min_hours_between_trainings
 
-        self._last_training_time: Optional[datetime] = None
+        self._last_training_time: datetime | None = None
         self._trades_since_training: int = 0
-        self._background_task: Optional[asyncio.Task[None]] = None
+        self._background_task: asyncio.Task[None] | None = None
         self._is_training: bool = False
 
     async def start(self, trade_getter: Callable[[], list[dict[str, Any]]]) -> None:
@@ -53,9 +54,7 @@ class KellyTrainingScheduler:
         if self._background_task is not None:
             return
 
-        self._background_task = asyncio.create_task(
-            self._training_loop(trade_getter)
-        )
+        self._background_task = asyncio.create_task(self._training_loop(trade_getter))
         logger.info("kelly_training_scheduler.started")
 
     async def stop(self) -> None:

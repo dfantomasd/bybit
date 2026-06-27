@@ -42,10 +42,7 @@ def calculate_strategy_correlations(
     strategies = list(returns_history.keys())
 
     # Validate we have enough data
-    valid_strategies = [
-        s for s in strategies
-        if returns_history[s] and len(returns_history[s]) >= min_samples
-    ]
+    valid_strategies = [s for s in strategies if returns_history[s] and len(returns_history[s]) >= min_samples]
 
     if len(valid_strategies) < 2:
         return CorrelationMatrix(
@@ -62,7 +59,7 @@ def calculate_strategy_correlations(
     all_corrs = []
 
     for i, strat1 in enumerate(valid_strategies):
-        for strat2 in valid_strategies[i + 1:]:
+        for strat2 in valid_strategies[i + 1 :]:
             # Align arrays to same length
             arr1 = data_dict[strat1]
             arr2 = data_dict[strat2]
@@ -128,7 +125,9 @@ def assess_position_concentration(
     ]
 
     # Calculate concentration score
-    correlation_risk = correlation_matrix.average_correlation * 0.5 if correlation_matrix.average_correlation > 0.5 else 0.0
+    correlation_risk = (
+        correlation_matrix.average_correlation * 0.5 if correlation_matrix.average_correlation > 0.5 else 0.0
+    )
     side_risk_score = 0.3 if side_risk else 0.0
     concentration_score = min(1.0, correlation_risk + side_risk_score)
 
@@ -140,14 +139,11 @@ def assess_position_concentration(
         )
 
     if high_corr_pairs:
-        recommendations.append(
-            f"High correlation pairs: {len(high_corr_pairs)} pairs with >70% correlation"
-        )
+        recommendations.append(f"High correlation pairs: {len(high_corr_pairs)} pairs with >70% correlation")
 
     if correlation_matrix.average_correlation > 0.6:
         recommendations.append(
-            f"Overall strategy correlation too high: {correlation_matrix.average_correlation:.2f} "
-            f"(target <0.4)"
+            f"Overall strategy correlation too high: {correlation_matrix.average_correlation:.2f} (target <0.4)"
         )
 
     if not recommendations:
@@ -207,9 +203,7 @@ def filter_position_candidates(
 
         # Reject if too correlated
         if abs(max_correlation) > 0.75:  # >75% correlation = reject
-            rejection_reason = (
-                f"Too correlated with {most_correlated} (r={max_correlation:.2f} > 0.75)"
-            )
+            rejection_reason = f"Too correlated with {most_correlated} (r={max_correlation:.2f} > 0.75)"
         elif abs(max_correlation) > 0.6 and len(approved) >= max_new_correlated:
             rejection_reason = (
                 f"Already have {len(approved)} new positions, "

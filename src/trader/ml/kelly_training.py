@@ -8,12 +8,11 @@ Walk-forward validation ensures models generalize to unseen data.
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -39,7 +38,7 @@ class TradeRecord:
 class KellyTrainer:
     """Trains Kelly predictor models from historical trades."""
 
-    def __init__(self, min_training_samples: int = 100, lookback_days: int = 90):
+    def __init__(self, min_training_samples: int = 100, lookback_days: int = 90) -> None:
         """Initialize trainer.
 
         Args:
@@ -48,7 +47,7 @@ class KellyTrainer:
         """
         self.min_training_samples = min_training_samples
         self.lookback_days = lookback_days
-        self._last_training_time: Optional[datetime] = None
+        self._last_training_time: datetime | None = None
         self._training_count = 0
 
     async def train_from_trades(
@@ -72,14 +71,10 @@ class KellyTrainer:
             return False, f"Insufficient trades: {len(trades)} < {self.min_training_samples}"
 
         try:
-            from trader.ml.kelly_predictor import KellyPredictorFeatures
-
             # Filter recent trades
             cutoff_time = datetime.now(UTC) - timedelta(days=self.lookback_days)
             recent_trades = [
-                t
-                for t in trades
-                if isinstance(t.get("timestamp"), datetime) and t["timestamp"] > cutoff_time
+                t for t in trades if isinstance(t.get("timestamp"), datetime) and t["timestamp"] > cutoff_time
             ]
 
             if len(recent_trades) < self.min_training_samples:
@@ -109,9 +104,7 @@ class KellyTrainer:
             self._last_training_time = datetime.now(UTC)
             self._training_count += 1
 
-            logger.info(
-                f"kelly_training.completed: {len(training_data)} samples, count={self._training_count}"
-            )
+            logger.info(f"kelly_training.completed: {len(training_data)} samples, count={self._training_count}")
             return True, f"Trained on {len(training_data)} samples"
 
         except Exception as e:
@@ -122,7 +115,7 @@ class KellyTrainer:
     def _extract_features_from_trade(
         trade: dict[str, Any],
         prior_trades: list[dict[str, Any]],
-    ) -> Optional[Any]:
+    ) -> Any | None:
         """Extract KellyPredictorFeatures from a trade."""
         try:
             from trader.ml.kelly_predictor import KellyPredictorFeatures
@@ -228,8 +221,6 @@ class KellyTrainer:
         """
         # Rough approximation: position size as % of capital
         position_size_pct = float(trade.get("position_size_pct", 0.02))
-        pnl_bps = float(trade.get("pnl_bps", 0))
-
         # Kelly is position_size that maximizes risk-adjusted return
         # Approximate as the size that was actually used
         return max(0.01, min(0.25, position_size_pct / 100))

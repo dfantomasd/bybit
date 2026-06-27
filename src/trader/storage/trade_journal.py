@@ -3241,12 +3241,8 @@ class TradeJournal:
                     "metrics": metrics,
                 }
 
-            champion = await self._enrich_model_with_live_paper(
-                _model(champion_rows[0] if champion_rows else None)
-            )
-            candidate = await self._enrich_model_with_live_paper(
-                _model(candidate_rows[0] if candidate_rows else None)
-            )
+            champion = await self._enrich_model_with_live_paper(_model(champion_rows[0] if champion_rows else None))
+            candidate = await self._enrich_model_with_live_paper(_model(candidate_rows[0] if candidate_rows else None))
             checks: list[dict[str, Any]] = []
             if champion:
                 wf = champion.get("walk_forward_bps")

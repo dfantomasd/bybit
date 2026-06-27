@@ -125,21 +125,21 @@ class TestATRBreakoutStrategy:
 
     def test_no_signal_inside_range(self) -> None:
         strat = ATRBreakoutStrategy()
-        for i in range(1, 6):
+        for _i in range(1, 6):
             strat.evaluate(_vector(vol_z=1.0), _PRICE, 1000.0)
         # Stay inside range = no signal
         assert strat.evaluate(_vector(vol_z=1.0), _PRICE, 1000.0) is None
 
     def test_reject_low_volume(self) -> None:
         strat = ATRBreakoutStrategy()
-        for i in range(1, 6):
+        for _i in range(1, 6):
             strat.evaluate(_vector(vol_z=1.0), _PRICE, 1000.0)
         proposal = strat.evaluate(_vector(vol_z=0.3, log_return=0.0005), _PRICE + 0.05, 1000.0)
         assert proposal is None  # vol_z < 0.5
 
     def test_reject_established_trend(self) -> None:
         strat = ATRBreakoutStrategy()
-        for i in range(1, 6):
+        for _i in range(1, 6):
             strat.evaluate(_vector(vol_z=1.0), _PRICE, 1000.0)
         proposal = strat.evaluate(_vector(vol_z=1.0, adx=0.40, log_return=0.0005), _PRICE + 0.05, 1000.0)
         assert proposal is None  # adx > 0.35

@@ -19,18 +19,23 @@ def _vector(
     rsi: float = 0.50,
     adx: float = 0.30,
     atr_pct: float = 0.004,
-    ewma: float = 0.005,        # bullish stack (> 0.003 threshold)
-    vwap_dist: float = -0.3,    # pulled back into VWAP zone for BUY (-0.6 to +0.2)
-    ob_imb: float = 0.20,       # buyers in book
+    ewma: float = 0.005,  # bullish stack (> 0.003 threshold)
+    vwap_dist: float = -0.3,  # pulled back into VWAP zone for BUY (-0.6 to +0.2)
+    ob_imb: float = 0.20,  # buyers in book
     ob_present: float = 1.0,
     macd_hist: float = 0.0001,  # positive momentum
     vol_z: float = 0.5,
 ) -> FeatureVector:
     names = [
-        "rsi_14", "adx_14", "atr_14_pct",
-        "ewma_tier_signal", "vwap_distance_pct",
-        "ob_imbalance_l5", "ob_data_present",
-        "macd_hist", "volume_zscore",
+        "rsi_14",
+        "adx_14",
+        "atr_14_pct",
+        "ewma_tier_signal",
+        "vwap_distance_pct",
+        "ob_imbalance_l5",
+        "ob_data_present",
+        "macd_hist",
+        "volume_zscore",
     ]
     values = [rsi, adx, atr_pct, ewma, vwap_dist, ob_imb, ob_present, macd_hist, vol_z]
     return FeatureVector(
@@ -85,10 +90,10 @@ class TestScalpMicroStrategy:
     def test_sell_signal_on_vwap_pullback(self) -> None:
         strat = _strategy()
         sell_vec = _vector(
-            ewma=-0.005,       # bearish stack
-            vwap_dist=0.3,     # price 0.3% above VWAP (pullback from above)
-            ob_imb=-0.20,      # sellers in book
-            macd_hist=-0.0001, # negative momentum
+            ewma=-0.005,  # bearish stack
+            vwap_dist=0.3,  # price 0.3% above VWAP (pullback from above)
+            ob_imb=-0.20,  # sellers in book
+            macd_hist=-0.0001,  # negative momentum
             rsi=0.50,
         )
         proposal = strat.evaluate(sell_vec, _PRICE, 1000.0)

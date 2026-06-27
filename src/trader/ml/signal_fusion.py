@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Optional
 
 import numpy as np
 
@@ -16,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -45,8 +45,8 @@ class SignalContext:
 class SignalFusion:
     """Объединяет сигналы умно (не просто голосование)."""
 
-    def __init__(self):
-        self.model: Optional[XGBRegressor] = None
+    def __init__(self) -> None:
+        self.model: XGBRegressor | None = None
         self.signal_weights = {
             "ma_crossover": 1.0,
             "rsi": 1.0,
@@ -71,23 +71,26 @@ class SignalFusion:
                     continue
 
                 # Создать вектор признаков из всех сигналов и их конфиденций
-                x = np.array([
-                    context.signal_ma_crossover,
-                    context.signal_rsi,
-                    context.signal_macd,
-                    context.signal_breakout,
-                    context.signal_volume,
-                    context.confidence_ma,
-                    context.confidence_rsi,
-                    context.confidence_macd,
-                    context.confidence_breakout,
-                    context.confidence_volume,
-                    1.0 if context.market_regime == "trend" else 0.0,
-                    1.0 if context.market_regime == "sideways" else 0.0,
-                    1.0 if context.market_regime == "volatile" else 0.0,
-                    context.recent_win_rate,
-                    context.volatility_pct,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        context.signal_ma_crossover,
+                        context.signal_rsi,
+                        context.signal_macd,
+                        context.signal_breakout,
+                        context.signal_volume,
+                        context.confidence_ma,
+                        context.confidence_rsi,
+                        context.confidence_macd,
+                        context.confidence_breakout,
+                        context.confidence_volume,
+                        1.0 if context.market_regime == "trend" else 0.0,
+                        1.0 if context.market_regime == "sideways" else 0.0,
+                        1.0 if context.market_regime == "volatile" else 0.0,
+                        context.recent_win_rate,
+                        context.volatility_pct,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
                 # Исход: 1 если сделка была прибыльна, 0 если убыточна
@@ -132,23 +135,26 @@ class SignalFusion:
             return self._simple_voting(context)
 
         try:
-            x = np.array([
-                context.signal_ma_crossover,
-                context.signal_rsi,
-                context.signal_macd,
-                context.signal_breakout,
-                context.signal_volume,
-                context.confidence_ma,
-                context.confidence_rsi,
-                context.confidence_macd,
-                context.confidence_breakout,
-                context.confidence_volume,
-                1.0 if context.market_regime == "trend" else 0.0,
-                1.0 if context.market_regime == "sideways" else 0.0,
-                1.0 if context.market_regime == "volatile" else 0.0,
-                context.recent_win_rate,
-                context.volatility_pct,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    context.signal_ma_crossover,
+                    context.signal_rsi,
+                    context.signal_macd,
+                    context.signal_breakout,
+                    context.signal_volume,
+                    context.confidence_ma,
+                    context.confidence_rsi,
+                    context.confidence_macd,
+                    context.confidence_breakout,
+                    context.confidence_volume,
+                    1.0 if context.market_regime == "trend" else 0.0,
+                    1.0 if context.market_regime == "sideways" else 0.0,
+                    1.0 if context.market_regime == "volatile" else 0.0,
+                    context.recent_win_rate,
+                    context.volatility_pct,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # Предсказание: какова вероятность успеха?
             success_probability = float(self.model.predict(x)[0])
@@ -157,24 +163,30 @@ class SignalFusion:
             # Если вероятность успеха > 0.5, сигнал хороший
             if success_probability > 0.6:
                 # Какой сигнал самый сильный?
-                buy_signals = sum([
-                    context.signal_ma_crossover > 0,
-                    context.signal_rsi > 0,
-                    context.signal_macd > 0,
-                    context.signal_breakout > 0,
-                    context.signal_volume > 0,
-                ])
-                sell_signals = sum([
-                    context.signal_ma_crossover < 0,
-                    context.signal_rsi < 0,
-                    context.signal_macd < 0,
-                    context.signal_breakout < 0,
-                    context.signal_volume < 0,
-                ])
+                buy_signals = sum(
+                    [
+                        context.signal_ma_crossover > 0,
+                        context.signal_rsi > 0,
+                        context.signal_macd > 0,
+                        context.signal_breakout > 0,
+                        context.signal_volume > 0,
+                    ]
+                )
+                sell_signals = sum(
+                    [
+                        context.signal_ma_crossover < 0,
+                        context.signal_rsi < 0,
+                        context.signal_macd < 0,
+                        context.signal_breakout < 0,
+                        context.signal_volume < 0,
+                    ]
+                )
 
                 if buy_signals > sell_signals:
                     final_signal = 1.0
-                    explanation = f"BUY ({buy_signals} сигналов за, {sell_signals} против, уверенность {success_probability:.0%})"
+                    explanation = (
+                        f"BUY ({buy_signals} сигналов за, {sell_signals} против, уверенность {success_probability:.0%})"
+                    )
                 elif sell_signals > buy_signals:
                     final_signal = -1.0
                     explanation = f"SELL ({sell_signals} сигналов за, {buy_signals} против, уверенность {success_probability:.0%})"

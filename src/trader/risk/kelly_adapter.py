@@ -10,7 +10,7 @@ import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -44,20 +44,20 @@ class KellyAdapterContext:
 class KellyAdapter:
     """Adapter for ML Kelly predictor integration with risk sizing."""
 
-    def __init__(self, ml_kelly_predictor: Any = None):
+    def __init__(self, ml_kelly_predictor: Any = None) -> None:
         """Initialize adapter with optional ML predictor.
 
         Args:
             ml_kelly_predictor: MLKellyPredictor instance, or None for fallback.
         """
         self._predictor = ml_kelly_predictor
-        self._last_context: Optional[KellyAdapterContext] = None
-        self._last_prediction: Optional[Any] = None
+        self._last_context: KellyAdapterContext | None = None
+        self._last_prediction: Any | None = None
 
     async def predict_kelly_sizing(
         self,
         context: KellyAdapterContext,
-    ) -> tuple[Decimal, Decimal, Optional[str]]:
+    ) -> tuple[Decimal, Decimal, str | None]:
         """Predict optimal Kelly sizing from context.
 
         Args:
@@ -74,8 +74,6 @@ class KellyAdapter:
             return self._fallback_kelly(context)
 
         try:
-            from trader.ml.kelly_predictor import KellyPredictorFeatures
-
             features = self._extract_features(context)
             prediction = await self._predictor.predict(features)
 
@@ -109,9 +107,7 @@ class KellyAdapter:
             recent_avg_win_bps = np.mean(win_amounts) if win_amounts else 10.0
             recent_avg_loss_bps = np.mean(loss_amounts) if loss_amounts else -10.0
 
-        recent_profit_factor = (
-            abs(sum(win_amounts)) / abs(sum(loss_amounts)) if win_amounts and loss_amounts else 1.0
-        )
+        recent_profit_factor = abs(sum(win_amounts)) / abs(sum(loss_amounts)) if win_amounts and loss_amounts else 1.0
 
         recent_pnl_trend = 0.0
         if len(context.recent_returns_bps) >= 5:
@@ -122,8 +118,16 @@ class KellyAdapter:
         # Volatility and distribution
         all_returns = np.array(context.all_returns_bps) if context.all_returns_bps else np.array([0.0])
         std_dev_bps = float(np.std(all_returns)) if len(all_returns) > 0 else 10.0
-        skewness = float(np.mean((all_returns - np.mean(all_returns)) ** 3) / (np.std(all_returns) ** 3)) if std_dev_bps > 0 else 0.0
-        kurtosis = float(np.mean((all_returns - np.mean(all_returns)) ** 4) / (np.std(all_returns) ** 4)) if std_dev_bps > 0 else 3.0
+        skewness = (
+            float(np.mean((all_returns - np.mean(all_returns)) ** 3) / (np.std(all_returns) ** 3))
+            if std_dev_bps > 0
+            else 0.0
+        )
+        kurtosis = (
+            float(np.mean((all_returns - np.mean(all_returns)) ** 4) / (np.std(all_returns) ** 4))
+            if std_dev_bps > 0
+            else 3.0
+        )
         var_95_bps = float(np.percentile(all_returns, 5)) if len(all_returns) > 0 else 0.0
 
         # Drawdown state

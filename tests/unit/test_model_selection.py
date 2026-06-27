@@ -38,8 +38,7 @@ def test_model_selection_does_not_confuse_walk_forward_pass_with_paper_gate() ->
     assert normalized["walk_forward_pass_count"] == 120
     assert normalized["pass_count_for_score"] == 120
     assert (
-        selection_reason({"walk_forward_expectancy_bps": 3.0, "total_pass_count": 120})
-        == "blocked:paper_gate_count<50"
+        selection_reason({"walk_forward_expectancy_bps": 3.0, "total_pass_count": 120}) == "blocked:paper_gate_count<50"
     )
 
 

@@ -10,22 +10,23 @@
 from __future__ import annotations
 
 import logging
-from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
 logger = logging.getLogger(__name__)
 
 try:
-    from xgboost import XGBRegressor, XGBClassifier
+    from xgboost import XGBClassifier, XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
     logger.warning("XGBoost not available, using simple numpy-based models")
-    from trader.ml.simple_models import SimpleEnsembleRegressor, SimpleClassifier
+    from trader.ml.simple_models import SimpleClassifier, SimpleEnsembleRegressor
+
     XGBRegressor = SimpleEnsembleRegressor
     XGBClassifier = SimpleClassifier
 
@@ -79,9 +80,9 @@ class SpreadPredictorEnhancedFeatures:
 class SpreadPredictorEnhanced:
     """Усиленный предсказатель спредов с анализом микроструктуры."""
 
-    def __init__(self):
-        self.spread_model: Optional[XGBRegressor] = None  # Предсказывает размер спреда
-        self.widening_model: Optional[XGBClassifier] = None  # Классифицирует: будет ли взрыв спреда
+    def __init__(self) -> None:
+        self.spread_model: XGBRegressor | None = None  # Предсказывает размер спреда
+        self.widening_model: XGBClassifier | None = None  # Классифицирует: будет ли взрыв спреда
 
         self.min_training_samples = 200  # Больше чем раньше для качества
         self.spread_history: list[float] = []  # История спредов для анализа
@@ -112,23 +113,26 @@ class SpreadPredictorEnhanced:
                     continue
 
                 # Вектор всех признаков (15 штук)
-                x = np.array([
-                    features.hour_of_day,
-                    features.day_of_week,
-                    float(features.is_funding_time),
-                    features.bid_ask_imbalance,
-                    features.bid_ask_ratio,
-                    features.order_book_total_depth,
-                    features.microstructure_score,
-                    features.spread_trend_5m,
-                    features.spread_volatility,
-                    features.spread_acceleration,
-                    features.price_volatility_bps,
-                    features.volume_ratio,
-                    features.momentum,
-                    features.recent_max_spread_bps,
-                    features.spread_mean_reversion_pct,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        features.hour_of_day,
+                        features.day_of_week,
+                        float(features.is_funding_time),
+                        features.bid_ask_imbalance,
+                        features.bid_ask_ratio,
+                        features.order_book_total_depth,
+                        features.microstructure_score,
+                        features.spread_trend_5m,
+                        features.spread_volatility,
+                        features.spread_acceleration,
+                        features.price_volatility_bps,
+                        features.volume_ratio,
+                        features.momentum,
+                        features.recent_max_spread_bps,
+                        features.spread_mean_reversion_pct,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
 
@@ -204,23 +208,26 @@ class SpreadPredictorEnhanced:
             return self._get_fallback_prediction(features)
 
         try:
-            x = np.array([
-                features.hour_of_day,
-                features.day_of_week,
-                float(features.is_funding_time),
-                features.bid_ask_imbalance,
-                features.bid_ask_ratio,
-                features.order_book_total_depth,
-                features.microstructure_score,
-                features.spread_trend_5m,
-                features.spread_volatility,
-                features.spread_acceleration,
-                features.price_volatility_bps,
-                features.volume_ratio,
-                features.momentum,
-                features.recent_max_spread_bps,
-                features.spread_mean_reversion_pct,
-            ], dtype=np.float32).reshape(1, -1)
+            x = np.array(
+                [
+                    features.hour_of_day,
+                    features.day_of_week,
+                    float(features.is_funding_time),
+                    features.bid_ask_imbalance,
+                    features.bid_ask_ratio,
+                    features.order_book_total_depth,
+                    features.microstructure_score,
+                    features.spread_trend_5m,
+                    features.spread_volatility,
+                    features.spread_acceleration,
+                    features.price_volatility_bps,
+                    features.volume_ratio,
+                    features.momentum,
+                    features.recent_max_spread_bps,
+                    features.spread_mean_reversion_pct,
+                ],
+                dtype=np.float32,
+            ).reshape(1, -1)
 
             # 1. Предсказать размер спреда
             predicted_spread = float(self.spread_model.predict(x)[0])
@@ -230,7 +237,6 @@ class SpreadPredictorEnhanced:
             widening_proba = float(self.widening_model.predict_proba(x)[0][1])  # Вероятность класса 1
 
             # 3. Рекомендации по размеру спреда
-            spread_z_score = (predicted_spread - self.mean_spread) / max(self.std_spread, 1.0)
             if predicted_spread < 10:
                 spread_recommendation = "GOOD - спред очень узкий 🟢"
             elif predicted_spread < 20:
@@ -261,13 +267,13 @@ class SpreadPredictorEnhanced:
             confidence = 0.7  # В усиленной версии выше уверенность
 
             return {
-                'predicted_spread_bps': predicted_spread,
-                'spread_recommendation': spread_recommendation,
-                'widening_risk': widening_proba,
-                'widening_warning': widening_warning,
-                'optimal_entry_timing': optimal_timing,
-                'confidence': confidence,
-                'explanation': explanation,
+                "predicted_spread_bps": predicted_spread,
+                "spread_recommendation": spread_recommendation,
+                "widening_risk": widening_proba,
+                "widening_warning": widening_warning,
+                "optimal_entry_timing": optimal_timing,
+                "confidence": confidence,
+                "explanation": explanation,
             }
 
         except Exception as e:
@@ -278,13 +284,13 @@ class SpreadPredictorEnhanced:
     def _get_fallback_prediction(features: SpreadPredictorEnhancedFeatures) -> dict:
         """Резервный вариант когда модели не обучены."""
         return {
-            'predicted_spread_bps': features.recent_avg_spread_bps,
-            'spread_recommendation': "Модели не обучены, используем среднее значение",
-            'widening_risk': 0.5,
-            'widening_warning': "UNKNOWN - нет данных для предсказания",
-            'optimal_entry_timing': "WAIT_5MIN",
-            'confidence': 0.3,
-            'explanation': "Модель еще обучается",
+            "predicted_spread_bps": features.recent_avg_spread_bps,
+            "spread_recommendation": "Модели не обучены, используем среднее значение",
+            "widening_risk": 0.5,
+            "widening_warning": "UNKNOWN - нет данных для предсказания",
+            "optimal_entry_timing": "WAIT_5MIN",
+            "confidence": 0.3,
+            "explanation": "Модель еще обучается",
         }
 
     def should_trade(

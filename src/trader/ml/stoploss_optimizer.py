@@ -7,8 +7,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
@@ -16,6 +14,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -36,8 +35,8 @@ class StopLossContext:
 class StopLossOptimizer:
     """Оптимизирует размер стоп-лосса под текущие условия."""
 
-    def __init__(self):
-        self.model: Optional[XGBRegressor] = None
+    def __init__(self) -> None:
+        self.model: XGBRegressor | None = None
         self.min_training_samples = 100
         self.regime_multipliers = {
             "trend": 1.5,  # В тренде можно более широкий стоп
@@ -59,14 +58,17 @@ class StopLossOptimizer:
                 if not context:
                     continue
 
-                x = np.array([
-                    context.realized_volatility_pct,
-                    context.atr_pct,
-                    context.recent_win_rate,
-                    np.mean(context.recent_swings_bps) if context.recent_swings_bps else 50.0,
-                    np.std(context.recent_swings_bps) if len(context.recent_swings_bps) > 1 else 20.0,
-                    context.hour_of_day,
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        context.realized_volatility_pct,
+                        context.atr_pct,
+                        context.recent_win_rate,
+                        np.mean(context.recent_swings_bps) if context.recent_swings_bps else 50.0,
+                        np.std(context.recent_swings_bps) if len(context.recent_swings_bps) > 1 else 20.0,
+                        context.hour_of_day,
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
                 y_stops.append(record.get("optimal_stop_pct", 2.0))
@@ -105,14 +107,17 @@ class StopLossOptimizer:
 
         if self.model is not None:
             try:
-                x = np.array([
-                    context.realized_volatility_pct,
-                    context.atr_pct,
-                    context.recent_win_rate,
-                    np.mean(context.recent_swings_bps) if context.recent_swings_bps else 50.0,
-                    np.std(context.recent_swings_bps) if len(context.recent_swings_bps) > 1 else 20.0,
-                    context.hour_of_day,
-                ], dtype=np.float32).reshape(1, -1)
+                x = np.array(
+                    [
+                        context.realized_volatility_pct,
+                        context.atr_pct,
+                        context.recent_win_rate,
+                        np.mean(context.recent_swings_bps) if context.recent_swings_bps else 50.0,
+                        np.std(context.recent_swings_bps) if len(context.recent_swings_bps) > 1 else 20.0,
+                        context.hour_of_day,
+                    ],
+                    dtype=np.float32,
+                ).reshape(1, -1)
 
                 ml_stop = float(self.model.predict(x)[0])
                 optimal_stop = ml_stop

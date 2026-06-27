@@ -11,10 +11,10 @@ import json
 import logging
 import pickle
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any
 
 logger = logging.getLogger(__name__)
 
@@ -73,9 +73,9 @@ class UnifiedMLController:
         spread_predictor: Any,
         stoploss_optimizer: Any,
         entry_exit_optimizer: Any = None,
-        model_dir: str = "/tmp/ml_models",
+        model_dir: str = "/tmp/ml_models",  # noqa: S108
         auto_save: bool = True,
-    ):
+    ) -> None:
         """Инициализация контроллера.
 
         Args:
@@ -109,7 +109,7 @@ class UnifiedMLController:
 
         # Статистика
         self.training_count = 0
-        self.last_training_time: Optional[datetime] = None
+        self.last_training_time: datetime | None = None
         self.prediction_count = 0
         self.accuracy_stats = {
             "kelly": [],
@@ -204,35 +204,29 @@ class UnifiedMLController:
                 fractional_kelly=kelly_result.fractional_kelly if kelly_result else Decimal("0.25"),
                 kelly_confidence=kelly_result.model_confidence if kelly_result else 0.3,
                 kelly_reasoning=kelly_result.reasoning if kelly_result else "Model not trained",
-
                 # Regime
                 current_regime=regime_result.current_regime if regime_result else "SIDEWAYS",
                 regime_confidence=regime_result.confidence_current if regime_result else 0.3,
                 next_5m_regime=regime_result.next_5m_regime if regime_result else "SIDEWAYS",
                 next_15m_regime=regime_result.next_15m_regime if regime_result else "SIDEWAYS",
                 trend_phase=regime_result.trend_phase if regime_result else "CHAOTIC",
-
                 # Signals
-                fused_signal=signal_result.get('final_signal', 0.0) if signal_result else 0.0,
-                signal_confidence=signal_result.get('confidence', 0.3) if signal_result else 0.3,
-                signal_recommendation=signal_result.get('recommendation', 'NEUTRAL') if signal_result else 'NEUTRAL',
-
+                fused_signal=signal_result.get("final_signal", 0.0) if signal_result else 0.0,
+                signal_confidence=signal_result.get("confidence", 0.3) if signal_result else 0.3,
+                signal_recommendation=signal_result.get("recommendation", "NEUTRAL") if signal_result else "NEUTRAL",
                 # Spread
-                predicted_spread_bps=spread_result.get('predicted_spread_bps', 25.0) if spread_result else 25.0,
-                spread_risk=spread_result.get('widening_risk', 0.5) if spread_result else 0.5,
-                spread_recommendation=spread_result.get('spread_recommendation', 'OK') if spread_result else 'OK',
-
+                predicted_spread_bps=spread_result.get("predicted_spread_bps", 25.0) if spread_result else 25.0,
+                spread_risk=spread_result.get("widening_risk", 0.5) if spread_result else 0.5,
+                spread_recommendation=spread_result.get("spread_recommendation", "OK") if spread_result else "OK",
                 # StopLoss
-                optimal_stop_pct=stoploss_result.get('stop_distance_pct', 2.0) if stoploss_result else 2.0,
-                emergency_stop_pct=stoploss_result.get('emergency_stop_pct', 3.0) if stoploss_result else 3.0,
-                sl_recommendation=stoploss_result.get('recommendation', 'OK') if stoploss_result else 'OK',
-
+                optimal_stop_pct=stoploss_result.get("stop_distance_pct", 2.0) if stoploss_result else 2.0,
+                emergency_stop_pct=stoploss_result.get("emergency_stop_pct", 3.0) if stoploss_result else 3.0,
+                sl_recommendation=stoploss_result.get("recommendation", "OK") if stoploss_result else "OK",
                 # Entry/Exit
                 entry_price=entry_exit_result.entry_price if entry_exit_result else current_price,
                 take_profit_price=entry_exit_result.take_profit_price if entry_exit_result else current_price,
                 stop_loss_price=entry_exit_result.stop_loss_price if entry_exit_result else current_price,
                 entry_confidence=entry_exit_result.probability_of_success if entry_exit_result else 0.5,
-
                 # Meta
                 timestamp=datetime.now(UTC),
                 all_models_trained=(
@@ -270,48 +264,60 @@ class UnifiedMLController:
         try:
             # Добавить в истории обучения
             if kelly_features:
-                self.kelly_training_data.append({
-                    "features": kelly_features,
-                    "kelly_actual": trade_outcome.get("kelly_used", 0.10),
-                    "fractional_actual": trade_outcome.get("fractional_used", 0.25),
-                    "was_profitable": trade_outcome.get("pnl_usd", 0) > 0,
-                })
+                self.kelly_training_data.append(
+                    {
+                        "features": kelly_features,
+                        "kelly_actual": trade_outcome.get("kelly_used", 0.10),
+                        "fractional_actual": trade_outcome.get("fractional_used", 0.25),
+                        "was_profitable": trade_outcome.get("pnl_usd", 0) > 0,
+                    }
+                )
 
             if regime_features:
-                self.regime_training_data.append({
-                    "features": regime_features,
-                    "current_regime_class": trade_outcome.get("regime_class", 2),
-                    "next_5m_regime_class": trade_outcome.get("next_regime_5m", 2),
-                })
+                self.regime_training_data.append(
+                    {
+                        "features": regime_features,
+                        "current_regime_class": trade_outcome.get("regime_class", 2),
+                        "next_5m_regime_class": trade_outcome.get("next_regime_5m", 2),
+                    }
+                )
 
             if signal_context:
-                self.signal_training_data.append({
-                    "context": signal_context,
-                    "was_profitable": trade_outcome.get("pnl_usd", 0) > 0,
-                    "expected_confidence": trade_outcome.get("signal_strength", 0.5),
-                })
+                self.signal_training_data.append(
+                    {
+                        "context": signal_context,
+                        "was_profitable": trade_outcome.get("pnl_usd", 0) > 0,
+                        "expected_confidence": trade_outcome.get("signal_strength", 0.5),
+                    }
+                )
 
             if spread_features:
-                self.spread_training_data.append({
-                    "features": spread_features,
-                    "actual_spread_bps": trade_outcome.get("actual_spread_bps", 20.0),
-                    "spread_widened": trade_outcome.get("spread_widened", False),
-                })
+                self.spread_training_data.append(
+                    {
+                        "features": spread_features,
+                        "actual_spread_bps": trade_outcome.get("actual_spread_bps", 20.0),
+                        "spread_widened": trade_outcome.get("spread_widened", False),
+                    }
+                )
 
             if stoploss_context:
-                self.stoploss_training_data.append({
-                    "context": stoploss_context,
-                    "optimal_stop_pct": trade_outcome.get("optimal_stop_pct", 2.0),
-                    "optimal_cvar_pct": trade_outcome.get("optimal_cvar_pct", 3.0),
-                })
+                self.stoploss_training_data.append(
+                    {
+                        "context": stoploss_context,
+                        "optimal_stop_pct": trade_outcome.get("optimal_stop_pct", 2.0),
+                        "optimal_cvar_pct": trade_outcome.get("optimal_cvar_pct", 3.0),
+                    }
+                )
 
             if entry_exit_context:
-                self.entry_exit_training_data.append({
-                    "context": entry_exit_context,
-                    "optimal_entry_offset_pct": trade_outcome.get("entry_offset_pct", 0.0),
-                    "optimal_tp_distance_pct": trade_outcome.get("tp_distance_pct", 1.0),
-                    "optimal_sl_distance_pct": trade_outcome.get("sl_distance_pct", 0.7),
-                })
+                self.entry_exit_training_data.append(
+                    {
+                        "context": entry_exit_context,
+                        "optimal_entry_offset_pct": trade_outcome.get("entry_offset_pct", 0.0),
+                        "optimal_tp_distance_pct": trade_outcome.get("tp_distance_pct", 1.0),
+                        "optimal_sl_distance_pct": trade_outcome.get("sl_distance_pct", 0.7),
+                    }
+                )
 
             logger.debug("✅ Training sample added")
 
@@ -384,7 +390,7 @@ class UnifiedMLController:
 
         except Exception as e:
             logger.error(f"retrain_models failed: {e}")
-            return {model: False for model in ["kelly", "regime", "signals", "spread", "stoploss"]}
+            return dict.fromkeys(["kelly", "regime", "signals", "spread", "stoploss"], False)
 
     async def save_models(self) -> None:
         """Сохранить все модели на диск."""
@@ -448,27 +454,27 @@ class UnifiedMLController:
         try:
             if (self.model_dir / "kelly_model.pkl").exists():
                 with open(self.model_dir / "kelly_model.pkl", "rb") as f:
-                    self.kelly.kelly_model = pickle.load(f)
+                    self.kelly.kelly_model = pickle.load(f)  # noqa: S301
                 logger.info("📂 Loaded kelly_model")
 
             if (self.model_dir / "regime_model.pkl").exists():
                 with open(self.model_dir / "regime_model.pkl", "rb") as f:
-                    self.regime.regime_model = pickle.load(f)
+                    self.regime.regime_model = pickle.load(f)  # noqa: S301
                 logger.info("📂 Loaded regime_model")
 
             if (self.model_dir / "signals_model.pkl").exists():
                 with open(self.model_dir / "signals_model.pkl", "rb") as f:
-                    self.signals.outcome_model = pickle.load(f)
+                    self.signals.outcome_model = pickle.load(f)  # noqa: S301
                 logger.info("📂 Loaded signals_model")
 
             if (self.model_dir / "spread_model.pkl").exists():
                 with open(self.model_dir / "spread_model.pkl", "rb") as f:
-                    self.spread.spread_model = pickle.load(f)
+                    self.spread.spread_model = pickle.load(f)  # noqa: S301
                 logger.info("📂 Loaded spread_model")
 
             if (self.model_dir / "stoploss_model.pkl").exists():
                 with open(self.model_dir / "stoploss_model.pkl", "rb") as f:
-                    self.stoploss.model = pickle.load(f)
+                    self.stoploss.model = pickle.load(f)  # noqa: S301
                 logger.info("📂 Loaded stoploss_model")
 
             logger.info("✅ All models loaded")

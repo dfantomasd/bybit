@@ -13,12 +13,11 @@ Architecture:
 
 from __future__ import annotations
 
-import asyncio
 import logging
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Any, Optional
+from typing import Any
 
 import numpy as np
 
@@ -26,6 +25,7 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
@@ -38,34 +38,34 @@ class KellyPredictorFeatures:
     """Features for Kelly prediction model."""
 
     # Recent performance (last 50 trades)
-    recent_win_rate: float          # 0-1
-    recent_avg_win_bps: float       # basis points
-    recent_avg_loss_bps: float      # basis points (negative)
-    recent_profit_factor: float     # wins/abs(losses)
-    recent_pnl_trend: float         # -1 to 1, equity curve slope
+    recent_win_rate: float  # 0-1
+    recent_avg_win_bps: float  # basis points
+    recent_avg_loss_bps: float  # basis points (negative)
+    recent_profit_factor: float  # wins/abs(losses)
+    recent_pnl_trend: float  # -1 to 1, equity curve slope
 
     # Volatility and distribution
-    std_dev_bps: float              # volatility of returns
-    skewness: float                 # left/right tail
-    kurtosis: float                 # fat tails indicator
-    var_95_bps: float               # 5th percentile (VaR)
+    std_dev_bps: float  # volatility of returns
+    skewness: float  # left/right tail
+    kurtosis: float  # fat tails indicator
+    var_95_bps: float  # 5th percentile (VaR)
 
     # Drawdown state
-    current_drawdown_pct: float     # 0 or negative
-    max_drawdown_pct: float         # worst case
-    drawdown_severity: int          # 0-4 (none, mild, moderate, severe, extreme)
-    in_drawdown: bool               # boolean
+    current_drawdown_pct: float  # 0 or negative
+    max_drawdown_pct: float  # worst case
+    drawdown_severity: int  # 0-4 (none, mild, moderate, severe, extreme)
+    in_drawdown: bool  # boolean
 
     # Market conditions
-    volatility_regime: int          # 0-3 (low, moderate, high, extreme)
-    hour_of_day: int                # 0-23
-    day_of_week: int                # 0-6
-    days_since_start: int           # how long strategy running
+    volatility_regime: int  # 0-3 (low, moderate, high, extreme)
+    hour_of_day: int  # 0-23
+    day_of_week: int  # 0-6
+    days_since_start: int  # how long strategy running
 
     # Strategy metadata
-    strategy_id: str                # which strategy
-    symbol: str                     # which symbol
-    total_trades: int               # cumulative trade count
+    strategy_id: str  # which strategy
+    symbol: str  # which symbol
+    total_trades: int  # cumulative trade count
 
     # Observation context
     timestamp: datetime = field(default_factory=lambda: datetime.now(UTC))
@@ -75,15 +75,15 @@ class KellyPredictorFeatures:
 class KellyPredictorOutput:
     """Output from Kelly predictor model."""
 
-    kelly_fraction: Decimal         # 0.01-0.25, from model prediction
-    fractional_kelly: Decimal       # 0.1-0.5, from model prediction
-    final_position_size: Decimal    # kelly * fractional
-    model_confidence: float         # 0-1, how confident is model
-    predicted_win_rate: float       # model's prediction of next trade
-    predicted_sharpe: float         # predicted risk-adjusted return
-    risk_level: str                 # low, medium, high, critical
-    model_version: str              # which model was used
-    reasoning: str                  # explanation
+    kelly_fraction: Decimal  # 0.01-0.25, from model prediction
+    fractional_kelly: Decimal  # 0.1-0.5, from model prediction
+    final_position_size: Decimal  # kelly * fractional
+    model_confidence: float  # 0-1, how confident is model
+    predicted_win_rate: float  # model's prediction of next trade
+    predicted_sharpe: float  # predicted risk-adjusted return
+    risk_level: str  # low, medium, high, critical
+    model_version: str  # which model was used
+    reasoning: str  # explanation
     feature_importance: dict[str, float] = field(default_factory=dict)
 
 
@@ -100,26 +100,29 @@ class KellyPredictorBase:
 
     def get_feature_vector(self, features: KellyPredictorFeatures) -> np.ndarray:
         """Convert features to model input vector."""
-        return np.array([
-            features.recent_win_rate,
-            features.recent_avg_win_bps,
-            features.recent_avg_loss_bps,
-            features.recent_profit_factor,
-            features.recent_pnl_trend,
-            features.std_dev_bps,
-            features.skewness,
-            features.kurtosis,
-            features.var_95_bps,
-            features.current_drawdown_pct,
-            features.max_drawdown_pct,
-            float(features.drawdown_severity),
-            float(features.in_drawdown),
-            float(features.volatility_regime),
-            float(features.hour_of_day),
-            float(features.day_of_week),
-            float(features.days_since_start),
-            float(features.total_trades),
-        ], dtype=np.float32)
+        return np.array(
+            [
+                features.recent_win_rate,
+                features.recent_avg_win_bps,
+                features.recent_avg_loss_bps,
+                features.recent_profit_factor,
+                features.recent_pnl_trend,
+                features.std_dev_bps,
+                features.skewness,
+                features.kurtosis,
+                features.var_95_bps,
+                features.current_drawdown_pct,
+                features.max_drawdown_pct,
+                float(features.drawdown_severity),
+                float(features.in_drawdown),
+                float(features.volatility_regime),
+                float(features.hour_of_day),
+                float(features.day_of_week),
+                float(features.days_since_start),
+                float(features.total_trades),
+            ],
+            dtype=np.float32,
+        )
 
     @staticmethod
     def get_feature_names() -> list[str]:
@@ -149,14 +152,14 @@ class KellyPredictorBase:
 class MLKellyPredictor(KellyPredictorBase):
     """ML-based Kelly predictor using XGBoost."""
 
-    def __init__(self, model_dir: str = "/tmp/kelly_models"):
+    def __init__(self, model_dir: str = "/tmp/kelly_models") -> None:  # noqa: S108
         self.model_dir = model_dir
-        self.kelly_model: Optional[XGBRegressor] = None  # Predicts kelly_fraction
-        self.fractional_model: Optional[XGBRegressor] = None  # Predicts fractional_kelly
+        self.kelly_model: XGBRegressor | None = None  # Predicts kelly_fraction
+        self.fractional_model: XGBRegressor | None = None  # Predicts fractional_kelly
         self.last_training_time = datetime.now(UTC)
         self.min_training_samples = 100
-        self.last_features: Optional[KellyPredictorFeatures] = None
-        self.last_prediction: Optional[KellyPredictorOutput] = None
+        self.last_features: KellyPredictorFeatures | None = None
+        self.last_prediction: KellyPredictorOutput | None = None
 
     async def train(self, training_data: list[dict[str, Any]]) -> None:
         """Train Kelly prediction models from historical data.
@@ -260,6 +263,7 @@ class MLKellyPredictor(KellyPredictorBase):
                 zip(
                     self.get_feature_names(),
                     self.kelly_model.feature_importances_.tolist()[:5],
+                    strict=False,
                 )
             )
 
@@ -355,7 +359,7 @@ class MLKellyPredictor(KellyPredictorBase):
             reasons.append(f"In drawdown ({features.current_drawdown_pct:.1f}%), reducing size")
 
         if features.kurtosis > 4:
-            reasons.append(f"Fat tails detected, being cautious")
+            reasons.append("Fat tails detected, being cautious")
 
         if features.recent_pnl_trend > 0.05:
             reasons.append("Positive equity trend, increasing exposure")

@@ -107,7 +107,7 @@ def assess_liquidity(
     spread_ratio = max(0.0, 1.0 - (spread_bps / 10.0))  # 10bps = 0 score
     size_ratio = min(1.0, float(min_depth_usd / (position_size_usd + Decimal("1"))))
 
-    liquidity_score = (depth_ratio * 0.4 + spread_ratio * 0.4 + size_ratio * 0.2)
+    liquidity_score = depth_ratio * 0.4 + spread_ratio * 0.4 + size_ratio * 0.2
 
     # Estimate slippage
     estimated_slippage = estimate_market_impact(
@@ -159,7 +159,7 @@ def estimate_market_impact(
     # 5% of depth = ~0.22 additional slippage
     # 10% of depth = ~0.32 additional slippage
     # 50% of depth = ~0.70 additional slippage
-    impact_slippage = (size_ratio ** 0.5) * 100
+    impact_slippage = (size_ratio**0.5) * 100
 
     total_slippage = base_slippage + impact_slippage
 

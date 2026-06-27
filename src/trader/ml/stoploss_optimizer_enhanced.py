@@ -11,8 +11,6 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from decimal import Decimal
-from typing import Optional
 
 import numpy as np
 
@@ -20,11 +18,13 @@ logger = logging.getLogger(__name__)
 
 try:
     from xgboost import XGBRegressor
+
     XGBOOST_AVAILABLE = True
 except ImportError:
     XGBOOST_AVAILABLE = False
     logger.warning("XGBoost not available, using simple numpy-based models")
     from trader.ml.simple_models import SimpleEnsembleRegressor
+
     XGBRegressor = SimpleEnsembleRegressor
 
 
@@ -61,9 +61,9 @@ class StopLossContextEnhanced:
 class StopLossOptimizerEnhanced:
     """Умный расчёт стопа с анализом уровней и хвостового риска."""
 
-    def __init__(self):
-        self.model: Optional[XGBRegressor] = None
-        self.cvar_model: Optional[XGBRegressor] = None  # Отдельная модель для хвостового риска
+    def __init__(self) -> None:
+        self.model: XGBRegressor | None = None
+        self.cvar_model: XGBRegressor | None = None  # Отдельная модель для хвостового риска
 
         self.min_training_samples = 200
         self.regime_multipliers = {
@@ -92,21 +92,24 @@ class StopLossOptimizerEnhanced:
                     continue
 
                 # 13 признаков
-                x = np.array([
-                    context.realized_volatility_pct,
-                    context.atr_pct,
-                    context.volatility_trend,
-                    context.nearest_support_pct,
-                    context.nearest_resistance_pct,
-                    context.var_95_pct,
-                    context.cvar_95_pct,
-                    1.0 if context.market_regime == "trend" else 0.0,
-                    1.0 if context.market_regime == "volatile" else 0.0,
-                    context.trend_strength,
-                    context.recent_win_rate,
-                    context.hour_of_day,
-                    context.time_in_trade_minutes / 60,  # в часах
-                ], dtype=np.float32)
+                x = np.array(
+                    [
+                        context.realized_volatility_pct,
+                        context.atr_pct,
+                        context.volatility_trend,
+                        context.nearest_support_pct,
+                        context.nearest_resistance_pct,
+                        context.var_95_pct,
+                        context.cvar_95_pct,
+                        1.0 if context.market_regime == "trend" else 0.0,
+                        1.0 if context.market_regime == "volatile" else 0.0,
+                        context.trend_strength,
+                        context.recent_win_rate,
+                        context.hour_of_day,
+                        context.time_in_trade_minutes / 60,  # в часах
+                    ],
+                    dtype=np.float32,
+                )
 
                 x_list.append(x)
                 y_stops.append(record.get("optimal_stop_pct", 2.0))
@@ -176,21 +179,24 @@ class StopLossOptimizerEnhanced:
         # 1. ML-ПРЕДСКАЗАНИЕ
         if self.model is not None:
             try:
-                x = np.array([
-                    context.realized_volatility_pct,
-                    context.atr_pct,
-                    context.volatility_trend,
-                    context.nearest_support_pct,
-                    context.nearest_resistance_pct,
-                    context.var_95_pct,
-                    context.cvar_95_pct,
-                    1.0 if context.market_regime == "trend" else 0.0,
-                    1.0 if context.market_regime == "volatile" else 0.0,
-                    context.trend_strength,
-                    context.recent_win_rate,
-                    context.hour_of_day,
-                    context.time_in_trade_minutes / 60,
-                ], dtype=np.float32).reshape(1, -1)
+                x = np.array(
+                    [
+                        context.realized_volatility_pct,
+                        context.atr_pct,
+                        context.volatility_trend,
+                        context.nearest_support_pct,
+                        context.nearest_resistance_pct,
+                        context.var_95_pct,
+                        context.cvar_95_pct,
+                        1.0 if context.market_regime == "trend" else 0.0,
+                        1.0 if context.market_regime == "volatile" else 0.0,
+                        context.trend_strength,
+                        context.recent_win_rate,
+                        context.hour_of_day,
+                        context.time_in_trade_minutes / 60,
+                    ],
+                    dtype=np.float32,
+                ).reshape(1, -1)
 
                 ml_stop = float(self.model.predict(x)[0])
                 stop_distance = ml_stop
@@ -210,21 +216,24 @@ class StopLossOptimizerEnhanced:
         emergency_stop = max_stop_pct
         if use_cvar_safety and self.cvar_model is not None:
             try:
-                x = np.array([
-                    context.realized_volatility_pct,
-                    context.atr_pct,
-                    context.volatility_trend,
-                    context.nearest_support_pct,
-                    context.nearest_resistance_pct,
-                    context.var_95_pct,
-                    context.cvar_95_pct,
-                    1.0 if context.market_regime == "trend" else 0.0,
-                    1.0 if context.market_regime == "volatile" else 0.0,
-                    context.trend_strength,
-                    context.recent_win_rate,
-                    context.hour_of_day,
-                    context.time_in_trade_minutes / 60,
-                ], dtype=np.float32).reshape(1, -1)
+                x = np.array(
+                    [
+                        context.realized_volatility_pct,
+                        context.atr_pct,
+                        context.volatility_trend,
+                        context.nearest_support_pct,
+                        context.nearest_resistance_pct,
+                        context.var_95_pct,
+                        context.cvar_95_pct,
+                        1.0 if context.market_regime == "trend" else 0.0,
+                        1.0 if context.market_regime == "volatile" else 0.0,
+                        context.trend_strength,
+                        context.recent_win_rate,
+                        context.hour_of_day,
+                        context.time_in_trade_minutes / 60,
+                    ],
+                    dtype=np.float32,
+                ).reshape(1, -1)
 
                 emergency_stop = float(self.cvar_model.predict(x)[0])
                 # Экстренный стоп всегда больше чем основной
@@ -250,16 +259,14 @@ class StopLossOptimizerEnhanced:
         # 7. ОБЪЯСНЕНИЕ
         explanation = self._build_explanation(context, stop_distance, emergency_stop)
 
-        recommendation = "🟢 GOOD" if stop_distance < 1.5 else (
-            "🟡 OK" if stop_distance < 2.5 else "🔴 WIDE"
-        )
+        recommendation = "🟢 GOOD" if stop_distance < 1.5 else ("🟡 OK" if stop_distance < 2.5 else "🔴 WIDE")
 
         return {
-            'stop_distance_pct': stop_distance,
-            'emergency_stop_pct': emergency_stop,
-            'support_level_stop_pct': support_stop,
-            'recommendation': recommendation,
-            'explanation': explanation,
+            "stop_distance_pct": stop_distance,
+            "emergency_stop_pct": emergency_stop,
+            "support_level_stop_pct": support_stop,
+            "recommendation": recommendation,
+            "explanation": explanation,
         }
 
     def get_dynamic_stop(

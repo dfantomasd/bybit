@@ -49,25 +49,25 @@ log = structlog.get_logger(__name__)
 _STRATEGY_ID = "scalp_micro_v1"
 
 # === VWAP Pullback thresholds ===
-_EWMA_THRESHOLD = 0.003          # multi-EMA bullish/bearish stack strength
-_EWMA_THRESHOLD_SHADOW = 0.001   # relaxed for shadow data collection
-_OB_IMBALANCE_THRESHOLD = 0.08   # L5 book imbalance required for direction confirmation
+_EWMA_THRESHOLD = 0.003  # multi-EMA bullish/bearish stack strength
+_EWMA_THRESHOLD_SHADOW = 0.001  # relaxed for shadow data collection
+_OB_IMBALANCE_THRESHOLD = 0.08  # L5 book imbalance required for direction confirmation
 _OB_IMBALANCE_THRESHOLD_SHADOW = 0.05
-_VWAP_BUY_LOW = -0.6             # BUY: price at most 0.6% below VWAP (not free-falling)
-_VWAP_BUY_HIGH = 0.2             # BUY: price at most 0.2% above VWAP (no breakout chasing)
-_VWAP_SELL_LOW = -0.2            # SELL: price at most 0.2% below VWAP
-_VWAP_SELL_HIGH = 0.6            # SELL: price at most 0.6% above VWAP (pullback from above)
-_RSI_BUY_MIN = 0.32              # BUY: not oversold
-_RSI_BUY_MAX = 0.67              # BUY: not overbought
-_RSI_SELL_MIN = 0.33             # SELL: not oversold
-_RSI_SELL_MAX = 0.68             # SELL: not overbought
-_ADX_THRESHOLD = 0.18            # normalised ADX (0.18 == ADX 18); flat markets rejected
+_VWAP_BUY_LOW = -0.6  # BUY: price at most 0.6% below VWAP (not free-falling)
+_VWAP_BUY_HIGH = 0.2  # BUY: price at most 0.2% above VWAP (no breakout chasing)
+_VWAP_SELL_LOW = -0.2  # SELL: price at most 0.2% below VWAP
+_VWAP_SELL_HIGH = 0.6  # SELL: price at most 0.6% above VWAP (pullback from above)
+_RSI_BUY_MIN = 0.32  # BUY: not oversold
+_RSI_BUY_MAX = 0.67  # BUY: not overbought
+_RSI_SELL_MIN = 0.33  # SELL: not oversold
+_RSI_SELL_MAX = 0.68  # SELL: not overbought
+_ADX_THRESHOLD = 0.18  # normalised ADX (0.18 == ADX 18); flat markets rejected
 _ADX_THRESHOLD_SHADOW = 0.14
-_VOLUME_ZSCORE_MIN = -1.2        # reject completely dead markets
-_TP_ATR_MULT = 1.6               # reward:risk ~= 2.46
+_VOLUME_ZSCORE_MIN = -1.2  # reject completely dead markets
+_TP_ATR_MULT = 1.6  # reward:risk ~= 2.46
 _SL_ATR_MULT = 0.65
-_MIN_ATR_PCT = 0.0005            # skip dead markets where TP would be inside the spread
-_MAX_ATR_PCT = 0.03              # skip violent markets where SL gets blown through
+_MIN_ATR_PCT = 0.0005  # skip dead markets where TP would be inside the spread
+_MAX_ATR_PCT = 0.03  # skip violent markets where SL gets blown through
 
 _PRICE_DECIMALS = Decimal("0.00000001")
 
@@ -142,7 +142,7 @@ class ScalpMicroStrategy(BaseStrategy):
         self._min_qty_usd = min_qty_usd
         self._diag_hook = diag_hook
         self._imbalance_provider = imbalance_provider  # kept for interface compat
-        self._min_imbalance = min_imbalance            # kept for interface compat
+        self._min_imbalance = min_imbalance  # kept for interface compat
         self._shadow_relaxed = shadow_relaxed
         self._last_signal_at: dict[str, datetime] = {}
 
@@ -251,7 +251,7 @@ class ScalpMicroStrategy(BaseStrategy):
                 return None
         else:
             imb = ob_imbalance if ob_imbalance is not None else 0.0
-            confirms = (imb >= ob_threshold if side == OrderSide.BUY else imb <= -ob_threshold)
+            confirms = imb >= ob_threshold if side == OrderSide.BUY else imb <= -ob_threshold
             if not confirms:
                 if self._shadow_relaxed:
                     log.debug(
