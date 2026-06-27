@@ -401,8 +401,9 @@ async def test_model_performance_history_includes_score_and_selection_reason() -
 
     assert rows[0]["version"] == "v_good"
     assert rows[0]["model_score"] > 0
-    assert rows[0]["paper_gate_count"] == 80
-    assert rows[0]["selection_reason"] == "selected:positive_walk_forward_lift"
+    assert rows[0]["paper_gate_count"] == 0
+    assert rows[0]["paper_gate_source"] == "live_outcomes"
+    assert rows[0]["selection_reason"] == "blocked:paper_gate_count<50"
 
 
 @pytest.mark.asyncio
@@ -468,8 +469,44 @@ async def test_champion_health_includes_checks_alternative_and_promotion_log() -
 
     assert health["champion"]["version"] == "champion"
     assert health["best_alternative"]["version"] == "candidate"
-    assert all(check["ok"] for check in health["checks"])
+    assert not all(check["ok"] for check in health["checks"])
+    paper_check = next(check for check in health["checks"] if check["name"] == "paper_gate_count")
+    assert paper_check["ok"] is False
+    assert paper_check["value"] == 0
     assert health["promotion_log"][0]["event_type"] == "PROMOTED"
+
+
+@pytest.mark.asyncio
+async def test_live_paper_enrichment_uses_live_zero_over_stale_metrics() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del args
+        assert "ORDER BY pe.created_at DESC" in query
+        assert ") recent\n                ORDER BY created_at ASC" in query
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    enriched = await journal._enrich_model_with_live_paper(
+        {
+            "version": "champion",
+            "paper_gate_count": 80,
+            "selection_reason": "selected:positive_walk_forward_lift",
+            "metrics": {
+                "walk_forward_expectancy_bps": 4.0,
+                "paper_gate": {"count": 80},
+            },
+        }
+    )
+
+    assert enriched is not None
+    assert enriched["paper_gate_count"] == 0
+    assert enriched["paper_gate_source"] == "live_outcomes"
+    assert enriched["selection_reason"] == "blocked:paper_gate_count<50"
 
 
 @pytest.mark.asyncio

@@ -3111,18 +3111,22 @@ class TradeJournal:
         try:
             gate_rows = await self._fetch(
                 """
-                SELECT po.net_return_bps
-                FROM prediction_events pe
-                JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
-                LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
-                WHERE pe.model_version = $1
-                  AND pe.decision = 'GATE_PASS'
-                  AND po.horizon_minutes = $2
-                  AND po.label IS NOT NULL
-                  AND po.label_schema_version = $3
-                  AND ($4::text = '' OR fs.feature_schema_hash = $4)
-                ORDER BY pe.created_at ASC
-                LIMIT 1000
+                SELECT net_return_bps
+                FROM (
+                    SELECT pe.created_at, po.net_return_bps
+                    FROM prediction_events pe
+                    JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
+                    LEFT JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
+                    WHERE pe.model_version = $1
+                      AND pe.decision = 'GATE_PASS'
+                      AND po.horizon_minutes = $2
+                      AND po.label IS NOT NULL
+                      AND po.label_schema_version = $3
+                      AND ($4::text = '' OR fs.feature_schema_hash = $4)
+                    ORDER BY pe.created_at DESC
+                    LIMIT 1000
+                ) recent
+                ORDER BY created_at ASC
                 """,
                 model_version,
                 int(horizon_minutes),
@@ -3153,8 +3157,6 @@ class TradeJournal:
                 feature_schema_hash=schema_hash,
             )
             live_count = int(live.get("count") or 0)
-            if live_count <= 0:
-                return model
             enriched = dict(model)
             enriched["paper_gate_count"] = live_count
             enriched["paper_gate_total_bps"] = live.get("total_bps")
