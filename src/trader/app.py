@@ -99,6 +99,7 @@ class TradingApplication:
         self._candle_sampler_no_model: int = 0
         self._candle_sampler_gate_pass: int = 0
         self._candle_sampler_gate_block: int = 0
+        self._candle_sampler_shadow_scores: deque[float] = deque(maxlen=500)
         # Per-symbol signal cooldown: suppress duplicate proposals within one candle period.
         # The strategy loop runs every ~10s but features refresh ~60s (one 1m candle), so
         # without a cooldown the same signal fires 5-6 times and floods training data with

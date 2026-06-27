@@ -719,6 +719,13 @@ class Settings(BaseSettings):
     MODEL_SHADOW_GATE_ENABLED: bool = True
     """Evaluate a model-based pass/block gate in shadow, without affecting execution."""
     MODEL_SHADOW_GATE_THRESHOLD: float = 0.50
+    CANDLE_SAMPLER_SHADOW_GATE_MIN_PASS_RATE_PCT: float = 20.0
+    """Minimum exploratory pass rate for candle-sampler shadow scoring.
+
+    This never affects live/canary execution. It only prevents observational
+    shadow-gate stats from starving when a weak/new challenger scores every
+    candle below the strict production threshold.
+    """
     MODEL_GATE_CANARY_ENABLED: bool = False
     """When enabled, allow the model gate to block entries only with conservative safeguards.
     Disabled by default until a promoted CHAMPION shows positive shadow-gate lift."""

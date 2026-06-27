@@ -152,6 +152,21 @@ class TestCandleSampler:
         shadow_kwargs = app._trade_journal.record_prediction_event.await_args_list[1].kwargs
         assert shadow_kwargs["decision"] == "GATE_BLOCK"
 
+    def test_candle_sampler_shadow_gate_uses_adaptive_observational_threshold(self) -> None:
+        app = _make_app(CANDLE_SAMPLER_SHADOW_GATE_MIN_PASS_RATE_PCT=20.0)
+
+        strict_threshold, strict_source = app._modules.signal_policy.candle_sampler_shadow_gate_threshold(0.42)
+        assert strict_threshold == pytest.approx(0.52)
+        assert strict_source == "strict"
+
+        app._candle_sampler_shadow_scores.clear()
+        for score in [0.31 + (i * 0.005) for i in range(20)]:
+            threshold, source = app._modules.signal_policy.candle_sampler_shadow_gate_threshold(score)
+
+        assert source == "adaptive"
+        assert threshold < 0.52
+        assert threshold >= 0.31
+
     @pytest.mark.asyncio
     async def test_no_challenger_records_only_baseline(self) -> None:
         app = _make_app()

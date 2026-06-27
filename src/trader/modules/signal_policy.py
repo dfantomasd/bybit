@@ -93,6 +93,36 @@ class SignalPolicyModule(AppBoundModule):
             threshold += 0.01
         return min(0.80, max(0.50, threshold))
 
+    def candle_sampler_shadow_gate_threshold(self, score: float) -> tuple[float, str]:
+        """Return a shadow-only exploratory gate threshold for sampled candles.
+
+        The production/canary model gate must remain conservative. The candle
+        sampler, however, is observational: if a weak challenger scores all
+        candles just below the strict threshold, gate pass statistics stay at
+        zero and we cannot measure whether the model's top-ranked slice has
+        positive expectancy. Use the stricter threshold unless it would starve
+        the configured top-score slice.
+        """
+
+        assert self._app._settings is not None
+        strict_threshold = self.model_gate_threshold(None)
+        scores = self._app._candle_sampler_shadow_scores
+        scores.append(float(score))
+        min_pass_rate = min(
+            100.0,
+            max(0.0, float(self._app._settings.CANDLE_SAMPLER_SHADOW_GATE_MIN_PASS_RATE_PCT)),
+        )
+        if min_pass_rate <= 0.0 or len(scores) < 20:
+            return strict_threshold, "strict"
+
+        sorted_scores = sorted(scores)
+        # Example: 20% min pass rate -> use the rolling 80th percentile as an
+        # upper bound on the shadow-only threshold.
+        quantile = 1.0 - (min_pass_rate / 100.0)
+        index = min(len(sorted_scores) - 1, max(0, int(round(quantile * (len(sorted_scores) - 1)))))
+        exploratory_threshold = sorted_scores[index]
+        return min(strict_threshold, exploratory_threshold), "adaptive"
+
     def update_model_gate_quality_from_diag(self, diag: dict[str, Any]) -> None:
         latest_model = DiagnosticsModule.dict_or_empty(diag.get("latest_model_version"))
         metrics = DiagnosticsModule.dict_or_empty(latest_model.get("metrics"))
@@ -226,7 +256,7 @@ class SignalPolicyModule(AppBoundModule):
                 shadow_prediction = self._app._model_registry.score_shadow(model_feature_values, model_feature_names)
                 if shadow_prediction is not None:
                     self._app._candle_sampler_scored += 1
-                    threshold = self.model_gate_threshold(None)
+                    threshold, threshold_source = self.candle_sampler_shadow_gate_threshold(shadow_prediction.score)
                     gate_decision = None
                     gate_reason = "shadow_gate_disabled"
                     if self._app._settings.MODEL_SHADOW_GATE_ENABLED:
@@ -251,6 +281,7 @@ class SignalPolicyModule(AppBoundModule):
                             "confidence": shadow_prediction.confidence,
                             "gate_reason": gate_reason,
                             "threshold": threshold,
+                            "threshold_source": threshold_source,
                         },
                     )
                 else:
