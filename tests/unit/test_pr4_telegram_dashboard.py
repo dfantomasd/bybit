@@ -1046,6 +1046,16 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
             "candles_by_interval": {"1": 5000, "5": 1000, "15": 0, "60": 100},
             "prediction_outcomes_by_horizon": {"5": 1500, "15": 0},
             "training_eligible_by_horizon": {"5": 1234, "15": 0},
+            "training_filtered_total_by_horizon": {"5": 1400, "15": 0},
+            "newest_training_schema_by_horizon": {
+                "5": {
+                    "sample_count": 110,
+                    "best_schema_count": 1234,
+                    "best_schema_hash": "best_schema_hash",
+                    "trainable_schema_count": 1234,
+                    "trainable_schema_hash": "best_schema_hash",
+                }
+            },
             "latest_training_run": {"status": "COMPLETED", "sample_count": 1234, "model_version": "v5"},
             "latest_model_version": {
                 "version": "v5",
@@ -1078,6 +1088,11 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
 
     reply_text = update.effective_message.reply_text.call_args[0][0]
     assert "Готово для обучения (5m)" in reply_text
+    assert "Схема обучения (5m)" in reply_text
+    assert "filtered=<code>1400</code>" in reply_text
+    assert "best=<code>1234</code>" in reply_text
+    assert "trainable=<code>best_sch</code>" in reply_text
+    assert "best schema 1234" in reply_text
     assert "Фильтр модели 5m" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text

@@ -3536,8 +3536,20 @@ class TelegramMonitorBot:
             model_horizon, gate = self._model_horizon_and_gate(db_diag, model_metrics)
             training_config = db_diag.get("training_config", {}) or {}
             pool_breakdown = db_diag.get("training_pool_breakdown", {}) or {}
-            trainable_model_horizon = int(training_by_horizon.get(str(model_horizon), labelled_15m) or 0)
+            model_horizon_key = str(model_horizon)
+            trainable_model_horizon = int(training_by_horizon.get(model_horizon_key, labelled_15m) or 0)
+            filtered_total_by_horizon = db_diag.get("training_filtered_total_by_horizon", {}) or {}
+            schema_by_horizon = db_diag.get("newest_training_schema_by_horizon", {}) or {}
+            horizon_schema = schema_by_horizon.get(model_horizon_key, {}) or {}
+            filtered_total_horizon = int(filtered_total_by_horizon.get(model_horizon_key, 0) or 0)
+            if not filtered_total_horizon:
+                filtered_total_horizon = int(pool_breakdown.get(f"filtered_total_{model_horizon}m", 0) or 0)
             filtered_total_5m = int(pool_breakdown.get("filtered_total_5m", 0) or 0)
+            newest_schema_count = int(horizon_schema.get("sample_count", 0) or 0)
+            best_schema_count = int(horizon_schema.get("best_schema_count", 0) or 0)
+            trainable_schema_hash = str(horizon_schema.get("trainable_schema_hash", "") or "")
+            best_schema_hash = str(horizon_schema.get("best_schema_hash", "") or "")
+            newest_schema_hash = str(horizon_schema.get("feature_schema_hash", "") or "")
             loose_v2_5m = int((db_diag.get("prediction_outcomes_by_horizon", {}) or {}).get(str(model_horizon), 0) or 0)
             train_allowlist = training_config.get("strategy_allowlist") or []
             train_include_candle = training_config.get("include_candle_baseline")
@@ -3634,6 +3646,19 @@ class TelegramMonitorBot:
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{trainable_model_horizon}</code>",
             ]
+            if horizon_schema:
+                schema_bits = [
+                    f"filtered=<code>{filtered_total_horizon}</code>",
+                    f"newest=<code>{newest_schema_count}</code>",
+                    f"best=<code>{best_schema_count}</code>",
+                ]
+                if trainable_schema_hash:
+                    schema_bits.append(f"trainable=<code>{html.escape(trainable_schema_hash[:8])}</code>")
+                elif best_schema_hash or newest_schema_hash:
+                    schema_bits.append(
+                        f"ждём schema <code>{html.escape((best_schema_hash or newest_schema_hash)[:8])}</code> до 1000"
+                    )
+                lines.append(f"Схема обучения ({model_horizon}m): " + " | ".join(schema_bits))
             if loose_v2_5m and trainable_model_horizon < loose_v2_5m:
                 lines.append(
                     f"Размечено v2 без фильтра scalp: <code>{loose_v2_5m}</code> "
@@ -3705,9 +3730,15 @@ class TelegramMonitorBot:
             lines.append("<b>📋 Путь к реальным сделкам (CANARY)</b>")
             # 1. Данные
             lbl_ok = int(trainable_model_horizon or 0) >= 1000
+            lbl_detail = f"{trainable_model_horizon}"
+            if horizon_schema:
+                lbl_detail += (
+                    f" (filtered {filtered_total_horizon}, best schema {best_schema_count}, "
+                    f"newest {newest_schema_count})"
+                )
             lines.append(
                 f"{'✅' if lbl_ok else '❌'} Совместимых trainable-семплов ({model_horizon}m) ≥ 1000 → сейчас: "
-                f"<code>{trainable_model_horizon}</code>"
+                f"<code>{html.escape(lbl_detail)}</code>"
             )
             # 2. Модель обучена, quality GOOD
             trained_ok = bool(db_model_version) and model_quality in ("GOOD", "ХОРОШО")
