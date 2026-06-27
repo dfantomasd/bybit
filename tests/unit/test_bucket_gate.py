@@ -206,6 +206,20 @@ class TestBucketGate:
 
         assert app._shadow_loss_guard_blocks() is False
 
+    def test_shadow_close_diagnostics_are_recorded_when_loss_guard_disabled(self) -> None:
+        app = _make_app(SHADOW_LOSS_GUARD_ENABLED=False)
+
+        app._record_shadow_close("XRPUSDT", "TP", 0.4)
+        app._record_shadow_close("ADAUSDT", "TIME", -0.2)
+
+        diag = app._modules.diagnostics.get_snapshot()
+        assert diag["hour_shadow_closed"] == 2
+        assert diag["hour_shadow_closed_tp"] == 1
+        assert diag["hour_shadow_closed_time"] == 1
+        assert diag["hour_shadow_closed_sl"] == 0
+        assert diag["hour_shadow_closed_avg_pnl_pct"] == 0.1
+        assert len(app._shadow_closed_results) == 2
+
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:
         app = _make_app(DEFAULT_LINEAR_TAKER_FEE_RATE=0.0, SCREENER_MAX_SPREAD_BPS=0.0, EXPECTED_SLIPPAGE_PCT=0.0)
         pos = {"side": "Buy", "entry": 100.0, "tp": 102.0, "sl": 99.0}

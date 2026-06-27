@@ -348,6 +348,18 @@ class DiagnosticsModule(AppBoundModule):
                 telegram_health = self._app._telegram_bot.health_snapshot()
             except Exception as exc:
                 telegram_health = {"enabled": True, "error": str(exc)}
+        shadow_closed_recent = [
+            (reason, pnl_pct) for ts, reason, pnl_pct in self._app._shadow_closed_results if ts >= cutoff
+        ]
+        shadow_close_reasons: dict[str, int] = {}
+        for reason, _pnl_pct in shadow_closed_recent:
+            key = str(reason or "UNKNOWN").upper()
+            shadow_close_reasons[key] = shadow_close_reasons.get(key, 0) + 1
+        shadow_close_avg = (
+            sum(float(pnl_pct) for _reason, pnl_pct in shadow_closed_recent) / len(shadow_closed_recent)
+            if shadow_closed_recent
+            else None
+        )
 
         from trader.monitoring.deploy_info import get_deploy_info
 
@@ -413,6 +425,11 @@ class DiagnosticsModule(AppBoundModule):
             ),
             "hour_shadow_loss_guard_blocked": hour_counts.get("shadow_loss_guard_blocked", 0),
             "hour_shadow_probe_regime_blocked": hour_counts.get("shadow_probe_regime_blocked", 0),
+            "hour_shadow_closed": len(shadow_closed_recent),
+            "hour_shadow_closed_tp": shadow_close_reasons.get("TP", 0),
+            "hour_shadow_closed_sl": shadow_close_reasons.get("SL", 0),
+            "hour_shadow_closed_time": shadow_close_reasons.get("TIME", 0),
+            "hour_shadow_closed_avg_pnl_pct": round(shadow_close_avg, 4) if shadow_close_avg is not None else None,
             # Engine-level counters (cumulative since startup, read from execution engine)
             "hour_skipped_pending_entries": (
                 self._app._execution_engine.get_diag_counts().get("skipped_pending_entries", 0)

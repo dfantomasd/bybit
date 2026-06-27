@@ -2711,6 +2711,15 @@ class TelegramMonitorBot:
         paper_baseline = paper_horizon.get("baseline", {}) if isinstance(paper_horizon, dict) else {}
         paper_model_gate = paper_horizon.get("model_gate", {}) if isinstance(paper_horizon, dict) else {}
         candle_sampler = runtime_diag.get("candle_sampler", {}) if isinstance(runtime_diag, dict) else {}
+        shadow_closes = {
+            "total": runtime_diag.get("hour_shadow_closed", 0) if isinstance(runtime_diag, dict) else 0,
+            "tp": runtime_diag.get("hour_shadow_closed_tp", 0) if isinstance(runtime_diag, dict) else 0,
+            "sl": runtime_diag.get("hour_shadow_closed_sl", 0) if isinstance(runtime_diag, dict) else 0,
+            "time": runtime_diag.get("hour_shadow_closed_time", 0) if isinstance(runtime_diag, dict) else 0,
+            "avg_pnl_pct": runtime_diag.get("hour_shadow_closed_avg_pnl_pct")
+            if isinstance(runtime_diag, dict)
+            else None,
+        }
 
         blockers: list[str] = []
         if shadow:
@@ -2789,6 +2798,7 @@ class TelegramMonitorBot:
                 "strategy_paper_model_gate": paper_model_gate,
                 "shadow_gate": shadow_gate,
                 "candle_sampler_runtime": candle_sampler,
+                "shadow_closes_runtime": shadow_closes,
             },
             "hour": {
                 "signals": hour_signals,
@@ -2835,6 +2845,12 @@ class TelegramMonitorBot:
             f"scored=<code>{int((candle_sampler or {}).get('scored') or 0)}</code>, "
             f"pass=<code>{int((candle_sampler or {}).get('gate_pass') or 0)}</code>, "
             f"block=<code>{int((candle_sampler or {}).get('gate_block') or 0)}</code>",
+            "• <b>Shadow closes</b>: "
+            f"total=<code>{int(shadow_closes.get('total') or 0)}</code>, "
+            f"TP=<code>{int(shadow_closes.get('tp') or 0)}</code>, "
+            f"SL=<code>{int(shadow_closes.get('sl') or 0)}</code>, "
+            f"TIME=<code>{int(shadow_closes.get('time') or 0)}</code>, "
+            f"avg=<code>{html.escape(str(shadow_closes.get('avg_pnl_pct') if shadow_closes.get('avg_pnl_pct') is not None else 'n/a'))}%</code>",
             f"• Shadow gate ({model_horizon}m): decisions=<code>{int((shadow_gate or {}).get('total_count') or 0)}</code>, "
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",

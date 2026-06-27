@@ -482,10 +482,13 @@ class SignalPolicyModule(AppBoundModule):
         """Track shadow TP/SL results and arm a cooldown after poor recent outcomes."""
 
         assert self._app._settings is not None
+        now = datetime.now(tz=UTC)
+        normalized_reason = str(reason or "UNKNOWN").upper()
+        self._app._shadow_closed_results.append((now, normalized_reason, float(pnl_pct)))
+        self._record_diag("shadow_closed")
+        self._record_diag(f"shadow_closed:{normalized_reason.lower()}")
         if not self._app._settings.SHADOW_LOSS_GUARD_ENABLED:
             return
-        now = datetime.now(tz=UTC)
-        self._app._shadow_closed_results.append((now, reason, float(pnl_pct)))
         window_size = max(1, int(self._app._settings.SHADOW_LOSS_GUARD_WINDOW))
         recent = list(self._app._shadow_closed_results)[-window_size:]
         min_closed = max(1, int(self._app._settings.SHADOW_LOSS_GUARD_MIN_CLOSED))
@@ -502,7 +505,7 @@ class SignalPolicyModule(AppBoundModule):
             log.warning(
                 "shadow_loss_guard.activated",
                 symbol=symbol,
-                reason=reason,
+                reason=normalized_reason,
                 recent_count=len(recent),
                 loss_rate=round(loss_rate, 3),
                 avg_pnl_pct=round(avg_pnl, 4),
