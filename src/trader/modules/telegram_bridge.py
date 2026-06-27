@@ -82,14 +82,9 @@ class TelegramBridgeModule(AppBoundModule):
                 cached_copy = dict(cache)
                 self._app._modules.diagnostics.merge_db_fallbacks(cached_copy)
                 return cached_copy
-            try:
-                diag = await asyncio.wait_for(
-                    self._app._trade_journal.get_db_diagnostics(lite=lite),
-                    timeout=15.0 if lite else 25.0,
-                )
-            except TimeoutError:
-                log.warning("db_diagnostics_timeout", lite=lite)
-                diag = {
+
+            async def _timeout_fallback() -> dict[str, Any]:
+                diag: dict[str, Any] = {
                     "connected": self._app._trade_journal.is_enabled,
                     "configured": self._app._trade_journal.is_configured,
                     "error": "db_diagnostics_timeout",
@@ -100,8 +95,71 @@ class TelegramBridgeModule(AppBoundModule):
                     ),
                     "lite": lite,
                 }
+                if not lite:
+                    try:
+                        quick = await asyncio.wait_for(
+                            self._app._trade_journal.get_db_diagnostics(lite=True),
+                            timeout=10.0,
+                        )
+                        diag.update(quick)
+                        diag["error"] = "db_diagnostics_timeout"
+                        diag["full_diagnostics_timeout"] = True
+                    except Exception as exc:
+                        log.debug("db_diagnostics_quick_fallback_failed", error=str(exc))
+                    try:
+                        active_model = diag.get("active_model_version") or diag.get("latest_model_version") or {}
+                        active_version = (
+                            str(active_model.get("version") or "") if isinstance(active_model, dict) else ""
+                        )
+                        metrics = active_model.get("metrics") if isinstance(active_model, dict) else {}
+                        if isinstance(metrics, str):
+                            import json as _json
+
+                            metrics = _json.loads(metrics)
+                        horizon = int(
+                            diag.get("model_gate_horizon_minutes")
+                            or (metrics or {}).get("horizon_minutes")
+                            or getattr(self._app._settings, "MODEL_AUTO_TRAIN_HORIZON_MINUTES", 5)
+                            or 5
+                        )
+                        label_schema = str(
+                            diag.get("label_schema_version")
+                            or getattr(self._app._settings, "LABEL_SCHEMA_VERSION", "directional_net_v2")
+                        )
+                        if active_version and hasattr(self._app._trade_journal, "get_shadow_gate_stats"):
+                            gate = await asyncio.wait_for(
+                                self._app._trade_journal.get_shadow_gate_stats(
+                                    active_version,
+                                    horizon,
+                                    label_schema,
+                                ),
+                                timeout=5.0,
+                            )
+                            gate["horizon_minutes"] = horizon
+                            diag["shadow_gate_by_horizon"] = {str(horizon): gate}
+                            diag[f"shadow_gate_{horizon}m"] = gate
+                            diag["shadow_gate_15m"] = gate
+                        if active_version and hasattr(self._app._trade_journal, "_paper_pnl_for_model"):
+                            paper = await asyncio.wait_for(
+                                self._app._trade_journal._paper_pnl_for_model(active_version, horizon, ""),
+                                timeout=5.0,
+                            )
+                            diag["paper_pnl_by_horizon"] = {str(horizon): paper}
+                            diag[f"paper_pnl_{horizon}m"] = paper
+                            diag["paper_pnl_15m"] = paper
+                    except Exception as exc:
+                        log.debug("db_diagnostics_paper_fallback_failed", error=str(exc))
                 self._app._modules.diagnostics.merge_db_fallbacks(diag)
                 return diag
+
+            try:
+                diag = await asyncio.wait_for(
+                    self._app._trade_journal.get_db_diagnostics(lite=lite),
+                    timeout=15.0 if lite else 25.0,
+                )
+            except TimeoutError:
+                log.warning("db_diagnostics_timeout", lite=lite)
+                return await _timeout_fallback()
             except Exception as exc:
                 return {"connected": False, "error": str(exc), "lite": lite}
             if not lite:
