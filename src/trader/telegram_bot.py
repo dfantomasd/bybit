@@ -2807,8 +2807,12 @@ class TelegramMonitorBot:
 
         shadow = ctrl.is_shadow() if ctrl is not None else bool(runtime_diag.get("shadow_mode", True))
         paused = ctrl.is_paused() if ctrl is not None else bool(runtime_diag.get("paused", False))
-        hour_signals = int(runtime_diag.get("hour_signals_emitted") or healthcheck.get("signals_last_hour") or 0)
+        hour_signal_candidates = int(
+            runtime_diag.get("hour_signals_emitted") or healthcheck.get("signals_last_hour") or 0
+        )
         hour_orders = int(runtime_diag.get("hour_order_placed") or healthcheck.get("fills_last_hour") or 0)
+        hour_shadow_entries = int(runtime_diag.get("hour_shadow_order_would_be_placed") or 0)
+        hour_approved_entries = hour_shadow_entries if shadow else hour_orders
         pending_count = int(runtime_diag.get("pending_entry_count") or 0)
         model_quality = str(gate_quality.get("quality") or latest_metrics.get("quality") or "n/a")
         wf_bps = latest_metrics.get("walk_forward_expectancy_bps")
@@ -2852,7 +2856,7 @@ class TelegramMonitorBot:
             pass
         if not champion_version:
             blockers.append("CHAMPION-модель отсутствует; есть только shadow challenger.")
-        if hour_signals == 0:
+        if hour_signal_candidates == 0:
             blockers.append("За последний час нет сигналов стратегии.")
         if pending_count > 0:
             blockers.append(f"Есть pending-заявки: {pending_count}.")
@@ -2907,10 +2911,14 @@ class TelegramMonitorBot:
             },
             "virtual_orders": {
                 "explanation": (
-                    "strategy_signals are actual rule proposals; candle_sampler checks score every confirmed "
-                    "candle so model pass/block and +/- outcomes can accumulate even when strategy signals are rare"
+                    "strategy_signal_candidates are rule proposals before final execution approval; approved "
+                    "shadow entries are virtual positions that can later close into paper outcomes; "
+                    "candle_sampler checks score every confirmed candle so model pass/block and +/- outcomes "
+                    "can accumulate even when strategy entries are rare"
                 ),
                 "model_horizon_minutes": model_horizon,
+                "strategy_signal_candidates": hour_signal_candidates,
+                "approved_shadow_entries": hour_shadow_entries,
                 "strategy_paper_baseline": paper_baseline,
                 "strategy_paper_model_gate": paper_model_gate,
                 "shadow_gate": shadow_gate,
@@ -2918,9 +2926,14 @@ class TelegramMonitorBot:
                 "shadow_closes_runtime": shadow_closes,
             },
             "hour": {
-                "signals": hour_signals,
+                "signal_candidates": hour_signal_candidates,
+                "approved_entries": hour_approved_entries,
+                "shadow_entries": hour_shadow_entries,
                 "orders": hour_orders,
                 "risk_rejected": runtime_diag.get("hour_risk_rejected") if isinstance(runtime_diag, dict) else None,
+                "net_edge_rejected": runtime_diag.get("hour_net_edge_rejected")
+                if isinstance(runtime_diag, dict)
+                else None,
                 "api_rejected": runtime_diag.get("hour_api_rejected") if isinstance(runtime_diag, dict) else None,
                 "spread_rejected": runtime_diag.get("hour_spread_rejected") if isinstance(runtime_diag, dict) else None,
                 "imbalance_rejected": runtime_diag.get("hour_imbalance_rejected")
@@ -2950,7 +2963,9 @@ class TelegramMonitorBot:
             "<b>Короткий вывод: когда будут ордера</b>",
             f"Реальные ордера сейчас: <code>{'нет' if blockers else 'условия близки к готовности'}</code>",
             f"SHADOW: <code>{'да' if shadow else 'нет'}</code> | Пауза: <code>{'да' if paused else 'нет'}</code>",
-            f"Сигналов за час: <code>{hour_signals}</code> | Ордеров за час: <code>{hour_orders}</code>",
+            f"Кандидатов стратегии за час: <code>{hour_signal_candidates}</code> | "
+            f"approved paper-входов: <code>{hour_approved_entries}</code> | "
+            f"реальных ордеров: <code>{hour_orders}</code>",
             f"Модель: <code>{html.escape(str(compact['runtime']['model_version'] or 'n/a'))}</code>",
             f"Качество: <code>{html.escape(self._ru(model_quality))}</code> | Champion: <code>{html.escape(str(champion_version or 'нет'))}</code>",
             "",
@@ -2978,11 +2993,14 @@ class TelegramMonitorBot:
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
             "",
             "<b>Strategy signal pipeline</b>",
-            f"• Emitted за час: <code>{hour_signals}</code>; "
+            f"• Кандидаты стратегии: <code>{hour_signal_candidates}</code>; "
+            f"approved shadow entries: <code>{hour_shadow_entries}</code>; "
             f"risk rejects: <code>{int(runtime_diag.get('hour_risk_rejected') or 0) if isinstance(runtime_diag, dict) else 0}</code>; "
+            f"net-edge rejects: <code>{int(runtime_diag.get('hour_net_edge_rejected') or 0) if isinstance(runtime_diag, dict) else 0}</code>; "
             f"in-memory last signals: <code>{len(signal_rows)}</code>/20",
-            "• Если emitted &gt; 0, а Strategy paper/Shadow closes ещё 0 — это обычно значит: "
-            f"ждём TP/SL/TIME или {model_horizon}m outcome; следующий отчёт должен показать resolved/pending.",
+            "• Paper/Shadow closes появляются только после approved shadow entry. "
+            f"Если candidates &gt; 0, но approved=0 — вход отрезан финальными execution-фильтрами "
+            f"(часто net-edge/min-notional), ждать {model_horizon}m outcome ещё нечему.",
         ]
         runtime_explainers = self._render_runtime_explainers(runtime_diag if isinstance(runtime_diag, dict) else {})
         if runtime_explainers:
