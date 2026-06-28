@@ -35,6 +35,9 @@ class RuleCandidate:
     validation_lift_bps: float | None
     pass_rate: float
     score: float
+    symbol: str | None = None
+    side: str | None = None
+    segment: str = "all"
 
     def to_dict(self) -> dict[str, Any]:
         data = asdict(self)
@@ -229,4 +232,92 @@ def discover_rules(
         "baseline_validation_avg_net_bps": baseline_validation,
         "rules_tested": int(len(single_conditions) + len(top_single) * max(len(top_single) - 1, 0) / 2),
         "rules": [candidate.to_dict() for candidate in all_candidates[: cfg.top_n]],
+    }
+
+
+def discover_segmented_rules(
+    *,
+    values: np.ndarray,
+    returns_bps: np.ndarray,
+    feature_names: list[str],
+    symbols: list[str] | None = None,
+    sides: list[str] | None = None,
+    train_fraction: float = 0.70,
+    config: RuleSearchConfig | None = None,
+    top_n_per_segment: int = 5,
+) -> dict[str, Any]:
+    """Discover rules for all/side/symbol+side segments.
+
+    The live runtime needs a direction. Searching side-aware segments prevents a
+    single aggregate rule from mixing Buy and Sell economics. Symbol+side
+    segments are included only when they have enough samples for the configured
+    train/validation split.
+    """
+
+    cfg = config or RuleSearchConfig()
+    x = np.asarray(values, dtype=float)
+    y = np.asarray(returns_bps, dtype=float)
+    if symbols is not None and len(symbols) != len(x):
+        raise ValueError(f"symbols length mismatch: {len(symbols)} != {len(x)}")
+    if sides is not None and len(sides) != len(x):
+        raise ValueError(f"sides length mismatch: {len(sides)} != {len(x)}")
+
+    segments: list[tuple[str, str | None, str | None, np.ndarray]] = [
+        ("all", None, None, np.arange(len(x))),
+    ]
+    if sides is not None:
+        for side in sorted({str(item) for item in sides if item}):
+            idx = np.asarray([i for i, item in enumerate(sides) if str(item) == side], dtype=int)
+            segments.append((f"side:{side}", None, side, idx))
+    if symbols is not None and sides is not None:
+        keys = sorted({(str(symbols[i]), str(sides[i])) for i in range(len(x)) if symbols[i] and sides[i]})
+        for symbol, side in keys:
+            idx = np.asarray(
+                [i for i in range(len(x)) if str(symbols[i]) == symbol and str(sides[i]) == side],
+                dtype=int,
+            )
+            segments.append((f"symbol_side:{symbol}:{side}", symbol, side, idx))
+
+    discovered: list[dict[str, Any]] = []
+    segment_reports: dict[str, dict[str, Any]] = {}
+    min_required = cfg.min_train_count + cfg.min_validation_count
+    for segment_name, symbol, side, idx in segments:
+        if len(idx) < min_required:
+            segment_reports[segment_name] = {
+                "status": "insufficient_samples",
+                "sample_count": int(len(idx)),
+                "required_samples": int(min_required),
+            }
+            continue
+        report = discover_rules(
+            values=x[idx],
+            returns_bps=y[idx],
+            feature_names=feature_names,
+            train_fraction=train_fraction,
+            config=cfg,
+        )
+        segment_reports[segment_name] = {
+            key: value for key, value in report.items() if key != "rules"
+        }
+        if side is None:
+            # Runtime-discovered rules must be directional. Keep aggregate
+            # segment diagnostics, but do not emit side-less rules into the
+            # executable rule list.
+            continue
+        for rule in list(report.get("rules") or [])[:top_n_per_segment]:
+            enriched = dict(rule)
+            enriched["segment"] = segment_name
+            enriched["symbol"] = symbol
+            enriched["side"] = side
+            # Keep ids stable but readable across segments.
+            enriched["rule_id"] = f"{segment_name}:{rule.get('rule_id', 'rule')}"
+            discovered.append(enriched)
+
+    discovered.sort(key=lambda item: float(item.get("score") or 0.0), reverse=True)
+    return {
+        "status": "ok" if discovered else "no_rules",
+        "sample_count": int(len(x)),
+        "segments_tested": len(segments),
+        "segment_reports": segment_reports,
+        "rules": discovered[: cfg.top_n],
     }

@@ -136,7 +136,7 @@ class Settings(BaseSettings):
     """When RISK_PROFILE=SCALP, skip the slow EMA trend strategy (wide TP/SL)."""
     SCALP_STRATEGY_PRIORITY_ORDER: str = (
         "scalp_micro_v1,order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
-        "statistical_arbitrage_v1,market_making_v1,ema_crossover_v1"
+        "statistical_arbitrage_v1,market_making_v1,discovered_rule_v1,ema_crossover_v1"
     )
     """Strategy priority override used when RISK_PROFILE=SCALP."""
     SCALP_STRICT_SHADOW: bool = True
@@ -178,6 +178,17 @@ class Settings(BaseSettings):
     """Global pause after the probe burst limit is reached."""
     SHADOW_PROBE_SELL_ENABLED: bool = False
     """Allow SELL-side paper probes. Disabled by default while SELL baseline is negative."""
+    DISCOVERED_RULE_STRATEGY_ENABLED: bool = True
+    """Enable SHADOW-only strategy_lab discovered-rule validation when a rule JSON exists."""
+    DISCOVERED_RULES_PATH: str = "strategy_lab.json"
+    """Path to JSON created by python -m trader.strategy_lab.discover."""
+    DISCOVERED_RULE_MIN_VALIDATION_COUNT: int = 10
+    DISCOVERED_RULE_MIN_VALIDATION_NET_BPS: float = 0.0
+    DISCOVERED_RULE_MAX_RULES: int = 20
+    DISCOVERED_RULE_MAX_NOTIONAL_USD: float = 8.0
+    DISCOVERED_RULE_TP_PCT: float = 0.75
+    DISCOVERED_RULE_SL_PCT: float = 0.40
+    DISCOVERED_RULE_MIN_CONFIDENCE: float = 0.52
     SHADOW_PROBE_SIDE_BLOCK_ENABLED: bool = True
     """Block probe entries on symbol+side pairs with persistently negative paper baseline."""
     SHADOW_PROBE_SIDE_MIN_SAMPLES: int = 8
@@ -266,7 +277,7 @@ class Settings(BaseSettings):
         "order_flow_v1,liquidation_hunting_v1,funding_arbitrage_v1,"
         "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1,"
         "volatility_squeeze_v1,statistical_arbitrage_v1,market_making_v1,"
-        "scalp_micro_v1,ema_crossover_v1"
+        "discovered_rule_v1,scalp_micro_v1,ema_crossover_v1"
     )
     """Higher-priority strategies win ensemble conflicts when directions disagree."""
 
@@ -639,7 +650,7 @@ class Settings(BaseSettings):
     MODEL_MIN_PASS_COUNT_FOR_PROMOTION: int = 20
     """Minimum model-pass observations expected before trusting promotion metrics."""
     TRAIN_EXCLUDE_NEGATIVE_BUCKETS: bool = True
-    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_hv_v2"
+    TRAIN_STRATEGY_ALLOWLIST: str = "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1"
     """CSV strategy ids for training. Empty = all RULE_BASELINE_V1 labels."""
     TRAIN_INCLUDE_CANDLE_BASELINE: bool = True
     """When allowlist is set, also include SHADOW_CANDLE/HISTORICAL_REAL baselines.
@@ -852,7 +863,8 @@ class Settings(BaseSettings):
             self.SHADOW_LOSS_GUARD_WINDOW = 20
             self.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS = 300
             self.TRAIN_STRATEGY_ALLOWLIST = (
-                "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
+                "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,"
+                "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
             )
             self.TRAIN_INCLUDE_CANDLE_BASELINE = True
 

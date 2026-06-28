@@ -236,6 +236,40 @@ class TradingLoopModule(AppBoundModule):
                 sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
             )
 
+        if self._app._initial_shadow_mode() and self._app._settings.DISCOVERED_RULE_STRATEGY_ENABLED:
+            from trader.strategies.discovered_rule import DiscoveredRuleStrategy, load_discovered_rules
+
+            discovered_rules = load_discovered_rules(
+                self._app._settings.DISCOVERED_RULES_PATH,
+                min_validation_count=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_COUNT,
+                min_validation_net_bps=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_NET_BPS,
+                max_rules=self._app._settings.DISCOVERED_RULE_MAX_RULES,
+            )
+            if discovered_rules:
+                strategies.append(
+                    DiscoveredRuleStrategy(
+                        rules=discovered_rules,
+                        max_notional_usd=self._app._settings.DISCOVERED_RULE_MAX_NOTIONAL_USD,
+                        tp_pct=self._app._settings.DISCOVERED_RULE_TP_PCT,
+                        sl_pct=self._app._settings.DISCOVERED_RULE_SL_PCT,
+                        min_confidence=self._app._settings.DISCOVERED_RULE_MIN_CONFIDENCE,
+                        diag_hook=self._app._record_diag,
+                    )
+                )
+                log.info(
+                    "discovered_rule.enabled",
+                    rules_path=self._app._settings.DISCOVERED_RULES_PATH,
+                    rule_count=len(discovered_rules),
+                    best_rule=discovered_rules[0].rule_id,
+                    best_validation_bps=round(discovered_rules[0].validation_avg_net_bps, 3),
+                )
+            else:
+                self._app._record_diag("discovered_rule_no_rules_loaded")
+                log.info(
+                    "discovered_rule.disabled_no_rules",
+                    rules_path=self._app._settings.DISCOVERED_RULES_PATH,
+                )
+
         if (
             self._app._settings.ORDER_FLOW_STRATEGY_ENABLED
             or self._app._settings.FUNDING_ARB_STRATEGY_ENABLED
@@ -403,6 +437,7 @@ class TradingLoopModule(AppBoundModule):
             "order_flow_v1",
             "liquidation_hunting_v1",
             "shadow_probe_hv_v2",
+            "discovered_rule_v1",
         }
 
         self._app._strategy_ensemble = StrategyEnsemble(

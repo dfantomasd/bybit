@@ -288,6 +288,24 @@ class OperatorControlsModule(AppBoundModule):
                 and count >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
                 and avg_bps < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
             ][:20],
+            "discovered_rule_strategy_enabled": (
+                getattr(self._app._settings, "DISCOVERED_RULE_STRATEGY_ENABLED", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "discovered_rules_path": (
+                getattr(self._app._settings, "DISCOVERED_RULES_PATH", None) if self._app._settings is not None else None
+            ),
+            "discovered_rule_min_validation_count": (
+                getattr(self._app._settings, "DISCOVERED_RULE_MIN_VALIDATION_COUNT", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "discovered_rule_min_validation_net_bps": (
+                getattr(self._app._settings, "DISCOVERED_RULE_MIN_VALIDATION_NET_BPS", None)
+                if self._app._settings is not None
+                else None
+            ),
             "model_auto_train_min_samples": (
                 self._app._settings.MODEL_AUTO_TRAIN_MIN_SAMPLES if self._app._settings is not None else 1000
             ),

@@ -16,13 +16,13 @@ from typing import Any
 import click
 import numpy as np
 
-from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_rules
+from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_rules, discover_segmented_rules
 from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 from trader.training.labels import active_label_schema_version
 from trader.training.train import _settings_horizon, _settings_label_bps
 
 
-def _parse_csv_samples(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
+def _parse_csv_samples(path: Path) -> tuple[np.ndarray, np.ndarray, list[str], list[str] | None, list[str] | None]:
     rows: list[list[float]] = []
     returns: list[float] = []
     with path.open("r", encoding="utf-8", newline="") as fh:
@@ -31,19 +31,31 @@ def _parse_csv_samples(path: Path) -> tuple[np.ndarray, np.ndarray, list[str]]:
             raise click.ClickException("CSV has no header")
         if "net_return_bps" not in reader.fieldnames:
             raise click.ClickException("CSV must include net_return_bps column")
-        feature_names = [name for name in reader.fieldnames if name != "net_return_bps"]
+        feature_names = [name for name in reader.fieldnames if name not in {"net_return_bps", "symbol", "side"}]
+        symbols: list[str] = []
+        sides: list[str] = []
         for row in reader:
             try:
                 returns.append(float(row["net_return_bps"]))
                 rows.append([float(row[name]) for name in feature_names])
+                if "symbol" in row:
+                    symbols.append(str(row.get("symbol") or ""))
+                if "side" in row:
+                    sides.append(str(row.get("side") or ""))
             except (TypeError, ValueError) as exc:
                 raise click.ClickException(f"invalid numeric CSV row: {exc}") from exc
-    return np.asarray(rows, dtype=float), np.asarray(returns, dtype=float), feature_names
+    return (
+        np.asarray(rows, dtype=float),
+        np.asarray(returns, dtype=float),
+        feature_names,
+        symbols if symbols else None,
+        sides if sides else None,
+    )
 
 
 async def _load_db_samples(
     *, horizon: int, min_samples: int
-) -> tuple[np.ndarray, np.ndarray, list[str], dict[str, Any]]:
+) -> tuple[np.ndarray, np.ndarray, list[str], list[str], list[str], dict[str, Any]]:
     import asyncpg
 
     from trader.config import Settings
@@ -63,6 +75,8 @@ async def _load_db_samples(
                     fs.feature_names,
                     fs.feature_values,
                     fs.feature_schema_hash,
+                    pe.symbol,
+                    pe.strategy_signal,
                     po.net_return_bps,
                     fs.created_at,
                     ROW_NUMBER() OVER (
@@ -98,14 +112,14 @@ async def _load_db_samples(
                 LIMIT 1
             ),
             latest_window AS (
-                SELECT es.feature_names, es.feature_values, es.net_return_bps, es.created_at
+                SELECT es.feature_names, es.feature_values, es.symbol, es.strategy_signal, es.net_return_bps, es.created_at
                 FROM eligible_samples es
                 JOIN selected_schema ss ON ss.feature_schema_hash = es.feature_schema_hash
                 WHERE es.candle_rank = 1
                 ORDER BY es.created_at DESC
                 LIMIT 10000
             )
-            SELECT feature_names, feature_values, net_return_bps, created_at
+            SELECT feature_names, feature_values, symbol, strategy_signal, net_return_bps, created_at
             FROM latest_window
             ORDER BY created_at ASC
             """
@@ -128,6 +142,8 @@ async def _load_db_samples(
 
     values: list[list[float]] = []
     returns: list[float] = []
+    symbols: list[str] = []
+    sides: list[str] = []
     feature_names: list[str] = []
     for row in rows:
         parsed_names = row["feature_names"]
@@ -140,6 +156,8 @@ async def _load_db_samples(
             raise click.ClickException("mixed feature names in selected DB sample window")
         values.append([float(value) for value in vals])
         returns.append(float(row["net_return_bps"] or 0.0))
+        symbols.append(str(row["symbol"] or ""))
+        sides.append(str(row["strategy_signal"] or ""))
 
     meta = {
         "source": "db",
@@ -149,7 +167,7 @@ async def _load_db_samples(
         "strategy_allowlist": strategy_allowlist or "ALL",
         "include_candle_baseline": include_candle_baseline,
     }
-    return np.asarray(values, dtype=float), np.asarray(returns, dtype=float), feature_names, meta
+    return np.asarray(values, dtype=float), np.asarray(returns, dtype=float), feature_names, symbols, sides, meta
 
 
 @click.command()
@@ -164,6 +182,7 @@ async def _load_db_samples(
 @click.option("--min-validation-count", type=int, default=10, show_default=True)
 @click.option("--min-validation-net-bps", type=float, default=0.0, show_default=True)
 @click.option("--top-n", type=int, default=20, show_default=True)
+@click.option("--segmented/--no-segmented", default=True, show_default=True)
 def main(
     *,
     from_db: bool,
@@ -175,6 +194,7 @@ def main(
     min_validation_count: int,
     min_validation_net_bps: float,
     top_n: int,
+    segmented: bool,
 ) -> None:
     """Discover explainable cost-aware strategy rules offline."""
 
@@ -182,12 +202,12 @@ def main(
         raise click.ClickException("choose exactly one source: --from-db or --csv")
     meta: dict[str, Any]
     if from_db:
-        values, returns_bps, feature_names, meta = asyncio.run(
+        values, returns_bps, feature_names, symbols, sides, meta = asyncio.run(
             _load_db_samples(horizon=horizon or _settings_horizon(), min_samples=min_samples)
         )
     else:
         assert csv_path is not None
-        values, returns_bps, feature_names = _parse_csv_samples(csv_path)
+        values, returns_bps, feature_names, symbols, sides = _parse_csv_samples(csv_path)
         meta = {"source": "csv", "path": str(csv_path)}
 
     config = RuleSearchConfig(
@@ -196,7 +216,17 @@ def main(
         min_validation_avg_net_bps=min_validation_net_bps,
         top_n=top_n,
     )
-    report = discover_rules(values=values, returns_bps=returns_bps, feature_names=feature_names, config=config)
+    if segmented:
+        report = discover_segmented_rules(
+            values=values,
+            returns_bps=returns_bps,
+            feature_names=feature_names,
+            symbols=symbols,
+            sides=sides,
+            config=config,
+        )
+    else:
+        report = discover_rules(values=values, returns_bps=returns_bps, feature_names=feature_names, config=config)
     report["meta"] = meta
     text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
     if output is not None:
