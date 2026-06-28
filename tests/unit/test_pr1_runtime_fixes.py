@@ -88,6 +88,8 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
                         "quality": "GOOD",
                         "lift_bps": 2.5,
                         "best_threshold": 0.61,
+                        "selected_sides": ["Sell"],
+                        "side_filter": {"mode": "single_side"},
                     }
                 )
             },
@@ -103,6 +105,10 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
     assert app._model_gate_quality["quality"] == "GOOD"
     assert app._model_gate_quality["lift_bps"] == 2.5
     assert app._model_gate_quality["best_threshold"] == 0.61
+    assert app._model_gate_quality["selected_sides"] == ["Sell"]
+    assert app._model_gate_quality["side_filter"] == {"mode": "single_side"}
+    assert app._model_side_allowed("Sell") is True
+    assert app._model_side_allowed("Buy") is False
     assert app._model_gate_quality["gate_total_count"] == 77
     assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
 

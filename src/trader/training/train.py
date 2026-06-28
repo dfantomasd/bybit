@@ -217,13 +217,13 @@ def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
 
 
 def _summarise_walk_forward(fold_metrics: list[dict[str, Any]]) -> dict[str, Any]:
-    expectancies = [
+    raw_expectancies = [
         float(m["best_threshold_avg_net_return_bps"])
         for m in fold_metrics
         if m.get("best_threshold_avg_net_return_bps") is not None
     ]
-    if not expectancies:
-        expectancies = [
+    if not raw_expectancies:
+        raw_expectancies = [
             float(m["walk_forward_expectancy_bps"])
             for m in fold_metrics
             if m.get("walk_forward_expectancy_bps") is not None
@@ -236,21 +236,88 @@ def _summarise_walk_forward(fold_metrics: list[dict[str, Any]]) -> dict[str, Any
         float(m["best_threshold_pass_rate"]) for m in fold_metrics if m.get("best_threshold_pass_rate") is not None
     ]
 
-    arr = np.array(expectancies, dtype=np.float32)
+    raw_arr = np.array(raw_expectancies, dtype=np.float32)
+    selected_sides: list[str] = []
+    side_filter: dict[str, Any] = {}
+    side_candidates: list[dict[str, Any]] = []
+    for side_key, side_name in (("buy", "Buy"), ("sell", "Sell")):
+        side_values: list[float] = []
+        side_pass_counts: list[int] = []
+        for metric in fold_metrics:
+            side_stats = (metric.get("validation_by_side") or {}).get(side_key) or {}
+            pass_count = int(side_stats.get("pass_count") or 0)
+            avg_pass = side_stats.get("avg_net_return_pass_bps")
+            if pass_count <= 0 or avg_pass is None:
+                continue
+            side_values.append(float(avg_pass))
+            side_pass_counts.append(pass_count)
+        if not side_values:
+            continue
+        side_arr = np.array(side_values, dtype=np.float32)
+        side_candidates.append(
+            {
+                "side": side_name,
+                "active_folds": int(len(side_values)),
+                "positive_folds": int((side_arr > 0).sum()),
+                "mean_bps": float(side_arr.mean()),
+                "median_bps": float(np.median(side_arr)),
+                "min_bps": float(side_arr.min()),
+                "max_bps": float(side_arr.max()),
+                "pass_count": int(sum(side_pass_counts)),
+            }
+        )
+
+    # If one direction is out-of-sample positive while the mixed Buy+Sell stream
+    # is negative, report the economically tradable slice. Runtime still has to
+    # enforce selected_sides before this can affect paper/canary decisions.
+    min_side_positive_folds = min(3, len(fold_metrics))
+    side_candidates.sort(
+        key=lambda item: (
+            float(item["mean_bps"]),
+            int(item["positive_folds"]),
+            int(item["pass_count"]),
+        ),
+        reverse=True,
+    )
+    best_side = side_candidates[0] if side_candidates else None
+    if (
+        best_side is not None
+        and float(best_side["mean_bps"]) > 0.0
+        and int(best_side["positive_folds"]) >= min_side_positive_folds
+    ):
+        selected_sides = [str(best_side["side"])]
+        side_filter = {
+            "mode": "single_side",
+            "selected_sides": selected_sides,
+            "candidates": side_candidates,
+            "raw_wf_mean_bps": float(raw_arr.mean()) if len(raw_arr) else None,
+            "reason": "positive_out_of_sample_side_expectancy",
+        }
+        arr = np.array([float(best_side["mean_bps"])], dtype=np.float32)
+        wf_positive_folds = int(best_side["positive_folds"])
+        total_pass_count = int(best_side["pass_count"])
+    else:
+        arr = raw_arr
+        wf_positive_folds = int((arr > 0).sum()) if len(arr) else 0
+        total_pass_count = int(sum(pass_counts))
+
     return {
         "wf_folds": int(len(fold_metrics)),
         "wf_mean_bps": float(arr.mean()) if len(arr) else None,
         "wf_median_bps": float(np.median(arr)) if len(arr) else None,
-        "wf_positive_folds": int((arr > 0).sum()) if len(arr) else 0,
+        "wf_positive_folds": wf_positive_folds,
         "wf_min_bps": float(arr.min()) if len(arr) else None,
         "wf_max_bps": float(arr.max()) if len(arr) else None,
         "wf_std_bps": float(arr.std(ddof=0)) if len(arr) else None,
+        "raw_wf_mean_bps": float(raw_arr.mean()) if len(raw_arr) else None,
+        "selected_sides": selected_sides,
+        "side_filter": side_filter,
         "precision": float(np.mean(precision_values)) if precision_values else 0.0,
         "lift_bps": float(np.mean(lift_values)) if lift_values else None,
         "selected_score_threshold": float(np.median(score_thresholds)) if score_thresholds else None,
         "selected_score_pass_rate": float(np.mean(pass_rates)) if pass_rates else None,
         "walk_forward_expectancy_bps": float(arr.mean()) if len(arr) else None,
-        "total_pass_count": int(sum(pass_counts)),
+        "total_pass_count": total_pass_count,
     }
 
 

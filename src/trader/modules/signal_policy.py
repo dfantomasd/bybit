@@ -182,11 +182,28 @@ class SignalPolicyModule(AppBoundModule):
             "quality": metrics.get("quality"),
             "lift_bps": metrics.get("lift_bps"),
             "best_threshold": metrics.get("best_threshold"),
+            "selected_sides": metrics.get("selected_sides") or [],
+            "side_filter": metrics.get("side_filter") or {},
             "horizon_minutes": int(model_horizon) if str(model_horizon).isdigit() else model_horizon,
             "gate_total_count": gate.get("total_count", 0) or 0,
             "gate_lift_vs_all_bps": gate.get("lift_vs_all_bps"),
         }
         self._app._model_gate_quality_checked_at = datetime.now(tz=UTC)
+
+    def model_side_allowed(self, side: str) -> bool:
+        """Return False when the trained model explicitly selected another side.
+
+        Training may discover that only Buy or Sell has positive out-of-sample
+        expectancy. Keep the default permissive unless that evidence exists.
+        """
+
+        selected = self._app._model_gate_quality.get("selected_sides") or []
+        if not selected:
+            return True
+        normalized = {str(item).strip().lower() for item in selected if str(item).strip()}
+        if not normalized:
+            return True
+        return str(side).strip().lower() in normalized
 
     def model_gate_quality_allows_canary(self) -> tuple[bool, str]:
         assert self._app._settings is not None
@@ -312,10 +329,14 @@ class SignalPolicyModule(AppBoundModule):
                     gate_decision = None
                     gate_reason = "shadow_gate_disabled"
                     if self._app._settings.MODEL_SHADOW_GATE_ENABLED:
-                        gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
-                        gate_reason = (
-                            "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
-                        )
+                        if not self.model_side_allowed(side):
+                            gate_decision = "GATE_BLOCK"
+                            gate_reason = "side_not_selected_by_model"
+                        else:
+                            gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                            gate_reason = (
+                                "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
+                            )
                     try:
                         shadow_prediction_id = await self._app._trade_journal.record_prediction_event(
                             symbol=symbol,

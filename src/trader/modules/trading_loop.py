@@ -834,12 +834,18 @@ class TradingLoopModule(AppBoundModule):
                             else "UNKNOWN"
                         )
                         if settings.MODEL_SHADOW_GATE_ENABLED:
-                            shadow_gate_decision = "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
-                            shadow_gate_reason = (
-                                "score_meets_threshold"
-                                if shadow_gate_decision == "GATE_PASS"
-                                else "score_below_regime_threshold"
-                            )
+                            if not self._app._model_side_allowed(proposal.side.value):
+                                shadow_gate_decision = "GATE_BLOCK"
+                                shadow_gate_reason = "side_not_selected_by_model"
+                            else:
+                                shadow_gate_decision = (
+                                    "GATE_PASS" if shadow_prediction.score >= threshold else "GATE_BLOCK"
+                                )
+                                shadow_gate_reason = (
+                                    "score_meets_threshold"
+                                    if shadow_gate_decision == "GATE_PASS"
+                                    else "score_below_regime_threshold"
+                                )
                         if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
                             await self._app._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
@@ -885,14 +891,20 @@ class TradingLoopModule(AppBoundModule):
                     live_prediction = self._app._model_registry.score_live(model_feature_values, model_feature_names)
                     if live_prediction is not None:
                         canary_threshold = self._app._model_gate_threshold(regime_ctx)
+                        canary_side_allowed = self._app._model_side_allowed(proposal.side.value)
                         canary_gate_decision = (
-                            "GATE_PASS" if live_prediction.score >= canary_threshold else "GATE_BLOCK"
+                            "GATE_PASS"
+                            if canary_side_allowed and live_prediction.score >= canary_threshold
+                            else "GATE_BLOCK"
                         )
                         canary_blocked, canary_reason = self._app._model_gate_canary_blocks(
                             canary_gate_decision,
                             canary_threshold,
                             live_prediction.score,
                         )
+                        if not canary_side_allowed:
+                            canary_blocked = True
+                            canary_reason = "side_not_selected_by_model"
                         if snapshot_id and self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
                             await self._app._trade_journal.record_prediction_event(
                                 symbol=proposal.symbol,
@@ -907,7 +919,7 @@ class TradingLoopModule(AppBoundModule):
                                     "canary_blocked": canary_blocked,
                                     "canary_reason": canary_reason,
                                     "confidence": live_prediction.confidence,
-                                    "gate_reason": "canary_gate",
+                                    "gate_reason": canary_reason if not canary_side_allowed else "canary_gate",
                                     "threshold": canary_threshold,
                                 },
                             )

@@ -15,6 +15,7 @@ def _fold(bps: float, threshold: float = 0.5, pass_rate: float = 0.1) -> dict:
         "precision": 0.6,
         "lift_bps": bps * 0.5,
         "selected_pass_count": 10,
+        "validation_by_side": {},
     }
 
 
@@ -53,3 +54,37 @@ def test_summarise_wf_selected_threshold_is_median() -> None:
     ]
     result = _summarise_walk_forward(folds)
     assert result["selected_score_threshold"] == pytest.approx(0.5, abs=0.01)
+
+
+def test_summarise_wf_selects_stably_positive_side_filter() -> None:
+    folds = []
+    for _ in range(3):
+        fold = _fold(-10.0)
+        fold["validation_by_side"] = {
+            "buy": {"pass_count": 5, "avg_net_return_pass_bps": -35.0},
+            "sell": {"pass_count": 12, "avg_net_return_pass_bps": 8.0},
+        }
+        folds.append(fold)
+
+    result = _summarise_walk_forward(folds)
+
+    assert result["selected_sides"] == ["Sell"]
+    assert result["wf_mean_bps"] == pytest.approx(8.0, abs=0.01)
+    assert result["raw_wf_mean_bps"] == pytest.approx(-10.0, abs=0.01)
+    assert result["total_pass_count"] == 36
+    assert result["side_filter"]["reason"] == "positive_out_of_sample_side_expectancy"
+
+
+def test_summarise_wf_does_not_select_unstable_single_positive_side() -> None:
+    folds = []
+    for bps in [12.0, -8.0, -6.0]:
+        fold = _fold(-10.0)
+        fold["validation_by_side"] = {
+            "sell": {"pass_count": 12, "avg_net_return_pass_bps": bps},
+        }
+        folds.append(fold)
+
+    result = _summarise_walk_forward(folds)
+
+    assert result["selected_sides"] == []
+    assert result["wf_mean_bps"] == pytest.approx(-10.0, abs=0.01)

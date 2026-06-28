@@ -423,6 +423,9 @@ class TradingApplication:
     def _model_gate_canary_blocks(self, gate_decision: str, threshold: float, score: float) -> tuple[bool, str]:
         return self._modules.signal_policy.model_gate_canary_blocks(gate_decision, threshold, score)
 
+    def _model_side_allowed(self, side: str) -> bool:
+        return self._modules.signal_policy.model_side_allowed(side)
+
     @staticmethod
     def _float_or_none(value: Any) -> float | None:
         return DiagnosticsModule.float_or_none(value)
