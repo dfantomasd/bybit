@@ -237,14 +237,54 @@ class TradingLoopModule(AppBoundModule):
             )
 
         if self._app._initial_shadow_mode() and self._app._settings.DISCOVERED_RULE_STRATEGY_ENABLED:
-            from trader.strategies.discovered_rule import DiscoveredRuleStrategy, load_discovered_rules
+            from trader.strategies.discovered_rule import (
+                DiscoveredRuleStrategy,
+                auto_generate_discovered_rules_file,
+                load_discovered_rules,
+                writable_discovered_rules_path,
+            )
 
+            rules_path = writable_discovered_rules_path(self._app._settings.DISCOVERED_RULES_PATH)
             discovered_rules = load_discovered_rules(
-                self._app._settings.DISCOVERED_RULES_PATH,
+                rules_path,
                 min_validation_count=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_COUNT,
                 min_validation_net_bps=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_NET_BPS,
                 max_rules=self._app._settings.DISCOVERED_RULE_MAX_RULES,
             )
+            if not discovered_rules and self._app._settings.DISCOVERED_RULE_AUTO_GENERATE:
+                try:
+                    generated_path, report = await auto_generate_discovered_rules_file(
+                        rules_path,
+                        horizon=self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES,
+                        min_samples=self._app._settings.DISCOVERED_RULE_AUTO_GENERATE_MIN_SAMPLES,
+                        min_train_count=self._app._settings.DISCOVERED_RULE_AUTO_GENERATE_MIN_TRAIN_COUNT,
+                        min_validation_count=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_COUNT,
+                        min_validation_net_bps=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_NET_BPS,
+                        top_n=self._app._settings.DISCOVERED_RULE_MAX_RULES,
+                        timeout_seconds=self._app._settings.DISCOVERED_RULE_AUTO_GENERATE_TIMEOUT_SECONDS,
+                    )
+                    self._app._record_diag("discovered_rule_auto_generated")
+                    log.info(
+                        "discovered_rule.auto_generated",
+                        rules_path=str(generated_path),
+                        status=report.get("status"),
+                        sample_count=report.get("sample_count"),
+                        rule_count=len(list(report.get("rules") or [])),
+                    )
+                    rules_path = generated_path
+                    discovered_rules = load_discovered_rules(
+                        rules_path,
+                        min_validation_count=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_COUNT,
+                        min_validation_net_bps=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_NET_BPS,
+                        max_rules=self._app._settings.DISCOVERED_RULE_MAX_RULES,
+                    )
+                except Exception as exc:
+                    self._app._record_diag("discovered_rule_auto_generate_failed")
+                    log.warning(
+                        "discovered_rule.auto_generate_failed",
+                        rules_path=str(rules_path),
+                        error=str(exc),
+                    )
             if discovered_rules:
                 strategies.append(
                     DiscoveredRuleStrategy(
@@ -258,7 +298,7 @@ class TradingLoopModule(AppBoundModule):
                 )
                 log.info(
                     "discovered_rule.enabled",
-                    rules_path=self._app._settings.DISCOVERED_RULES_PATH,
+                    rules_path=str(rules_path),
                     rule_count=len(discovered_rules),
                     best_rule=discovered_rules[0].rule_id,
                     best_validation_bps=round(discovered_rules[0].validation_avg_net_bps, 3),
@@ -267,7 +307,7 @@ class TradingLoopModule(AppBoundModule):
                 self._app._record_diag("discovered_rule_no_rules_loaded")
                 log.info(
                     "discovered_rule.disabled_no_rules",
-                    rules_path=self._app._settings.DISCOVERED_RULES_PATH,
+                    rules_path=str(rules_path),
                 )
 
         if (

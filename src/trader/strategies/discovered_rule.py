@@ -8,6 +8,7 @@ signals; live safety is enforced by only wiring this strategy in SHADOW mode.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from decimal import Decimal
@@ -24,6 +25,7 @@ log = structlog.get_logger(__name__)
 
 DISCOVERED_RULE_STRATEGY_ID = "discovered_rule_v1"
 _PRICE_DECIMALS = Decimal("0.00000001")
+_PLACEHOLDER_PATH_PREFIXES = ("/path/to/", "path/to/")
 
 
 @dataclass(frozen=True)
@@ -123,6 +125,54 @@ def load_discovered_rules(
             rules.append(rule)
     rules.sort(key=lambda item: (item.validation_avg_net_bps, item.score, item.validation_count), reverse=True)
     return rules[: max(0, int(max_rules))]
+
+
+def writable_discovered_rules_path(path: str | Path) -> Path:
+    """Return a safe local path for a generated strategy-lab report.
+
+    Render envs sometimes keep documentation placeholders such as
+    ``/path/to/strategy_lab.json``. Treat those as not operator intent and use
+    the app working directory instead.
+    """
+
+    raw = str(path or "").strip()
+    if not raw or raw.startswith(_PLACEHOLDER_PATH_PREFIXES):
+        return Path("strategy_lab.json")
+    return Path(raw).expanduser()
+
+
+async def auto_generate_discovered_rules_file(
+    path: str | Path,
+    *,
+    horizon: int,
+    min_samples: int,
+    min_train_count: int,
+    min_validation_count: int,
+    min_validation_net_bps: float,
+    top_n: int,
+    timeout_seconds: float,
+) -> tuple[Path, dict[str, Any]]:
+    """Generate a strategy-lab JSON report from DB outcomes with a hard timeout."""
+
+    target = writable_discovered_rules_path(path)
+
+    async def _build() -> dict[str, Any]:
+        from trader.strategy_lab.discover import build_strategy_lab_report_from_db
+
+        return await build_strategy_lab_report_from_db(
+            horizon=horizon,
+            min_samples=min_samples,
+            min_train_count=min_train_count,
+            min_validation_count=min_validation_count,
+            min_validation_net_bps=min_validation_net_bps,
+            top_n=top_n,
+            segmented=True,
+        )
+
+    report = await asyncio.wait_for(_build(), timeout=max(1.0, float(timeout_seconds)))
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target, report
 
 
 class DiscoveredRuleStrategy(BaseStrategy):

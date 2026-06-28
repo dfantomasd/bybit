@@ -182,6 +182,11 @@ class Settings(BaseSettings):
     """Enable SHADOW-only strategy_lab discovered-rule validation when a rule JSON exists."""
     DISCOVERED_RULES_PATH: str = "strategy_lab.json"
     """Path to JSON created by python -m trader.strategy_lab.discover."""
+    DISCOVERED_RULE_AUTO_GENERATE: bool = True
+    """In SHADOW, generate strategy_lab.json from DB outcomes when no valid rules are checked in."""
+    DISCOVERED_RULE_AUTO_GENERATE_TIMEOUT_SECONDS: float = 20.0
+    DISCOVERED_RULE_AUTO_GENERATE_MIN_SAMPLES: int = 1000
+    DISCOVERED_RULE_AUTO_GENERATE_MIN_TRAIN_COUNT: int = 30
     DISCOVERED_RULE_MIN_VALIDATION_COUNT: int = 10
     DISCOVERED_RULE_MIN_VALIDATION_NET_BPS: float = 0.0
     DISCOVERED_RULE_MAX_RULES: int = 20

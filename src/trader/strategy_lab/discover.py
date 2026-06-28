@@ -170,6 +170,48 @@ async def _load_db_samples(
     return np.asarray(values, dtype=float), np.asarray(returns, dtype=float), feature_names, symbols, sides, meta
 
 
+async def build_strategy_lab_report_from_db(
+    *,
+    horizon: int | None = None,
+    min_samples: int = 1000,
+    min_train_count: int = 30,
+    min_validation_count: int = 10,
+    min_validation_net_bps: float = 0.0,
+    top_n: int = 20,
+    segmented: bool = True,
+) -> dict[str, Any]:
+    """Build a strategy-lab report from compatible Postgres outcomes.
+
+    This is the programmatic counterpart of the CLI. Runtime code uses it in
+    SHADOW mode to avoid the common operational trap where discovered-rule
+    validation is enabled but the JSON file was never generated after deploy.
+    """
+
+    values, returns_bps, feature_names, symbols, sides, meta = await _load_db_samples(
+        horizon=horizon or _settings_horizon(),
+        min_samples=min_samples,
+    )
+    config = RuleSearchConfig(
+        min_train_count=min_train_count,
+        min_validation_count=min_validation_count,
+        min_validation_avg_net_bps=min_validation_net_bps,
+        top_n=top_n,
+    )
+    if segmented:
+        report = discover_segmented_rules(
+            values=values,
+            returns_bps=returns_bps,
+            feature_names=feature_names,
+            symbols=symbols,
+            sides=sides,
+            config=config,
+        )
+    else:
+        report = discover_rules(values=values, returns_bps=returns_bps, feature_names=feature_names, config=config)
+    report["meta"] = meta
+    return report
+
+
 @click.command()
 @click.option("--from-db", "from_db", is_flag=True, help="Load compatible samples from Postgres.")
 @click.option(
@@ -202,32 +244,39 @@ def main(
         raise click.ClickException("choose exactly one source: --from-db or --csv")
     meta: dict[str, Any]
     if from_db:
-        values, returns_bps, feature_names, symbols, sides, meta = asyncio.run(
-            _load_db_samples(horizon=horizon or _settings_horizon(), min_samples=min_samples)
+        report = asyncio.run(
+            build_strategy_lab_report_from_db(
+                horizon=horizon,
+                min_samples=min_samples,
+                min_train_count=min_train_count,
+                min_validation_count=min_validation_count,
+                min_validation_net_bps=min_validation_net_bps,
+                top_n=top_n,
+                segmented=segmented,
+            )
         )
     else:
         assert csv_path is not None
         values, returns_bps, feature_names, symbols, sides = _parse_csv_samples(csv_path)
         meta = {"source": "csv", "path": str(csv_path)}
-
-    config = RuleSearchConfig(
-        min_train_count=min_train_count,
-        min_validation_count=min_validation_count,
-        min_validation_avg_net_bps=min_validation_net_bps,
-        top_n=top_n,
-    )
-    if segmented:
-        report = discover_segmented_rules(
-            values=values,
-            returns_bps=returns_bps,
-            feature_names=feature_names,
-            symbols=symbols,
-            sides=sides,
-            config=config,
+        config = RuleSearchConfig(
+            min_train_count=min_train_count,
+            min_validation_count=min_validation_count,
+            min_validation_avg_net_bps=min_validation_net_bps,
+            top_n=top_n,
         )
-    else:
-        report = discover_rules(values=values, returns_bps=returns_bps, feature_names=feature_names, config=config)
-    report["meta"] = meta
+        if segmented:
+            report = discover_segmented_rules(
+                values=values,
+                returns_bps=returns_bps,
+                feature_names=feature_names,
+                symbols=symbols,
+                sides=sides,
+                config=config,
+            )
+        else:
+            report = discover_rules(values=values, returns_bps=returns_bps, feature_names=feature_names, config=config)
+        report["meta"] = meta
     text = json.dumps(report, ensure_ascii=False, indent=2, sort_keys=True)
     if output is not None:
         output.write_text(text + "\n", encoding="utf-8")

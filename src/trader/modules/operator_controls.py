@@ -296,6 +296,21 @@ class OperatorControlsModule(AppBoundModule):
             "discovered_rules_path": (
                 getattr(self._app._settings, "DISCOVERED_RULES_PATH", None) if self._app._settings is not None else None
             ),
+            "discovered_rule_auto_generate": (
+                getattr(self._app._settings, "DISCOVERED_RULE_AUTO_GENERATE", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "discovered_rule_auto_generate_min_samples": (
+                getattr(self._app._settings, "DISCOVERED_RULE_AUTO_GENERATE_MIN_SAMPLES", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "discovered_rule_auto_generate_timeout_seconds": (
+                getattr(self._app._settings, "DISCOVERED_RULE_AUTO_GENERATE_TIMEOUT_SECONDS", None)
+                if self._app._settings is not None
+                else None
+            ),
             "discovered_rule_min_validation_count": (
                 getattr(self._app._settings, "DISCOVERED_RULE_MIN_VALIDATION_COUNT", None)
                 if self._app._settings is not None

@@ -1,0 +1,9 @@
+{
+  "meta": {
+    "description": "Versioned strategy-lab artifact. Generate fresh rules with: python -m trader.strategy_lab.discover --from-db --horizon 5 --min-samples 1000 --output strategy_lab.json",
+    "source": "repo_placeholder"
+  },
+  "rules": [],
+  "sample_count": 0,
+  "status": "no_rules"
+}
