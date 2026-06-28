@@ -189,11 +189,23 @@ class TestBucketGate:
         assert app._shadow_loss_guard_blocks() is False
 
     def test_shadow_loss_guard_activates_after_poor_recent_run(self) -> None:
-        app = _make_app()
+        app = _make_app(SHADOW_PROBE_RESEARCH_PROFILE_V2=False)
 
         app._record_shadow_close("XRPUSDT", "SL", -0.3)
         app._record_shadow_close("ADAUSDT", "SL", -0.2)
         app._record_shadow_close("DOGEUSDT", "TP", 0.05)
+
+        assert app._shadow_loss_guard_blocks() is True
+
+    def test_research_shadow_loss_guard_waits_for_real_sample(self) -> None:
+        app = _make_app()
+
+        for idx in range(19):
+            app._record_shadow_close(f"SYM{idx}USDT", "TIME", -0.2)
+
+        assert app._shadow_loss_guard_blocks() is False
+
+        app._record_shadow_close("SYM20USDT", "TIME", -0.2)
 
         assert app._shadow_loss_guard_blocks() is True
 

@@ -848,6 +848,9 @@ class Settings(BaseSettings):
             self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = False
             self.SCALP_STRICT_SHADOW = True
             self.SHADOW_LOSS_GUARD_ENABLED = True
+            self.SHADOW_LOSS_GUARD_MIN_CLOSED = 20
+            self.SHADOW_LOSS_GUARD_WINDOW = 20
+            self.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS = 300
             self.TRAIN_STRATEGY_ALLOWLIST = (
                 "scalp_micro_v1,shadow_probe_hv_v2,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
             )
