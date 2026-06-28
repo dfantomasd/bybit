@@ -188,6 +188,7 @@ class TestScalpMicroStrategy:
         # Book shows sellers, not buyers
         assert strat.evaluate(_vector(ob_imb=-0.30), _PRICE, 1000.0) is None
         assert "imbalance_rejected" in rejections
+        assert f"imbalance_rejected:{_SYMBOL}:Buy" in rejections
 
     def test_ob_weak_imbalance_rejected(self) -> None:
         rejections: list[str] = []

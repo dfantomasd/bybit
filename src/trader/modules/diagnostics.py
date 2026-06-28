@@ -205,6 +205,28 @@ class DiagnosticsModule(AppBoundModule):
         """Record a diagnostics event with the current timestamp."""
         self._app._diag_events.append((datetime.now(tz=UTC), event))
 
+    @staticmethod
+    def top_diag_details(hour_counts: dict[str, int], prefix: str, *, limit: int = 8) -> list[dict[str, Any]]:
+        """Return top symbol/side details for colon-suffixed diagnostic events."""
+        marker = f"{prefix}:"
+        rows: list[dict[str, Any]] = []
+        for event, count in hour_counts.items():
+            if not event.startswith(marker):
+                continue
+            parts = event.split(":")
+            if len(parts) < 2:
+                continue
+            rows.append(
+                {
+                    "reason": parts[0],
+                    "symbol": parts[1],
+                    "side": parts[2] if len(parts) > 2 else None,
+                    "count": int(count),
+                }
+            )
+        rows.sort(key=lambda row: int(row["count"]), reverse=True)
+        return rows[:limit]
+
     def top_blocker_from_diag(self, diag: dict[str, Any], *, default: str) -> tuple[str, dict[str, int]]:
         """Return the most useful blocker label for operator diagnostics."""
         blockers = {
@@ -335,6 +357,12 @@ class DiagnosticsModule(AppBoundModule):
         for ts, event in self._app._diag_events:
             if ts >= cutoff:
                 hour_counts[event] = hour_counts.get(event, 0) + 1
+        rejection_details = {
+            "imbalance_rejected": self.top_diag_details(hour_counts, "imbalance_rejected"),
+            "imbalance_missing": self.top_diag_details(hour_counts, "imbalance_missing"),
+            "spread_rejected": self.top_diag_details(hour_counts, "spread_rejected"),
+            "scalp_net_edge_rejected": self.top_diag_details(hour_counts, "scalp_net_edge_rejected"),
+        }
 
         ws_age: float | None = None
         if self._app._health_checker is not None and self._app._health_checker._last_ws_message_at is not None:
@@ -415,6 +443,7 @@ class DiagnosticsModule(AppBoundModule):
             "hour_spread_rejected": hour_counts.get("spread_rejected", 0),
             "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
             "hour_imbalance_rejected": hour_counts.get("imbalance_rejected", 0),
+            "hour_rejection_details": rejection_details,
             "hour_bucket_blocked": hour_counts.get("bucket_blocked", 0),
             "hour_symbol_side_blocked": hour_counts.get("symbol_side_blocked", 0),
             "hour_trend_confirmation_blocked": hour_counts.get("trend_confirmation_blocked", 0),

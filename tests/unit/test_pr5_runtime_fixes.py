@@ -161,6 +161,25 @@ def test_get_diagnostics_exposes_specific_risk_rejection_counts():
     assert diag["hour_min_notional_rejected"] == 1
 
 
+def test_get_diagnostics_exposes_rejection_symbol_side_details():
+    app = _make_app()
+    app._record_diag("imbalance_rejected")
+    app._record_diag("imbalance_rejected:XRPUSDT:Buy")
+    app._record_diag("imbalance_rejected:XRPUSDT:Buy")
+    app._record_diag("scalp_net_edge_rejected:DOGEUSDT:Sell")
+
+    diag = app.get_diagnostics()
+
+    assert diag["hour_imbalance_rejected"] == 1
+    assert diag["hour_rejection_details"]["imbalance_rejected"][0] == {
+        "reason": "imbalance_rejected",
+        "symbol": "XRPUSDT",
+        "side": "Buy",
+        "count": 2,
+    }
+    assert diag["hour_rejection_details"]["scalp_net_edge_rejected"][0]["symbol"] == "DOGEUSDT"
+
+
 @pytest.mark.asyncio
 async def test_trade_journal_pool_close_timeout_terminates(monkeypatch: pytest.MonkeyPatch) -> None:
     import trader.storage.trade_journal as trade_journal_module

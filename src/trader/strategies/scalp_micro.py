@@ -152,10 +152,15 @@ class ScalpMicroStrategy(BaseStrategy):
 
     # ------------------------------------------------------------------
 
-    def _diag(self, reason: str) -> None:
+    def _diag(self, reason: str, *, symbol: str | None = None, side: OrderSide | None = None) -> None:
         if self._diag_hook is not None:
             try:
                 self._diag_hook(reason)
+                if symbol:
+                    parts = [reason, symbol]
+                    if side is not None:
+                        parts.append(side.value)
+                    self._diag_hook(":".join(parts))
             except Exception as exc:
                 log.debug("scalp_micro.diag_hook_failed", reason=reason, error=str(exc))
 
@@ -247,7 +252,7 @@ class ScalpMicroStrategy(BaseStrategy):
             if self._shadow_relaxed:
                 log.debug("scalp_micro.ob_missing_shadow", symbol=symbol)
             else:
-                self._diag("imbalance_missing")
+                self._diag("imbalance_missing", symbol=symbol, side=side)
                 return None
         else:
             imb = ob_imbalance if ob_imbalance is not None else 0.0
@@ -261,7 +266,7 @@ class ScalpMicroStrategy(BaseStrategy):
                         imbalance=round(imb, 3),
                     )
                 else:
-                    self._diag("imbalance_rejected")
+                    self._diag("imbalance_rejected", symbol=symbol, side=side)
                     return None
 
         # --- Spread filter (fail closed: unknown spread = no trade) ---
@@ -269,7 +274,7 @@ class ScalpMicroStrategy(BaseStrategy):
         if spread_bps is None and self._shadow_relaxed:
             spread_bps = min(self._max_spread_bps, 4.0)
         if spread_bps is None or spread_bps > self._max_spread_bps:
-            self._diag("spread_rejected")
+            self._diag("spread_rejected", symbol=symbol, side=side)
             log.debug(
                 "scalp_micro.spread_rejected",
                 symbol=symbol,
@@ -283,7 +288,7 @@ class ScalpMicroStrategy(BaseStrategy):
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0
         net_edge_pct = self._net_edge_pct(gross_edge_pct, spread_bps)
         if not self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
-            self._diag("scalp_net_edge_rejected")
+            self._diag("scalp_net_edge_rejected", symbol=symbol, side=side)
             log.debug(
                 "scalp_micro.net_edge_rejected",
                 symbol=symbol,
