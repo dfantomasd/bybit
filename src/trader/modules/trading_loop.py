@@ -415,6 +415,7 @@ class TradingLoopModule(AppBoundModule):
             confirmation_required_for=confirmation_required_for,
             confirmation_sources=confirmation_sources,
             min_confirmation_sources=1,
+            diag_hook=self._app._record_diag,
         )
         log.info(
             "ensemble.configured",

@@ -2606,6 +2606,15 @@ class TelegramMonitorBot:
             return redacted
         if isinstance(value, list | tuple):
             return [TelegramMonitorBot._redact_for_report(item) for item in value]
+        if isinstance(value, str):
+            redacted = value
+            redacted = re.sub(
+                r"(?i)(api[_-]?key|api[_-]?secret|token|password|postgres[_-]?dsn|database[_-]?url|redis[_-]?url)(\s*[=:]\s*)([^\s,;]+)",
+                r"\1\2***REDACTED***",
+                redacted,
+            )
+            redacted = re.sub(r"(?i)(bearer\s+)[a-z0-9._~+/\-=]+", r"\1***REDACTED***", redacted)
+            return redacted
         return value
 
     @classmethod
@@ -2619,6 +2628,97 @@ class TelegramMonitorBot:
                 default=str,
             )
         )
+
+    @staticmethod
+    def _detail_rows(items: Any, *, max_rows: int = 8) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        rows: list[str] = []
+        for item in items[:max_rows]:
+            if not isinstance(item, dict):
+                continue
+            symbol = html.escape(str(item.get("symbol") or "?"))
+            side = html.escape(str(item.get("side") or ""))
+            count = int(item.get("count") or 0)
+            suffix = f" {side}" if side else ""
+            rows.append(f"  - <code>{symbol}{suffix}</code>: <code>{count}</code>")
+        return rows
+
+    @staticmethod
+    def _strategy_detail_rows(items: Any, *, max_rows: int = 10) -> list[str]:
+        if not isinstance(items, list):
+            return []
+        rows: list[str] = []
+        for item in items[:max_rows]:
+            if not isinstance(item, dict):
+                continue
+            strategy_id = html.escape(str(item.get("symbol") or "?"))
+            count = int(item.get("count") or 0)
+            rows.append(f"  - <code>{strategy_id}</code>: <code>{count}</code>")
+        return rows
+
+    @classmethod
+    def _render_runtime_explainers(cls, runtime_diag: dict[str, Any]) -> list[str]:
+        if not isinstance(runtime_diag, dict):
+            return []
+        rejection_details = runtime_diag.get("hour_rejection_details") or {}
+        strategy_details = runtime_diag.get("hour_strategy_details") or {}
+        lines: list[str] = ["<b>Почему нет/мало сделок за последний час</b>"]
+        top_blocker = runtime_diag.get("top_blocker")
+        if top_blocker:
+            lines.append(f"Самый частый блокер: <code>{html.escape(str(top_blocker))}</code>")
+
+        sections = [
+            ("Отказы по imbalance/stakan", rejection_details.get("imbalance_rejected")),
+            ("Отказы по net-edge scalp", rejection_details.get("scalp_net_edge_rejected")),
+            ("Отказы по spread", rejection_details.get("spread_rejected")),
+            ("Нет/устарел стакан", rejection_details.get("imbalance_missing")),
+        ]
+        any_rejection_rows = False
+        for title, items in sections:
+            rows = cls._detail_rows(items)
+            if rows:
+                any_rejection_rows = True
+                lines.append(f"{html.escape(title)}:")
+                lines.extend(rows)
+        if not any_rejection_rows:
+            lines.append("Детальных отказов по symbol/side пока нет.")
+
+        strategy_sections = [
+            ("Стратегии молчали", strategy_details.get("no_signal")),
+            ("Стратегии дали кандидата", strategy_details.get("proposed")),
+            ("Ансамбль выпустил сигнал", strategy_details.get("emitted")),
+            ("Блок confirmation", strategy_details.get("confirmation_blocked")),
+            ("Ниже min confidence", strategy_details.get("below_min_confidence")),
+        ]
+        any_strategy_rows = False
+        for title, items in strategy_sections:
+            rows = cls._strategy_detail_rows(items)
+            if rows:
+                any_strategy_rows = True
+                lines.append(f"{html.escape(title)}:")
+                lines.extend(rows)
+        if not any_strategy_rows:
+            lines.append("Деталей по стратегиям ещё нет — нужен деплой с ensemble diagnostics и 10–20 минут работы.")
+
+        conflict_count = int(runtime_diag.get("hour_ensemble_conflict_blocked") or 0)
+        if conflict_count:
+            lines.append(f"Конфликт BUY/SELL равного приоритета: <code>{conflict_count}</code>")
+
+        lines.append(
+            "Следующий рычаг: если большинство строк — <code>strategy_no_signal</code>, расширяем/настраиваем стратегии; "
+            "если <code>imbalance_rejected</code>, не ослабляем стакан вслепую, а смотрим symbol/side и качество этих отказов."
+        )
+        return lines
+
+    @classmethod
+    def _render_log_tail_for_report(cls) -> str | None:
+        raw = os.getenv("RENDER_LOG_TAIL") or os.getenv("APP_LOG_TAIL")
+        if not raw:
+            return None
+        lines = raw.splitlines()[-120:]
+        redacted = cls._redact_for_report("\n".join(lines))
+        return html.escape(str(redacted))
 
     async def _render_deep_report_text(self) -> str:
         ctrl = self._controller
@@ -2674,6 +2774,7 @@ class TelegramMonitorBot:
             ctrl.costs_detailed_provider if ctrl is not None else None,
             {},
         )
+        log_tail = self._render_log_tail_for_report()
         model_rows = await _safe_async(
             "model_performance",
             ctrl.model_performance_provider if ctrl is not None else None,
@@ -2874,6 +2975,9 @@ class TelegramMonitorBot:
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
         ]
+        runtime_explainers = self._render_runtime_explainers(runtime_diag if isinstance(runtime_diag, dict) else {})
+        if runtime_explainers:
+            lines.extend(["", *runtime_explainers])
         if blockers:
             lines.append("\n<b>Блокеры реальных ордеров / CANARY</b>")
             lines.extend(f"❌ {html.escape(item)}" for item in blockers)
@@ -2912,6 +3016,15 @@ class TelegramMonitorBot:
             "<b>Compare / PnL / Costs JSON</b>",
             f"<pre>{self._json_for_report({'compare': compare, 'pnl_analysis': pnl_analysis, 'costs': costs})}</pre>",
         ]
+        if log_tail:
+            lines.extend(
+                [
+                    "",
+                    "<b>Render / app log tail</b>",
+                    "<i>Берётся из env RENDER_LOG_TAIL или APP_LOG_TAIL, если окружение его передало.</i>",
+                    f"<pre>{log_tail}</pre>",
+                ]
+            )
         return "\n".join(lines)
 
     async def _cmd_canary_ready(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:

@@ -363,6 +363,13 @@ class DiagnosticsModule(AppBoundModule):
             "spread_rejected": self.top_diag_details(hour_counts, "spread_rejected"),
             "scalp_net_edge_rejected": self.top_diag_details(hour_counts, "scalp_net_edge_rejected"),
         }
+        strategy_details = {
+            "no_signal": self.top_diag_details(hour_counts, "strategy_no_signal"),
+            "proposed": self.top_diag_details(hour_counts, "strategy_proposed"),
+            "emitted": self.top_diag_details(hour_counts, "ensemble_emitted"),
+            "confirmation_blocked": self.top_diag_details(hour_counts, "ensemble_confirmation_blocked"),
+            "below_min_confidence": self.top_diag_details(hour_counts, "ensemble_below_min_confidence"),
+        }
 
         ws_age: float | None = None
         if self._app._health_checker is not None and self._app._health_checker._last_ws_message_at is not None:
@@ -444,6 +451,8 @@ class DiagnosticsModule(AppBoundModule):
             "hour_scalp_net_edge_rejected": hour_counts.get("scalp_net_edge_rejected", 0),
             "hour_imbalance_rejected": hour_counts.get("imbalance_rejected", 0),
             "hour_rejection_details": rejection_details,
+            "hour_strategy_details": strategy_details,
+            "hour_ensemble_conflict_blocked": hour_counts.get("ensemble_conflict_blocked", 0),
             "hour_bucket_blocked": hour_counts.get("bucket_blocked", 0),
             "hour_symbol_side_blocked": hour_counts.get("symbol_side_blocked", 0),
             "hour_trend_confirmation_blocked": hour_counts.get("trend_confirmation_blocked", 0),

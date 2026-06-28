@@ -43,6 +43,7 @@ class StrategyEnsemble:
         confirmation_required_for: set[str] | None = None,
         confirmation_sources: set[str] | None = None,
         min_confirmation_sources: int = 1,
+        diag_hook: Any | None = None,
     ) -> None:
         self._strategies = strategies
         self._health = health_checker
@@ -52,6 +53,15 @@ class StrategyEnsemble:
         self._confirmation_required_for = confirmation_required_for or set()
         self._confirmation_sources = confirmation_sources or set()
         self._min_confirmation_sources = max(1, int(min_confirmation_sources))
+        self._diag_hook = diag_hook
+
+    def _diag(self, event: str) -> None:
+        if self._diag_hook is None:
+            return
+        try:
+            self._diag_hook(event)
+        except Exception as exc:
+            log.debug("ensemble.diag_hook_failed", event=event, error=str(exc))
 
     def _priority(self, proposal: TradeProposal, priorities: dict[str, int] | None = None) -> int:
         p = priorities or self._strategy_priorities
@@ -98,8 +108,10 @@ class StrategyEnsemble:
             try:
                 proposal = strategy.evaluate(feature_vector, current_price, available_balance_usd)
                 if proposal is not None:
+                    self._diag(f"strategy_proposed:{strategy.strategy_id}")
                     proposals.append(proposal)
                 else:
+                    self._diag(f"strategy_no_signal:{strategy.strategy_id}")
                     log.debug(
                         "ensemble.strategy_no_signal",
                         strategy_id=strategy.strategy_id,
@@ -139,6 +151,7 @@ class StrategyEnsemble:
                     sell_strategies_with_confidence=[f"{p.strategy_id}:{round(p.confidence, 3)}" for p in sells],
                     priority=buy_priority,
                 )
+                self._diag("ensemble_conflict_blocked")
                 return None
             agreed = buys if buy_priority > sell_priority else sells
             suppressed = sells if buy_priority > sell_priority else buys
@@ -173,6 +186,7 @@ class StrategyEnsemble:
                     confirming_sources=sorted(confirming_sources),
                     min_confirmation_sources=self._min_confirmation_sources,
                 )
+                self._diag(f"ensemble_confirmation_blocked:{best.strategy_id}")
                 return None
 
         agreement_bonus = self._agree_bonus * (len(agreed) - 1)
@@ -196,6 +210,7 @@ class StrategyEnsemble:
                 confidence=round(new_conf, 3),
                 min_confidence=self._min_confidence,
             )
+            self._diag(f"ensemble_below_min_confidence:{best.strategy_id}")
             return None
 
         if new_conf != best.confidence:
@@ -214,4 +229,5 @@ class StrategyEnsemble:
             alignment_multiplier=round(alignment_multiplier, 3),
             regime_adapted_priorities=regime_adapted,
         )
+        self._diag(f"ensemble_emitted:{best.strategy_id}")
         return best

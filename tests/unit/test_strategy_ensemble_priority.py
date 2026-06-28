@@ -133,3 +133,23 @@ def test_independent_alpha_strategy_can_trade_without_confirmation() -> None:
 
     assert proposal is not None
     assert proposal.strategy_id == "order_flow_v1"
+
+
+def test_ensemble_emits_diagnostics_for_silent_and_emitted_strategies() -> None:
+    events: list[str] = []
+    ensemble = StrategyEnsemble(
+        strategies=[
+            _Strategy("quiet_v1", None),
+            _Strategy("order_flow_v1", OrderSide.SELL, 0.6),
+        ],
+        min_confidence=0.5,
+        strategy_priorities={"order_flow_v1": 10},
+        diag_hook=events.append,
+    )
+
+    proposal = ensemble.evaluate_all(_vector(), 10.0, 1000.0)
+
+    assert proposal is not None
+    assert "strategy_no_signal:quiet_v1" in events
+    assert "strategy_proposed:order_flow_v1" in events
+    assert "ensemble_emitted:order_flow_v1" in events
