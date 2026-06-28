@@ -931,6 +931,13 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         result["model_gate_horizon_minutes"] = analysis_horizon
         if active_version:
             gate = await self.get_shadow_gate_stats(active_version, analysis_horizon, label_schema)
+            gate_events = await self.get_shadow_gate_event_counts(active_version, analysis_horizon, label_schema)
+            if gate_events:
+                gate["event_total_count"] = int(gate_events.get("total_count", 0) or 0)
+                gate["event_resolved_count"] = int(gate_events.get("resolved_count", 0) or 0)
+                gate["event_pending_count"] = int(gate_events.get("pending_count", 0) or 0)
+                gate["event_pass_count"] = int(gate_events.get("pass_count", 0) or 0)
+                gate["event_block_count"] = int(gate_events.get("block_count", 0) or 0)
             gate["horizon_minutes"] = analysis_horizon
             paper = await self._paper_pnl_for_model(active_version, analysis_horizon, active_schema_hash)
             if active_schema_hash or gate.get("total_count"):

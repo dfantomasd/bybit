@@ -626,6 +626,11 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                 {"net_return_bps": 4.5},
                 {"net_return_bps": 3.5},
             ]
+        if "count(po.prediction_id) AS resolved_count" in query:
+            return [
+                {"decision": "GATE_PASS", "total_count": 15, "resolved_count": 12},
+                {"decision": "GATE_BLOCK", "total_count": 10, "resolved_count": 8},
+            ]
         if "pe.decision IN ('GATE_PASS', 'GATE_BLOCK')" in query:
             return [
                 {
@@ -690,6 +695,9 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["latest_model_version"]["version"] == "v20260607_1000"
     assert diag["model_gate_horizon_minutes"] == 5
     assert diag["shadow_gate_by_horizon"]["5"]["pass_count"] == 12
+    assert diag["shadow_gate_by_horizon"]["5"]["event_total_count"] == 25
+    assert diag["shadow_gate_by_horizon"]["5"]["event_resolved_count"] == 20
+    assert diag["shadow_gate_by_horizon"]["5"]["event_pending_count"] == 5
     assert diag["paper_pnl_by_horizon"]["5"]["model_gate"]["count"] == 2
     assert diag["shadow_gate_15m"]["pass_count"] == 12
     assert diag["shadow_gate_15m"]["pass_vs_block_bps"] == 6.0
@@ -1105,7 +1113,8 @@ async def test_database_model_telegram_screen() -> None:
     assert "ХОРОШО" in text
     assert "+2.70 bps" in text
     assert "Фильтр модели 5m" in text
-    assert "12/20 пропущено" in text
+    assert "12/20 resolved пропущено" in text
+    assert "observed=<code>20</code>, pending=<code>0</code>" in text
     assert "Paper baseline" in text
     assert "Paper model gate" in text
     assert "score_below_regime_threshold" in text

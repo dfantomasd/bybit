@@ -2854,7 +2854,9 @@ class TelegramMonitorBot:
             f"SL=<code>{int(shadow_closes.get('sl') or 0)}</code>, "
             f"TIME=<code>{int(shadow_closes.get('time') or 0)}</code>, "
             f"avg=<code>{html.escape(str(shadow_closes.get('avg_pnl_pct') if shadow_closes.get('avg_pnl_pct') is not None else 'n/a'))}%</code>",
-            f"• Shadow gate ({model_horizon}m): decisions=<code>{int((shadow_gate or {}).get('total_count') or 0)}</code>, "
+            f"• Shadow gate ({model_horizon}m): resolved=<code>{int((shadow_gate or {}).get('total_count') or 0)}</code>, "
+            f"observed=<code>{int((shadow_gate or {}).get('event_total_count') or (shadow_gate or {}).get('total_count') or 0)}</code>, "
+            f"pending=<code>{int((shadow_gate or {}).get('event_pending_count') or 0)}</code>, "
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
         ]
@@ -3567,6 +3569,8 @@ class TelegramMonitorBot:
                 "true" if train_include_candle is True else "false" if train_include_candle is False else "n/a"
             )
             gate_total = gate.get("total_count", 0) or 0
+            gate_observed = int(gate.get("event_total_count", gate_total) or 0)
+            gate_pending = int(gate.get("event_pending_count", 0) or 0)
             gate_pass = gate.get("pass_count", 0) or 0
             gate_block = gate.get("block_count", 0) or 0
             gate_pass_avg = gate.get("pass_avg_net_return_bps")
@@ -3709,11 +3713,16 @@ class TelegramMonitorBot:
                 f"Улучшение против baseline: <code>{lift_str}</code>",
                 f"Лучший порог модели: <code>{best_threshold_str}</code>, среднее=<code>{best_threshold_avg_str}</code>",
                 f"Ожидание walk-forward: <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
-                f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} пропущено</code>, блок=<code>{gate_block}</code>",
+                f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} resolved пропущено</code>, "
+                f"блок=<code>{gate_block}</code>, observed=<code>{gate_observed}</code>, pending=<code>{gate_pending}</code>",
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
                 f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
                 "Lift фильтра: <code>"
-                + ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
+                + (
+                    f"⏳ ждём outcome ({gate_pending} pending)"
+                    if gate_total == 0 and gate_observed > 0
+                    else ("⏳ ждём ~50 живых сигналов" if gate_total == 0 and db_model_version else gate_lift_str)
+                )
                 + "</code>",
                 f"Причины блоков: <code>{gate_reasons_str}</code>",
                 f"Paper baseline: <code>{_paper_line(paper_baseline)}</code>",
@@ -3762,7 +3771,11 @@ class TelegramMonitorBot:
             # 5. Gate lift
             if gate_total == 0 and db_model_version:
                 gate_road_icon = "⏳"
-                gate_road_val = f"ждём ~50 сигналов (сейчас {gate_total})"
+                gate_road_val = (
+                    f"ждём outcome: {gate_pending} pending из {gate_observed} observed"
+                    if gate_observed > 0
+                    else f"ждём ~50 сигналов (сейчас {gate_total})"
+                )
             elif gate_lift is not None and float(gate_lift) > 0:
                 gate_road_icon = "✅"
                 gate_road_val = gate_lift_str
