@@ -129,4 +129,5 @@ def test_runtime_settings_reports_probe_edge_gate_when_strict_shadow() -> None:
     settings = OperatorControlsModule(app).runtime_settings()
 
     assert settings["shadow_apply_net_edge_gate"] is True
-    assert settings["shadow_probe_bypasses_live_edge_gate"] is False
+    assert settings["shadow_probe_bypasses_live_edge_gate"] is True
+    assert settings["shadow_probe_effective_min_net_return_pct"] == settings["shadow_probe_min_net_return_pct"]

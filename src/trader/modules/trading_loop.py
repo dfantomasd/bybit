@@ -154,10 +154,7 @@ class TradingLoopModule(AppBoundModule):
                 funding_buffer_pct=self._app._settings.FUNDING_BUFFER_PCT,
                 safety_margin_pct=self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT,
             )
-            probe_min_net_return_pct = max(
-                self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
-                self._app._settings.MIN_EXPECTED_NET_EDGE_PCT,
-            )
+            probe_min_net_return_pct = self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT
 
             def _probe_symbol_allowed(symbol: str) -> bool:
                 return self._app._shadow_probe_symbol_warmed_up(symbol) and self._app._shadow_probe_symbol_allowed(

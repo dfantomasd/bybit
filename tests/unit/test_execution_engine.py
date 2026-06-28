@@ -186,11 +186,11 @@ class TestExecutionEngine:
         assert engine.has_open_position("BTCUSDT")
 
     @pytest.mark.asyncio
-    async def test_shadow_probe_obeys_strict_shadow_net_edge_gate(self):
+    async def test_regular_strategy_obeys_strict_shadow_net_edge_gate(self):
         engine = _make_engine(approved=True, shadow_mode=True, shadow_apply_net_edge_gate=True)
         proposal = _proposal().model_copy(
             update={
-                "strategy_id": "shadow_probe_v1",
+                "strategy_id": "scalp_micro_v1",
                 # Deliberately tiny TP would fail the live/strict net-edge gate.
                 "take_profit": Decimal("50001"),
             }
@@ -206,6 +206,29 @@ class TestExecutionEngine:
         counts = engine.get_diag_counts()
         assert counts["net_edge_rejected"] == 1
         assert counts["shadow_order_would_be_placed"] == 0
+
+    @pytest.mark.asyncio
+    async def test_shadow_probe_bypasses_engine_live_net_edge_gate_in_shadow(self):
+        engine = _make_engine(approved=True, shadow_mode=True, shadow_apply_net_edge_gate=True)
+        proposal = _proposal().model_copy(
+            update={
+                "strategy_id": "shadow_probe_hv_v2",
+                # The probe strategy has its own pre-gate; the engine should
+                # not apply the live-wide gate again in SHADOW paper mode.
+                "take_profit": Decimal("50001"),
+            }
+        )
+
+        decision = await engine.submit(
+            proposal=proposal,
+            capital=Decimal("10000"),
+            available_balance=Decimal("10000"),
+        )
+
+        assert decision is not None
+        counts = engine.get_diag_counts()
+        assert counts["net_edge_rejected"] == 0
+        assert counts["shadow_order_would_be_placed"] == 1
 
     @pytest.mark.asyncio
     async def test_shadow_order_event_recorded_in_trade_journal(self):
