@@ -97,6 +97,8 @@ class TradingApplication:
         self._candle_sampler_total: int = 0
         self._candle_sampler_scored: int = 0
         self._candle_sampler_no_model: int = 0
+        self._candle_sampler_shadow_recorded: int = 0
+        self._candle_sampler_shadow_record_failed: int = 0
         self._candle_sampler_gate_pass: int = 0
         self._candle_sampler_gate_block: int = 0
         self._candle_sampler_shadow_scores: deque[float] = deque(maxlen=500)

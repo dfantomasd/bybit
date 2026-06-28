@@ -132,6 +132,10 @@ class TestCandleSampler:
         assert shadow_kwargs["model_version"] == "v_test_challenger"
         assert shadow_kwargs["decision"] == "GATE_PASS"
         assert shadow_kwargs["metadata"]["source"] == "candle_sampler_shadow"
+        assert app._candle_sampler_scored == 1
+        assert app._candle_sampler_shadow_recorded == 1
+        assert app._candle_sampler_shadow_record_failed == 0
+        assert app._candle_sampler_gate_pass == 1
 
     @pytest.mark.asyncio
     async def test_challenger_shadow_gate_block_below_threshold(self) -> None:
@@ -151,6 +155,39 @@ class TestCandleSampler:
         await app._sample_confirmed_candle(_SYMBOL, "1", _vec())
         shadow_kwargs = app._trade_journal.record_prediction_event.await_args_list[1].kwargs
         assert shadow_kwargs["decision"] == "GATE_BLOCK"
+        assert app._candle_sampler_shadow_recorded == 1
+        assert app._candle_sampler_gate_block == 1
+
+    @pytest.mark.asyncio
+    async def test_challenger_shadow_gate_record_failure_is_reported(self) -> None:
+        from trader.ml.challenger import ModelPrediction
+
+        app = _make_app()
+        registry = MagicMock()
+        registry.score_shadow = MagicMock(
+            return_value=ModelPrediction(
+                score=0.9,
+                label=1,
+                confidence=0.9,
+                model_version="v_test_challenger",
+            )
+        )
+        app._model_registry = registry
+
+        async def _record_prediction_event(**kwargs):
+            if kwargs["model_version"] == "v_test_challenger":
+                raise RuntimeError("db write failed")
+            return str(uuid.uuid4())
+
+        app._trade_journal.record_prediction_event = AsyncMock(side_effect=_record_prediction_event)
+
+        await app._sample_confirmed_candle(_SYMBOL, "1", _vec())
+
+        assert app._candle_sampler_scored == 1
+        assert app._candle_sampler_shadow_recorded == 0
+        assert app._candle_sampler_shadow_record_failed == 1
+        assert app._candle_sampler_gate_pass == 0
+        assert app._candle_sampler_gate_block == 0
 
     def test_candle_sampler_shadow_gate_uses_adaptive_observational_threshold(self) -> None:
         app = _make_app(CANDLE_SAMPLER_SHADOW_GATE_MIN_PASS_RATE_PCT=20.0)

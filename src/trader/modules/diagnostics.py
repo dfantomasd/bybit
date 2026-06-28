@@ -536,6 +536,8 @@ class DiagnosticsModule(AppBoundModule):
                 "total": self._app._candle_sampler_total,
                 "scored": self._app._candle_sampler_scored,
                 "no_model": self._app._candle_sampler_no_model,
+                "shadow_recorded": self._app._candle_sampler_shadow_recorded,
+                "shadow_record_failed": self._app._candle_sampler_shadow_record_failed,
                 "gate_pass": self._app._candle_sampler_gate_pass,
                 "gate_block": self._app._candle_sampler_gate_block,
                 **self._app._modules.signal_policy.candle_sampler_shadow_gate_stats(),

@@ -316,26 +316,44 @@ class SignalPolicyModule(AppBoundModule):
                         gate_reason = (
                             "score_meets_threshold" if gate_decision == "GATE_PASS" else "score_below_threshold"
                         )
-                        if gate_decision == "GATE_PASS":
-                            self._app._candle_sampler_gate_pass += 1
+                    try:
+                        shadow_prediction_id = await self._app._trade_journal.record_prediction_event(
+                            symbol=symbol,
+                            interval=interval,
+                            model_version=shadow_prediction.model_version,
+                            score=shadow_prediction.score,
+                            strategy_signal=side,
+                            decision=gate_decision,
+                            feature_snapshot_id=snapshot_id,
+                            metadata={
+                                "source": "candle_sampler_shadow",
+                                "confidence": shadow_prediction.confidence,
+                                "gate_reason": gate_reason,
+                                "threshold": threshold,
+                                "threshold_source": threshold_source,
+                            },
+                        )
+                        if shadow_prediction_id:
+                            self._app._candle_sampler_shadow_recorded += 1
+                            if gate_decision == "GATE_PASS":
+                                self._app._candle_sampler_gate_pass += 1
+                            elif gate_decision == "GATE_BLOCK":
+                                self._app._candle_sampler_gate_block += 1
                         else:
-                            self._app._candle_sampler_gate_block += 1
-                    await self._app._trade_journal.record_prediction_event(
-                        symbol=symbol,
-                        interval=interval,
-                        model_version=shadow_prediction.model_version,
-                        score=shadow_prediction.score,
-                        strategy_signal=side,
-                        decision=gate_decision,
-                        feature_snapshot_id=snapshot_id,
-                        metadata={
-                            "source": "candle_sampler_shadow",
-                            "confidence": shadow_prediction.confidence,
-                            "gate_reason": gate_reason,
-                            "threshold": threshold,
-                            "threshold_source": threshold_source,
-                        },
-                    )
+                            self._app._candle_sampler_shadow_record_failed += 1
+                            log.warning(
+                                "candle_sampler.shadow_prediction_not_recorded",
+                                symbol=symbol,
+                                model_version=shadow_prediction.model_version,
+                            )
+                    except Exception as exc:
+                        self._app._candle_sampler_shadow_record_failed += 1
+                        log.warning(
+                            "candle_sampler.shadow_prediction_record_failed",
+                            symbol=symbol,
+                            model_version=shadow_prediction.model_version,
+                            error=str(exc),
+                        )
                 else:
                     self._app._candle_sampler_no_model += 1
                     # Only warn once per 50 misses to avoid log spam
@@ -366,6 +384,8 @@ class SignalPolicyModule(AppBoundModule):
                     total=self._app._candle_sampler_total,
                     scored=self._app._candle_sampler_scored,
                     no_model=self._app._candle_sampler_no_model,
+                    shadow_recorded=self._app._candle_sampler_shadow_recorded,
+                    shadow_record_failed=self._app._candle_sampler_shadow_record_failed,
                     gate_pass=self._app._candle_sampler_gate_pass,
                     gate_block=self._app._candle_sampler_gate_block,
                     score_rate=score_rate,
