@@ -242,6 +242,7 @@ class TradingLoopModule(AppBoundModule):
                 auto_generate_discovered_rules_file,
                 load_discovered_rules,
                 writable_discovered_rules_path,
+                write_discovered_rules_failure_report,
             )
 
             rules_path = writable_discovered_rules_path(self._app._settings.DISCOVERED_RULES_PATH)
@@ -279,10 +280,16 @@ class TradingLoopModule(AppBoundModule):
                         max_rules=self._app._settings.DISCOVERED_RULE_MAX_RULES,
                     )
                 except Exception as exc:
+                    failure_path = write_discovered_rules_failure_report(
+                        rules_path,
+                        error=exc,
+                        stage="auto_generate",
+                    )
                     self._app._record_diag("discovered_rule_auto_generate_failed")
+                    self._app._record_diag(f"discovered_rule_auto_generate_failed:{type(exc).__name__}")
                     log.warning(
                         "discovered_rule.auto_generate_failed",
-                        rules_path=str(rules_path),
+                        rules_path=str(failure_path),
                         error=str(exc),
                     )
             if discovered_rules:

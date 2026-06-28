@@ -28,6 +28,10 @@ _PRICE_DECIMALS = Decimal("0.00000001")
 _PLACEHOLDER_PATH_PREFIXES = ("/path/to/", "path/to/")
 
 
+def _repo_root() -> Path:
+    return Path(__file__).resolve().parents[3]
+
+
 @dataclass(frozen=True)
 class DiscoveredCondition:
     feature: str
@@ -137,8 +141,35 @@ def writable_discovered_rules_path(path: str | Path) -> Path:
 
     raw = str(path or "").strip()
     if not raw or raw.startswith(_PLACEHOLDER_PATH_PREFIXES):
-        return Path("strategy_lab.json")
-    return Path(raw).expanduser()
+        raw = "strategy_lab.json"
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    cwd_candidate = candidate
+    if cwd_candidate.exists():
+        return cwd_candidate
+    repo_candidate = _repo_root() / candidate
+    if repo_candidate.exists():
+        return repo_candidate
+    return cwd_candidate
+
+
+def write_discovered_rules_failure_report(path: str | Path, *, error: Exception, stage: str) -> Path:
+    """Persist a small diagnostic report so Telegram can explain generator failures."""
+
+    target = writable_discovered_rules_path(path)
+    if target.exists() and target.is_file():
+        return target
+    payload = {
+        "status": "auto_generate_failed",
+        "rules": [],
+        "sample_count": 0,
+        "error": f"{type(error).__name__}: {error}",
+        "stage": stage,
+    }
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text(json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return target
 
 
 async def auto_generate_discovered_rules_file(

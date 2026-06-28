@@ -191,6 +191,15 @@ async def build_strategy_lab_report_from_db(
         horizon=horizon or _settings_horizon(),
         min_samples=min_samples,
     )
+    sample_count = int(len(returns_bps))
+    if sample_count < min_samples or not feature_names:
+        return {
+            "status": "insufficient_samples",
+            "sample_count": sample_count,
+            "required_samples": int(min_samples),
+            "rules": [],
+            "meta": meta,
+        }
     config = RuleSearchConfig(
         min_train_count=min_train_count,
         min_validation_count=min_validation_count,

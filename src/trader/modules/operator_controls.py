@@ -6,7 +6,6 @@ import asyncio
 import html
 import json
 from decimal import Decimal
-from pathlib import Path
 from typing import Any, cast
 
 from trader.domain.enums import TradingMode
@@ -37,7 +36,9 @@ class OperatorControlsModule(AppBoundModule):
         if not path:
             return None
         try:
-            rule_path = Path(path).expanduser()
+            from trader.strategies.discovered_rule import writable_discovered_rules_path
+
+            rule_path = writable_discovered_rules_path(path)
             if not rule_path.exists():
                 return {"exists": False, "path": str(rule_path)}
             payload = json.loads(rule_path.read_text(encoding="utf-8"))

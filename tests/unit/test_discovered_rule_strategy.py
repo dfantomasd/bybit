@@ -7,7 +7,12 @@ import numpy as np
 
 from trader.domain.enums import OrderSide
 from trader.domain.models import FeatureVector
-from trader.strategies.discovered_rule import DiscoveredRuleStrategy, load_discovered_rules
+from trader.strategies.discovered_rule import (
+    DiscoveredRuleStrategy,
+    load_discovered_rules,
+    writable_discovered_rules_path,
+    write_discovered_rules_failure_report,
+)
 from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_segmented_rules
 
 
@@ -109,3 +114,27 @@ def test_discovered_rule_strategy_ignores_negative_or_wrong_side_rules(tmp_path)
     )
 
     assert load_discovered_rules(rules_path) == []
+
+
+def test_writable_discovered_rules_path_finds_repo_checked_in_file(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    resolved = writable_discovered_rules_path("strategy_lab.json")
+
+    assert resolved.name == "strategy_lab.json"
+    assert resolved.exists()
+
+
+def test_write_discovered_rules_failure_report_creates_diagnostic_json(tmp_path) -> None:
+    rules_path = tmp_path / "strategy_lab.json"
+
+    written = write_discovered_rules_failure_report(
+        rules_path,
+        error=TimeoutError("db slow"),
+        stage="auto_generate",
+    )
+
+    payload = json.loads(written.read_text(encoding="utf-8"))
+    assert payload["status"] == "auto_generate_failed"
+    assert payload["rules"] == []
+    assert "TimeoutError" in payload["error"]
