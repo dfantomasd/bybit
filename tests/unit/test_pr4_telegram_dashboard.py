@@ -749,6 +749,36 @@ async def test_load_db_diag_timeout_returns_error() -> None:
 
 
 @pytest.mark.asyncio
+async def test_load_db_diag_full_timeout_uses_lite_fallback() -> None:
+    bot = _make_bot()
+
+    async def _provider(*, lite: bool = False) -> dict[str, object]:
+        if lite:
+            return {
+                "connected": True,
+                "configured": True,
+                "lite": True,
+                "latest_model_version": {"version": "v-lite"},
+                "candles_by_interval": {"1": 1000},
+            }
+        await asyncio.sleep(0.2)
+        return {"connected": True, "lite": False}
+
+    assert bot._controller is not None
+    bot._controller.db_diagnostics_provider = _provider
+    bot._DB_DIAG_TIMEOUT_FULL_S = 0.05
+    bot._DB_DIAG_TIMEOUT_LITE_S = 0.1
+
+    diag = await bot._load_db_diag(lite=False)
+
+    assert diag["connected"] is True
+    assert diag["error"] == "db_diagnostics_timeout"
+    assert diag["full_diagnostics_timeout"] is True
+    assert diag["lite"] is True
+    assert diag["latest_model_version"] == {"version": "v-lite"}
+
+
+@pytest.mark.asyncio
 async def test_dashboard_action_canary_button_is_routed() -> None:
     bot = _make_bot()
     bot._db_diagnostics_provider = AsyncMock(return_value={"connected": True})

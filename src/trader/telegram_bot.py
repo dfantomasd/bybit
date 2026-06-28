@@ -1474,6 +1474,20 @@ class TelegramMonitorBot:
             return diag
         except TimeoutError:
             log.warning("telegram.db_diagnostics_timeout", lite=lite, timeout_s=timeout)
+            if not lite:
+                try:
+                    try:
+                        quick_coro = provider(lite=True)
+                    except TypeError:
+                        quick_coro = provider()
+                    quick = await asyncio.wait_for(quick_coro, timeout=self._DB_DIAG_TIMEOUT_LITE_S)
+                    quick["error"] = "db_diagnostics_timeout"
+                    quick["full_diagnostics_timeout"] = True
+                    quick["lite"] = True
+                    self._apply_db_diag_fallbacks(quick)
+                    return quick
+                except Exception as exc:
+                    log.debug("telegram.db_diagnostics_lite_fallback_failed", error=str(exc))
             diag = {
                 "connected": False,
                 "error": "db_diagnostics_timeout",
