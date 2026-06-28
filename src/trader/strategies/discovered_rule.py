@@ -132,11 +132,11 @@ def load_discovered_rules(
 
 
 def writable_discovered_rules_path(path: str | Path) -> Path:
-    """Return a safe local path for a generated strategy-lab report.
+    """Return a readable path for a strategy-lab report.
 
     Render envs sometimes keep documentation placeholders such as
     ``/path/to/strategy_lab.json``. Treat those as not operator intent and use
-    the app working directory instead.
+    the app working directory first, then fall back to the checked-in repo file.
     """
 
     raw = str(path or "").strip()
@@ -154,12 +154,22 @@ def writable_discovered_rules_path(path: str | Path) -> Path:
     return cwd_candidate
 
 
+def runtime_discovered_rules_path(path: str | Path) -> Path:
+    """Return the writable runtime path for generated strategy-lab reports."""
+
+    raw = str(path or "").strip()
+    if not raw or raw.startswith(_PLACEHOLDER_PATH_PREFIXES):
+        raw = "strategy_lab.json"
+    candidate = Path(raw).expanduser()
+    if candidate.is_absolute():
+        return candidate
+    return candidate
+
+
 def write_discovered_rules_failure_report(path: str | Path, *, error: Exception, stage: str) -> Path:
     """Persist a small diagnostic report so Telegram can explain generator failures."""
 
-    target = writable_discovered_rules_path(path)
-    if target.exists() and target.is_file():
-        return target
+    target = runtime_discovered_rules_path(path)
     payload = {
         "status": "auto_generate_failed",
         "rules": [],
@@ -185,7 +195,7 @@ async def auto_generate_discovered_rules_file(
 ) -> tuple[Path, dict[str, Any]]:
     """Generate a strategy-lab JSON report from DB outcomes with a hard timeout."""
 
-    target = writable_discovered_rules_path(path)
+    target = runtime_discovered_rules_path(path)
 
     async def _build() -> dict[str, Any]:
         from trader.strategy_lab.discover import build_strategy_lab_report_from_db

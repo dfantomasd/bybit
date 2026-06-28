@@ -10,6 +10,7 @@ from trader.domain.models import FeatureVector
 from trader.strategies.discovered_rule import (
     DiscoveredRuleStrategy,
     load_discovered_rules,
+    runtime_discovered_rules_path,
     writable_discovered_rules_path,
     write_discovered_rules_failure_report,
 )
@@ -123,6 +124,15 @@ def test_writable_discovered_rules_path_finds_repo_checked_in_file(monkeypatch, 
 
     assert resolved.name == "strategy_lab.json"
     assert resolved.exists()
+
+
+def test_runtime_discovered_rules_path_stays_in_working_directory(monkeypatch, tmp_path) -> None:
+    monkeypatch.chdir(tmp_path)
+
+    resolved = runtime_discovered_rules_path("strategy_lab.json")
+
+    assert resolved == tmp_path / "strategy_lab.json" or str(resolved) == "strategy_lab.json"
+    assert not resolved.is_absolute()
 
 
 def test_write_discovered_rules_failure_report_creates_diagnostic_json(tmp_path) -> None:

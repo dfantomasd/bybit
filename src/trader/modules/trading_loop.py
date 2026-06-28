@@ -246,6 +246,7 @@ class TradingLoopModule(AppBoundModule):
             )
 
             rules_path = writable_discovered_rules_path(self._app._settings.DISCOVERED_RULES_PATH)
+            configured_rules_path = self._app._settings.DISCOVERED_RULES_PATH
             discovered_rules = load_discovered_rules(
                 rules_path,
                 min_validation_count=self._app._settings.DISCOVERED_RULE_MIN_VALIDATION_COUNT,
@@ -255,7 +256,7 @@ class TradingLoopModule(AppBoundModule):
             if not discovered_rules and self._app._settings.DISCOVERED_RULE_AUTO_GENERATE:
                 try:
                     generated_path, report = await auto_generate_discovered_rules_file(
-                        rules_path,
+                        configured_rules_path,
                         horizon=self._app._settings.MODEL_AUTO_TRAIN_HORIZON_MINUTES,
                         min_samples=self._app._settings.DISCOVERED_RULE_AUTO_GENERATE_MIN_SAMPLES,
                         min_train_count=self._app._settings.DISCOVERED_RULE_AUTO_GENERATE_MIN_TRAIN_COUNT,
@@ -281,7 +282,7 @@ class TradingLoopModule(AppBoundModule):
                     )
                 except Exception as exc:
                     failure_path = write_discovered_rules_failure_report(
-                        rules_path,
+                        configured_rules_path,
                         error=exc,
                         stage="auto_generate",
                     )
