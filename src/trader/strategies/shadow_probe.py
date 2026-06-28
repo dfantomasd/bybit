@@ -93,6 +93,7 @@ class ShadowProbeStrategy(BaseStrategy):
         min_notional_buffer_pct: float = 3.0,
         cost_params: NetEdgeParams | None = None,
         sell_enabled: bool = False,
+        diag_hook: Callable[[str], None] | None = None,
     ) -> None:
         self._imbalance_provider = imbalance_provider
         self._instrument_info_provider = instrument_info_provider
@@ -117,6 +118,7 @@ class ShadowProbeStrategy(BaseStrategy):
         self._min_notional_buffer_pct = max(0.0, float(min_notional_buffer_pct))
         self._cost_params = cost_params
         self._sell_enabled = bool(sell_enabled)
+        self._diag_hook = diag_hook
         self._last_signal_at: dict[str, datetime] = {}
         self._signal_times: deque[datetime] = deque()
         self._burst_blocked_until: datetime | None = None
@@ -124,6 +126,19 @@ class ShadowProbeStrategy(BaseStrategy):
     @property
     def strategy_id(self) -> str:
         return SHADOW_PROBE_STRATEGY_ID
+
+    def _diag(self, reason: str, *, symbol: str | None = None, side: OrderSide | str | None = None) -> None:
+        if self._diag_hook is None:
+            return
+        try:
+            self._diag_hook(reason)
+            if symbol:
+                parts = [reason, symbol]
+                if side is not None:
+                    parts.append(side.value if isinstance(side, OrderSide) else str(side))
+                self._diag_hook(":".join(parts))
+        except Exception:
+            return
 
     def _cooldown_active(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
@@ -188,33 +203,53 @@ class ShadowProbeStrategy(BaseStrategy):
             return None
         now = datetime.now(tz=UTC)
         if self._open_positions_count is not None and self._open_positions_count() >= self._max_open_positions:
+            self._diag("shadow_probe_open_positions_limit", symbol=feature_vector.symbol)
             return None
         if self._burst_limited(now):
+            self._diag("shadow_probe_burst_limited", symbol=feature_vector.symbol)
             return None
         if self._symbol_allowed is not None and not self._symbol_allowed(feature_vector.symbol):
+            self._diag("shadow_probe_symbol_not_allowed", symbol=feature_vector.symbol)
             return None
         if self._regime_allows is not None and not self._regime_allows(feature_vector):
+            self._diag("shadow_probe_regime_blocked", symbol=feature_vector.symbol)
             return None
         if feature_vector.quality_score < self._min_quality:
+            self._diag("shadow_probe_low_quality", symbol=feature_vector.symbol)
             return None
         if self._cooldown_active(feature_vector.symbol):
+            self._diag("shadow_probe_cooldown", symbol=feature_vector.symbol)
             return None
 
         features = self._features(feature_vector)
         atr_pct = features.get("atr_14_pct")
         if atr_pct is None or atr_pct <= 0:
+            self._diag("shadow_probe_atr_missing", symbol=feature_vector.symbol)
             return None
         # Keep probes meaningful: avoid dead/noisy extremes but stay much wider
         # than live strategies so SHADOW accumulates paper outcomes.
         if atr_pct < 0.00025 or atr_pct > 0.04:
+            self._diag("shadow_probe_atr_out_of_range", symbol=feature_vector.symbol)
             return None
 
         side, reason = self._side_from_features(feature_vector, features)
         if side is None:
+            if "unavailable" in reason:
+                self._diag("shadow_probe_imbalance_missing", symbol=feature_vector.symbol)
+            elif "below threshold" in reason:
+                self._diag("shadow_probe_imbalance_weak", symbol=feature_vector.symbol)
+            elif "EMA confirmation unavailable" in reason:
+                self._diag("shadow_probe_ema_missing", symbol=feature_vector.symbol)
+            elif "book/EMA conflict" in reason:
+                self._diag("shadow_probe_book_ema_conflict", symbol=feature_vector.symbol)
+            else:
+                self._diag("shadow_probe_side_unresolved", symbol=feature_vector.symbol)
             return None
         if side == OrderSide.SELL and not self._sell_enabled:
+            self._diag("shadow_probe_sell_disabled", symbol=feature_vector.symbol, side=side)
             return None
         if self._side_blocked is not None and self._side_blocked(feature_vector.symbol, side.value):
+            self._diag("shadow_probe_side_blocked", symbol=feature_vector.symbol, side=side)
             return None
 
         sl_dist = max(float(atr_pct) * self._sl_atr_mult, self._min_sl_pct / 100.0)
@@ -224,6 +259,7 @@ class ShadowProbeStrategy(BaseStrategy):
             self._cost_params,
             self._min_net_return_pct,
         ):
+            self._diag("shadow_probe_net_edge_rejected", symbol=feature_vector.symbol, side=side)
             return None
 
         notional = min(self._max_notional_usd, max(5.0, available_balance_usd * 0.25))
@@ -235,10 +271,12 @@ class ShadowProbeStrategy(BaseStrategy):
                 info=info,
                 min_notional_buffer_pct=self._min_notional_buffer_pct,
             ):
+                self._diag("shadow_probe_min_notional_rejected", symbol=feature_vector.symbol, side=side)
                 return None
 
         qty = notional / current_price
         if qty <= 0:
+            self._diag("shadow_probe_qty_invalid", symbol=feature_vector.symbol, side=side)
             return None
 
         if side == OrderSide.BUY:

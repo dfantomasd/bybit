@@ -213,6 +213,7 @@ class TradingLoopModule(AppBoundModule):
                     min_notional_buffer_pct=self._app._settings.SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT,
                     cost_params=probe_cost_params,
                     sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
+                    diag_hook=self._app._record_diag,
                 )
             )
             log.info(

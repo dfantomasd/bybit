@@ -369,6 +369,39 @@ class DiagnosticsModule(AppBoundModule):
             "emitted": self.top_diag_details(hour_counts, "ensemble_emitted"),
             "confirmation_blocked": self.top_diag_details(hour_counts, "ensemble_confirmation_blocked"),
             "below_min_confidence": self.top_diag_details(hour_counts, "ensemble_below_min_confidence"),
+            "shadow_probe": sorted(
+                [
+                    {
+                        "reason": event,
+                        "symbol": None,
+                        "side": None,
+                        "count": int(count),
+                    }
+                    for event, count in hour_counts.items()
+                    if event.startswith("shadow_probe_") and ":" not in event
+                ],
+                key=lambda row: int(row["count"]),
+                reverse=True,
+            )[:12],
+            "shadow_probe_symbols": sorted(
+                [
+                    row
+                    for prefix in (
+                        "shadow_probe_symbol_not_allowed",
+                        "shadow_probe_imbalance_missing",
+                        "shadow_probe_imbalance_weak",
+                        "shadow_probe_ema_missing",
+                        "shadow_probe_book_ema_conflict",
+                        "shadow_probe_net_edge_rejected",
+                        "shadow_probe_min_notional_rejected",
+                        "shadow_probe_cooldown",
+                        "shadow_probe_regime_blocked",
+                    )
+                    for row in self.top_diag_details(hour_counts, prefix, limit=12)
+                ],
+                key=lambda row: int(row["count"]),
+                reverse=True,
+            )[:12],
         }
 
         ws_age: float | None = None

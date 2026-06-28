@@ -55,6 +55,12 @@ def test_shadow_probe_symbol_allowed_uses_eligible_set() -> None:
     assert policy.shadow_probe_symbol_allowed("DOGEUSDT") is False
 
 
+def test_shadow_probe_empty_eligible_set_is_warmup_not_block_all() -> None:
+    policy = _policy_module(eligible=set())
+
+    assert policy.shadow_probe_symbol_allowed("DOGEUSDT") is True
+
+
 def test_compute_shadow_probe_eligible_symbols_returns_top_n() -> None:
     stats = {
         "XRPUSDT": (4.0, 10),

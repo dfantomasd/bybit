@@ -87,20 +87,26 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
 
 
 def test_shadow_probe_rejects_ema_only_without_obi() -> None:
-    strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: None)
+    rejections: list[str] = []
+    strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: None, diag_hook=rejections.append)
 
     proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=2.0, available_balance_usd=25.0)
 
     assert proposal is None
+    assert "shadow_probe_imbalance_missing" in rejections
+    assert "shadow_probe_imbalance_missing:XRPUSDT" in rejections
 
 
 def test_shadow_probe_requires_obi_above_threshold() -> None:
+    rejections: list[str] = []
     strategy = ShadowProbeStrategy(
         imbalance_provider=lambda _symbol: 0.05,
         min_abs_imbalance=0.08,
+        diag_hook=rejections.append,
     )
 
     assert strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
+    assert "shadow_probe_imbalance_weak:XRPUSDT" in rejections
 
 
 def test_shadow_probe_cooldown_suppresses_duplicate_symbol() -> None:
@@ -112,14 +118,17 @@ def test_shadow_probe_cooldown_suppresses_duplicate_symbol() -> None:
 
 
 def test_shadow_probe_blocks_book_ema_conflict() -> None:
-    strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: -0.08)
+    rejections: list[str] = []
+    strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: -0.08, diag_hook=rejections.append)
 
     proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=1.0, available_balance_usd=25.0)
 
     assert proposal is None
+    assert "shadow_probe_book_ema_conflict:XRPUSDT" in rejections
 
 
 def test_shadow_probe_rejects_weak_net_edge() -> None:
+    rejections: list[str] = []
     cost_params = NetEdgeParams(
         taker_fee_pct=0.11,
         expected_slippage_pct=0.06,
@@ -133,11 +142,13 @@ def test_shadow_probe_rejects_weak_net_edge() -> None:
         min_sl_pct=0.05,
         min_net_return_pct=0.50,
         cost_params=cost_params,
+        diag_hook=rejections.append,
     )
 
     proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
 
     assert proposal is None
+    assert "shadow_probe_net_edge_rejected:XRPUSDT:Buy" in rejections
 
 
 def test_shadow_probe_skips_symbol_failing_min_notional() -> None:

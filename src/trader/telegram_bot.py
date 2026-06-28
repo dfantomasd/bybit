@@ -2652,7 +2652,7 @@ class TelegramMonitorBot:
         for item in items[:max_rows]:
             if not isinstance(item, dict):
                 continue
-            strategy_id = html.escape(str(item.get("symbol") or "?"))
+            strategy_id = html.escape(str(item.get("symbol") or item.get("reason") or "?"))
             count = int(item.get("count") or 0)
             rows.append(f"  - <code>{strategy_id}</code>: <code>{count}</code>")
         return rows
@@ -2690,6 +2690,8 @@ class TelegramMonitorBot:
             ("Ансамбль выпустил сигнал", strategy_details.get("emitted")),
             ("Блок confirmation", strategy_details.get("confirmation_blocked")),
             ("Ниже min confidence", strategy_details.get("below_min_confidence")),
+            ("Shadow probe причины", strategy_details.get("shadow_probe")),
+            ("Shadow probe по символам", strategy_details.get("shadow_probe_symbols")),
         ]
         any_strategy_rows = False
         for title, items in strategy_sections:

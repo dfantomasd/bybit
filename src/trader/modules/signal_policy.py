@@ -489,6 +489,12 @@ class SignalPolicyModule(AppBoundModule):
         eligible = self._app._shadow_probe_eligible_symbols
         if eligible is None:
             return True
+        if len(eligible) == 0:
+            # Empty means the stats refresher has no mature per-symbol probe
+            # winners yet. Treat it as warmup, otherwise paper collection can
+            # deadlock forever: no eligible symbols -> no probe trades -> no
+            # symbol stats -> still no eligible symbols.
+            return True
         return symbol in eligible
 
     def record_shadow_probe_symbol_subscribed(self, symbols: list[str]) -> None:
