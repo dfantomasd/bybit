@@ -3688,6 +3688,15 @@ class TelegramMonitorBot:
                     model_metrics = json.loads(model_metrics)
                 except json.JSONDecodeError:
                     model_metrics = {}
+
+            def _metric_float(value: Any) -> float | None:
+                if value is None:
+                    return None
+                try:
+                    return float(value)
+                except (TypeError, ValueError):
+                    return None
+
             champion_ver = model_info.get("champion_version", "none")
             challenger_ver = model_info.get("challenger_version", "none")
             last_training = model_info.get("last_training", "never")
@@ -3716,6 +3725,13 @@ class TelegramMonitorBot:
             precision = model_metrics.get("precision")
             lift_bps = model_metrics.get("lift_bps")
             expectancy_bps = model_metrics.get("walk_forward_expectancy_bps")
+            raw_expectancy_bps = _metric_float(model_metrics.get("raw_wf_mean_bps"))
+            selected_sides = model_metrics.get("selected_sides") or []
+            selected_sides_str = (
+                ", ".join(html.escape(str(side)) for side in selected_sides if str(side).strip()) or "нет"
+            )
+            side_filter = model_metrics.get("side_filter") or {}
+            side_filter_reason = html.escape(str(side_filter.get("reason") or "n/a"))
             best_threshold = model_metrics.get("best_threshold")
             best_threshold_avg = model_metrics.get("best_threshold_avg_net_return_bps")
             precision_str = f"{float(precision):.1%}" if precision is not None else "n/a"
@@ -3903,6 +3919,10 @@ class TelegramMonitorBot:
                 f"Улучшение против baseline: <code>{lift_str}</code>",
                 f"Лучший порог модели: <code>{best_threshold_str}</code>, среднее=<code>{best_threshold_avg_str}</code>",
                 f"Ожидание walk-forward: <code>{expectancy_str if expectancy_bps is not None else wf_exp}</code>",
+                f"Side-filter: <code>{selected_sides_str}</code>",
+                "WF до side-filter: <code>"
+                + (f"{raw_expectancy_bps:+.2f} bps" if raw_expectancy_bps is not None else "n/a")
+                + f"</code>, причина=<code>{side_filter_reason}</code>",
                 f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} resolved пропущено</code>, "
                 f"блок=<code>{gate_block}</code>, observed=<code>{gate_observed}</code>, pending=<code>{gate_pending}</code>",
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",

@@ -1091,7 +1091,15 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
                 "version": "v5",
                 "status": "SHADOW_CHALLENGER",
                 "training_samples": 1234,
-                "metrics": {"quality": "GOOD", "horizon_minutes": 5, "lift_bps": 1.2},
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "lift_bps": 1.2,
+                    "walk_forward_expectancy_bps": 4.0,
+                    "raw_wf_mean_bps": -8.0,
+                    "selected_sides": ["Sell"],
+                    "side_filter": {"reason": "positive_out_of_sample_side_expectancy"},
+                },
             },
             "model_gate_horizon_minutes": 5,
             "shadow_gate_by_horizon": {
@@ -1124,5 +1132,8 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
     assert "trainable=<code>best_sch</code>" in reply_text
     assert "best schema 1234" in reply_text
     assert "Фильтр модели 5m" in reply_text
+    assert "Side-filter: <code>Sell</code>" in reply_text
+    assert "WF до side-filter: <code>-8.00 bps</code>" in reply_text
+    assert "positive_out_of_sample_side_expectancy" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text
