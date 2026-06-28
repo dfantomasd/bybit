@@ -126,6 +126,9 @@ class TelegramBridgeModule(AppBoundModule):
                             diag.get("label_schema_version")
                             or getattr(self._app._settings, "LABEL_SCHEMA_VERSION", "directional_net_v2")
                         )
+                        active_schema_hash = (
+                            str(active_model.get("feature_schema_hash") or "") if isinstance(active_model, dict) else ""
+                        )
                         if active_version and hasattr(self._app._trade_journal, "get_shadow_gate_stats"):
                             gate = await asyncio.wait_for(
                                 self._app._trade_journal.get_shadow_gate_stats(
@@ -135,13 +138,33 @@ class TelegramBridgeModule(AppBoundModule):
                                 ),
                                 timeout=5.0,
                             )
+                            gate_event_counter = getattr(self._app._trade_journal, "get_shadow_gate_event_counts", None)
+                            if gate_event_counter is not None:
+                                gate_events = await asyncio.wait_for(
+                                    gate_event_counter(
+                                        active_version,
+                                        horizon,
+                                        label_schema,
+                                    ),
+                                    timeout=5.0,
+                                )
+                                if gate_events:
+                                    gate["event_total_count"] = int(gate_events.get("total_count", 0) or 0)
+                                    gate["event_resolved_count"] = int(gate_events.get("resolved_count", 0) or 0)
+                                    gate["event_pending_count"] = int(gate_events.get("pending_count", 0) or 0)
+                                    gate["event_pass_count"] = int(gate_events.get("pass_count", 0) or 0)
+                                    gate["event_block_count"] = int(gate_events.get("block_count", 0) or 0)
                             gate["horizon_minutes"] = horizon
                             diag["shadow_gate_by_horizon"] = {str(horizon): gate}
                             diag[f"shadow_gate_{horizon}m"] = gate
                             diag["shadow_gate_15m"] = gate
                         if active_version and hasattr(self._app._trade_journal, "_paper_pnl_for_model"):
                             paper = await asyncio.wait_for(
-                                self._app._trade_journal._paper_pnl_for_model(active_version, horizon, ""),
+                                self._app._trade_journal._paper_pnl_for_model(
+                                    active_version,
+                                    horizon,
+                                    active_schema_hash,
+                                ),
                                 timeout=5.0,
                             )
                             diag["paper_pnl_by_horizon"] = {str(horizon): paper}
