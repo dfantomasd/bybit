@@ -57,6 +57,7 @@ def test_model_selection_prefers_explicit_paper_gate_over_walk_forward_pass() ->
 
 def test_selection_reason_distinguishes_missing_and_immature_evidence() -> None:
     assert selection_reason({}) == "fallback:no_walk_forward"
+    assert selection_reason({"walk_forward_expectancy_bps": -5.5}).startswith("rejected:negative_walk_forward")
     assert (
         selection_reason({"walk_forward_expectancy_bps": 2.0, "paper_gate": {"count": 12}})
         == "blocked:paper_gate_count<50"

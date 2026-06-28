@@ -376,9 +376,16 @@ def _evaluate_model(
 
     quality = "INSUFFICIENT_VALIDATION"
     if len(x_val) >= 100:
-        good_default = precision > positive_rate and lift_bps is not None and lift_bps > 0
+        good_default = (
+            precision > positive_rate
+            and lift_bps is not None
+            and lift_bps > 0
+            and avg_predicted_positive is not None
+            and avg_predicted_positive > 0
+        )
         good_best_threshold = (
             best_threshold_avg_bps is not None
+            and best_threshold_avg_bps > 0
             and best_threshold_avg_bps > avg_all
             and best_threshold_pass_rate is not None
             and best_threshold_pass_rate >= 0.05

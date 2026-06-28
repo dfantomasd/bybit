@@ -103,8 +103,8 @@ def selection_reason(metrics: dict[str, Any], *, min_paper_gate_count: int = 50)
     paper_count = int(normalized["paper_gate_count"] or 0)
     if wf_bps is None:
         return "fallback:no_walk_forward"
+    if float(wf_bps) <= 0:
+        return f"rejected:negative_walk_forward:{float(wf_bps):.2f}"
     if paper_count < min_paper_gate_count:
         return f"blocked:paper_gate_count<{min_paper_gate_count}"
-    if float(wf_bps) > 0:
-        return "selected:positive_walk_forward_lift"
-    return "selected:least_negative_walk_forward"
+    return "selected:positive_walk_forward_lift"
