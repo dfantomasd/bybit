@@ -2976,6 +2976,13 @@ class TelegramMonitorBot:
             f"pending=<code>{int((shadow_gate or {}).get('event_pending_count') or 0)}</code>, "
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
+            "",
+            "<b>Strategy signal pipeline</b>",
+            f"• Emitted за час: <code>{hour_signals}</code>; "
+            f"risk rejects: <code>{int(runtime_diag.get('hour_risk_rejected') or 0) if isinstance(runtime_diag, dict) else 0}</code>; "
+            f"in-memory last signals: <code>{len(signal_rows)}</code>/20",
+            "• Если emitted &gt; 0, а Strategy paper/Shadow closes ещё 0 — это обычно значит: "
+            f"ждём TP/SL/TIME или {model_horizon}m outcome; следующий отчёт должен показать resolved/pending.",
         ]
         runtime_explainers = self._render_runtime_explainers(runtime_diag if isinstance(runtime_diag, dict) else {})
         if runtime_explainers:
@@ -3143,15 +3150,26 @@ class TelegramMonitorBot:
                 return None
 
         training_by_horizon = db_diag.get("training_eligible_by_horizon", {}) or {}
-        trainable_model_horizon = int(
+        db_diag_timed_out = bool(
+            db_diag.get("full_diagnostics_timeout") or db_diag.get("error") == "db_diagnostics_timeout"
+        )
+
+        def _optional_int(value: Any) -> int | None:
+            if value is None:
+                return None
+            try:
+                return int(value)
+            except (TypeError, ValueError):
+                return None
+
+        trainable_model_horizon = _optional_int(
             training_by_horizon.get(
                 str(model_horizon),
                 db_diag.get("training_eligible_15m", db_diag.get("labelled_samples_15m")),
             )
-            or 0
         )
-        prediction_outcomes = int(db_diag.get("prediction_outcomes") or 0)
-        feature_snapshots = int(db_diag.get("feature_snapshots") or 0)
+        prediction_outcomes = _optional_int(db_diag.get("prediction_outcomes"))
+        feature_snapshots = _optional_int(db_diag.get("feature_snapshots"))
         gate_total = int(gate.get("total_count") or 0)
         gate_lift = _as_float(gate.get("lift_vs_all_bps"))
         paper_gate_count = int(paper_gate.get("count") or 0)
@@ -3231,24 +3249,42 @@ class TelegramMonitorBot:
         )
         require(
             "Снимки признаков",
-            feature_snapshots >= 1000,
-            f"{feature_snapshots}/1000 снимков",
-            "Оставьте SHADOW включенным; бот будет сохранять признаки на каждом цикле стратегии.",
-            self._eta_for_samples(1000 - feature_snapshots, active_count * 240),
+            feature_snapshots is not None and feature_snapshots >= 1000,
+            f"{feature_snapshots}/1000 снимков"
+            if feature_snapshots is not None
+            else "н/д — DB diagnostics timeout, не считаю как 0",
+            "Оставьте SHADOW включенным; бот будет сохранять признаки на каждом цикле стратегии."
+            if feature_snapshots is not None
+            else "Повторите отчёт позже или проверьте pgbouncer/POSTGRES_DSN: быстрый отчёт не успел прочитать счётчик.",
+            self._eta_for_samples(1000 - feature_snapshots, active_count * 240)
+            if feature_snapshots is not None
+            else "",
         )
         require(
             f"Размеченные примеры {model_horizon}m",
-            trainable_model_horizon >= 1000,
-            f"{trainable_model_horizon}/1000 примеров",
-            f"Дождитесь закрытия {model_horizon}m исходов или загрузите историю свечей backfill, затем запустите обучение.",
-            self._eta_for_samples(1000 - trainable_model_horizon, active_count * 4),
+            trainable_model_horizon is not None and trainable_model_horizon >= 1000,
+            f"{trainable_model_horizon}/1000 примеров"
+            if trainable_model_horizon is not None
+            else "н/д — DB diagnostics timeout, не считаю как 0",
+            f"Дождитесь закрытия {model_horizon}m исходов или загрузите историю свечей backfill, затем запустите обучение."
+            if trainable_model_horizon is not None
+            else "Повторите отчёт позже: полный DB-блок не успел посчитать training eligibility.",
+            self._eta_for_samples(1000 - trainable_model_horizon, active_count * 4)
+            if trainable_model_horizon is not None
+            else "",
         )
         require(
             "Результаты прогнозов",
-            prediction_outcomes >= 1000,
-            f"{prediction_outcomes}/1000 исходов",
-            f"Проверьте задачу outcome-resolver: она должна сопоставлять сигналы с результатом через {model_horizon} минут.",
-            self._eta_for_samples(1000 - prediction_outcomes, active_count * 4),
+            prediction_outcomes is not None and prediction_outcomes >= 1000,
+            f"{prediction_outcomes}/1000 исходов"
+            if prediction_outcomes is not None
+            else "н/д — DB diagnostics timeout, не считаю как 0",
+            f"Проверьте задачу outcome-resolver: она должна сопоставлять сигналы с результатом через {model_horizon} минут."
+            if prediction_outcomes is not None
+            else "Повторите отчёт позже: полный DB-блок не успел посчитать prediction outcomes.",
+            self._eta_for_samples(1000 - prediction_outcomes, active_count * 4)
+            if prediction_outcomes is not None
+            else "",
         )
         require(
             "Модель обучена",
@@ -3327,9 +3363,14 @@ class TelegramMonitorBot:
         )
 
         warn_if(
-            trainable_model_horizon < 2000,
+            trainable_model_horizon is not None and trainable_model_horizon < 2000,
             f"Размеченных {model_horizon}m примеров {trainable_model_horizon}; для более уверенного CANARY лучше 2000+.",
             "Можно начать с 1000 для первого кандидата, но перед реальными деньгами лучше добрать данные.",
+        )
+        warn_if(
+            db_diag_timed_out,
+            "Полная DB-диагностика не успела ответить; часть счётчиков показана как н/д, а не как 0.",
+            "Это не торговый стоппер само по себе, но для анализа лучше повторить отчёт или проверить медленные SQL/pgbouncer.",
         )
         warn_if(
             paper_base_count == 0,
