@@ -270,6 +270,19 @@ def test_canary_gate_scores_side_aware_model_features() -> None:
     assert "self._app._model_registry.score_live(vec.values, vec.feature_names)" not in src
 
 
+def test_shadow_probe_pre_gate_uses_live_like_edge_hurdle() -> None:
+    import inspect
+
+    from trader.modules.trading_loop import TradingLoopModule
+
+    src = inspect.getsource(TradingLoopModule.start)
+    assert "safety_margin_pct=self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT" in src
+    assert "probe_min_net_return_pct = max(" in src
+    assert "self._app._settings.MIN_EXPECTED_NET_EDGE_PCT" in src
+    assert "min_net_return_pct=probe_min_net_return_pct" in src
+    assert "safety_margin_pct=0.01" not in src
+
+
 def test_enabled_canary_gate_fails_closed_without_compatible_champion() -> None:
     import inspect
 

@@ -152,7 +152,11 @@ class TradingLoopModule(AppBoundModule):
                 expected_slippage_pct=self._app._settings.EXPECTED_SLIPPAGE_PCT,
                 max_spread_bps=self._app._settings.SCREENER_MAX_SPREAD_BPS,
                 funding_buffer_pct=self._app._settings.FUNDING_BUFFER_PCT,
-                safety_margin_pct=0.01,
+                safety_margin_pct=self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT,
+            )
+            probe_min_net_return_pct = max(
+                self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                self._app._settings.MIN_EXPECTED_NET_EDGE_PCT,
             )
 
             def _probe_symbol_allowed(symbol: str) -> bool:
@@ -205,7 +209,7 @@ class TradingLoopModule(AppBoundModule):
                     max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                     min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                     min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
-                    min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                    min_net_return_pct=probe_min_net_return_pct,
                     min_notional_buffer_pct=self._app._settings.SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT,
                     cost_params=probe_cost_params,
                     sell_enabled=self._app._settings.SHADOW_PROBE_SELL_ENABLED,
@@ -225,7 +229,7 @@ class TradingLoopModule(AppBoundModule):
                 max_notional_usd=self._app._settings.SHADOW_PROBE_MAX_NOTIONAL_USD,
                 min_tp_pct=self._app._settings.SHADOW_PROBE_MIN_TP_PCT,
                 min_sl_pct=self._app._settings.SHADOW_PROBE_MIN_SL_PCT,
-                min_net_return_pct=self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                min_net_return_pct=probe_min_net_return_pct,
                 symbol_top_n=self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N,
                 symbol_warmup_seconds=self._app._settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS,
                 max_open_positions=probe_max_open_positions,
