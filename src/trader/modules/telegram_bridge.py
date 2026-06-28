@@ -106,11 +106,13 @@ class TelegramBridgeModule(AppBoundModule):
                         diag["full_diagnostics_timeout"] = True
                     except Exception as exc:
                         log.debug("db_diagnostics_quick_fallback_failed", error=str(exc))
-                    try:
-                        active_model = diag.get("active_model_version") or diag.get("latest_model_version") or {}
-                        active_version = (
-                            str(active_model.get("version") or "") if isinstance(active_model, dict) else ""
-                        )
+                    active_model = diag.get("active_model_version") or diag.get("latest_model_version") or {}
+                    active_version = str(active_model.get("version") or "") if isinstance(active_model, dict) else ""
+                    if not active_version:
+                        latest_model = diag.get("latest_model_version") or {}
+                        active_version = str(latest_model.get("version") or "") if isinstance(latest_model, dict) else ""
+                    if active_version:
+                        gate: dict[str, Any] = {"model_version": active_version}
                         metrics = active_model.get("metrics") if isinstance(active_model, dict) else {}
                         if isinstance(metrics, str):
                             import json as _json
@@ -129,17 +131,10 @@ class TelegramBridgeModule(AppBoundModule):
                         active_schema_hash = (
                             str(active_model.get("feature_schema_hash") or "") if isinstance(active_model, dict) else ""
                         )
-                        if active_version and hasattr(self._app._trade_journal, "get_shadow_gate_stats"):
-                            gate = await asyncio.wait_for(
-                                self._app._trade_journal.get_shadow_gate_stats(
-                                    active_version,
-                                    horizon,
-                                    label_schema,
-                                ),
-                                timeout=5.0,
-                            )
-                            gate_event_counter = getattr(self._app._trade_journal, "get_shadow_gate_event_counts", None)
-                            if gate_event_counter is not None:
+
+                        gate_event_counter = getattr(self._app._trade_journal, "get_shadow_gate_event_counts", None)
+                        if gate_event_counter is not None:
+                            try:
                                 gate_events = await asyncio.wait_for(
                                     gate_event_counter(
                                         active_version,
@@ -154,24 +149,45 @@ class TelegramBridgeModule(AppBoundModule):
                                     gate["event_pending_count"] = int(gate_events.get("pending_count", 0) or 0)
                                     gate["event_pass_count"] = int(gate_events.get("pass_count", 0) or 0)
                                     gate["event_block_count"] = int(gate_events.get("block_count", 0) or 0)
+                            except Exception as exc:
+                                gate["event_error"] = str(exc) or exc.__class__.__name__
+
+                        if hasattr(self._app._trade_journal, "get_shadow_gate_stats"):
+                            try:
+                                resolved_gate = await asyncio.wait_for(
+                                    self._app._trade_journal.get_shadow_gate_stats(
+                                        active_version,
+                                        horizon,
+                                        label_schema,
+                                    ),
+                                    timeout=5.0,
+                                )
+                                if isinstance(resolved_gate, dict):
+                                    gate.update(resolved_gate)
+                            except Exception as exc:
+                                gate["resolved_error"] = str(exc) or exc.__class__.__name__
+
+                        if len(gate) > 1:
                             gate["horizon_minutes"] = horizon
                             diag["shadow_gate_by_horizon"] = {str(horizon): gate}
                             diag[f"shadow_gate_{horizon}m"] = gate
                             diag["shadow_gate_15m"] = gate
-                        if active_version and hasattr(self._app._trade_journal, "_paper_pnl_for_model"):
-                            paper = await asyncio.wait_for(
-                                self._app._trade_journal._paper_pnl_for_model(
-                                    active_version,
-                                    horizon,
-                                    active_schema_hash,
-                                ),
-                                timeout=5.0,
-                            )
-                            diag["paper_pnl_by_horizon"] = {str(horizon): paper}
-                            diag[f"paper_pnl_{horizon}m"] = paper
-                            diag["paper_pnl_15m"] = paper
-                    except Exception as exc:
-                        log.debug("db_diagnostics_paper_fallback_failed", error=str(exc))
+
+                        if hasattr(self._app._trade_journal, "_paper_pnl_for_model"):
+                            try:
+                                paper = await asyncio.wait_for(
+                                    self._app._trade_journal._paper_pnl_for_model(
+                                        active_version,
+                                        horizon,
+                                        active_schema_hash,
+                                    ),
+                                    timeout=5.0,
+                                )
+                                diag["paper_pnl_by_horizon"] = {str(horizon): paper}
+                                diag[f"paper_pnl_{horizon}m"] = paper
+                                diag["paper_pnl_15m"] = paper
+                            except Exception as exc:
+                                diag["paper_pnl_error"] = str(exc) or exc.__class__.__name__
                 self._app._modules.diagnostics.merge_db_fallbacks(diag)
                 return diag
 
