@@ -186,7 +186,7 @@ class TestExecutionEngine:
         assert engine.has_open_position("BTCUSDT")
 
     @pytest.mark.asyncio
-    async def test_shadow_probe_bypasses_strict_shadow_net_edge_gate(self):
+    async def test_shadow_probe_obeys_strict_shadow_net_edge_gate(self):
         engine = _make_engine(approved=True, shadow_mode=True, shadow_apply_net_edge_gate=True)
         proposal = _proposal().model_copy(
             update={
@@ -202,9 +202,10 @@ class TestExecutionEngine:
             available_balance=Decimal("10000"),
         )
 
-        assert decision is not None
-        assert decision.status == RiskDecisionStatus.APPROVED
-        assert engine.get_diag_counts()["shadow_order_would_be_placed"] == 1
+        assert decision is None
+        counts = engine.get_diag_counts()
+        assert counts["net_edge_rejected"] == 1
+        assert counts["shadow_order_would_be_placed"] == 0
 
     @pytest.mark.asyncio
     async def test_shadow_order_event_recorded_in_trade_journal(self):

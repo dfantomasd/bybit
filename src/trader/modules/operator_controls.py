@@ -251,7 +251,11 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_paper_regimes": (
                 self._app._settings.SHADOW_PROBE_PAPER_REGIMES if self._app._settings is not None else None
             ),
-            "shadow_probe_bypasses_live_edge_gate": True,
+            "shadow_probe_bypasses_live_edge_gate": not (
+                self._app._execution_engine._shadow_apply_net_edge_gate
+                if self._app._execution_engine is not None
+                else self._app._scalp_strict_shadow()
+            ),
             "shadow_probe_min_net_return_pct": (
                 self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT if self._app._settings is not None else None
             ),

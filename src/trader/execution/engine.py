@@ -1173,7 +1173,12 @@ class ExecutionEngine:
         exposure_reserved = True
 
         # 5b. Cost-aware entry gate (LIVE, or SCALP strict shadow) ─────────
-        apply_net_edge_gate = ((not self._shadow_mode) or self._shadow_apply_net_edge_gate) and not shadow_probe
+        # SHADOW probes are research-only, but when strict shadow economics are
+        # enabled they must still pass the same live-like net-edge gate. Without
+        # this, probe paper trades can keep accumulating known negative-edge
+        # outcomes and make readiness metrics look worse than the deployable
+        # policy would be.
+        apply_net_edge_gate = (not self._shadow_mode) or self._shadow_apply_net_edge_gate
         if apply_net_edge_gate:
             # Fail-closed: TP required for LIVE entries
             if proposal.take_profit is None:

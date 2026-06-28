@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -77,3 +78,55 @@ async def test_set_shadow_mode_updates_settings_and_engine() -> None:
 def test_hammer_score_can_reach_one() -> None:
     bar = _Bar(open=100.0, high=101.0, low=90.0, close=100.5)
     assert score_hammer(bar) >= 0.9
+
+
+def test_runtime_settings_reports_probe_edge_gate_when_strict_shadow() -> None:
+    app = MagicMock()
+    app._trading_paused = False
+    app._current_risk_profile_str = "scalp"
+    app._model_gate_quality = None
+    app._shadow_probe_eligible_symbols = set()
+    app._shadow_probe_side_stats = {}
+    app._scalp_strict_shadow.return_value = True
+    app._execution_engine = SimpleNamespace(
+        _shadow_mode=True,
+        _shadow_apply_net_edge_gate=True,
+        _max_entries_per_minute=1,
+        _max_concurrent_pending=1,
+        _max_same_side=1,
+        _max_open_positions=1,
+    )
+    app._screener = SimpleNamespace(
+        _feature_max=3,
+        _exec_candidates=3,
+        manual_symbols=[],
+    )
+    app._settings = SimpleNamespace(
+        MAX_POSITIONS=1,
+        SCREENER_MAX_PRICE_USD=25.0,
+        MODEL_GATE_CANARY_ENABLED=False,
+        MODEL_SHADOW_GATE_THRESHOLD=0.55,
+        MIN_EXPECTED_NET_EDGE_PCT=0.25,
+        NET_EDGE_SAFETY_MARGIN_PCT=0.05,
+        SHADOW_PROBE_ENABLED=True,
+        SHADOW_PROBE_PAPER_COLLECTION_MODE=True,
+        SHADOW_PROBE_PAPER_REGIMES="SIDEWAYS",
+        SHADOW_PROBE_MIN_NET_RETURN_PCT=0.12,
+        SHADOW_PROBE_SYMBOL_TOP_N=10,
+        SHADOW_PROBE_SYMBOL_WARMUP_SECONDS=60,
+        SHADOW_PROBE_SELL_ENABLED=True,
+        SHADOW_PROBE_SIDE_BLOCK_ENABLED=False,
+        SHADOW_PROBE_SIDE_MIN_SAMPLES=8,
+        SHADOW_PROBE_SIDE_BLOCK_AVG_BPS=-3.0,
+        MODEL_AUTO_TRAIN_MIN_SAMPLES=1000,
+        MODEL_AUTO_TRAIN_HORIZON_MINUTES=5,
+        MODEL_AUTO_TRAIN_LABEL_BPS=2.0,
+        MODEL_LABEL_USE_TPSL_EXIT=True,
+        STRATEGY_PRIORITY_ORDER="",
+        SCALP_STRATEGY_PRIORITY_ORDER="",
+    )
+
+    settings = OperatorControlsModule(app).runtime_settings()
+
+    assert settings["shadow_apply_net_edge_gate"] is True
+    assert settings["shadow_probe_bypasses_live_edge_gate"] is False
