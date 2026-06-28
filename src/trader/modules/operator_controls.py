@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import html
+import json
 from decimal import Decimal
+from pathlib import Path
 from typing import Any, cast
 
 from trader.domain.enums import TradingMode
@@ -29,6 +31,30 @@ class OperatorControlsModule(AppBoundModule):
 
     async def _run_model_training_all(self) -> None:
         await self._app._modules.training.run_model_training_all()
+
+    @staticmethod
+    def _strategy_lab_summary(path: str | None) -> dict[str, Any] | None:
+        if not path:
+            return None
+        try:
+            rule_path = Path(path).expanduser()
+            if not rule_path.exists():
+                return {"exists": False, "path": str(rule_path)}
+            payload = json.loads(rule_path.read_text(encoding="utf-8"))
+            rules = list(payload.get("rules") or []) if isinstance(payload, dict) else []
+            return {
+                "exists": True,
+                "path": str(rule_path),
+                "status": payload.get("status") if isinstance(payload, dict) else None,
+                "sample_count": payload.get("sample_count") if isinstance(payload, dict) else None,
+                "rule_count": len(rules),
+                "top_rule": rules[0].get("rule_id") if rules and isinstance(rules[0], dict) else None,
+                "top_validation_avg_net_bps": (
+                    rules[0].get("validation_avg_net_bps") if rules and isinstance(rules[0], dict) else None
+                ),
+            }
+        except Exception as exc:
+            return {"exists": None, "path": str(path), "error": f"{type(exc).__name__}: {exc}"}
 
     def _active_execution_allowed(self) -> bool:
         return self._app._modules.signal_policy.active_execution_allowed()
@@ -295,6 +321,11 @@ class OperatorControlsModule(AppBoundModule):
             ),
             "discovered_rules_path": (
                 getattr(self._app._settings, "DISCOVERED_RULES_PATH", None) if self._app._settings is not None else None
+            ),
+            "discovered_rules_file": (
+                self._strategy_lab_summary(getattr(self._app._settings, "DISCOVERED_RULES_PATH", None))
+                if self._app._settings is not None
+                else None
             ),
             "discovered_rule_auto_generate": (
                 getattr(self._app._settings, "DISCOVERED_RULE_AUTO_GENERATE", None)

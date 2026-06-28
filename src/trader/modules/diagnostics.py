@@ -369,6 +369,33 @@ class DiagnosticsModule(AppBoundModule):
             "emitted": self.top_diag_details(hour_counts, "ensemble_emitted"),
             "confirmation_blocked": self.top_diag_details(hour_counts, "ensemble_confirmation_blocked"),
             "below_min_confidence": self.top_diag_details(hour_counts, "ensemble_below_min_confidence"),
+            "discovered_rule": sorted(
+                [
+                    {
+                        "reason": event,
+                        "symbol": None,
+                        "side": None,
+                        "count": int(count),
+                    }
+                    for event, count in hour_counts.items()
+                    if event.startswith("discovered_rule_") and ":" not in event
+                ],
+                key=lambda row: int(row["count"]),
+                reverse=True,
+            )[:12],
+            "discovered_rule_symbols": sorted(
+                [
+                    row
+                    for prefix in (
+                        "discovered_rule_no_rules",
+                        "discovered_rule_no_match",
+                        "discovered_rule_match",
+                    )
+                    for row in self.top_diag_details(hour_counts, prefix, limit=12)
+                ],
+                key=lambda row: int(row["count"]),
+                reverse=True,
+            )[:12],
             "shadow_probe": sorted(
                 [
                     {

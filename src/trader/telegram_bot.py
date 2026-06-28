@@ -2690,6 +2690,8 @@ class TelegramMonitorBot:
             ("Ансамбль выпустил сигнал", strategy_details.get("emitted")),
             ("Блок confirmation", strategy_details.get("confirmation_blocked")),
             ("Ниже min confidence", strategy_details.get("below_min_confidence")),
+            ("Discovered-rule статус", strategy_details.get("discovered_rule")),
+            ("Discovered-rule по символам", strategy_details.get("discovered_rule_symbols")),
             ("Shadow probe причины", strategy_details.get("shadow_probe")),
             ("Shadow probe по символам", strategy_details.get("shadow_probe_symbols")),
         ]
