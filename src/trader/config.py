@@ -838,7 +838,8 @@ class Settings(BaseSettings):
             # subprocess) regardless of stale deployment overrides.
             # Include basic ensemble strategies so their signals feed training
             # data and speed up schema-change sample accumulation.
-            self.SHADOW_PROBE_MIN_TP_PCT = 0.45
+            self.SHADOW_PROBE_MIN_ABS_IMBALANCE = 0.04
+            self.SHADOW_PROBE_MIN_TP_PCT = 0.60
             self.SHADOW_PROBE_MIN_SL_PCT = 0.25
             self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
             self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60

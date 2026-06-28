@@ -259,6 +259,24 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_min_net_return_pct": (
                 self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT if self._app._settings is not None else None
             ),
+            "shadow_probe_effective_min_net_return_pct": (
+                max(
+                    self._app._settings.SHADOW_PROBE_MIN_NET_RETURN_PCT,
+                    self._app._settings.MIN_EXPECTED_NET_EDGE_PCT,
+                )
+                if self._app._settings is not None
+                else None
+            ),
+            "shadow_probe_min_abs_imbalance": (
+                getattr(self._app._settings, "SHADOW_PROBE_MIN_ABS_IMBALANCE", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "shadow_probe_min_tp_pct": (
+                getattr(self._app._settings, "SHADOW_PROBE_MIN_TP_PCT", None)
+                if self._app._settings is not None
+                else None
+            ),
             "shadow_probe_symbol_top_n": (
                 self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N if self._app._settings is not None else None
             ),

@@ -215,6 +215,7 @@ class TestSettingsSafetyGates:
             TRADING_MODE="SHADOW",
             BYBIT_USE_TESTNET="false",
             SHADOW_PROBE_RESEARCH_PROFILE_V2="true",
+            SHADOW_PROBE_MIN_ABS_IMBALANCE="0.08",
             SHADOW_PROBE_MIN_TP_PCT="0.75",
             SHADOW_PROBE_MIN_SL_PCT="0.40",
             SHADOW_PROBE_MIN_NET_RETURN_PCT="0.30",
@@ -227,7 +228,8 @@ class TestSettingsSafetyGates:
             TRAIN_INCLUDE_CANDLE_BASELINE="true",
         )
 
-        assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.45  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_ABS_IMBALANCE == 0.04  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.60  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MIN_SL_PCT == 0.25  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MIN_NET_RETURN_PCT == 0.12  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS == 60  # type: ignore[union-attr]
