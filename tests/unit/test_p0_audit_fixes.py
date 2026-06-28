@@ -18,6 +18,7 @@ Covers:
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from decimal import Decimal
 from unittest.mock import AsyncMock, MagicMock
 
@@ -344,7 +345,8 @@ async def test_write_failure_resets_on_success() -> None:
     journal._enabled = True
     journal._consecutive_write_errors = 2  # pre-set
     journal._last_successful_write_at = None
-    journal._last_write_error_at = None
+    journal._last_write_error_at = datetime.now(tz=UTC)
+    journal._last_write_error = "previous error"
 
     mock_conn = AsyncMock()
     mock_conn.execute = AsyncMock(return_value=None)
@@ -362,6 +364,8 @@ async def test_write_failure_resets_on_success() -> None:
     assert journal._consecutive_write_errors == 0
     assert journal.durable_state_healthy is True
     assert journal._last_successful_write_at is not None
+    assert journal._last_write_error_at is None
+    assert journal._last_write_error is None
 
 
 def test_canary_blocks_when_durable_store_unhealthy() -> None:

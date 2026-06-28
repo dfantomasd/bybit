@@ -103,6 +103,29 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_legacy_journal_tables_get_created_at_backfill() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    sql = "\n".join(pool.conn.executed_sql)
+    for table in (
+        "trade_signals",
+        "risk_decisions",
+        "order_events",
+        "closed_pnl",
+        "execution_events",
+        "market_candles",
+        "feature_snapshots",
+        "prediction_events",
+    ):
+        assert f"ALTER TABLE {table}" in sql
+        assert "ADD COLUMN IF NOT EXISTS created_at" in sql
+
+
+@pytest.mark.asyncio
 async def test_feature_snapshot_duplicates_are_invalidated_before_unique_index() -> None:
     pool = _FakePool()
     journal = TradeJournal("postgresql://example/db")

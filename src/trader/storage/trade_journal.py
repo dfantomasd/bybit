@@ -660,6 +660,27 @@ class TradeJournal:
             """
             )
             await conn.execute("""
+                -- Legacy deployments may have these tables without created_at
+                -- because CREATE TABLE IF NOT EXISTS does not backfill columns.
+                -- Repair them before journal writes start, otherwise individual
+                -- signal/risk/order/PnL inserts can fail with:
+                -- "column created_at does not exist".
+                ALTER TABLE trade_signals
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE risk_decisions
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE order_events
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE closed_pnl
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE execution_events
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE market_candles
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE feature_snapshots
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
+                ALTER TABLE prediction_events
+                    ADD COLUMN IF NOT EXISTS created_at timestamptz NOT NULL DEFAULT now();
                 CREATE TABLE IF NOT EXISTS account_transaction_events (
                     id bigserial PRIMARY KEY,
                     transaction_time timestamptz NOT NULL,
@@ -4059,6 +4080,8 @@ class TradeJournal:
                 result = await conn.execute(query, *args)
             self._last_successful_write_at = datetime.now(tz=UTC)
             self._consecutive_write_errors = 0
+            self._last_write_error = None
+            self._last_write_error_at = None
             return str(result) if result is not None else None
         except Exception as exc:
             self._last_write_error_at = datetime.now(tz=UTC)
@@ -4085,6 +4108,8 @@ class TradeJournal:
                 await conn.execute(query, *args)
             self._last_successful_write_at = datetime.now(tz=UTC)
             self._consecutive_write_errors = 0
+            self._last_write_error = None
+            self._last_write_error_at = None
         except Exception as exc:
             self._last_write_error_at = datetime.now(tz=UTC)
             self._last_write_error = str(exc)
