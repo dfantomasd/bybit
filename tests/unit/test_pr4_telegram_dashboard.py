@@ -812,6 +812,21 @@ async def test_callback_exception_returns_visible_fallback(monkeypatch: pytest.M
 
 
 @pytest.mark.asyncio
+async def test_runtime_settings_none_does_not_break_dashboard_buttons() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value=None)
+
+    home_text, _ = await bot._render_home()
+    settings_text, _ = await bot._render_settings()
+    limits_text = bot._limits_text()
+
+    assert "Bybit AI Trader" in home_text
+    assert "Настройки" in settings_text
+    assert "Лимиты" in limits_text
+
+
+@pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()
     update = _fake_callback_update()

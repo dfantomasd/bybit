@@ -1097,7 +1097,7 @@ class TelegramMonitorBot:
 
     def _train_defaults(self) -> tuple[int, int, float]:
         """Return (min_samples, horizon_minutes, label_bps) aligned with auto-trainer config."""
-        runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
+        runtime = self._runtime_settings()
         min_samples = int(runtime.get("model_auto_train_min_samples") or 1000)
         horizon = int(runtime.get("model_auto_train_horizon_minutes") or 5)
         label_bps = float(runtime.get("model_auto_train_label_bps") or 2.0)
@@ -3074,12 +3074,7 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
-        runtime: dict[str, Any] = {}
-        if self._controller is not None and self._controller.runtime_settings is not None:
-            try:
-                runtime = self._controller.runtime_settings()
-            except Exception:
-                runtime = {}
+        runtime = self._runtime_settings()
         text = full_priority_overview(runtime_settings=runtime)
         await self._respond(update, text, reply_markup=self._canary_menu())
 
@@ -3128,7 +3123,7 @@ class TelegramMonitorBot:
             if runtime_age is not None:
                 latest_age_s = float(runtime_age)
         active_symbols = diag.get("active_symbols") or []
-        runtime = self._controller.runtime_settings() if self._controller and self._controller.runtime_settings else {}
+        runtime = self._runtime_settings()
         latest_run = db_diag.get("latest_training_run", {}) or {}
         latest_model = db_diag.get("latest_model_version", {}) or {}
         active_model = db_diag.get("active_model_version", {}) or latest_model
@@ -4819,13 +4814,10 @@ class TelegramMonitorBot:
         symbols_count = len(ctrl.active_symbols()) if ctrl is not None else 0
         entries_per_min: Any = "—"
         max_pos: Any = "—"
-        if ctrl and ctrl.runtime_settings:
-            try:
-                s = ctrl.runtime_settings()
-                entries_per_min = s.get("max_entries_per_minute", "—")
-                max_pos = s.get("max_positions", "—")
-            except Exception as _exc:
-                log.debug("telegram.render_home_settings_failed", error=str(_exc))
+        s = self._runtime_settings()
+        if s:
+            entries_per_min = s.get("max_entries_per_minute", "—")
+            max_pos = s.get("max_positions", "—")
 
         text = (
             "🏠 <b>Bybit AI Trader</b>\n"
@@ -4860,13 +4852,7 @@ class TelegramMonitorBot:
 
     async def _render_settings(self) -> tuple[str, InlineKeyboardMarkup]:
         """Render the interactive settings screen."""
-        ctrl = self._controller
-        s: dict[str, Any] = {}
-        if ctrl and ctrl.runtime_settings:
-            try:
-                s = ctrl.runtime_settings()
-            except Exception as _exc:
-                log.debug("telegram.render_settings_failed", error=str(_exc))
+        s = self._runtime_settings()
 
         entries = s.get("max_entries_per_minute", 4)
         max_pos = s.get("max_positions", 2)
@@ -5229,12 +5215,7 @@ class TelegramMonitorBot:
         setting_key, direction = parts
         if direction not in {"inc", "dec"}:
             return
-        s: dict[str, Any] = {}
-        if self._controller and self._controller.runtime_settings:
-            try:
-                s = self._controller.runtime_settings()
-            except Exception as _exc:
-                log.debug("telegram.limit_adjust_settings_failed", error=str(_exc))
+        s = self._runtime_settings()
         # Maps button key → (runtime_settings read key, set_runtime_setting key, min, max)
         limit_map: dict[str, tuple[str, str, float, float]] = {
             "entries_per_min_limit": ("max_entries_per_minute", "entries", 1, 10),
@@ -5777,10 +5758,22 @@ class TelegramMonitorBot:
             return []
         return self._controller.selected_symbols()
 
-    def _limits_text(self) -> str:
+    def _runtime_settings(self) -> dict[str, Any]:
+        """Return runtime settings as a dict, tolerating unavailable providers."""
+
         if self._controller is None or self._controller.runtime_settings is None:
+            return {}
+        try:
+            settings = self._controller.runtime_settings()
+        except Exception as exc:
+            log.debug("telegram.runtime_settings_failed", error=str(exc))
+            return {}
+        return settings if isinstance(settings, dict) else {}
+
+    def _limits_text(self) -> str:
+        s = self._runtime_settings()
+        if not s:
             return "<b>Лимиты</b>\nПока недоступны."
-        s = self._controller.runtime_settings()
         gate_quality = s.get("model_gate_quality", {}) or {}
         return (
             "<b>Лимиты риска и нагрузки</b>\n"
