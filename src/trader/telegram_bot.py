@@ -2743,64 +2743,88 @@ class TelegramMonitorBot:
             except Exception as exc:
                 return {"error": f"{label}: {type(exc).__name__}: {exc}"}
 
+        def _dict_or_empty(value: Any) -> dict[str, Any]:
+            return value if isinstance(value, dict) else {}
+
+        def _list_or_empty(value: Any) -> list[Any]:
+            return value if isinstance(value, list) else []
+
         from trader.monitoring.deploy_info import get_deploy_info
 
         generated_at = datetime.now(tz=UTC).isoformat()
         deploy = get_deploy_info()
-        runtime_diag = _safe_sync(
-            "runtime_diagnostics",
-            ctrl.diagnostics_provider if ctrl is not None else None,
-            {},
+        runtime_diag = _dict_or_empty(
+            _safe_sync(
+                "runtime_diagnostics",
+                ctrl.diagnostics_provider if ctrl is not None else None,
+                {},
+            )
         )
-        runtime_settings = _safe_sync(
-            "runtime_settings",
-            ctrl.runtime_settings if ctrl is not None else None,
-            {},
+        runtime_settings = _dict_or_empty(
+            _safe_sync(
+                "runtime_settings",
+                ctrl.runtime_settings if ctrl is not None else None,
+                {},
+            )
         )
-        db_diag = await self._load_db_diag(lite=False)
-        healthcheck = await _safe_async(
-            "healthcheck",
-            ctrl.healthcheck_provider if ctrl is not None else None,
-            {},
+        db_diag = _dict_or_empty(await self._load_db_diag(lite=False))
+        healthcheck = _dict_or_empty(
+            await _safe_async(
+                "healthcheck",
+                ctrl.healthcheck_provider if ctrl is not None else None,
+                {},
+            )
         )
-        compare = await _safe_async(
-            "compare",
-            ctrl.compare_provider if ctrl is not None else None,
-            {},
+        compare = _dict_or_empty(
+            await _safe_async(
+                "compare",
+                ctrl.compare_provider if ctrl is not None else None,
+                {},
+            )
         )
-        pnl_analysis = await _safe_async(
-            "pnl_analysis",
-            ctrl.pnl_analysis_provider if ctrl is not None else None,
-            {},
+        pnl_analysis = _dict_or_empty(
+            await _safe_async(
+                "pnl_analysis",
+                ctrl.pnl_analysis_provider if ctrl is not None else None,
+                {},
+            )
         )
-        costs = await _safe_async(
-            "costs_detailed",
-            ctrl.costs_detailed_provider if ctrl is not None else None,
-            {},
+        costs = _dict_or_empty(
+            await _safe_async(
+                "costs_detailed",
+                ctrl.costs_detailed_provider if ctrl is not None else None,
+                {},
+            )
         )
         log_tail = self._render_log_tail_for_report()
-        model_rows = await _safe_async(
-            "model_performance",
-            ctrl.model_performance_provider if ctrl is not None else None,
-            [],
+        model_rows = _list_or_empty(
+            await _safe_async(
+                "model_performance",
+                ctrl.model_performance_provider if ctrl is not None else None,
+                [],
+            )
         )
-        champion = await _safe_async(
-            "champion_health",
-            ctrl.champion_health_provider if ctrl is not None else None,
-            {},
+        champion = _dict_or_empty(
+            await _safe_async(
+                "champion_health",
+                ctrl.champion_health_provider if ctrl is not None else None,
+                {},
+            )
         )
         canary_text = self._canary_readiness_text(
             db_diag=db_diag, diag=runtime_diag if isinstance(runtime_diag, dict) else {}
         )
 
-        model_info = runtime_diag.get("model") if isinstance(runtime_diag, dict) else {}
-        latest_model = db_diag.get("latest_model_version") or db_diag.get("active_model_version") or {}
-        latest_metrics = latest_model.get("metrics") if isinstance(latest_model, dict) else {}
-        if isinstance(latest_metrics, str):
+        model_info = _dict_or_empty(runtime_diag.get("model"))
+        latest_model = _dict_or_empty(db_diag.get("latest_model_version") or db_diag.get("active_model_version"))
+        latest_metrics_raw = latest_model.get("metrics")
+        if isinstance(latest_metrics_raw, str):
             try:
-                latest_metrics = json.loads(latest_metrics) or {}
+                latest_metrics = _dict_or_empty(json.loads(latest_metrics_raw))
             except Exception:
                 latest_metrics = {}
+        else:
+            latest_metrics = _dict_or_empty(latest_metrics_raw)
         gate_quality = (
             runtime_settings.get("model_gate_quality") if isinstance(runtime_settings, dict) else None
         ) or {}
@@ -2824,16 +2848,17 @@ class TelegramMonitorBot:
             db_diag,
             latest_metrics if isinstance(latest_metrics, dict) else {},
         )
-        paper_by_horizon = db_diag.get("paper_pnl_by_horizon", {}) or {}
+        paper_by_horizon = _dict_or_empty(db_diag.get("paper_pnl_by_horizon"))
         paper_horizon = (
             paper_by_horizon.get(str(model_horizon))
             or db_diag.get(f"paper_pnl_{model_horizon}m")
             or db_diag.get("paper_pnl_15m")
             or {}
         )
-        paper_baseline = paper_horizon.get("baseline", {}) if isinstance(paper_horizon, dict) else {}
-        paper_model_gate = paper_horizon.get("model_gate", {}) if isinstance(paper_horizon, dict) else {}
-        candle_sampler = runtime_diag.get("candle_sampler", {}) if isinstance(runtime_diag, dict) else {}
+        paper_horizon = _dict_or_empty(paper_horizon)
+        paper_baseline = _dict_or_empty(paper_horizon.get("baseline"))
+        paper_model_gate = _dict_or_empty(paper_horizon.get("model_gate"))
+        candle_sampler = _dict_or_empty(runtime_diag.get("candle_sampler"))
         shadow_closes = {
             "total": runtime_diag.get("hour_shadow_closed", 0) if isinstance(runtime_diag, dict) else 0,
             "tp": runtime_diag.get("hour_shadow_closed_tp", 0) if isinstance(runtime_diag, dict) else 0,

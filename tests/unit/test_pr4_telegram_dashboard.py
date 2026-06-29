@@ -827,6 +827,27 @@ async def test_runtime_settings_none_does_not_break_dashboard_buttons() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deep_report_tolerates_none_provider_payloads() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(return_value=None)
+    bot._controller.diagnostics_provider = MagicMock(return_value=None)
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value=None)
+    bot._controller.healthcheck_provider = AsyncMock(return_value=None)
+    bot._controller.compare_provider = AsyncMock(return_value=None)
+    bot._controller.pnl_analysis_provider = AsyncMock(return_value=None)
+    bot._controller.costs_detailed_provider = AsyncMock(return_value=None)
+    bot._controller.model_performance_provider = AsyncMock(return_value=None)
+    bot._controller.champion_health_provider = AsyncMock(return_value=None)
+
+    text = await bot._render_deep_report_text()
+
+    assert "ПОЛНАЯ СВОДКА ДЛЯ АНАЛИЗА" in text
+    assert "Runtime settings JSON" in text
+    assert "Compare / PnL / Costs JSON" in text
+
+
+@pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()
     update = _fake_callback_update()
