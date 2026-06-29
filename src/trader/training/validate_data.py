@@ -21,6 +21,8 @@ sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "..", ".."))
 
 import click
 
+from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+
 
 async def _validate(dsn: str) -> int:
     try:
@@ -29,7 +31,12 @@ async def _validate(dsn: str) -> int:
         click.echo("asyncpg not installed", err=True)
         return 1
 
-    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=2, statement_cache_size=0)
+    pool = await asyncpg.create_pool(
+        **asyncpg_pool_connect_kwargs(dsn),
+        min_size=1,
+        max_size=2,
+        statement_cache_size=0,
+    )
     errors = 0
     try:
         click.echo("=== Training Data Validation ===\n")

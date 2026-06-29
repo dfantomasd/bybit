@@ -10,7 +10,7 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
-from urllib.parse import urlparse
+from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 
 import asyncpg
 import structlog
@@ -92,6 +92,34 @@ def _safe_connection_target(dsn: str) -> dict[str, Any]:
         "username_prefix": username_prefix,
         "username_has_project_ref": "." in username if username else False,
     }
+
+
+def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
+    """Normalize application DSNs into explicit asyncpg connection kwargs.
+
+    asyncpg accepts URL query params in many cases, but making SSL explicit avoids
+    ambiguity with Supabase/Supavisor pooler strings and keeps all entry points
+    (runtime, training, backfill, discovery) consistent.
+    """
+    normalized = dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
+    parsed = urlparse(normalized)
+    query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
+    kept_query: list[tuple[str, str]] = []
+    ssl_arg: bool | str | None = None
+    for key, value in query_pairs:
+        if key.lower() == "sslmode":
+            mode = value.lower()
+            if mode in {"require", "verify-ca", "verify-full"}:
+                ssl_arg = True
+            elif mode in {"disable", "allow", "prefer"}:
+                ssl_arg = False
+            continue
+        kept_query.append((key, value))
+    cleaned = urlunparse(parsed._replace(query=urlencode(kept_query, doseq=True)))
+    kwargs: dict[str, Any] = {"dsn": cleaned}
+    if ssl_arg is not None:
+        kwargs["ssl"] = ssl_arg
+    return kwargs
 
 
 def _schema_statement_label(statement: str) -> str:
@@ -301,7 +329,7 @@ class TradeJournal:
         self._last_connect_attempt_at = datetime.now(tz=UTC)
         try:
             self._pool = await asyncpg.create_pool(
-                dsn=self._dsn,
+                **asyncpg_pool_connect_kwargs(self._dsn),
                 min_size=1,
                 max_size=self._pool_max_size,
                 statement_cache_size=0,

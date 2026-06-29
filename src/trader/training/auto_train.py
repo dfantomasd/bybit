@@ -17,6 +17,7 @@ from typing import Any
 import click
 
 from trader.training.labels import active_label_schema_version
+from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
@@ -45,8 +46,12 @@ async def _pool() -> Any:
     from trader.config import Settings
 
     settings = Settings()
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    return await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    return await asyncpg.create_pool(
+        **asyncpg_pool_connect_kwargs(settings.POSTGRES_DSN.get_secret_value()),
+        min_size=1,
+        max_size=2,
+        statement_cache_size=0,
+    )
 
 
 async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:

@@ -579,10 +579,15 @@ async def _historical_seed(
     import asyncpg
 
     from trader.config import Settings
+    from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 
     settings = Settings()
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    pool = await asyncpg.create_pool(
+        **asyncpg_pool_connect_kwargs(settings.POSTGRES_DSN.get_secret_value()),
+        min_size=1,
+        max_size=2,
+        statement_cache_size=0,
+    )
 
     total_written = 0
     total_outcomes = 0

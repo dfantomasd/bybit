@@ -17,6 +17,7 @@ import click
 import numpy as np
 
 from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_rules, discover_segmented_rules
+from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 from trader.training.labels import active_label_schema_version
 from trader.training.train import _settings_horizon, _settings_label_bps
@@ -67,8 +68,12 @@ async def _load_db_samples(
     include_candle_baseline = bool(settings.TRAIN_INCLUDE_CANDLE_BASELINE)
     label_schema_version = active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
     label_threshold_bps = float(_settings_label_bps())
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    pool = await asyncpg.create_pool(
+        **asyncpg_pool_connect_kwargs(settings.POSTGRES_DSN.get_secret_value()),
+        min_size=1,
+        max_size=2,
+        statement_cache_size=0,
+    )
     query_template = """
             WITH eligible_samples AS (
                 SELECT

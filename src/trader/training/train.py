@@ -26,6 +26,7 @@ import click
 import numpy as np
 
 from trader.ml.model_selection import model_selection_metrics
+from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 from trader.training.labels import active_label_schema_version, label_schema_tag
 
@@ -526,9 +527,8 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         include_candle_baseline,
         label_schema_version,
     )
-    dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
     pool = await asyncpg.create_pool(
-        dsn=dsn,
+        **asyncpg_pool_connect_kwargs(settings.POSTGRES_DSN.get_secret_value()),
         min_size=1,
         max_size=2,
         statement_cache_size=0,

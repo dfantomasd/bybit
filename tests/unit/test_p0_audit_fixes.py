@@ -452,6 +452,28 @@ async def test_db_diagnostics_redacts_supabase_pooler_project_ref() -> None:
     assert "secret" not in str(diag["connection_target"])
 
 
+def test_asyncpg_pool_connect_kwargs_makes_sslmode_explicit() -> None:
+    from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+
+    kwargs = asyncpg_pool_connect_kwargs(
+        "postgresql+asyncpg://postgres.ref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require"
+    )
+
+    assert kwargs["dsn"] == (
+        "postgresql://postgres.ref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+    )
+    assert kwargs["ssl"] is True
+
+
+def test_asyncpg_pool_connect_kwargs_preserves_non_ssl_query_params() -> None:
+    from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+
+    kwargs = asyncpg_pool_connect_kwargs("postgresql://u:p@db.example:5432/app?application_name=bot&sslmode=disable")
+
+    assert kwargs["dsn"] == "postgresql://u:p@db.example:5432/app?application_name=bot"
+    assert kwargs["ssl"] is False
+
+
 @pytest.mark.asyncio
 async def test_schema_script_executes_one_statement_at_a_time() -> None:
     from trader.storage.trade_journal import _execute_schema_script
