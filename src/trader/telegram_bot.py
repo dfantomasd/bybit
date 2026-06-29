@@ -3244,7 +3244,7 @@ class TelegramMonitorBot:
             "База данных подключена",
             bool(db_diag.get("connected")),
             "хранилище доступно" if db_diag.get("connected") else "бот не видит Postgres",
-            "На Render проверьте POSTGRES_DSN и включите внешний PostgreSQL/Supabase.",
+            self._db_connection_fix_hint(db_diag),
         )
         require(
             "Свежая свеча 1m",
@@ -3443,7 +3443,7 @@ class TelegramMonitorBot:
         warn_if(
             bool(db_error),
             f"Ошибка DB диагностики: {html.escape(str(db_error))}",
-            "Проверьте POSTGRES_DSN и pgbouncer режим.",
+            self._db_connection_fix_hint(db_diag),
         )
         if loop_at in (None, "never"):
             warnings.append(
@@ -3597,6 +3597,31 @@ class TelegramMonitorBot:
         if hours < 48:
             return f"примерно {hours:.1f} ч при текущем темпе"
         return f"примерно {hours / 24:.1f} дн при текущем темпе"
+
+    @staticmethod
+    def _db_connection_fix_hint(db_diag: dict[str, Any]) -> str:
+        target = db_diag.get("connection_target") if isinstance(db_diag, dict) else {}
+        if not isinstance(target, dict):
+            target = {}
+        host = str(target.get("host") or "")
+        port = target.get("port")
+        error = str(
+            db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error") or ""
+        ).lower()
+        if "pooler.supabase.com" in host and str(port) == "5432" and "econnrefused" in error:
+            return (
+                "POSTGRES_DSN смотрит в Supabase pooler на порт 5432, но соединение refused. "
+                "На Render замените порт на 6543 для transaction pooler и оставьте sslmode=require; "
+                "после redeploy проверьте, что DB connected=true."
+            )
+        if "pooler.supabase.com" in host:
+            return (
+                "Проверьте Supabase pooler DSN на Render: host/port/user/password/database и sslmode=require. "
+                "Для transaction pooler обычно порт 6543; для session pooler 5432."
+            )
+        if host in {"localhost", "127.0.0.1", "::1"}:
+            return "POSTGRES_DSN указывает на localhost внутри Render; задайте внешний PostgreSQL/Supabase host."
+        return "На Render проверьте POSTGRES_DSN, доступность PostgreSQL/Supabase, sslmode=require и pgbouncer режим."
 
     @staticmethod
     def _ru(value: Any) -> str:

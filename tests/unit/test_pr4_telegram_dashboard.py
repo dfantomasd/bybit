@@ -871,6 +871,23 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "connection_target" in text
 
 
+def test_db_connection_fix_hint_for_supabase_pooler_refused() -> None:
+    hint = TelegramMonitorBot._db_connection_fix_hint(
+        {
+            "last_connect_error": "Failed to connect to database: {:error, :econnrefused}",
+            "connection_target": {
+                "host": "aws-0-eu-west-1.pooler.supabase.com",
+                "port": 5432,
+                "database": "postgres",
+            },
+        }
+    )
+
+    assert "6543" in hint
+    assert "sslmode=require" in hint
+    assert "Supabase pooler" in hint
+
+
 @pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()
