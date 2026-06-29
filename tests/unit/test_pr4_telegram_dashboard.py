@@ -871,6 +871,63 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "connection_target" in text
 
 
+def test_diagnostics_menu_has_db_probe_button() -> None:
+    bot = _make_bot()
+
+    callback_data = [
+        button.callback_data
+        for row in bot._diagnostics_menu().inline_keyboard
+        for button in row
+        if button.callback_data is not None
+    ]
+
+    assert "view:db_probe" in callback_data
+
+
+@pytest.mark.asyncio
+async def test_db_probe_success_redacts_dsn(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    monkeypatch.setenv(
+        "POSTGRES_DSN",
+        "postgresql+asyncpg://postgres.projectref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    )
+
+    fake_conn = MagicMock()
+    fake_conn.fetchrow = AsyncMock(return_value={"db": "postgres", "usr": "postgres.projectref", "addr": "10.0.0.1"})
+    fake_conn.close = AsyncMock()
+
+    import asyncpg
+
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(return_value=fake_conn))
+
+    text = await bot._render_db_probe_text()
+
+    assert "asyncpg.connect OK" in text
+    assert "SSL arg: <code>True</code>" in text
+    assert "username_has_project_ref" in text
+    assert "secret" not in text
+
+
+@pytest.mark.asyncio
+async def test_db_probe_failure_reports_sanitized_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    bot = _make_bot()
+    monkeypatch.setenv(
+        "POSTGRES_DSN",
+        "postgresql+asyncpg://postgres.projectref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require",
+    )
+
+    import asyncpg
+
+    monkeypatch.setattr(asyncpg, "connect", AsyncMock(side_effect=RuntimeError("EAUTHQUERY failed")))
+
+    text = await bot._render_db_probe_text()
+
+    assert "asyncpg.connect failed" in text
+    assert "EAUTHQUERY failed" in text
+    assert "SSL arg: <code>True</code>" in text
+    assert "secret" not in text
+
+
 def test_db_connection_fix_hint_for_supabase_pooler_refused() -> None:
     hint = TelegramMonitorBot._db_connection_fix_hint(
         {

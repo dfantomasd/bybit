@@ -309,6 +309,7 @@ class TelegramMonitorBot:
         app.add_handler(CommandHandler("model_performance", self._cmd_model_performance))
         app.add_handler(CommandHandler("champion_health", self._cmd_champion_health))
         app.add_handler(CommandHandler("diagnostics", self._cmd_diagnostics))
+        app.add_handler(CommandHandler("db_probe", self._cmd_db_probe))
         app.add_handler(CommandHandler("deep_report", self._cmd_deep_report))
         app.add_handler(CommandHandler("deep_report_text", self._cmd_deep_report_text))
         app.add_handler(CommandHandler("attribution", self._cmd_attribution))
@@ -1237,6 +1238,7 @@ class TelegramMonitorBot:
                     InlineKeyboardButton("🩺 Healthcheck", callback_data="view:healthcheck"),
                     InlineKeyboardButton("🖥 Нагрузка", callback_data="view:load_diagnostics"),
                 ],
+                [InlineKeyboardButton("🧪 DB probe", callback_data="view:db_probe")],
                 [
                     InlineKeyboardButton("🧾 Издержки детально", callback_data="view:costs_detailed"),
                     InlineKeyboardButton("💸 Издержки", callback_data="view:costs"),
@@ -2522,6 +2524,71 @@ class TelegramMonitorBot:
             )
 
         await self._respond(update, "\n".join(lines))
+
+    async def _cmd_db_probe(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Run a direct sanitized asyncpg connectivity probe from the live service."""
+        del context
+        if not await self._authorised(update):
+            return
+        text = await self._render_db_probe_text()
+        await self._respond(update, text, reply_markup=self._diagnostics_menu())
+
+    async def _render_db_probe_text(self) -> str:
+        started = datetime.now(tz=UTC)
+        try:
+            import asyncpg
+
+            from trader.config import Settings
+            from trader.storage.trade_journal import asyncpg_pool_connect_kwargs, _safe_connection_target
+
+            dsn = Settings().POSTGRES_DSN.get_secret_value()
+            target = _safe_connection_target(dsn)
+            kwargs = asyncpg_pool_connect_kwargs(dsn)
+            ssl_mode = kwargs.get("ssl", "dsn/default")
+            conn = await asyncio.wait_for(
+                asyncpg.connect(**kwargs, statement_cache_size=0),
+                timeout=10.0,
+            )
+            try:
+                row = await asyncio.wait_for(
+                    conn.fetchrow(
+                        "select current_database() as db, current_user as usr, inet_server_addr()::text as addr"
+                    ),
+                    timeout=5.0,
+                )
+            finally:
+                await conn.close()
+            elapsed_ms = (datetime.now(tz=UTC) - started).total_seconds() * 1000.0
+            return (
+                "🧪 <b>DB probe</b>\n"
+                "✅ asyncpg.connect OK\n"
+                f"Target: <code>{html.escape(json.dumps(target, ensure_ascii=False, sort_keys=True))}</code>\n"
+                f"SSL arg: <code>{html.escape(str(ssl_mode))}</code>\n"
+                f"DB: <code>{html.escape(str(row['db']))}</code>, user=<code>{html.escape(str(row['usr']))}</code>\n"
+                f"Server addr: <code>{html.escape(str(row['addr']))}</code>\n"
+                f"Elapsed: <code>{elapsed_ms:.0f} ms</code>"
+            )
+        except Exception as exc:
+            elapsed_ms = (datetime.now(tz=UTC) - started).total_seconds() * 1000.0
+            target: dict[str, Any] = {}
+            ssl_mode: Any = "n/a"
+            try:
+                from trader.config import Settings
+                from trader.storage.trade_journal import asyncpg_pool_connect_kwargs, _safe_connection_target
+
+                dsn = Settings().POSTGRES_DSN.get_secret_value()
+                target = _safe_connection_target(dsn)
+                ssl_mode = asyncpg_pool_connect_kwargs(dsn).get("ssl", "dsn/default")
+            except Exception:
+                pass
+            return (
+                "🧪 <b>DB probe</b>\n"
+                "❌ asyncpg.connect failed\n"
+                f"Target: <code>{html.escape(json.dumps(target, ensure_ascii=False, sort_keys=True))}</code>\n"
+                f"SSL arg: <code>{html.escape(str(ssl_mode))}</code>\n"
+                f"Error: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>\n"
+                f"Elapsed: <code>{elapsed_ms:.0f} ms</code>"
+            )
 
     async def _cmd_deep_report(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Send all operator diagnostics as one downloadable text file."""
@@ -5350,6 +5417,7 @@ class TelegramMonitorBot:
             "symbols": self._cmd_symbols,
             "pnl": self._cmd_pnl,
             "load_diagnostics": self._cmd_diagnostics,
+            "db_probe": self._cmd_db_probe,
             "costs": self._cmd_costs,
             "costs_detailed": self._cmd_costs_detailed,
             "pnl_analysis": self._cmd_pnl_analysis,
