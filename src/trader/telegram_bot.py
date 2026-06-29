@@ -3615,6 +3615,19 @@ class TelegramMonitorBot:
                 "после redeploy проверьте, что DB connected=true."
             )
         if "pooler.supabase.com" in host and str(port) == "6543" and "schema bootstrap degraded" in error:
+            if "eauthquery" in error or "authentication query failed" in error:
+                username_hint = (
+                    " Сейчас username в DSN не похож на shared-pooler формат postgres.<project-ref>."
+                    if target.get("username_has_project_ref") is False
+                    else ""
+                )
+                return (
+                    "Supabase pooler доступен, но auth-query не может подключиться к backend database. "
+                    "На Render проверьте POSTGRES_DSN: для shared pooler username должен быть "
+                    "postgres.<project-ref>, порт 6543, database=postgres, sslmode=require; "
+                    "также проверьте DB password и что Supabase project не paused."
+                    f"{username_hint}"
+                )
             return (
                 "Supabase transaction pooler доступен, но соединение рвётся во время schema bootstrap. "
                 "Задеплойте версию со split-bootstrap DDL; если повторится, проверьте Supabase pooler limits, "

@@ -905,6 +905,28 @@ def test_db_connection_fix_hint_for_supabase_schema_bootstrap_degraded() -> None
     assert "6543" not in hint
 
 
+def test_db_connection_fix_hint_for_supabase_eauthquery() -> None:
+    hint = TelegramMonitorBot._db_connection_fix_hint(
+        {
+            "last_connect_error": (
+                "schema bootstrap degraded: (EAUTHQUERY) authentication query failed: "
+                "connection to database not available"
+            ),
+            "connection_target": {
+                "host": "aws-0-eu-west-1.pooler.supabase.com",
+                "port": 6543,
+                "database": "postgres",
+                "username_prefix": "postgres",
+                "username_has_project_ref": False,
+            },
+        }
+    )
+
+    assert "postgres.<project-ref>" in hint
+    assert "DB password" in hint
+    assert "not paused" in hint or "не paused" in hint
+
+
 @pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()

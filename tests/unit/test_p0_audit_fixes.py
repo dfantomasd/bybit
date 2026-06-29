@@ -429,9 +429,27 @@ async def test_db_diagnostics_exposes_safe_connection_target() -> None:
         "host": "example.internal",
         "port": 6543,
         "database": "trades",
+        "username_prefix": "user",
+        "username_has_project_ref": False,
     }
     assert "secret" not in str(diag["connection_target"])
-    assert "user" not in str(diag["connection_target"])
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_redacts_supabase_pooler_project_ref() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(
+        "postgresql://postgres.abcdefghijklmnop:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require",
+        enabled=True,
+    )
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["connection_target"]["username_prefix"] == "postgres"
+    assert diag["connection_target"]["username_has_project_ref"] is True
+    assert "abcdefghijklmnop" not in str(diag["connection_target"])
+    assert "secret" not in str(diag["connection_target"])
 
 
 @pytest.mark.asyncio

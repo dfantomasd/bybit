@@ -82,11 +82,15 @@ def _safe_connection_target(dsn: str) -> dict[str, Any]:
     database = parsed.path.lstrip("/") or None
     if "?" in str(database):
         database = str(database).split("?", 1)[0]
+    username = parsed.username or ""
+    username_prefix = username.split(".", 1)[0] if username else None
     return {
         "scheme": parsed.scheme or None,
         "host": parsed.hostname,
         "port": parsed.port,
         "database": database,
+        "username_prefix": username_prefix,
+        "username_has_project_ref": "." in username if username else False,
     }
 
 
