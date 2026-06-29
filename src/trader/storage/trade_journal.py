@@ -10,6 +10,7 @@ from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from typing import Any, cast
+from urllib.parse import urlparse
 
 import asyncpg
 import structlog
@@ -70,6 +71,23 @@ def _query_label_schema_version() -> str:
     if settings is not None:
         return active_label_schema_version(use_tpsl_exit=bool(settings.MODEL_LABEL_USE_TPSL_EXIT))
     return LABEL_SCHEMA_VERSION
+
+
+def _safe_connection_target(dsn: str) -> dict[str, Any]:
+    """Return non-secret connection target details for diagnostics."""
+    try:
+        parsed = urlparse(dsn)
+    except Exception:
+        return {"parse_error": "invalid_dsn"}
+    database = parsed.path.lstrip("/") or None
+    if "?" in str(database):
+        database = str(database).split("?", 1)[0]
+    return {
+        "scheme": parsed.scheme or None,
+        "host": parsed.hostname,
+        "port": parsed.port,
+        "database": database,
+    }
 
 
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
@@ -209,12 +227,24 @@ class TradeJournal:
         """False after 3 consecutive write errors — used to fail-closed in CANARY_LIVE/LIVE."""
         return self._consecutive_write_errors < 3
 
+    @property
+    def write_available(self) -> bool:
+        """True only when durable storage is configured, connected, and not in write-error fail-close."""
+        return bool(getattr(self, "_enabled", False)) and self._pool is not None and self.durable_state_healthy
+
     def write_health(self) -> dict[str, Any]:
         """Return write-health snapshot for observability and safety gates."""
         last_read_error_at = cast(datetime | None, getattr(self, "_last_read_error_at", None))
         last_connect_error_at = cast(datetime | None, getattr(self, "_last_connect_error_at", None))
+        configured = bool(getattr(self, "_enabled", False))
+        connected = self._pool is not None
+        writable = configured and connected and self.durable_state_healthy
         return {
-            "healthy": self.durable_state_healthy,
+            "healthy": writable,
+            "configured": configured,
+            "connected": connected,
+            "writable": writable,
+            "durable_state_healthy": self.durable_state_healthy,
             "consecutive_write_errors": self._consecutive_write_errors,
             "last_successful_write_at": (
                 self._last_successful_write_at.isoformat() if self._last_successful_write_at else None
@@ -3476,6 +3506,7 @@ class TradeJournal:
         result: dict[str, Any] = {
             "connected": self.is_enabled,
             "configured": self.is_configured,
+            "connection_target": _safe_connection_target(self._dsn),
             "lite": lite,
             "schema_degraded": bool(
                 self._last_connect_error and "schema bootstrap degraded" in str(self._last_connect_error).lower()

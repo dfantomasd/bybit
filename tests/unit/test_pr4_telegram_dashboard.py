@@ -848,6 +848,30 @@ async def test_deep_report_tolerates_none_provider_payloads() -> None:
 
 
 @pytest.mark.asyncio
+async def test_deep_report_compact_db_includes_connect_error_and_target() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": False,
+            "last_connect_error": "Failed to connect to database: {:error, :econnrefused}",
+            "connection_target": {
+                "scheme": "postgresql",
+                "host": "db.internal",
+                "port": 5432,
+                "database": "trades",
+            },
+        }
+    )
+
+    text = await bot._render_deep_report_text()
+
+    assert "econnrefused" in text
+    assert "db.internal" in text
+    assert "connection_target" in text
+
+
+@pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()
     update = _fake_callback_update()

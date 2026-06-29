@@ -386,6 +386,54 @@ def test_canary_blocks_when_durable_store_unhealthy() -> None:
     assert health["consecutive_write_errors"] == 3
 
 
+def test_write_health_unhealthy_when_configured_but_disconnected() -> None:
+    """A configured journal with no pool is not write-healthy even before write errors."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal.__new__(TradeJournal)
+    journal._enabled = True
+    journal._pool = None
+    journal._consecutive_write_errors = 0
+    journal._last_successful_write_at = None
+    journal._last_write_error_at = None
+    journal._last_write_error = None
+    journal._last_read_error_at = None
+    journal._last_read_error = None
+    journal._last_connect_error_at = None
+    journal._last_connect_error = "Failed to connect to database: {:error, :econnrefused}"
+
+    health = journal.write_health()
+
+    assert health["healthy"] is False
+    assert health["configured"] is True
+    assert health["connected"] is False
+    assert health["writable"] is False
+    assert health["durable_state_healthy"] is True
+    assert "econnrefused" in str(health["last_connect_error"])
+
+
+@pytest.mark.asyncio
+async def test_db_diagnostics_exposes_safe_connection_target() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(
+        "postgresql://user:secret@example.internal:6543/trades?sslmode=require",
+        enabled=True,
+    )
+
+    diag = await journal.get_db_diagnostics()
+
+    assert diag["connected"] is False
+    assert diag["connection_target"] == {
+        "scheme": "postgresql",
+        "host": "example.internal",
+        "port": 6543,
+        "database": "trades",
+    }
+    assert "secret" not in str(diag["connection_target"])
+    assert "user" not in str(diag["connection_target"])
+
+
 # ---------------------------------------------------------------------------
 # P0.5 — Telegram auto-subscription
 # ---------------------------------------------------------------------------

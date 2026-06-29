@@ -2972,7 +2972,8 @@ class TelegramMonitorBot:
             },
             "db": {
                 "connected": db_diag.get("connected"),
-                "error": db_diag.get("error"),
+                "error": db_diag.get("error") or db_diag.get("last_connect_error") or db_diag.get("last_read_error"),
+                "connection_target": db_diag.get("connection_target"),
                 "candles_by_interval": db_diag.get("candles_by_interval"),
                 "feature_snapshots": db_diag.get("feature_snapshots"),
                 "prediction_outcomes": db_diag.get("prediction_outcomes"),
