@@ -888,6 +888,23 @@ def test_db_connection_fix_hint_for_supabase_pooler_refused() -> None:
     assert "Supabase pooler" in hint
 
 
+def test_db_connection_fix_hint_for_supabase_schema_bootstrap_degraded() -> None:
+    hint = TelegramMonitorBot._db_connection_fix_hint(
+        {
+            "last_connect_error": "schema bootstrap degraded: connection was closed in the middle of operation",
+            "connection_target": {
+                "host": "aws-0-eu-west-1.pooler.supabase.com",
+                "port": 6543,
+                "database": "postgres",
+            },
+        }
+    )
+
+    assert "split-bootstrap" in hint
+    assert "schema bootstrap" in hint
+    assert "6543" not in hint
+
+
 @pytest.mark.asyncio
 async def test_button_reply_falls_back_to_new_message_when_edit_unavailable() -> None:
     bot = _make_bot()

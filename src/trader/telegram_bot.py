@@ -3614,6 +3614,12 @@ class TelegramMonitorBot:
                 "На Render замените порт на 6543 для transaction pooler и оставьте sslmode=require; "
                 "после redeploy проверьте, что DB connected=true."
             )
+        if "pooler.supabase.com" in host and str(port) == "6543" and "schema bootstrap degraded" in error:
+            return (
+                "Supabase transaction pooler доступен, но соединение рвётся во время schema bootstrap. "
+                "Задеплойте версию со split-bootstrap DDL; если повторится, проверьте Supabase pooler limits, "
+                "пароль/пользователя и попробуйте direct/session connection для первичной миграции схемы."
+            )
         if "pooler.supabase.com" in host:
             return (
                 "Проверьте Supabase pooler DSN на Render: host/port/user/password/database и sslmode=require. "

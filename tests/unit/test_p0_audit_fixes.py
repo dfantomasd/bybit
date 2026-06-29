@@ -434,6 +434,31 @@ async def test_db_diagnostics_exposes_safe_connection_target() -> None:
     assert "user" not in str(diag["connection_target"])
 
 
+@pytest.mark.asyncio
+async def test_schema_script_executes_one_statement_at_a_time() -> None:
+    from trader.storage.trade_journal import _execute_schema_script
+
+    conn = MagicMock()
+    conn.execute = AsyncMock()
+
+    await _execute_schema_script(
+        conn,
+        """
+        CREATE TABLE IF NOT EXISTS one (id int);
+        CREATE INDEX IF NOT EXISTS one_id_idx ON one (id);
+
+        ALTER TABLE one ADD COLUMN IF NOT EXISTS name text;
+        """,
+    )
+
+    statements = [call.args[0] for call in conn.execute.await_args_list]
+    assert statements == [
+        "CREATE TABLE IF NOT EXISTS one (id int)",
+        "CREATE INDEX IF NOT EXISTS one_id_idx ON one (id)",
+        "ALTER TABLE one ADD COLUMN IF NOT EXISTS name text",
+    ]
+
+
 # ---------------------------------------------------------------------------
 # P0.5 — Telegram auto-subscription
 # ---------------------------------------------------------------------------

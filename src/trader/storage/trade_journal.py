@@ -90,6 +90,20 @@ def _safe_connection_target(dsn: str) -> dict[str, Any]:
     }
 
 
+async def _execute_schema_script(conn: Any, script: str) -> None:
+    """Execute DDL one statement at a time.
+
+    Some poolers/proxies are less tolerant of large multi-statement packets during
+    startup. Splitting schema bootstrap keeps the connection alive more reliably
+    and makes failures point at the exact DDL statement.
+    """
+    for raw_statement in script.split(";"):
+        statement = raw_statement.strip()
+        if not statement:
+            continue
+        await conn.execute(statement)
+
+
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
     returns = [float(row.get("net_return_bps") or 0.0) for row in rows]
     equity = 0.0
@@ -427,7 +441,8 @@ class TradeJournal:
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             await conn.execute("SET statement_timeout = '60s'")
-            await conn.execute(
+            await _execute_schema_script(
+                conn,
                 """
             CREATE TABLE IF NOT EXISTS durable_order_state (
                 order_link_id text PRIMARY KEY,
@@ -689,7 +704,9 @@ class TradeJournal:
                 ON execution_events (order_link_id);
             """
             )
-            await conn.execute("""
+            await _execute_schema_script(
+                conn,
+                """
                 -- Legacy deployments may have these tables without created_at
                 -- because CREATE TABLE IF NOT EXISTS does not backfill columns.
                 -- Repair them before journal writes start, otherwise individual
@@ -772,7 +789,8 @@ class TradeJournal:
                     chat_id bigint PRIMARY KEY,
                     subscribed_at timestamptz NOT NULL DEFAULT now()
                 );
-            """)
+            """,
+            )
         asyncio.create_task(
             self._ensure_model_registry_indexes_deferred(),
             name="trade-journal-model-registry-index",
