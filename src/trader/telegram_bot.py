@@ -2546,6 +2546,54 @@ class TelegramMonitorBot:
                 pass
             return str(value)
 
+        def _tcp_probe_sync(host: Any, port: Any, timeout: float = 3.0) -> str:
+            try:
+                import socket
+
+                host_s = str(host or "")
+                port_i = int(port or 0)
+                if not host_s or port_i <= 0:
+                    return "skipped:no_host_or_port"
+                infos = socket.getaddrinfo(host_s, port_i, type=socket.SOCK_STREAM)
+                last_error = ""
+                for family, socktype, proto, _canonname, sockaddr in infos[:4]:
+                    try:
+                        with socket.socket(family, socktype, proto) as sock:
+                            sock.settimeout(timeout)
+                            sock.connect(sockaddr)
+                        return f"ok:{sockaddr[0]}:{port_i}"
+                    except Exception as exc:  # pragma: no cover - depends on live network
+                        last_error = f"{type(exc).__name__}:{exc}"
+                return f"failed:{last_error or 'no_addresses'}"
+            except Exception as exc:  # pragma: no cover - depends on live network
+                return f"failed:{type(exc).__name__}:{exc}"
+
+        def _db_probe_error_hint(exc: Exception, target: dict[str, Any], tcp_probe: str) -> str:
+            host = str(target.get("host") or "")
+            port = str(target.get("port") or "")
+            error = f"{type(exc).__name__}: {exc}".lower()
+            if "timeouterror" in error or error.strip() == "timeouterror:":
+                if tcp_probe.startswith("failed:"):
+                    return (
+                        "TCP до Postgres host:port не проходит из сервиса. Проверьте Supabase project status, "
+                        "pooler endpoint/region, outbound network на Render и попробуйте direct/session DSN."
+                    )
+                if "pooler.supabase.com" in host and port == "6543":
+                    return (
+                        "TCP открыт, но asyncpg не дождался PostgreSQL handshake. Часто это Supabase pooler/backend "
+                        "unavailable/paused или неверный pooler endpoint. Проверьте Supabase project не paused и "
+                        "попробуйте direct DB host либо session pooler DSN."
+                    )
+                return "Соединение с БД зависло до timeout; проверьте доступность host:port и firewall/network."
+            if "certificate_verify_failed" in error or "self-signed certificate" in error:
+                return "Задеплойте версию с SSLContext(no_verify) для sslmode=require или используйте корректный CA для verify-full."
+            if "eauthquery" in error or "authentication query failed" in error:
+                return (
+                    "Pooler отвечает, но backend/auth недоступен. Проверьте user postgres.<project-ref>, пароль, "
+                    "database=postgres и что Supabase project не paused."
+                )
+            return self._db_connection_fix_hint({"connection_target": target, "error": str(exc)})
+
         started = datetime.now(tz=UTC)
         try:
             import asyncpg
@@ -2557,6 +2605,7 @@ class TelegramMonitorBot:
             target = _safe_connection_target(dsn)
             kwargs = asyncpg_pool_connect_kwargs(dsn)
             ssl_mode = _ssl_arg_label(kwargs.get("ssl", "dsn/default"))
+            tcp_probe = await asyncio.to_thread(_tcp_probe_sync, target.get("host"), target.get("port"))
             conn = await asyncio.wait_for(
                 asyncpg.connect(**kwargs, statement_cache_size=0),
                 timeout=10.0,
@@ -2576,6 +2625,7 @@ class TelegramMonitorBot:
                 "✅ asyncpg.connect OK\n"
                 f"Target: <code>{html.escape(json.dumps(target, ensure_ascii=False, sort_keys=True))}</code>\n"
                 f"SSL arg: <code>{html.escape(str(ssl_mode))}</code>\n"
+                f"TCP: <code>{html.escape(tcp_probe)}</code>\n"
                 f"DB: <code>{html.escape(str(row['db']))}</code>, user=<code>{html.escape(str(row['usr']))}</code>\n"
                 f"Server addr: <code>{html.escape(str(row['addr']))}</code>\n"
                 f"Elapsed: <code>{elapsed_ms:.0f} ms</code>"
@@ -2584,6 +2634,7 @@ class TelegramMonitorBot:
             elapsed_ms = (datetime.now(tz=UTC) - started).total_seconds() * 1000.0
             target: dict[str, Any] = {}
             ssl_mode: Any = "n/a"
+            tcp_probe = "n/a"
             try:
                 from trader.config import Settings
                 from trader.storage.trade_journal import asyncpg_pool_connect_kwargs, _safe_connection_target
@@ -2591,14 +2642,18 @@ class TelegramMonitorBot:
                 dsn = Settings().POSTGRES_DSN.get_secret_value()
                 target = _safe_connection_target(dsn)
                 ssl_mode = _ssl_arg_label(asyncpg_pool_connect_kwargs(dsn).get("ssl", "dsn/default"))
+                tcp_probe = await asyncio.to_thread(_tcp_probe_sync, target.get("host"), target.get("port"))
             except Exception:
                 pass
+            hint = _db_probe_error_hint(exc, target, tcp_probe)
             return (
                 "🧪 <b>DB probe</b>\n"
                 "❌ asyncpg.connect failed\n"
                 f"Target: <code>{html.escape(json.dumps(target, ensure_ascii=False, sort_keys=True))}</code>\n"
                 f"SSL arg: <code>{html.escape(str(ssl_mode))}</code>\n"
+                f"TCP: <code>{html.escape(tcp_probe)}</code>\n"
                 f"Error: <code>{html.escape(type(exc).__name__)}: {html.escape(str(exc))}</code>\n"
+                f"Hint: {html.escape(hint)}\n"
                 f"Elapsed: <code>{elapsed_ms:.0f} ms</code>"
             )
 
