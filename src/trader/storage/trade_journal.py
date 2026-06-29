@@ -90,6 +90,14 @@ def _safe_connection_target(dsn: str) -> dict[str, Any]:
     }
 
 
+def _schema_statement_label(statement: str) -> str:
+    for line in statement.splitlines():
+        stripped = line.strip()
+        if stripped and not stripped.startswith("--"):
+            return stripped[:160]
+    return statement.strip()[:160]
+
+
 async def _execute_schema_script(conn: Any, script: str) -> None:
     """Execute DDL one statement at a time.
 
@@ -97,11 +105,17 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
     startup. Splitting schema bootstrap keeps the connection alive more reliably
     and makes failures point at the exact DDL statement.
     """
+    statement_index = 0
     for raw_statement in script.split(";"):
         statement = raw_statement.strip()
         if not statement:
             continue
-        await conn.execute(statement)
+        statement_index += 1
+        try:
+            await conn.execute(statement)
+        except Exception as exc:
+            label = _schema_statement_label(statement)
+            raise RuntimeError(f"schema statement #{statement_index} failed: {label}: {exc}") from exc
 
 
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:

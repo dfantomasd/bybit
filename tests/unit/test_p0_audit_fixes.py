@@ -459,6 +459,28 @@ async def test_schema_script_executes_one_statement_at_a_time() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_schema_script_error_identifies_failed_statement() -> None:
+    from trader.storage.trade_journal import _execute_schema_script
+
+    conn = MagicMock()
+    conn.execute = AsyncMock(side_effect=[None, ConnectionError("connection was closed")])
+
+    with pytest.raises(RuntimeError) as excinfo:
+        await _execute_schema_script(
+            conn,
+            """
+            CREATE TABLE IF NOT EXISTS one (id int);
+            CREATE INDEX IF NOT EXISTS one_id_idx ON one (id);
+            """,
+        )
+
+    message = str(excinfo.value)
+    assert "schema statement #2 failed" in message
+    assert "CREATE INDEX IF NOT EXISTS one_id_idx" in message
+    assert "connection was closed" in message
+
+
 # ---------------------------------------------------------------------------
 # P0.5 — Telegram auto-subscription
 # ---------------------------------------------------------------------------
