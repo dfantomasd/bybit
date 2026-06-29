@@ -80,6 +80,29 @@ def _parse_str_csv(raw: str) -> list[str]:
     return [item.strip() for item in str(raw or "").split(",") if item.strip()]
 
 
+async def _configure_training_connection(conn: Any) -> None:
+    """Force trainer DB sessions to be read-write and fail early on replicas.
+
+    The trainer records rows in ``training_runs`` and ``model_versions``. If the
+    pool connects to a read-only replica or a role with read-only defaults, the
+    first INSERT otherwise fails with a low-level asyncpg stack trace.
+    """
+
+    try:
+        await conn.execute("SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE")
+        await conn.execute("SET default_transaction_read_only = off")
+        read_only = str(await conn.fetchval("SHOW transaction_read_only")).strip().lower()
+    except Exception as exc:
+        raise RuntimeError(
+            "training DB connection is not read-write; use the primary Postgres DSN/user for training"
+        ) from exc
+
+    if read_only in {"on", "true", "1", "yes"}:
+        raise RuntimeError(
+            "training DB connection is read-only; use the primary Postgres DSN/user for training"
+        )
+
+
 def _walk_forward_splits(
     x: np.ndarray,
     min_train_samples: int = 500,
@@ -504,7 +527,13 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         label_schema_version,
     )
     dsn = settings.POSTGRES_DSN.get_secret_value().replace("postgresql+asyncpg://", "postgresql://", 1)
-    pool = await asyncpg.create_pool(dsn=dsn, min_size=1, max_size=2, statement_cache_size=0)
+    pool = await asyncpg.create_pool(
+        dsn=dsn,
+        min_size=1,
+        max_size=2,
+        statement_cache_size=0,
+        init=_configure_training_connection,
+    )
 
     run_id = str(uuid.uuid4())
     run_started = datetime.now(tz=UTC)

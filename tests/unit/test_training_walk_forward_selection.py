@@ -10,11 +10,25 @@ import pytest
 from trader.ml.challenger import ChallengerModel
 from trader.training.train import (
     _candidate_specs,
+    _configure_training_connection,
     _filter_timestamps_by_mask,
     _negative_bucket_keep_mask,
     _validate_walk_forward_chronology,
     _walk_forward_splits,
 )
+
+
+class _FakeTrainingConn:
+    def __init__(self, read_only: str = "off") -> None:
+        self.read_only = read_only
+        self.executed: list[str] = []
+
+    async def execute(self, query: str) -> None:
+        self.executed.append(query)
+
+    async def fetchval(self, query: str) -> str:
+        self.executed.append(query)
+        return self.read_only
 
 
 def test_walk_forward_splits_expand_train_window() -> None:
@@ -27,6 +41,27 @@ def test_walk_forward_splits_expand_train_window() -> None:
     assert folds[0][1].tolist() == list(range(8, 12))
     assert folds[1][0].tolist() == list(range(12))
     assert folds[1][1].tolist() == list(range(12, 16))
+
+
+@pytest.mark.asyncio
+async def test_configure_training_connection_requires_read_write_session() -> None:
+    conn = _FakeTrainingConn(read_only="off")
+
+    await _configure_training_connection(conn)
+
+    assert conn.executed == [
+        "SET SESSION CHARACTERISTICS AS TRANSACTION READ WRITE",
+        "SET default_transaction_read_only = off",
+        "SHOW transaction_read_only",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_configure_training_connection_rejects_read_only_session() -> None:
+    conn = _FakeTrainingConn(read_only="on")
+
+    with pytest.raises(RuntimeError, match="read-only"):
+        await _configure_training_connection(conn)
 
 
 def test_walk_forward_splits_fallback_when_too_small() -> None:
