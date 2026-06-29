@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import math
+import ssl
 from collections.abc import Iterable
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
@@ -105,11 +106,21 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
     parsed = urlparse(normalized)
     query_pairs = parse_qsl(parsed.query, keep_blank_values=True)
     kept_query: list[tuple[str, str]] = []
-    ssl_arg: bool | str | None = None
+    ssl_arg: bool | ssl.SSLContext | None = None
     for key, value in query_pairs:
         if key.lower() == "sslmode":
             mode = value.lower()
-            if mode in {"require", "verify-ca", "verify-full"}:
+            if mode == "require":
+                # libpq sslmode=require encrypts the connection without
+                # requiring certificate-chain verification. Supabase pooler can
+                # present a chain that is not trusted by Render's CA bundle; a
+                # plain ssl=True in asyncpg verifies it and fails. Use an
+                # explicit context to preserve sslmode=require semantics.
+                context = ssl.create_default_context()
+                context.check_hostname = False
+                context.verify_mode = ssl.CERT_NONE
+                ssl_arg = context
+            elif mode in {"verify-ca", "verify-full"}:
                 ssl_arg = True
             elif mode in {"disable", "allow", "prefer"}:
                 ssl_arg = False

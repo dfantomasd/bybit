@@ -453,6 +453,8 @@ async def test_db_diagnostics_redacts_supabase_pooler_project_ref() -> None:
 
 
 def test_asyncpg_pool_connect_kwargs_makes_sslmode_explicit() -> None:
+    import ssl
+
     from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 
     kwargs = asyncpg_pool_connect_kwargs(
@@ -462,6 +464,19 @@ def test_asyncpg_pool_connect_kwargs_makes_sslmode_explicit() -> None:
     assert kwargs["dsn"] == (
         "postgresql://postgres.ref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
     )
+    assert isinstance(kwargs["ssl"], ssl.SSLContext)
+    assert kwargs["ssl"].verify_mode == ssl.CERT_NONE
+    assert kwargs["ssl"].check_hostname is False
+
+
+def test_asyncpg_pool_connect_kwargs_keeps_verify_modes_strict() -> None:
+    from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+
+    kwargs = asyncpg_pool_connect_kwargs(
+        "postgresql://u:p@db.example:5432/app?sslmode=verify-full&application_name=bot"
+    )
+
+    assert kwargs["dsn"] == "postgresql://u:p@db.example:5432/app?application_name=bot"
     assert kwargs["ssl"] is True
 
 

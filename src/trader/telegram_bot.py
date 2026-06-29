@@ -2534,6 +2534,18 @@ class TelegramMonitorBot:
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
 
     async def _render_db_probe_text(self) -> str:
+        def _ssl_arg_label(value: Any) -> str:
+            try:
+                import ssl
+
+                if isinstance(value, ssl.SSLContext):
+                    if value.verify_mode == ssl.CERT_NONE:
+                        return "SSLContext(no_verify)"
+                    return "SSLContext(verify)"
+            except Exception:
+                pass
+            return str(value)
+
         started = datetime.now(tz=UTC)
         try:
             import asyncpg
@@ -2544,7 +2556,7 @@ class TelegramMonitorBot:
             dsn = Settings().POSTGRES_DSN.get_secret_value()
             target = _safe_connection_target(dsn)
             kwargs = asyncpg_pool_connect_kwargs(dsn)
-            ssl_mode = kwargs.get("ssl", "dsn/default")
+            ssl_mode = _ssl_arg_label(kwargs.get("ssl", "dsn/default"))
             conn = await asyncio.wait_for(
                 asyncpg.connect(**kwargs, statement_cache_size=0),
                 timeout=10.0,
@@ -2578,7 +2590,7 @@ class TelegramMonitorBot:
 
                 dsn = Settings().POSTGRES_DSN.get_secret_value()
                 target = _safe_connection_target(dsn)
-                ssl_mode = asyncpg_pool_connect_kwargs(dsn).get("ssl", "dsn/default")
+                ssl_mode = _ssl_arg_label(asyncpg_pool_connect_kwargs(dsn).get("ssl", "dsn/default"))
             except Exception:
                 pass
             return (
