@@ -155,22 +155,54 @@ def _schema_statement_label(statement: str) -> str:
 
 
 def _split_sql_statements(script: str) -> list[str]:
-    """Split SQL script into individual statements, respecting string literals."""
+    """Split SQL script into individual statements, respecting string literals.
+
+    Handles single-quoted strings, double-quoted identifiers, and PostgreSQL
+    dollar-quoted literals ($$...$$ or $tag$...$tag$).
+    """
+    import re
+
     statements: list[str] = []
     current: list[str] = []
     in_string = False
     string_char = ""
+    dollar_tag: str | None = None  # non-None while inside $tag$...$tag$
     i = 0
     while i < len(script):
         ch = script[i]
+
+        if dollar_tag is not None:
+            # Inside a dollar-quoted block — scan for the closing tag
+            end = script.find(dollar_tag, i)
+            if end == -1:
+                # Unterminated dollar-quote: consume the rest as-is
+                current.append(script[i:])
+                break
+            tag_end = end + len(dollar_tag)
+            current.append(script[i:tag_end])
+            i = tag_end
+            dollar_tag = None
+            continue
+
         if in_string:
             current.append(ch)
             if ch == string_char:
+                # Handle escaped quote by doubling ('' or "")
                 if i + 1 < len(script) and script[i + 1] == string_char:
                     current.append(script[i + 1])
                     i += 2
                     continue
                 in_string = False
+        elif ch == "$":
+            # Look for a dollar-quote opening tag: $identifier$ or $$
+            m = re.match(r"\$([A-Za-z_]\w*)?\$", script[i:])
+            if m:
+                dollar_tag = m.group(0)
+                current.append(dollar_tag)
+                i += len(dollar_tag)
+                continue
+            else:
+                current.append(ch)
         elif ch in ("'", '"'):
             in_string = True
             string_char = ch

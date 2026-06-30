@@ -194,9 +194,18 @@ class CircuitBreakerManager:
         daily_pnl: Decimal,
         capital: Decimal,
     ) -> bool:
-        """Trigger if daily loss exceeds the limit."""
+        """Trigger if daily loss exceeds the limit.
+
+        Fails closed when capital is zero or unknown: trigger the breaker rather
+        than bypassing it, because a zero capital reading most likely indicates a
+        stale/failed balance query, not a genuinely zero account.
+        """
         if capital <= Decimal("0"):
-            return False
+            await self.trigger(
+                CircuitBreakerType.DAILY_LOSS_LIMIT,
+                "capital reported as zero or negative — failing closed on daily loss check",
+            )
+            return True
         loss_pct = abs(daily_pnl) / capital * Decimal("100") if daily_pnl < 0 else Decimal("0")
         if loss_pct >= self._limits.daily_loss_limit_pct:
             await self.trigger(

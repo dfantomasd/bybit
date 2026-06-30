@@ -235,6 +235,48 @@ class IdempotencyManager:
         self._transition(order_link_id, OrderStatus.CANCELLED)
 
     # ------------------------------------------------------------------
+    # Startup seeding
+    # ------------------------------------------------------------------
+
+    def seed_from_records(
+        self,
+        records: Iterable[dict[str, Any]],
+    ) -> int:
+        """Pre-populate the store from DB records on startup.
+
+        Each record must have ``order_link_id`` and ``status`` (OrderStatus value
+        string or OrderStatus enum).  Records for IDs already present are skipped.
+        Returns the number of records actually seeded.
+
+        Call this once during system startup (before any orders are submitted) so
+        the idempotency guard survives process restarts.
+        """
+        seeded = 0
+        for rec in records:
+            order_link_id = rec.get("order_link_id") or rec.get("orderLinkId")
+            if not order_link_id or order_link_id in self._store:
+                continue
+            raw_status = rec.get("status")
+            try:
+                if isinstance(raw_status, OrderStatus):
+                    status = raw_status
+                else:
+                    status = OrderStatus(str(raw_status))
+            except ValueError:
+                status = OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED
+            self._store[order_link_id] = {
+                "status": status,
+                "exchange_order_id": rec.get("exchange_order_id") or rec.get("orderId"),
+                "intent": None,
+                "created_at": rec.get("created_at") or datetime.now(tz=UTC),
+                "terminal_at": rec.get("terminal_at"),
+            }
+            seeded += 1
+        if seeded:
+            logger.info("idempotency.seeded_from_db", count=seeded)
+        return seeded
+
+    # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
 

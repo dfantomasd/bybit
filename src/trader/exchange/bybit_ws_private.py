@@ -100,6 +100,8 @@ class BybitPrivateWebSocket:
         self._seen_events: OrderedDict[str, None] = OrderedDict()
 
         self._reconnect_count: int = 0
+        # Per-symbol last updatedTime (ms) — used to drop out-of-order position frames
+        self._last_position_ts: dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Public interface
@@ -417,6 +419,22 @@ class BybitPrivateWebSocket:
         """Parse position update messages."""
         items = data if isinstance(data, list) else [data]
         for item in items:
+            symbol = item.get("symbol", "")
+            try:
+                updated_ms = int(item.get("updatedTime", 0) or 0)
+            except (TypeError, ValueError):
+                updated_ms = 0
+            if updated_ms > 0 and symbol:
+                prev = self._last_position_ts.get(symbol, 0)
+                if updated_ms < prev:
+                    self._log.debug(
+                        "ws_position_out_of_order_dropped",
+                        symbol=symbol,
+                        event_ts_ms=updated_ms,
+                        last_ts_ms=prev,
+                    )
+                    continue
+                self._last_position_ts[symbol] = updated_ms
             try:
                 side = OrderSide(item.get("side", "Buy"))
             except ValueError:
@@ -482,9 +500,32 @@ class BybitPrivateWebSocket:
             self._seen_events.popitem(last=False)
         return False
 
+    _CRITICAL_EVENT_TYPES = (PositionUpdateEvent, OrderUpdateEvent, ExecutionUpdateEvent)
+
     async def _emit(self, event: BaseEvent) -> None:
-        """Put event onto queue non-blocking."""
+        """Put event onto queue.
+
+        For critical safety events (position/order/execution), if the queue is
+        full we drop the oldest entry to make room rather than silently
+        discarding the new event.  Dropping stale data is safer than dropping
+        fresh data — the consumer will re-sync via the next REST reconciliation.
+        """
         try:
             self._event_queue.put_nowait(event)
         except asyncio.QueueFull:
-            self._log.debug("ws_private.queue_full_drop", event_type=type(event).__name__)
+            if isinstance(event, self._CRITICAL_EVENT_TYPES):
+                try:
+                    dropped = self._event_queue.get_nowait()
+                    self._log.warning(
+                        "ws_private.queue_full_dropped_oldest",
+                        dropped_type=type(dropped).__name__,
+                        new_type=type(event).__name__,
+                    )
+                    self._event_queue.put_nowait(event)
+                except (asyncio.QueueEmpty, asyncio.QueueFull):
+                    self._log.error(
+                        "ws_private.critical_event_lost",
+                        event_type=type(event).__name__,
+                    )
+            else:
+                self._log.debug("ws_private.queue_full_drop", event_type=type(event).__name__)

@@ -140,7 +140,7 @@ class KillSwitch:
         if self._flag_file.exists():
             try:
                 with self._flag_file.open(encoding="utf-8") as fh:
-                    content = fh.read().strip()
+                    content = fh.read(4096).strip()
                 reason = content or "kill flag file present"
             except OSError:
                 reason = "kill flag file present"

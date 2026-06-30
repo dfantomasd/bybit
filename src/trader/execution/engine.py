@@ -668,6 +668,10 @@ class ExecutionEngine:
             }
             notional = position.size * position.entry_price
             await self._exposure.update_position(position.symbol, position.side.value, notional)
+            # Stamp an entry time so _apply_position_snapshot respects the grace
+            # period even when the position was opened via WS (not via submit()).
+            if position.symbol not in self._last_entry_at:
+                self._last_entry_at[position.symbol] = datetime.now(tz=UTC)
 
     async def _remove_position(self, symbol: str) -> None:
         self._open_positions.pop(symbol, None)
