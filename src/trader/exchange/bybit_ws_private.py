@@ -32,6 +32,8 @@ logger = structlog.get_logger(__name__)
 _HEARTBEAT_INTERVAL = 20.0
 _WATCHDOG_TIMEOUT = 30.0
 _AUTH_EXPIRES_SECONDS = 10
+_RECONNECT_BACKOFF_BASE = 1.0
+_RECONNECT_BACKOFF_MAX = 30.0
 _MAX_SEEN_EVENTS = 20_000
 _PRIVATE_TOPICS = ["order", "execution", "position", "wallet"]
 
@@ -110,8 +112,9 @@ class BybitPrivateWebSocket:
     async def start(self) -> None:
         """Connect, authenticate and start processing messages."""
         self._running = True
+        consecutive_failures = 0
         while not self._stop_event.is_set():
-            await self._run_connection()
+            connected_ok = await self._run_connection()
             if self._stop_event.is_set():
                 break
             self._reconnect_count += 1
@@ -120,7 +123,16 @@ class BybitPrivateWebSocket:
                     self._metrics.ws_reconnect_total.labels(name="private").inc()
                 except Exception:  # noqa: S110
                     pass
-            await asyncio.sleep(1.0)
+            if connected_ok:
+                consecutive_failures = 0
+                delay = _RECONNECT_BACKOFF_BASE
+            else:
+                consecutive_failures += 1
+                delay = min(
+                    _RECONNECT_BACKOFF_BASE * (2 ** (consecutive_failures - 1)),
+                    _RECONNECT_BACKOFF_MAX,
+                )
+            await asyncio.sleep(delay)
         self._running = False
 
     async def stop(self) -> None:
@@ -148,15 +160,16 @@ class BybitPrivateWebSocket:
     # Internal connection loop
     # ------------------------------------------------------------------
 
-    async def _run_connection(self) -> None:
-        """Single connection attempt — returns when disconnected."""
+    async def _run_connection(self) -> bool:
+        """Single connection attempt — returns True if auth succeeded at least once."""
         try:
             import websockets
         except ImportError:
             self._log.error("websockets_not_installed")
             await asyncio.sleep(5.0)
-            return
+            return False
 
+        connected_ok = False
         try:
             async with websockets.connect(
                 self._endpoint,
@@ -174,7 +187,8 @@ class BybitPrivateWebSocket:
                 # Authenticate
                 if not await self._authenticate(ws):
                     self._log.error("ws_private.auth_failed")
-                    return
+                    return False
+                connected_ok = True
 
                 # Subscribe to private topics
                 await self._send_subscribe(ws, _PRIVATE_TOPICS)
@@ -219,6 +233,7 @@ class BybitPrivateWebSocket:
             self._connected = False
             self._authenticated = False
             self._ws = None
+        return connected_ok
 
     def _build_auth_msg(self) -> dict[str, Any]:
         """Build Bybit V5 WebSocket auth message using HMAC-SHA256."""
@@ -255,6 +270,8 @@ class BybitPrivateWebSocket:
                         else:
                             self._log.error("ws_private.auth_rejected", msg=msg)
                             return False
+                    else:
+                        self._log.debug("ws_private.auth_wait_frame_dropped", op=msg.get("op"))
         except TimeoutError:
             self._log.error("ws_private.auth_timeout")
         return False
@@ -293,7 +310,8 @@ class BybitPrivateWebSocket:
     async def _handle_message(self, raw: str | bytes) -> None:
         try:
             msg = json.loads(raw)
-        except Exception:
+        except Exception as exc:
+            self._log.warning("ws_private.message_parse_failed", error=str(exc))
             return
 
         # Op responses
