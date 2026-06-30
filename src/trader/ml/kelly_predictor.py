@@ -14,6 +14,7 @@ Architecture:
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -247,6 +248,15 @@ class MLKellyPredictor(KellyPredictorBase):
             # Get predictions
             kelly_pred = float(self.kelly_model.predict(x_reshaped)[0])
             frac_pred = float(self.fractional_model.predict(x_reshaped)[0])
+
+            # Reject non-finite model output before clamping (min/max do not
+            # filter NaN, which would otherwise silently propagate into the
+            # Decimal-typed position size).
+            if not math.isfinite(kelly_pred) or not math.isfinite(frac_pred):
+                logger.error(
+                    f"kelly_predictor.non_finite_prediction: kelly_pred={kelly_pred}, frac_pred={frac_pred}"
+                )
+                return self._fallback_prediction(features)
 
             # Clamp to reasonable ranges
             kelly_pred = max(0.01, min(kelly_pred, 0.25))
