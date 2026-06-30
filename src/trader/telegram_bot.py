@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import html
 import inspect
 import io
@@ -441,10 +442,11 @@ class TelegramMonitorBot:
         @http_app.post("/telegram/webhook")
         async def telegram_webhook(incoming: Request) -> Response:
             secret = bot_ref._config.webhook_secret.strip()
-            if secret:
-                provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-                if provided != secret:
-                    raise HTTPException(status_code=403, detail="invalid webhook secret")
+            if not secret:
+                raise HTTPException(status_code=403, detail="webhook secret not configured")
+            provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if not hmac.compare_digest(provided, secret):
+                raise HTTPException(status_code=403, detail="invalid webhook secret")
             tg_app = bot_ref._app
             if tg_app is None:
                 raise HTTPException(status_code=503, detail="telegram not ready")
@@ -2541,6 +2543,8 @@ class TelegramMonitorBot:
                 if isinstance(value, ssl.SSLContext):
                     if value.verify_mode == ssl.CERT_NONE:
                         return "SSLContext(no_verify)"
+                    if value.verify_mode == ssl.CERT_OPTIONAL:
+                        return "SSLContext(optional_verify)"
                     return "SSLContext(verify)"
             except Exception:
                 pass

@@ -118,6 +118,7 @@ def _make_engine(shadow: bool = False, min_edge: float = 0.15, fee_provider=None
         max_spread_bps=8.0,
         expected_slippage_pct=0.03,
         funding_buffer_pct=0.01,
+        live_armed=True,
     ), adapter
 
 

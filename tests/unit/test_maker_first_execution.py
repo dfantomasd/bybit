@@ -109,6 +109,7 @@ def _make_engine(
         maker_ttl_s=maker_timeout_s,
         maker_allow_escalation=maker_allow_escalation,
         imbalance_provider=imbalance_provider if imbalance_provider is not None else (lambda _s: 0.5),
+        live_armed=True,
     )
 
 

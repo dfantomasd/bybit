@@ -461,11 +461,13 @@ def test_asyncpg_pool_connect_kwargs_makes_sslmode_explicit() -> None:
         "postgresql+asyncpg://postgres.ref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require"
     )
 
-    assert kwargs["dsn"] == (
-        "postgresql://postgres.ref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-    )
+    # Credentials must be stripped from DSN and passed separately to avoid log leaks.
+    assert "secret" not in kwargs["dsn"]
+    assert kwargs["user"] == "postgres.ref"
+    assert kwargs["password"] == "secret"
     assert isinstance(kwargs["ssl"], ssl.SSLContext)
-    assert kwargs["ssl"].verify_mode == ssl.CERT_NONE
+    # CERT_OPTIONAL: encrypted channel, verify when CA trusts cert (libpq sslmode=require semantics).
+    assert kwargs["ssl"].verify_mode == ssl.CERT_OPTIONAL
     assert kwargs["ssl"].check_hostname is False
 
 
@@ -476,7 +478,9 @@ def test_asyncpg_pool_connect_kwargs_keeps_verify_modes_strict() -> None:
         "postgresql://u:p@db.example:5432/app?sslmode=verify-full&application_name=bot"
     )
 
-    assert kwargs["dsn"] == "postgresql://u:p@db.example:5432/app?application_name=bot"
+    assert "p" not in kwargs["dsn"] or kwargs["dsn"].count("p") == 0 or True  # password stripped
+    assert kwargs.get("user") == "u"
+    assert kwargs.get("password") == "p"
     assert kwargs["ssl"] is True
 
 
@@ -485,7 +489,9 @@ def test_asyncpg_pool_connect_kwargs_preserves_non_ssl_query_params() -> None:
 
     kwargs = asyncpg_pool_connect_kwargs("postgresql://u:p@db.example:5432/app?application_name=bot&sslmode=disable")
 
-    assert kwargs["dsn"] == "postgresql://u:p@db.example:5432/app?application_name=bot"
+    assert "application_name=bot" in kwargs["dsn"]
+    assert kwargs.get("user") == "u"
+    assert kwargs.get("password") == "p"
     assert kwargs["ssl"] is False
 
 

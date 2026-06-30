@@ -220,6 +220,7 @@ def _make_engine_with_fee_provider(shadow=False, min_edge=0.15, fee_taker=0.0005
         max_spread_bps=8.0,
         expected_slippage_pct=0.03,
         funding_buffer_pct=0.01,
+        live_armed=True,
     )
     return engine, adapter, fee_provider
 

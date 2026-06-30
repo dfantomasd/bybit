@@ -111,14 +111,13 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
         if key.lower() == "sslmode":
             mode = value.lower()
             if mode == "require":
-                # libpq sslmode=require encrypts the connection without
-                # requiring certificate-chain verification. Supabase pooler can
-                # present a chain that is not trusted by Render's CA bundle; a
-                # plain ssl=True in asyncpg verifies it and fails. Use an
-                # explicit context to preserve sslmode=require semantics.
+                # libpq sslmode=require: encrypt but do not abort when the CA
+                # chain is not trusted (Supabase pooler uses a cert not always
+                # in Render's bundle). CERT_OPTIONAL keeps the connection
+                # encrypted and verifies when possible, matching libpq semantics.
                 context = ssl.create_default_context()
                 context.check_hostname = False
-                context.verify_mode = ssl.CERT_NONE
+                context.verify_mode = ssl.CERT_OPTIONAL
                 ssl_arg = context
             elif mode in {"verify-ca", "verify-full"}:
                 ssl_arg = True
@@ -127,7 +126,21 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
             continue
         kept_query.append((key, value))
     cleaned = urlunparse(parsed._replace(query=urlencode(kept_query, doseq=True)))
+    # Expand DSN into explicit kwargs so the password is never in a loggable
+    # string (asyncpg may log connection kwargs on error).
     kwargs: dict[str, Any] = {"dsn": cleaned}
+    if parsed.username:
+        kwargs["user"] = parsed.username
+    if parsed.password:
+        kwargs["password"] = parsed.password
+        # Remove credentials from the DSN string to avoid leaking them in logs.
+        cleaned_no_creds = urlunparse(
+            parsed._replace(
+                netloc=f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or ""),
+                query=urlencode(kept_query, doseq=True),
+            )
+        )
+        kwargs["dsn"] = cleaned_no_creds
     if ssl_arg is not None:
         kwargs["ssl"] = ssl_arg
     return kwargs
@@ -141,6 +154,41 @@ def _schema_statement_label(statement: str) -> str:
     return statement.strip()[:160]
 
 
+def _split_sql_statements(script: str) -> list[str]:
+    """Split SQL script into individual statements, respecting string literals."""
+    statements: list[str] = []
+    current: list[str] = []
+    in_string = False
+    string_char = ""
+    i = 0
+    while i < len(script):
+        ch = script[i]
+        if in_string:
+            current.append(ch)
+            if ch == string_char:
+                if i + 1 < len(script) and script[i + 1] == string_char:
+                    current.append(script[i + 1])
+                    i += 2
+                    continue
+                in_string = False
+        elif ch in ("'", '"'):
+            in_string = True
+            string_char = ch
+            current.append(ch)
+        elif ch == ";":
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    remainder = "".join(current).strip()
+    if remainder:
+        statements.append(remainder)
+    return statements
+
+
 async def _execute_schema_script(conn: Any, script: str) -> None:
     """Execute DDL one statement at a time.
 
@@ -149,8 +197,7 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
     and makes failures point at the exact DDL statement.
     """
     statement_index = 0
-    for raw_statement in script.split(";"):
-        statement = raw_statement.strip()
+    for statement in _split_sql_statements(script):
         if not statement:
             continue
         statement_index += 1

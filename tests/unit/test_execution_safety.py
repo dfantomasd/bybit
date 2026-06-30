@@ -105,6 +105,7 @@ def _make_engine(shadow: bool = False, buffer_pct: float = 3.0) -> Any:
         shadow_mode=shadow,
         category="linear",
         min_notional_safety_buffer_pct=buffer_pct,
+        live_armed=True,
     )
     return engine, adapter
 

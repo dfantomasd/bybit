@@ -789,25 +789,36 @@ class TrainingModule(ModuleTaskMixin):
             return html.escape(value[-limit:])
 
         try:
-            train_env = {
-                **os.environ,
-                # Keep sklearn/BLAS from saturating the single Render starter CPU.
-                "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
-                "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
-                "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
-                "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
-                "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
-                "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
-                "TRAIN_STRATEGY_ALLOWLIST": (
-                    self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
-                ),
-                "TRAIN_INCLUDE_CANDLE_BASELINE": (
-                    "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
-                ),
-                "MODEL_LABEL_USE_TPSL_EXIT": (
-                    "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
-                ),
+            # Pass only the variables the training subprocess needs.
+            # Never forward the full os.environ to avoid leaking secrets
+            # (API keys, tokens, DSN passwords) to the child process.
+            _safe_env_passthrough = {
+                "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE",
+                "TZ", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV",
+                # Postgres DSN is required for training data queries.
+                "POSTGRES_DSN", "DATABASE_URL",
             }
+            train_env = {k: v for k, v in os.environ.items() if k in _safe_env_passthrough}
+            # Keep sklearn/BLAS from saturating the single Render starter CPU.
+            train_env.update(
+                {
+                    "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
+                    "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
+                    "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
+                    "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
+                    "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
+                    "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
+                    "TRAIN_STRATEGY_ALLOWLIST": (
+                        self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
+                    ),
+                    "TRAIN_INCLUDE_CANDLE_BASELINE": (
+                        "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
+                    ),
+                    "MODEL_LABEL_USE_TPSL_EXIT": (
+                        "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
+                    ),
+                }
+            )
             create_kwargs: dict[str, Any] = {"env": train_env}
             if hasattr(os, "nice"):
                 create_kwargs["preexec_fn"] = lambda: os.nice(10)
@@ -820,7 +831,8 @@ class TrainingModule(ModuleTaskMixin):
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False
             _notified_running = False
-            while True:
+            try:
+              while True:
                 try:
                     stdout_b, stderr_b = await asyncio.wait_for(
                         asyncio.shield(communicate_task),
@@ -843,6 +855,13 @@ class TrainingModule(ModuleTaskMixin):
                     if self._app._telegram_bot is not None and not _notified_running:
                         await self._app._telegram_bot.notify(f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)")
                         _notified_running = True
+            except asyncio.CancelledError:
+                # Kill the subprocess so it does not become an orphan when the
+                # event loop is shutting down.
+                if proc.returncode is None:
+                    proc.kill()
+                communicate_task.cancel()
+                raise
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:

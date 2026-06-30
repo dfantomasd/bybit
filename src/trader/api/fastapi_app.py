@@ -21,6 +21,7 @@ All endpoints are READ-ONLY. No trading actions can be triggered via this API.
 
 from __future__ import annotations
 
+import hmac
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -118,7 +119,7 @@ def create_app(
 
     def verify_api_key(request: Request) -> None:
         provided = request.headers.get(_API_KEY_HEADER)
-        if not provided or provided != api_key:
+        if not provided or not hmac.compare_digest(provided, api_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing API key",
@@ -293,7 +294,7 @@ def create_app(
                 status_code=500,
                 content=f"<html><body><h1>Dashboard error</h1><pre>{data['error']}</pre></body></html>",
             )
-        payload = json.dumps(data, default=str).replace("</", "<\\/")
+        payload = json.dumps(data, default=str)
         html = f"""
 <!doctype html>
 <html lang="en">
@@ -325,8 +326,9 @@ def create_app(
   </div>
   <section style="margin-top:18px"><h2>Baseline PnL heatmap, UTC</h2><div id="heatmap"></div></section>
 </main>
+<script type="application/json" id="__data__">{payload}</script>
 <script>
-const DATA = {payload};
+const DATA = JSON.parse(document.getElementById('__data__').textContent);
 document.getElementById('meta').textContent = `horizon=${{DATA.horizon_minutes}}m, model=${{DATA.model_version || 'none'}}`;
 const base = DATA.equity_baseline || [];
 const gate = DATA.equity_gate_pass || [];

@@ -7,8 +7,11 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import json
 import logging
+import os
 import pickle
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -392,6 +395,28 @@ class UnifiedMLController:
             logger.error(f"retrain_models failed: {e}")
             return dict.fromkeys(["kelly", "regime", "signals", "spread", "stoploss"], False)
 
+    @staticmethod
+    def _save_pkl(path: Path, obj: object) -> None:
+        """Pickle obj to path and write a SHA-256 checksum sidecar."""
+        data = pickle.dumps(obj, protocol=5)
+        digest = hashlib.sha256(data).hexdigest()
+        path.write_bytes(data)
+        path.with_suffix(".sha256").write_text(digest + "\n", encoding="ascii")
+
+    @staticmethod
+    def _load_pkl(path: Path) -> object:
+        """Load and verify a pickle file written by _save_pkl."""
+        data = path.read_bytes()
+        sha_path = path.with_suffix(".sha256")
+        if sha_path.exists():
+            expected = sha_path.read_text(encoding="ascii").strip()
+            actual = hashlib.sha256(data).hexdigest()
+            if not hmac.compare_digest(actual, expected):
+                raise ValueError(f"checksum mismatch for {path}: file may have been tampered with")
+        else:
+            logger.warning("pkl_no_checksum", path=str(path))
+        return pickle.loads(data)  # noqa: S301
+
     async def save_models(self) -> None:
         """Сохранить все модели на диск."""
         try:
@@ -400,32 +425,27 @@ class UnifiedMLController:
             # Сохранить каждую модель
             if self.kelly.kelly_model:
                 path = self.model_dir / "kelly_model.pkl"
-                with open(path, "wb") as f:
-                    pickle.dump(self.kelly.kelly_model, f)
+                self._save_pkl(path, self.kelly.kelly_model)
                 logger.debug(f"💾 Saved kelly_model to {path}")
 
             if self.regime.regime_model:
                 path = self.model_dir / "regime_model.pkl"
-                with open(path, "wb") as f:
-                    pickle.dump(self.regime.regime_model, f)
+                self._save_pkl(path, self.regime.regime_model)
                 logger.debug(f"💾 Saved regime_model to {path}")
 
             if self.signals.outcome_model:
                 path = self.model_dir / "signals_model.pkl"
-                with open(path, "wb") as f:
-                    pickle.dump(self.signals.outcome_model, f)
+                self._save_pkl(path, self.signals.outcome_model)
                 logger.debug(f"💾 Saved signals_model to {path}")
 
             if self.spread.spread_model:
                 path = self.model_dir / "spread_model.pkl"
-                with open(path, "wb") as f:
-                    pickle.dump(self.spread.spread_model, f)
+                self._save_pkl(path, self.spread.spread_model)
                 logger.debug(f"💾 Saved spread_model to {path}")
 
             if self.stoploss.model:
                 path = self.model_dir / "stoploss_model.pkl"
-                with open(path, "wb") as f:
-                    pickle.dump(self.stoploss.model, f)
+                self._save_pkl(path, self.stoploss.model)
                 logger.debug(f"💾 Saved stoploss_model to {path}")
 
             # Сохранить метаданные
@@ -453,28 +473,23 @@ class UnifiedMLController:
         """Загрузить модели с диска."""
         try:
             if (self.model_dir / "kelly_model.pkl").exists():
-                with open(self.model_dir / "kelly_model.pkl", "rb") as f:
-                    self.kelly.kelly_model = pickle.load(f)  # noqa: S301
+                self.kelly.kelly_model = self._load_pkl(self.model_dir / "kelly_model.pkl")
                 logger.info("📂 Loaded kelly_model")
 
             if (self.model_dir / "regime_model.pkl").exists():
-                with open(self.model_dir / "regime_model.pkl", "rb") as f:
-                    self.regime.regime_model = pickle.load(f)  # noqa: S301
+                self.regime.regime_model = self._load_pkl(self.model_dir / "regime_model.pkl")
                 logger.info("📂 Loaded regime_model")
 
             if (self.model_dir / "signals_model.pkl").exists():
-                with open(self.model_dir / "signals_model.pkl", "rb") as f:
-                    self.signals.outcome_model = pickle.load(f)  # noqa: S301
+                self.signals.outcome_model = self._load_pkl(self.model_dir / "signals_model.pkl")
                 logger.info("📂 Loaded signals_model")
 
             if (self.model_dir / "spread_model.pkl").exists():
-                with open(self.model_dir / "spread_model.pkl", "rb") as f:
-                    self.spread.spread_model = pickle.load(f)  # noqa: S301
+                self.spread.spread_model = self._load_pkl(self.model_dir / "spread_model.pkl")
                 logger.info("📂 Loaded spread_model")
 
             if (self.model_dir / "stoploss_model.pkl").exists():
-                with open(self.model_dir / "stoploss_model.pkl", "rb") as f:
-                    self.stoploss.model = pickle.load(f)  # noqa: S301
+                self.stoploss.model = self._load_pkl(self.model_dir / "stoploss_model.pkl")
                 logger.info("📂 Loaded stoploss_model")
 
             logger.info("✅ All models loaded")

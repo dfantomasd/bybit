@@ -120,7 +120,7 @@ class ExecutionEngine:
         trailing_stop_min_pct: float = 0.01,
         profit_gate_pct: float = 3.0,
         profit_lock_pct: float = 5.0,
-        live_armed: bool = True,
+        live_armed: bool = False,
         shadow_min_atr_multiple: float | None = None,
     ) -> None:
         self._adapter = adapter

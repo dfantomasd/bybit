@@ -113,6 +113,7 @@ def _make_engine(
     qty: Decimal | None = None,
     trade_journal: MagicMock | None = None,
     shadow_apply_net_edge_gate: bool = False,
+    live_armed: bool = True,
 ) -> ExecutionEngine:
     adapter = MagicMock()
     adapter.get_positions = AsyncMock(return_value=[])
@@ -140,6 +141,7 @@ def _make_engine(
         shadow_apply_net_edge_gate=shadow_apply_net_edge_gate,
         cooldown_s=0,  # disable cooldown for tests
         trade_journal=trade_journal,
+        live_armed=live_armed,
     )
     return engine
 

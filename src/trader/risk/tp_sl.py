@@ -191,11 +191,27 @@ class TPSLCalculator:
         side: str,
         is_stop_loss: bool,
     ) -> Decimal:
-        """Round exit prices conservatively for the trade direction."""
-        del is_stop_loss
+        """Round exit prices conservatively for the trade direction.
+
+        Conservative means: SL must not move closer to entry, TP must not
+        exceed the intended profit target.
+          - Long SL  → round DOWN  (keep SL below entry)
+          - Long TP  → round DOWN  (do not overshoot TP)
+          - Short SL → round UP    (keep SL above entry)
+          - Short TP → round UP    (do not overshoot TP)
+        """
         if tick_size <= Decimal("0"):
             return price
         is_short = side.lower() in ("sell", "short")
-        rounding = ROUND_CEILING if is_short else ROUND_DOWN
+        if is_stop_loss:
+            # SL must stay on the loss-limiting side of entry (conservative):
+            #   Long  SL is below entry → round DOWN to not move SL closer
+            #   Short SL is above entry → round UP (CEILING) to not move SL closer
+            rounding = ROUND_CEILING if is_short else ROUND_DOWN
+        else:
+            # TP should not be rounded beyond the achievable target (conservative):
+            #   Long  TP is above entry → round DOWN toward entry
+            #   Short TP is below entry → round UP (CEILING) toward entry
+            rounding = ROUND_CEILING if is_short else ROUND_DOWN
         ticks = (price / tick_size).to_integral_value(rounding=rounding)
         return ticks * tick_size

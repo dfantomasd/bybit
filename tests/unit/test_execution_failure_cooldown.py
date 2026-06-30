@@ -80,6 +80,7 @@ def _make_engine(shadow_mode: bool = False, failure_cooldown_s: int = 30) -> Exe
         shadow_mode=shadow_mode,
         cooldown_s=0,  # disable entry cooldown for these tests
         failure_cooldown_s=failure_cooldown_s,
+        live_armed=True,
     )
 
 

@@ -113,6 +113,7 @@ def _make_engine(
         shadow_mode=shadow,
         trade_journal=journal,
         is_canary=is_canary,
+        live_armed=True,
     )
     return engine, adapter, risk
 

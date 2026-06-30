@@ -14,7 +14,9 @@ CRITICAL INVARIANTS:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
@@ -154,6 +156,8 @@ class RiskManager:
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
+        self._last_daily_reset: datetime = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        self._daily_reset_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Primary evaluation
@@ -686,9 +690,33 @@ class RiskManager:
         self._daily_pnl += realized_pnl
 
     async def reset_daily_stats(self) -> None:
-        """Reset daily stats — call at UTC midnight."""
+        """Reset daily stats at UTC midnight."""
         self._daily_pnl = Decimal("0")
+        self._last_daily_reset = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         self._log.info("Daily risk stats reset")
+
+    def start_daily_reset_scheduler(self) -> None:
+        """Start a background task that resets daily stats at UTC midnight."""
+        if self._daily_reset_task is not None and not self._daily_reset_task.done():
+            return
+        self._daily_reset_task = asyncio.create_task(
+            self._daily_reset_loop(), name="risk-manager-daily-reset"
+        )
+
+    def stop_daily_reset_scheduler(self) -> None:
+        if self._daily_reset_task is not None:
+            self._daily_reset_task.cancel()
+            self._daily_reset_task = None
+
+    async def _daily_reset_loop(self) -> None:
+        while True:
+            now = datetime.now(tz=UTC)
+            next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if next_midnight <= now:
+                next_midnight = next_midnight.replace(day=next_midnight.day + 1)
+            wait_seconds = (next_midnight - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+            await self.reset_daily_stats()
 
     # ------------------------------------------------------------------
     # Properties
