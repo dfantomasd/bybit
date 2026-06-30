@@ -78,6 +78,7 @@ _CONFIRM_MAX_PENDING = 1000
 _TELEGRAM_MESSAGE_LIMIT = 4000
 _POLLING_LOCK_KEY_PREFIX = "bybit-trader:telegram-polling"
 _TRAIN_RATE_LIMIT_SECONDS = 120
+_DB_PROBE_RATE_LIMIT_SECONDS = 30
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -266,6 +267,7 @@ class TelegramMonitorBot:
         self._model_performance_cache: list[dict[str, Any]] = []
         # Rate limit: track last training invocation time per chat to prevent subprocess spam.
         self._last_train_at: dict[int, datetime] = {}
+        self._last_db_probe_at: dict[int, datetime] = {}
 
     def _uses_webhook(self) -> bool:
         return self._config.delivery_mode == "webhook"
@@ -1582,7 +1584,7 @@ class TelegramMonitorBot:
         try:
             health = await self._health_provider()
         except Exception as exc:
-            await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{exc}</code>")
+            await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{html.escape(str(exc))}</code>")
             return
 
         from trader.monitoring.deploy_info import get_deploy_info
@@ -1638,7 +1640,7 @@ class TelegramMonitorBot:
         try:
             bal: Balance = await adapter.get_balance()
         except Exception as exc:
-            await self._reply(update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         lines = [
             "<b>Баланс Bybit UNIFIED</b>",
@@ -1664,7 +1666,7 @@ class TelegramMonitorBot:
         try:
             positions: list[Position] = await adapter.get_positions(self._config.default_category)
         except Exception as exc:
-            await self._reply(update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         open_pos = [p for p in positions if p.size > 0]
         if not open_pos:
@@ -1763,7 +1765,7 @@ class TelegramMonitorBot:
             resp = await adapter._rest.get_closed_pnl(category=self._config.default_category, limit=20)
             records = resp.get("result", {}).get("list", [])
         except Exception as exc:
-            await self._reply(update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         if not records:
             await self._reply(update, "<b>Закрытый PnL</b>\nЗакрытых сделок пока нет.")
@@ -1932,7 +1934,7 @@ class TelegramMonitorBot:
             log.warning("telegram.costs_detailed_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Издержки детально</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Издержки детально</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -1988,7 +1990,7 @@ class TelegramMonitorBot:
             log.warning("telegram.pnl_analysis_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>PnL-анализ</b>\nОшибка: <code>{exc}</code>",
+                f"<b>PnL-анализ</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2100,7 +2102,7 @@ class TelegramMonitorBot:
             log.warning("telegram.compare_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Compare</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Compare</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2153,7 +2155,7 @@ class TelegramMonitorBot:
             log.warning("telegram.worst_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Worst</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Worst</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2213,7 +2215,7 @@ class TelegramMonitorBot:
             else:
                 await self._respond(
                     update,
-                    f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
+                    f"<b>История моделей</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                     reply_markup=self._main_menu(),
                 )
                 return
@@ -2406,7 +2408,7 @@ class TelegramMonitorBot:
         try:
             rows = await self._controller.attribution_provider(7)
         except Exception as exc:
-            await self._reply(update, f"<b>Attribution</b>\nОшибка: <code>{exc}</code>")
+            await self._reply(update, f"<b>Attribution</b>\nОшибка: <code>{html.escape(str(exc))}</code>")
             return
         if not rows:
             await self._reply(
@@ -2436,7 +2438,7 @@ class TelegramMonitorBot:
         try:
             diag = self._controller.diagnostics_provider()
         except Exception as exc:
-            await self._reply(update, f"<b>Диагностика</b>\nОшибка: <code>{exc}</code>")
+            await self._reply(update, f"<b>Диагностика</b>\nОшибка: <code>{html.escape(str(exc))}</code>")
             return
 
         loop_at = diag.get("last_strategy_loop_at") or "никогда"
@@ -2535,6 +2537,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last_probe = self._last_db_probe_at.get(cid)
+            if last_probe is not None:
+                elapsed = (datetime.now(tz=UTC) - last_probe).total_seconds()
+                if elapsed < _DB_PROBE_RATE_LIMIT_SECONDS:
+                    wait = int(_DB_PROBE_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным /db_probe.")
+                    return
+            self._last_db_probe_at[cid] = datetime.now(tz=UTC)
         text = await self._render_db_probe_text()
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
 
@@ -4601,7 +4613,7 @@ class TelegramMonitorBot:
                 value = int(raw_value)
             msg = await self._controller.set_runtime_setting(key, value)
         except Exception as exc:
-            await self._reply(update, f"❌ Изменение лимита отклонено: <code>{exc}</code>")
+            await self._reply(update, f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>")
             return
         await self._reply(
             update,
@@ -4642,7 +4654,7 @@ class TelegramMonitorBot:
             await self._reply(update, f"✅ Готово: <i>{action_name}</i>")
             log.info("telegram_control_confirmed", action=action_name, chat_id=cid)
         except Exception as exc:
-            await self._reply(update, f"❌ Не получилось: <code>{exc}</code>")
+            await self._reply(update, f"❌ Не получилось: <code>{html.escape(str(exc))}</code>")
             log.error("telegram_control_failed", action=action_name, error=str(exc))
 
     async def _show_canary_model_metrics(self, update: Update) -> None:
@@ -5171,7 +5183,7 @@ class TelegramMonitorBot:
                 else:
                     text_parts.append("Нет данных")
             except Exception as exc:
-                text_parts.append(f"Ошибка: <code>{exc}</code>")
+                text_parts.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
             text_parts.append("Контроллер недоступен")
         keyboard = InlineKeyboardMarkup(
@@ -5196,7 +5208,7 @@ class TelegramMonitorBot:
                 if net is not None:
                     text_parts.append(f"Net PnL: <code>{net:+.2f} USD</code>")
             except Exception as exc:
-                text_parts.append(f"Ошибка: <code>{exc}</code>")
+                text_parts.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
             text_parts.append("Провайдер PnL недоступен")
         keyboard = InlineKeyboardMarkup(
@@ -5802,7 +5814,7 @@ class TelegramMonitorBot:
             )
             markup = self._confirm_menu(f"train:{min_samples}:{horizon}:{label_bps:g}")
         except Exception as exc:
-            msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
+            msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
             markup = self._main_menu()
         await self._button_reply(update, msg, reply_markup=markup)
 
@@ -5855,7 +5867,7 @@ class TelegramMonitorBot:
         except Exception as exc:
             await self._button_reply(
                 update,
-                f"❌ Изменение лимита отклонено: <code>{exc}</code>",
+                f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._limits_menu(),
             )
             return
