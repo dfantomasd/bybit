@@ -85,6 +85,12 @@ class TPSLCalculator:
             if tp_price >= entry_price:
                 tp_price = self._round_exit_to_tick(entry_price - tick_size, tick_size, side=side, is_stop_loss=False)
 
+        # Final sanity check: SL and TP must not coincide or cross after rounding.
+        if is_long and sl_price >= tp_price:
+            sl_price = tp_price - tick_size
+        elif not is_long and sl_price <= tp_price:
+            sl_price = tp_price + tick_size
+
         return sl_price, tp_price
 
     # ------------------------------------------------------------------

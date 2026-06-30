@@ -109,6 +109,8 @@ class ExecutionRuntimeModule(AppBoundModule):
             ml_controller=self._app._ml_controller,
         )
         self._app._kill_switch = kill_switch
+        # Automatically reset daily PnL at UTC midnight.
+        self._app._risk_manager.start_daily_reset_scheduler()
         log.info(
             "risk_manager.initialized",
             profile=profile.value,

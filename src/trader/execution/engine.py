@@ -2091,21 +2091,20 @@ class ExecutionEngine:
             proposal.side,
             is_stop_loss=True,
         )
-        use_limit = self._entry_order_mode == "POST_ONLY_LIMIT"
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,
             symbol=proposal.symbol,
             market_type=proposal.market_type,
             side=proposal.side,
-            order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
+            order_type=OrderType.MARKET,
             qty=decision.approved_qty,
-            price=None,  # Market order — no price needed
+            price=None,
             order_link_id=link_id,
             take_profit=take_profit,
             stop_loss=stop_loss,
-            tp_order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
-            sl_order_type=OrderType.MARKET,  # SL always market
+            tp_order_type=OrderType.MARKET,
+            sl_order_type=OrderType.MARKET,
         )
 
     def _round_exit_price(

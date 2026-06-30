@@ -399,7 +399,7 @@ class BybitAdapter:
         try:
             open_orders_resp = await self._rest.get_open_orders(category=self._default_category)
             exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
-            exchange_ids = {o.get("orderLinkId") for o in exchange_open}
+            exchange_ids = {o.get("orderLinkId") for o in exchange_open if o.get("orderLinkId")}
 
             all_states = self._idempotency.all_states()
             pending_ids = {lid for lid, status_str in all_states.items() if OrderStatus(status_str) in _pending_states}
@@ -485,12 +485,12 @@ class BybitAdapter:
                         OrderStatus.REST_ACCEPTED,
                         OrderStatus.SUBMITTING,
                     }:
-                        self._idempotency._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+                        await self._idempotency.mark_ws_confirmed(order_link_id)
                     elif order_status == OrderStatus.PARTIALLY_FILLED and current in {
                         OrderStatus.WS_CONFIRMED,
                         OrderStatus.REST_ACCEPTED,
                     }:
-                        self._idempotency._store[order_link_id]["status"] = OrderStatus.PARTIALLY_FILLED
+                        await self._idempotency.mark_partially_filled(order_link_id)
             except Exception as exc:
                 logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
 

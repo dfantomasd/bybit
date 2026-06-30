@@ -167,12 +167,14 @@ class PositionSizer:
         # ----------------------------------------------------------------
         # Volatility-adaptive sizing — scale down in high-vol, up in low-vol
         # target_vol is the profile's max_drawdown_pct as a daily vol proxy;
-        # multiplier clamped to [0.5, 1.5] so it never doubles or halves.
+        # multiplier clamped to [0.5, 1.0] when drawdown is active so it can
+        # never undo the drawdown multiplier applied above.
         # ----------------------------------------------------------------
         if realized_vol is not None and realized_vol > Decimal("0"):
             target_vol = self._limits.max_drawdown_pct / Decimal("100")
             vol_multiplier = target_vol / realized_vol
-            vol_multiplier = max(Decimal("0.5"), min(Decimal("1.5"), vol_multiplier))
+            vol_upper = Decimal("1") if drawdown_multiplier < Decimal("1") else Decimal("1.5")
+            vol_multiplier = max(Decimal("0.5"), min(vol_upper, vol_multiplier))
             raw_qty = raw_qty * vol_multiplier
 
         # ----------------------------------------------------------------

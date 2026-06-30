@@ -205,23 +205,54 @@ class IdempotencyManager:
         self._transition(order_link_id, OrderStatus.REST_ACCEPTED)
         self._store[order_link_id]["exchange_order_id"] = exchange_order_id
 
+    async def mark_ws_confirmed(self, order_link_id: str) -> None:
+        """Mark order as WS-confirmed (exchange acknowledged)."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_ws_confirmed.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES or current == OrderStatus.WS_CONFIRMED:
+            return
+        allowed = _VALID_TRANSITIONS.get(current, set())
+        if OrderStatus.WS_CONFIRMED in allowed:
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
+
+    async def mark_partially_filled(self, order_link_id: str) -> None:
+        """Mark order as partially filled."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_partially_filled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES or current == OrderStatus.PARTIALLY_FILLED:
+            return
+        # Ensure we're in WS_CONFIRMED first if coming from REST_ACCEPTED
+        if current == OrderStatus.REST_ACCEPTED:
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
+        self._transition(order_link_id, OrderStatus.PARTIALLY_FILLED)
+
     async def mark_filled(self, order_link_id: str) -> None:
         """Mark order as fully filled."""
-        current = self._store.get(order_link_id, {}).get("status")
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_filled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
         if current == OrderStatus.PARTIALLY_FILLED:
             self._transition(order_link_id, OrderStatus.FILLED)
         elif current == OrderStatus.WS_CONFIRMED:
             self._transition(order_link_id, OrderStatus.FILLED)
         elif current == OrderStatus.REST_ACCEPTED:
-            # Fast-fill: jump straight to FILLED via WS_CONFIRMED intermediate
-            self._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+            # Fast-fill: step through WS_CONFIRMED to satisfy state machine
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
             self._transition(order_link_id, OrderStatus.FILLED)
-        else:
+        elif current not in _TERMINAL_STATES:
             self._transition(order_link_id, OrderStatus.FILLED)
 
     async def mark_cancelled(self, order_link_id: str) -> None:
         """Mark order as cancelled."""
-        current = self._store.get(order_link_id, {}).get("status")
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_cancelled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
         if current in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
             logger.warning(
                 "idempotency.cancel_in_terminal_state",
@@ -229,9 +260,9 @@ class IdempotencyManager:
                 status=current.value if current else "None",
             )
             return
-        # Move to CANCEL_REQUESTED first if needed
-        if current == OrderStatus.WS_CONFIRMED or current == OrderStatus.PARTIALLY_FILLED:
-            self._store[order_link_id]["status"] = OrderStatus.CANCEL_REQUESTED
+        # Step through CANCEL_REQUESTED for WS_CONFIRMED / PARTIALLY_FILLED orders
+        if current in (OrderStatus.WS_CONFIRMED, OrderStatus.PARTIALLY_FILLED):
+            self._transition(order_link_id, OrderStatus.CANCEL_REQUESTED)
         self._transition(order_link_id, OrderStatus.CANCELLED)
 
     # ------------------------------------------------------------------
