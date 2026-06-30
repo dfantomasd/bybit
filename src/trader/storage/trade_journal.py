@@ -241,7 +241,14 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
 
 
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
-    returns = [float(row.get("net_return_bps") or 0.0) for row in rows]
+    import math
+
+    returns = [
+        v
+        for row in rows
+        for v in [float(row.get("net_return_bps") or 0.0)]
+        if math.isfinite(v)
+    ]
     equity = 0.0
     peak = 0.0
     max_drawdown = 0.0
@@ -363,6 +370,7 @@ class TradeJournal:
         self._last_write_error_at: datetime | None = None
         self._last_write_error: str | None = None
         self._consecutive_write_errors: int = 0
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def is_enabled(self) -> bool:
@@ -927,14 +935,13 @@ class TradeJournal:
                 );
             """,
             )
-        asyncio.create_task(
-            self._ensure_model_registry_indexes_deferred(),
-            name="trade-journal-model-registry-index",
-        )
-        asyncio.create_task(
-            self._ensure_feature_snapshot_unique_index_deferred(),
-            name="trade-journal-feature-index",
-        )
+        for coro, name in (
+            (self._ensure_model_registry_indexes_deferred(), "trade-journal-model-registry-index"),
+            (self._ensure_feature_snapshot_unique_index_deferred(), "trade-journal-feature-index"),
+        ):
+            task = asyncio.create_task(coro, name=name)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     async def _ensure_model_registry_indexes_deferred(self) -> None:
         """Repair model registry metadata and champion uniqueness outside startup."""
@@ -943,45 +950,54 @@ class TradeJournal:
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute("SET statement_timeout = '120s'")
-                await conn.execute(
-                    """
-                    UPDATE model_versions
-                    SET feature_schema_hash = metrics->>'source_feature_schema_hash'
-                    WHERE metrics ? 'source_feature_schema_hash'
-                      AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
-                      AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash';
-                    WITH ranked AS (
-                        SELECT model_id,
-                               row_number() OVER (
-                                   ORDER BY
-                                       CASE WHEN COALESCE(
-                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                           NULLIF(metrics->>'wf_mean_bps', ''),
-                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
-                                       )::double precision > 0 THEN 0 ELSE 1 END,
-                                       COALESCE(
-                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                           NULLIF(metrics->>'wf_mean_bps', ''),
-                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
-                                           '-1000000'
-                                       )::double precision DESC,
-                                       COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
-                                       training_finished_at DESC NULLS LAST,
-                                       created_at DESC
-                               ) AS rn
-                        FROM model_versions
-                        WHERE status = 'CHAMPION'
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE model_versions
+                        SET feature_schema_hash = metrics->>'source_feature_schema_hash'
+                        WHERE metrics ? 'source_feature_schema_hash'
+                          AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
+                          AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash'
+                        """
                     )
-                    UPDATE model_versions mv
-                    SET status = 'ARCHIVED'
-                    FROM ranked
-                    WHERE mv.model_id = ranked.model_id
-                      AND ranked.rn > 1;
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
-                        ON model_versions ((status))
-                        WHERE status = 'CHAMPION';
-                    """
-                )
+                    await conn.execute(
+                        """
+                        WITH ranked AS (
+                            SELECT model_id,
+                                   row_number() OVER (
+                                       ORDER BY
+                                           CASE WHEN COALESCE(
+                                               NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                               NULLIF(metrics->>'wf_mean_bps', ''),
+                                               NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                                           )::double precision > 0 THEN 0 ELSE 1 END,
+                                           COALESCE(
+                                               NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                               NULLIF(metrics->>'wf_mean_bps', ''),
+                                               NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
+                                               '-1000000'
+                                           )::double precision DESC,
+                                           COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                                           training_finished_at DESC NULLS LAST,
+                                           created_at DESC
+                                   ) AS rn
+                            FROM model_versions
+                            WHERE status = 'CHAMPION'
+                        )
+                        UPDATE model_versions mv
+                        SET status = 'ARCHIVED'
+                        FROM ranked
+                        WHERE mv.model_id = ranked.model_id
+                          AND ranked.rn > 1
+                        """
+                    )
+                    await conn.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
+                            ON model_versions ((status))
+                            WHERE status = 'CHAMPION'
+                        """
+                    )
         except Exception as exc:
             log.warning("trade_journal.model_registry_indexes_deferred_failed", error=str(exc))
 
@@ -1001,39 +1017,40 @@ class TradeJournal:
         if exists:
             return
         try:
-            await conn.execute(
-                """
-                WITH ranked AS (
-                    SELECT
-                        snapshot_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY
-                                symbol,
-                                interval,
-                                candle_open_time,
-                                feature_schema_hash
-                            ORDER BY created_at ASC, snapshot_id ASC
-                        ) AS rn
-                    FROM feature_snapshots
-                    WHERE training_eligible = true
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            snapshot_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY
+                                    symbol,
+                                    interval,
+                                    candle_open_time,
+                                    feature_schema_hash
+                                ORDER BY created_at ASC, snapshot_id ASC
+                            ) AS rn
+                        FROM feature_snapshots
+                        WHERE training_eligible = true
+                    )
+                    UPDATE feature_snapshots fs
+                    SET
+                        training_eligible = false,
+                        invalid_reason = 'duplicate_snapshot_same_candle',
+                        invalidated_at = now()
+                    FROM ranked
+                    WHERE fs.snapshot_id = ranked.snapshot_id
+                      AND ranked.rn > 1
+                    """
                 )
-                UPDATE feature_snapshots fs
-                SET
-                    training_eligible = false,
-                    invalid_reason = 'duplicate_snapshot_same_candle',
-                    invalidated_at = now()
-                FROM ranked
-                WHERE fs.snapshot_id = ranked.snapshot_id
-                  AND ranked.rn > 1
-                """
-            )
-            await conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
-                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
-                    WHERE training_eligible = true
-                """
-            )
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                        ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                        WHERE training_eligible = true
+                    """
+                )
         except Exception as exc:
             log.warning(
                 "trade_journal.feature_snapshot_unique_index_deferred",
@@ -1058,7 +1075,7 @@ class TradeJournal:
         regime = regime_context.regime.value if regime_context is not None else None
         requested_notional = None
         if proposal.entry_price is not None:
-            requested_notional = proposal.entry_price * proposal.requested_qty
+            requested_notional = Decimal(str(proposal.entry_price)) * Decimal(str(proposal.requested_qty))
         await self._execute(
             """
             INSERT INTO trade_signals (
@@ -1383,7 +1400,7 @@ class TradeJournal:
             taker_count = int(exec_rows[0]["taker_count"]) if exec_rows else 0
             total_fills = maker_count + taker_count
             maker_pct = (maker_count / total_fills * 100.0) if total_fills > 0 else 0.0
-            taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 100.0
+            taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 0.0
 
             # Bybit closedPnl ALREADY nets out open/close fees and funding
             # (help center: Closed P&L = position P&L - fees - funding), so it
@@ -2328,6 +2345,7 @@ class TradeJournal:
                     feature_schema_hash, feature_names, feature_values
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+                ON CONFLICT DO NOTHING
                 RETURNING snapshot_id
                 """,
                 *args,
@@ -2503,7 +2521,7 @@ class TradeJournal:
             # at horizon_time is almost certainly confirmed. Still we filter confirmed.
             horizon_rows = await self._fetch(
                 """
-                SELECT close, high, low FROM market_candles
+                SELECT close, high, low, open_time FROM market_candles
                 WHERE symbol=$1 AND interval='1' AND open_time <= $2 AND confirmed = true
                 ORDER BY open_time DESC LIMIT 1
                 """,
@@ -2511,6 +2529,15 @@ class TradeJournal:
                 horizon_time,
             )
             if not horizon_rows:
+                continue
+            # Reject if the closest candle is more than 5 minutes stale — a gap
+            # in market data would produce systematically biased training labels.
+            candle_open_time = horizon_rows[0]["open_time"]
+            if candle_open_time.tzinfo is None:
+                candle_open_time = candle_open_time.replace(tzinfo=UTC)
+            from datetime import timedelta as _td
+
+            if abs((candle_open_time - horizon_time).total_seconds()) > 5 * 60:
                 continue
             horizon_close = float(horizon_rows[0]["close"])
             horizon_high = float(horizon_rows[0]["high"])
@@ -3107,7 +3134,7 @@ class TradeJournal:
                       AND po.label_schema_version = $1
                       AND po.horizon_minutes = $2
                       AND po.net_return_bps IS NOT NULL
-                    ORDER BY random()
+                      AND random() < 0.20
                     LIMIT $3
                     """,
                     label_schema_version,
