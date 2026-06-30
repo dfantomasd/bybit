@@ -5,10 +5,13 @@ Thread-safe via a re-entrant lock. All financial arithmetic uses Decimal.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import RLock
 from typing import Any
+
+# Pending exposure reservations older than this are considered stale and pruned.
+_PENDING_EXPOSURE_TTL_S = 120
 
 from trader.risk.profiles import RiskLimits
 
@@ -326,10 +329,12 @@ class ExposureTracker:
                         f"{self._limits.max_total_risk_at_stop_pct}%",
                     )
 
+            self._prune_stale_pending_unlocked()
             if order_id:
                 self._pending_exposure[order_id] = {
                     "symbol": symbol,
                     "notional": additional_notional,
+                    "reserved_at": datetime.now(UTC),
                 }
             return True, ""
 
@@ -438,4 +443,15 @@ class ExposureTracker:
             if str(pending.get("symbol", "")).upper() == symbol.upper()
         ]
         for oid in to_release:
+            self._pending_exposure.pop(oid, None)
+
+    def _prune_stale_pending_unlocked(self) -> None:
+        """Drop pending reservations older than _PENDING_EXPOSURE_TTL_S."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=_PENDING_EXPOSURE_TTL_S)
+        stale = [
+            oid
+            for oid, pending in self._pending_exposure.items()
+            if isinstance(pending.get("reserved_at"), datetime) and pending["reserved_at"] < cutoff
+        ]
+        for oid in stale:
             self._pending_exposure.pop(oid, None)

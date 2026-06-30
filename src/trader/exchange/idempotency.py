@@ -320,8 +320,17 @@ class IdempotencyManager:
         return sum(1 for v in self._store.values() if v["status"] not in _TERMINAL_STATES)
 
     def _terminal_order_ids_oldest_first(self) -> Iterable[str]:
+        _fallback = datetime.min.replace(tzinfo=UTC)
+
+        def _ts(entry: dict) -> datetime:
+            for key in ("terminal_at", "created_at"):
+                val = entry.get(key)
+                if isinstance(val, datetime):
+                    return val
+            return _fallback
+
         terminal_items = [
-            (order_link_id, entry.get("terminal_at") or entry.get("created_at") or datetime.min.replace(tzinfo=UTC))
+            (order_link_id, _ts(entry))
             for order_link_id, entry in self._store.items()
             if entry.get("status") in _TERMINAL_STATES
         ]

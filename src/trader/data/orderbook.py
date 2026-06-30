@@ -100,15 +100,15 @@ class LocalOrderBook:
     # ------------------------------------------------------------------
 
     def get_best_bid(self) -> tuple[Decimal, Decimal] | None:
-        """Return (price, qty) of the best bid, or None if empty."""
-        if not self._bids:
+        """Return (price, qty) of the best bid, or None if empty or invalid."""
+        if not self._valid or not self._bids:
             return None
         price = max(self._bids)
         return price, self._bids[price]
 
     def get_best_ask(self) -> tuple[Decimal, Decimal] | None:
-        """Return (price, qty) of the best ask, or None if empty."""
-        if not self._asks:
+        """Return (price, qty) of the best ask, or None if empty or invalid."""
+        if not self._valid or not self._asks:
             return None
         price = min(self._asks)
         return price, self._asks[price]
@@ -132,9 +132,9 @@ class LocalOrderBook:
     def get_imbalance(self, depth: int = 5) -> float | None:
         """Return (bid_vol - ask_vol) / total_vol for top *depth* levels.
 
-        Result in [-1, 1]; None when the book is empty.
+        Result in [-1, 1]; None when the book is empty or invalid.
         """
-        if not self._bids or not self._asks:
+        if not self._valid or not self._bids or not self._asks:
             return None
 
         sorted_bids = sorted(self._bids.items(), reverse=True)[:depth]

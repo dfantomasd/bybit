@@ -379,6 +379,10 @@ class RiskManager:
         if instrument_info.max_leverage is not None:
             if instrument_info.max_leverage > self._limits.max_leverage:
                 triggered_rules.append("leverage_reduced")
+                # Enforce the profile cap: override confirmed_leverage so the
+                # sizer never uses a leverage the profile doesn't permit.
+                if confirmed_leverage is not None and confirmed_leverage > self._limits.max_leverage:
+                    confirmed_leverage = self._limits.max_leverage
 
         # ----------------------------------------------------------------
         # 10. Validate stop distance
