@@ -715,7 +715,8 @@ class RiskManager:
             now = datetime.now(tz=UTC)
             next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if next_midnight <= now:
-                next_midnight = next_midnight.replace(day=next_midnight.day + 1)
+                from datetime import timedelta
+                next_midnight = next_midnight + timedelta(days=1)
             wait_seconds = (next_midnight - now).total_seconds()
             await asyncio.sleep(wait_seconds)
             await self.reset_daily_stats()
