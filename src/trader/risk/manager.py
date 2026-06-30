@@ -175,6 +175,7 @@ class RiskManager:
         atr: Decimal | None = None,
         shadow_mode: bool = False,
         min_atr_multiple: Decimal | None = None,
+        confirmed_leverage: Decimal | None = None,
     ) -> RiskDecision:
         """Evaluate a trade proposal and return a RiskDecision."""
         triggered_rules: list[str] = []
@@ -498,6 +499,7 @@ class RiskManager:
             remaining_position_budget_usd=remaining_position_budget_usd,
             realized_vol=realized_vol,
             min_atr_multiple=min_atr_multiple,
+            confirmed_leverage=confirmed_leverage,
         )
 
         if approved_qty <= Decimal("0"):

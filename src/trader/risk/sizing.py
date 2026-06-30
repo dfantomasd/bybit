@@ -74,6 +74,7 @@ class PositionSizer:
         remaining_position_budget_usd: Decimal | None = None,
         realized_vol: Decimal | None = None,
         min_atr_multiple: Decimal | None = None,
+        confirmed_leverage: Decimal | None = None,
     ) -> tuple[Decimal, str]:
         """Compute approved quantity.
 
@@ -203,7 +204,13 @@ class PositionSizer:
         # Available balance cap
         # ----------------------------------------------------------------
         if entry_price is not None and entry_price > Decimal("0"):
-            leverage = max(self._limits.max_leverage, Decimal("1"))
+            # Use the leverage actually confirmed by the exchange when available;
+            # fall back to the profile max so we never exceed what the exchange allows.
+            effective_leverage = min(
+                confirmed_leverage if confirmed_leverage is not None else self._limits.max_leverage,
+                self._limits.max_leverage,
+            )
+            leverage = max(effective_leverage, Decimal("1"))
             max_qty_from_balance = (available_balance * leverage) / entry_price
             raw_qty = min(raw_qty, max_qty_from_balance)
 

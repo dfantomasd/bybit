@@ -77,6 +77,7 @@ _CONFIRM_TTL_SECONDS = 300.0
 _CONFIRM_MAX_PENDING = 1000
 _TELEGRAM_MESSAGE_LIMIT = 4000
 _POLLING_LOCK_KEY_PREFIX = "bybit-trader:telegram-polling"
+_TRAIN_RATE_LIMIT_SECONDS = 120
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -263,6 +264,8 @@ class TelegramMonitorBot:
         self._webhook_route_mounted: bool = False
         self._redis_client: Any | None = None
         self._model_performance_cache: list[dict[str, Any]] = []
+        # Rate limit: track last training invocation time per chat to prevent subprocess spam.
+        self._last_train_at: dict[int, datetime] = {}
 
     def _uses_webhook(self) -> bool:
         return self._config.delivery_mode == "webhook"
@@ -4378,11 +4381,24 @@ class TelegramMonitorBot:
                     reply_markup=self._main_menu(),
                 )
                 return
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last_train = self._last_train_at.get(chat_id)
+            if last_train is not None:
+                elapsed = (datetime.now(tz=UTC) - last_train).total_seconds()
+                if elapsed < _TRAIN_RATE_LIMIT_SECONDS:
+                    wait = int(_TRAIN_RATE_LIMIT_SECONDS - elapsed)
+                    await self._button_reply(
+                        update,
+                        f"⏳ Обучение уже запущено или недавно завершилось. Подождите ещё {wait}с.",
+                        reply_markup=self._main_menu(),
+                    )
+                    return
             try:
                 _, min_s_raw, horizon_raw, label_raw = action.split(":", maxsplit=3)
                 min_samples = int(min_s_raw)
                 horizon = int(horizon_raw)
                 label_bps = float(label_raw)
+                self._last_train_at[chat_id] = datetime.now(tz=UTC)
                 msg = await self._controller.start_training(min_samples, horizon, label_bps)
             except Exception as exc:
                 msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"

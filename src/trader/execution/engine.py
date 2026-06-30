@@ -1127,6 +1127,7 @@ class ExecutionEngine:
                     atr=atr,
                     shadow_mode=self._shadow_mode,
                     min_atr_multiple=shadow_min_atr,
+                    confirmed_leverage=self._leverage_confirmed.get(symbol),
                 ),
             )
         except Exception as exc:
