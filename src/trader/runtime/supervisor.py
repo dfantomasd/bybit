@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -156,7 +155,11 @@ class RuntimeSupervisor(AppBoundModule):
                         )
                     except Exception as notify_exc:  # noqa: BLE001
                         log.warning("supervisor.telegram_notify_failed", error=str(notify_exc))
-                sys.exit(1)
+                # Signal the main loop to exit via graceful_shutdown rather than
+                # calling sys.exit() directly, which would bypass journal flushing
+                # and adapter teardown.
+                self._app._shutdown_event.set()
+                return
 
             try:
                 await asyncio.wait_for(

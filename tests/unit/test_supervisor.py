@@ -18,7 +18,7 @@ class TestRuntimeSupervisor:
 
     @pytest.mark.asyncio
     async def test_supervisor_exits_when_critical_task_dies(self):
-        """_run_supervisor must call sys.exit(1) when a critical task finishes unexpectedly."""
+        """_run_supervisor sets shutdown_event when a critical task finishes unexpectedly."""
         app = TradingApplication()
         app._shutdown_event = asyncio.Event()
         app._telegram_bot = None
@@ -32,10 +32,9 @@ class TestRuntimeSupervisor:
 
         app._background_tasks = [dying_task]
 
-        with pytest.raises(SystemExit) as exc_info:
-            await app._run_supervisor()
+        await app._run_supervisor()
 
-        assert exc_info.value.code == 1
+        assert app._shutdown_event.is_set()
 
     @pytest.mark.asyncio
     async def test_supervisor_does_not_exit_for_non_critical_task(self):
@@ -64,7 +63,7 @@ class TestRuntimeSupervisor:
 
     @pytest.mark.asyncio
     async def test_supervisor_sends_telegram_alert_before_exit(self):
-        """Telegram alert is sent before sys.exit when a critical task dies."""
+        """Telegram alert is sent and shutdown_event is set when a critical task dies."""
         app = TradingApplication()
         app._shutdown_event = asyncio.Event()
 
@@ -79,9 +78,9 @@ class TestRuntimeSupervisor:
         await asyncio.sleep(0)
         app._background_tasks = [dying_task]
 
-        with pytest.raises(SystemExit):
-            await app._run_supervisor()
+        await app._run_supervisor()
 
+        assert app._shutdown_event.is_set()
         notify_mock.assert_awaited_once()
         call_text: str = notify_mock.await_args.args[0]
         assert "ws-public" in call_text
