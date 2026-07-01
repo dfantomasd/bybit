@@ -257,11 +257,23 @@ class BybitPublicWebSocket:
         """
         if self._ws is None:
             return
+        ws = self._ws
         try:
-            await self._ws.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
-            await self._ws.send(json.dumps({"op": "subscribe", "args": [topic]}))
+            await ws.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
         except Exception as exc:
-            self._log.warning("ws_public.orderbook_resubscribe_failed", topic=topic, error=str(exc))
+            self._log.warning("ws_public.orderbook_unsubscribe_failed", topic=topic, error=str(exc))
+            return
+        try:
+            await ws.send(json.dumps({"op": "subscribe", "args": [topic]}))
+        except Exception as exc:
+            # Unsubscribe succeeded but subscribe failed: the topic is now unregistered
+            # on the server. Log as error (not warning) — no snapshot will arrive and
+            # the book stays broken until the next full reconnect.
+            self._log.error(
+                "ws_public.orderbook_resubscribe_subscribe_failed",
+                topic=topic,
+                error=str(exc),
+            )
 
     async def _heartbeat_loop(self, ws: Any) -> None:
         """Send ping every 20s and verify pong received within 5s."""

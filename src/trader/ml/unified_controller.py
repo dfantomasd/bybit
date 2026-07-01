@@ -471,31 +471,26 @@ class UnifiedMLController:
 
     async def load_models(self) -> None:
         """Загрузить модели с диска."""
-        try:
-            if (self.model_dir / "kelly_model.pkl").exists():
-                self.kelly.kelly_model = self._load_pkl(self.model_dir / "kelly_model.pkl")
-                logger.info("📂 Loaded kelly_model")
-
-            if (self.model_dir / "regime_model.pkl").exists():
-                self.regime.regime_model = self._load_pkl(self.model_dir / "regime_model.pkl")
-                logger.info("📂 Loaded regime_model")
-
-            if (self.model_dir / "signals_model.pkl").exists():
-                self.signals.outcome_model = self._load_pkl(self.model_dir / "signals_model.pkl")
-                logger.info("📂 Loaded signals_model")
-
-            if (self.model_dir / "spread_model.pkl").exists():
-                self.spread.spread_model = self._load_pkl(self.model_dir / "spread_model.pkl")
-                logger.info("📂 Loaded spread_model")
-
-            if (self.model_dir / "stoploss_model.pkl").exists():
-                self.stoploss.model = self._load_pkl(self.model_dir / "stoploss_model.pkl")
-                logger.info("📂 Loaded stoploss_model")
-
-            logger.info("✅ All models loaded")
-
-        except Exception as e:
-            logger.error(f"load_models failed: {e}")
+        _models: list[tuple[str, Any]] = [
+            ("kelly_model", lambda p: setattr(self.kelly, "kelly_model", self._load_pkl(p))),
+            ("regime_model", lambda p: setattr(self.regime, "regime_model", self._load_pkl(p))),
+            ("signals_model", lambda p: setattr(self.signals, "outcome_model", self._load_pkl(p))),
+            ("spread_model", lambda p: setattr(self.spread, "spread_model", self._load_pkl(p))),
+            ("stoploss_model", lambda p: setattr(self.stoploss, "model", self._load_pkl(p))),
+        ]
+        loaded = 0
+        for name, loader in _models:
+            path = self.model_dir / f"{name}.pkl"
+            if not path.exists():
+                continue
+            try:
+                loader(path)
+                logger.info(f"Loaded {name}")
+                loaded += 1
+            except Exception as e:
+                # Log per-model failure without aborting the remaining loads.
+                logger.error(f"load_models.{name}_failed: {e}")
+        logger.info(f"load_models completed: {loaded}/{len(_models)} models loaded")
 
     @staticmethod
     def _get_fallback_predictions(current_price: Decimal) -> MLPredictions:

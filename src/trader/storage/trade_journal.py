@@ -4302,7 +4302,7 @@ class TradeJournal:
             self._consecutive_write_errors += 1
             # Escalate to WARNING after the first failure so fill/PnL write
             # errors are visible in production logs, not buried at DEBUG.
-            _log_fn = log.warning if self._consecutive_write_errors > 1 else log.debug
+            _log_fn = log.warning if self._consecutive_write_errors >= 1 else log.debug
             _log_fn(
                 "trade_journal.write_failed",
                 error=str(exc),
