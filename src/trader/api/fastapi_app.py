@@ -138,16 +138,12 @@ def create_app(
         tags=["observability"],
     )
     async def get_livez() -> dict[str, str]:
-        """Return minimal unauthenticated liveness for container probes."""
-        from trader.monitoring.deploy_info import get_deploy_info
+        """Return minimal unauthenticated liveness for container probes.
 
-        info = get_deploy_info()
-        payload = {"status": "ok"}
-        if info["deploy_id"]:
-            payload["deploy_id"] = info["deploy_id"]
-        if info["git_commit"]:
-            payload["git_commit"] = info["git_commit"]
-        return payload
+        Intentionally returns only status — deploy/commit metadata would be
+        visible to any unauthenticated caller and is available on /status.
+        """
+        return {"status": "ok"}
 
     @app.get(
         "/readyz",
