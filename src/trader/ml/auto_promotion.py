@@ -51,13 +51,19 @@ def _metric_score(metrics: dict[str, Any]) -> float:
     return float(model_selection_metrics(metrics)["model_score"])
 
 
+_KNOWN_QUALITY_RANKS = {"GOOD": 2, "WEAK": 1, "NONE": 0, "": 0}
+
+
 def _quality_rank(quality: str) -> int:
+    """Return numeric rank for a model quality string.
+
+    Raises ValueError for unrecognized values so misconfigured required_quality
+    fails loudly instead of silently disabling the quality gate.
+    """
     normalized = str(quality or "").upper()
-    if normalized == "GOOD":
-        return 2
-    if normalized == "WEAK":
-        return 1
-    return 0
+    if normalized not in _KNOWN_QUALITY_RANKS:
+        raise ValueError(f"Unknown model quality value: {quality!r}. Expected one of: GOOD, WEAK, NONE")
+    return _KNOWN_QUALITY_RANKS[normalized]
 
 
 def _model_snapshot(row: dict[str, Any] | None) -> dict[str, Any] | None:
@@ -387,7 +393,7 @@ class AutoPromotionEngine:
                     """,
                     challenger_version,
                 )
-                if not updated.endswith("1"):
+                if updated != "UPDATE 1":
                     raise RuntimeError(f"promotion update affected unexpected rows: {updated}")
                 await conn.execute(
                     """
