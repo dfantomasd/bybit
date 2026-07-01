@@ -225,6 +225,7 @@ class ExposureTracker:
         """
         with self._lock:
             current_total = sum(Decimal(str(p["notional"])) for p in self._positions.values())
+            current_total += sum(Decimal(str(p["notional"])) for p in self._pending_exposure.values())
             if symbol is not None and symbol in self._positions:
                 current_total -= Decimal(str(self._positions[symbol]["notional"]))
             max_total = capital * self._limits.max_total_exposure_pct / Decimal("100")

@@ -884,6 +884,11 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
 
         # The saved artifact is trained on all usable samples with the candidate
         # selected only from out-of-sample walk-forward metrics.
+        if len(np.unique(y)) < 2:
+            raise RuntimeError(
+                f"Final training labels are single-class (threshold={selected_label_threshold}bps). "
+                "All samples are the same class; cannot train a useful model."
+            )
         model.fit_batch(x_arr, y, params=model.model_params)
         metrics = {
             "quality": "GOOD"

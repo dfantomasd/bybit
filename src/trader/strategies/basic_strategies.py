@@ -320,13 +320,13 @@ class MACDZeroCrossStrategy(BaseStrategy):
             )
             return None
 
-        # Check rate limiting
+        last_hist = self._last_macd_hist.get(symbol)
+        self._last_macd_hist[symbol] = macd_hist
+
+        # Check rate limiting (after updating histogram so state is current)
         last = self._last_signal_at.get(symbol)
         if last is not None and (datetime.now(UTC) - last).total_seconds() < _MC_COOLDOWN_SECONDS:
             return None
-
-        last_hist = self._last_macd_hist.get(symbol)
-        self._last_macd_hist[symbol] = macd_hist
 
         # No previous value = can't detect cross
         if last_hist is None:
