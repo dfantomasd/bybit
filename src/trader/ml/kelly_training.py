@@ -140,12 +140,12 @@ class KellyTrainer:
                 recent_pnl_trend = recent_sum / (len(recent[-5:]) * 100)
                 recent_pnl_trend = max(-1.0, min(1.0, recent_pnl_trend))
 
-            recent_profit_factor = (
-                abs(sum(t.get("pnl_bps", 0) for t in recent if t.get("pnl_bps", 0) > 0))
-                / abs(sum(t.get("pnl_bps", 0) for t in recent if t.get("pnl_bps", 0) < 0))
-                if recent
-                else 1.0
-            )
+            _win_sum = abs(sum(t.get("pnl_bps", 0) for t in recent if t.get("pnl_bps", 0) > 0))
+            _loss_sum = abs(sum(t.get("pnl_bps", 0) for t in recent if t.get("pnl_bps", 0) < 0))
+            # Mirror inference guard: require both wins and losses to avoid ZeroDivisionError.
+            # Without this, all-win periods raise ZeroDivisionError → sample is skipped →
+            # model never learns from all-win scenarios, but inference returns 1.0 for them.
+            recent_profit_factor = (_win_sum / _loss_sum) if (_win_sum > 0 and _loss_sum > 0) else 1.0
 
             # Distribution
             all_returns = np.array([t.get("pnl_bps", 0) for t in prior_trades]) if prior_trades else np.array([0.0])
@@ -164,7 +164,10 @@ class KellyTrainer:
 
             # Drawdown
             current_drawdown_pct = float(trade.get("drawdown_pct", 0.0))
-            max_drawdown_pct = float(max([t.get("drawdown_pct", 0.0) for t in prior_trades] or [0.0]))
+            # min() picks the most negative (worst) drawdown, matching the inference
+            # side where max_drawdown_pct is the peak (worst) historical drawdown.
+            # max() would return the least negative value, inverting the severity ladder.
+            max_drawdown_pct = float(min([t.get("drawdown_pct", 0.0) for t in prior_trades] or [0.0]))
 
             drawdown_severity = 0
             if max_drawdown_pct < -7.0:
