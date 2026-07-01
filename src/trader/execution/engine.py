@@ -1237,7 +1237,6 @@ class ExecutionEngine:
                 proposal.take_profit,
                 instrument_info.tick_size,
                 proposal.side,
-                is_stop_loss=False,
             )
             if tp_d is None:
                 self._release_exposure_reservation(proposal)
@@ -2083,13 +2082,11 @@ class ExecutionEngine:
             proposal.take_profit,
             instrument_info.tick_size,
             proposal.side,
-            is_stop_loss=False,
         )
         stop_loss = self._round_exit_price(
             proposal.stop_loss,
             instrument_info.tick_size,
             proposal.side,
-            is_stop_loss=True,
         )
         return OrderIntent(
             decision_id=decision.decision_id,
@@ -2112,7 +2109,6 @@ class ExecutionEngine:
         price: Decimal | None,
         tick_size: Decimal,
         side: OrderSide,
-        is_stop_loss: bool,
     ) -> Decimal | None:
         """Round exit prices without moving stops to the wrong side."""
         if price is None or tick_size <= Decimal("0"):
