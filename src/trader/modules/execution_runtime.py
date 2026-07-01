@@ -312,6 +312,10 @@ class ExecutionRuntimeModule(AppBoundModule):
                     and self._app._trade_journal.is_enabled
                     and await self._app._trade_journal.is_order_resolved(order_link_id)
                 ):
+                    # Order already resolved in DB (e.g. after restart): release the in-memory
+                    # pending slot so it doesn't leak and block future orders.
+                    if self._app._execution_engine is not None:
+                        self._app._execution_engine.mark_entry_resolved(order_link_id)
                     if len(_released_cache) >= _RELEASED_CACHE_MAX:
                         _released_cache.clear()
                     _released_cache.add(order_link_id)
@@ -372,13 +376,13 @@ class ExecutionRuntimeModule(AppBoundModule):
                         # Use order_link_id if present, otherwise reverse-lookup via exchange_order_id.
                         order_link_id = event.order_link_id
                         exchange_order_id = event.order_id
-                        if order_link_id is None and exchange_order_id:
+                        if not order_link_id and exchange_order_id:
                             if self._app._trade_journal is not None:
                                 order_link_id = await self._app._trade_journal.find_order_link_id_by_exchange_order_id(
                                     exchange_order_id
                                 )
                             # If lookup fails, we still process the event but can't tie it to a pending slot
-                        if order_link_id is None:
+                        if not order_link_id:
                             # Generate a fallback ID for logging only — never used for pending slot
                             order_link_id = f"unknown:{exchange_order_id or 'no_exchange_id'}"
 

@@ -167,14 +167,14 @@ class KellyTrainer:
             max_drawdown_pct = float(max([t.get("drawdown_pct", 0.0) for t in prior_trades] or [0.0]))
 
             drawdown_severity = 0
-            if max_drawdown_pct < -1.0:
-                drawdown_severity = 1
-            elif max_drawdown_pct < -3.0:
-                drawdown_severity = 2
-            elif max_drawdown_pct < -7.0:
-                drawdown_severity = 3
-            else:
+            if max_drawdown_pct < -7.0:
                 drawdown_severity = 4
+            elif max_drawdown_pct < -3.0:
+                drawdown_severity = 3
+            elif max_drawdown_pct < -1.0:
+                drawdown_severity = 2
+            elif max_drawdown_pct < 0:
+                drawdown_severity = 1
 
             in_drawdown = current_drawdown_pct < -0.1
 

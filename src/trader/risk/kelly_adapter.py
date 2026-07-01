@@ -130,16 +130,16 @@ class KellyAdapter:
         )
         var_95_bps = float(np.percentile(all_returns, 5)) if len(all_returns) > 0 else 0.0
 
-        # Drawdown state
+        # Drawdown state — check most extreme thresholds first so elif branches are reachable
         drawdown_severity = 0
-        if context.max_drawdown_pct < -1.0:
-            drawdown_severity = 1
-        elif context.max_drawdown_pct < -3.0:
-            drawdown_severity = 2
-        elif context.max_drawdown_pct < -7.0:
-            drawdown_severity = 3
-        else:
+        if context.max_drawdown_pct < -7.0:
             drawdown_severity = 4
+        elif context.max_drawdown_pct < -3.0:
+            drawdown_severity = 3
+        elif context.max_drawdown_pct < -1.0:
+            drawdown_severity = 2
+        elif context.max_drawdown_pct < 0:
+            drawdown_severity = 1
 
         in_drawdown = context.current_drawdown_pct < -0.1
 
