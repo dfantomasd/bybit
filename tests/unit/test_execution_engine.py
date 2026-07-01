@@ -294,13 +294,14 @@ class TestExecutionEngine:
         engine._adapter.place_order.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_live_order_uses_market_tp_sl(self):
+    async def test_live_order_uses_limit_tp_and_market_sl(self):
         engine = _make_engine(approved=True, shadow_mode=False)
         proposal = _proposal()
         await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
 
         intent = engine._adapter.place_order.await_args.args[0]
-        assert intent.tp_order_type == OrderType.MARKET
+        # TP uses LIMIT so the order rests at the target price; SL must be MARKET
+        assert intent.tp_order_type == OrderType.LIMIT
         assert intent.sl_order_type == OrderType.MARKET
 
     def test_exit_price_rounding_is_conservative_for_both_sides(self):

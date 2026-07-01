@@ -79,6 +79,8 @@ _TELEGRAM_MESSAGE_LIMIT = 4000
 _POLLING_LOCK_KEY_PREFIX = "bybit-trader:telegram-polling"
 _TRAIN_RATE_LIMIT_SECONDS = 120
 _DB_PROBE_RATE_LIMIT_SECONDS = 30
+_DEEP_REPORT_RATE_LIMIT_SECONDS = 60
+_DB_MODEL_RATE_LIMIT_SECONDS = 30
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -268,6 +270,8 @@ class TelegramMonitorBot:
         # Rate limit: track last training invocation time per chat to prevent subprocess spam.
         self._last_train_at: dict[int, datetime] = {}
         self._last_db_probe_at: dict[int, datetime] = {}
+        self._last_deep_report_at: dict[int, datetime] = {}
+        self._last_db_model_at: dict[int, datetime] = {}
 
     def _uses_webhook(self) -> bool:
         return self._config.delivery_mode == "webhook"
@@ -896,7 +900,7 @@ class TelegramMonitorBot:
         await self.notify(f"{icon} <b>Позиция закрыта</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>")
 
     async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
-        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{breaker_type}</code>\nПричина: {reason}")
+        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{html.escape(breaker_type)}</code>\nПричина: {html.escape(reason)}")
 
     async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
         await self.notify(f"⚙️ <b>Риск-профиль изменен</b>\n{old_profile} → <code>{new_profile}</code>")
@@ -1626,7 +1630,7 @@ class TelegramMonitorBot:
         ]
         if health.messages:
             lines += ["", "<b>Предупреждения</b>"]
-            lines.extend(f"• {m}" for m in health.messages[:6])
+            lines.extend(f"• {html.escape(m)}" for m in health.messages[:6])
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1707,7 +1711,7 @@ class TelegramMonitorBot:
                 "",
                 f"{icon} <b>{s.symbol}</b> {s.side} [{mode}] {ts}",
                 f"  Уверенность: <code>{s.confidence:.2f}</code>  Режим рынка: <code>{s.regime}</code>",
-                f"  {s.rationale[:80]}",
+                f"  {html.escape(s.rationale[:80])}",
             ]
         await self._reply(update, "\n".join(lines))
 
@@ -2453,8 +2457,8 @@ class TelegramMonitorBot:
             "<b>Диагностика за последний час</b>",
             f"Цикл стратегии: <code>{loop_at}</code>",
             f"Последнее WS-сообщение: <code>{ws_str}</code>",
-            f"Активные монеты: <code>{len(symbols)}</code>  {' '.join(symbols[:5])}{'…' if len(symbols) > 5 else ''}",
-            f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(positions[:5])}{'…' if len(positions) > 5 else ''}",
+            f"Активные монеты: <code>{len(symbols)}</code>  {' '.join(html.escape(s) for s in symbols[:5])}{'…' if len(symbols) > 5 else ''}",
+            f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(html.escape(p) for p in positions[:5])}{'…' if len(positions) > 5 else ''}",
             f"Риск портфеля: <code>{heat_str}</code>",
         ]
         drift = diag.get("drift_status")
@@ -2502,7 +2506,7 @@ class TelegramMonitorBot:
         pending_symbols = diag.get("pending_entry_symbols") or []
         pending_count = diag.get("pending_entry_count") or 0
         if pending_count > 0:
-            ids_str = ", ".join(f"<code>{pid[:16]}…</code>" for pid in pending_ids[:3])
+            ids_str = ", ".join(f"<code>{html.escape(pid[:16])}…</code>" for pid in pending_ids[:3])
             sym_str = ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
             lines.append(
                 f"\n⚠️ Новые входы <b>заблокированы</b> pending-заявкой:\n"
@@ -2681,6 +2685,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_deep_report_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DEEP_REPORT_RATE_LIMIT_SECONDS:
+                    wait = int(_DEEP_REPORT_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным запросом отчёта.")
+                    return
+            self._last_deep_report_at[cid] = datetime.now(tz=UTC)
         text = await self._render_deep_report_text()
         await self._send_deep_report_document(update, text)
 
@@ -2689,6 +2703,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_deep_report_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DEEP_REPORT_RATE_LIMIT_SECONDS:
+                    wait = int(_DEEP_REPORT_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным запросом отчёта.")
+                    return
+            self._last_deep_report_at[cid] = datetime.now(tz=UTC)
         text = await self._render_deep_report_text()
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
 
@@ -3864,6 +3888,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_db_model_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DB_MODEL_RATE_LIMIT_SECONDS:
+                    wait = int(_DB_MODEL_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с.")
+                    return
+            self._last_db_model_at[cid] = datetime.now(tz=UTC)
         try:
             db_diag = await self._load_db_diag(lite=update.callback_query is not None)
             diag: dict[str, Any] = {}

@@ -2100,7 +2100,7 @@ class ExecutionEngine:
             order_link_id=link_id,
             take_profit=take_profit,
             stop_loss=stop_loss,
-            tp_order_type=OrderType.MARKET,
+            tp_order_type=OrderType.LIMIT,
             sl_order_type=OrderType.MARKET,
         )
 
