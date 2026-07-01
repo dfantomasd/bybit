@@ -6,8 +6,11 @@ The analytics functions operate on raw bid/ask level lists.
 
 from __future__ import annotations
 
+import logging
 from decimal import Decimal
 from typing import Any
+
+_log = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # LocalOrderBook
@@ -45,17 +48,27 @@ class LocalOrderBook:
         for level in data.get("b", []):
             price = Decimal(str(level[0]))
             qty = Decimal(str(level[1]))
-            if qty > 0:
+            if qty == 0:
+                _log.warning("orderbook.snapshot_zero_qty_bid", symbol=self._symbol, price=str(price))
+            else:
                 self._bids[price] = qty
 
         for level in data.get("a", []):
             price = Decimal(str(level[0]))
             qty = Decimal(str(level[1]))
-            if qty > 0:
+            if qty == 0:
+                _log.warning("orderbook.snapshot_zero_qty_ask", symbol=self._symbol, price=str(price))
+            else:
                 self._asks[price] = qty
 
         self._last_update_id = int(data.get("u", 0))
         self._sequence = int(data.get("seq", 0))
+        if self._last_update_id == 0:
+            _log.warning(
+                "orderbook.snapshot_missing_update_id",
+                symbol=self._symbol,
+                note="gap detection disabled until first delta sets _last_update_id",
+            )
         self._valid = True
 
     def apply_delta(self, data: dict[str, Any]) -> bool:
@@ -151,8 +164,15 @@ class LocalOrderBook:
         return self._valid
 
     def invalidate(self) -> None:
-        """Mark the book as invalid (sequence gap or forced reset)."""
+        """Mark the book as invalid (sequence gap or forced reset).
+
+        Clears bid/ask data so stale levels cannot leak if _valid is ever
+        reset without going through apply_snapshot().
+        """
         self._valid = False
+        self._bids.clear()
+        self._asks.clear()
+        self._last_update_id = 0
 
     # ------------------------------------------------------------------
     # Internal access for analytics helpers
