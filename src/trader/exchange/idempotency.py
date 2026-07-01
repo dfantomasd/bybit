@@ -39,12 +39,19 @@ _VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.CANCELLED,
     },
     OrderStatus.FILLED: set(),
-    OrderStatus.CANCEL_REQUESTED: {OrderStatus.CANCELLED},
+    # CANCEL_REQUESTED → PARTIALLY_FILLED / FILLED: fill-vs-cancel race; the
+    # exchange may ack a fill after we sent a cancel request.
+    OrderStatus.CANCEL_REQUESTED: {
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.FILLED,
+        OrderStatus.CANCELLED,
+    },
     OrderStatus.CANCELLED: set(),
     OrderStatus.REJECTED: set(),
     OrderStatus.EXPIRED: set(),
     OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED: {
         OrderStatus.WS_CONFIRMED,
+        OrderStatus.PARTIALLY_FILLED,
         OrderStatus.FILLED,
         OrderStatus.CANCELLED,
         OrderStatus.REJECTED,
@@ -253,7 +260,7 @@ class IdempotencyManager:
             logger.warning("idempotency.mark_cancelled.unknown", order_link_id=order_link_id)
             return
         current = self._store[order_link_id]["status"]
-        if current in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
+        if current in _TERMINAL_STATES:
             logger.warning(
                 "idempotency.cancel_in_terminal_state",
                 order_link_id=order_link_id,
@@ -337,14 +344,15 @@ class IdempotencyManager:
         return (order_link_id for order_link_id, _ in sorted(terminal_items, key=lambda item: item[1]))
 
     def _prune_terminal_orders(self) -> None:
-        """Bound memory use by retaining only the newest terminal orders."""
+        """Bound memory use by retaining only the newest terminal orders.
+
+        A max_terminal_retained of 0 or negative means unlimited retention.
+        """
         if self._max_terminal_retained <= 0:
-            terminal_ids = list(self._terminal_order_ids_oldest_first())
-        else:
-            terminal_ids = list(self._terminal_order_ids_oldest_first())
-            overflow = len(terminal_ids) - self._max_terminal_retained
-            if overflow <= 0:
-                return
-            terminal_ids = terminal_ids[:overflow]
-        for order_link_id in terminal_ids:
+            return
+        terminal_ids = list(self._terminal_order_ids_oldest_first())
+        overflow = len(terminal_ids) - self._max_terminal_retained
+        if overflow <= 0:
+            return
+        for order_link_id in terminal_ids[:overflow]:
             self._store.pop(order_link_id, None)
