@@ -414,7 +414,7 @@ class UnifiedMLController:
             if not hmac.compare_digest(actual, expected):
                 raise ValueError(f"checksum mismatch for {path}: file may have been tampered with")
         else:
-            logger.warning("pkl_no_checksum", path=str(path))
+            logger.warning("pkl_no_checksum: %s", path)
         return pickle.loads(data)  # noqa: S301
 
     async def save_models(self) -> None:
