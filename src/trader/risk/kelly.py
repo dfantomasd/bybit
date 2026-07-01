@@ -77,8 +77,8 @@ def calculate_kelly_fraction(
 
     kelly_fraction = (win_rate * avg_win_bps - (1 - win_rate) * abs_avg_loss) / avg_win_bps
 
-    # Cap at 0.25 (fractional Kelly) for safety
-    kelly_fraction = max(0.0, min(kelly_fraction, 0.25))
+    # Clamp raw Kelly to [0, 1]; callers apply their own fractional multiplier.
+    kelly_fraction = max(0.0, min(kelly_fraction, 1.0))
 
     return kelly_fraction
 

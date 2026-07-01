@@ -132,7 +132,7 @@ class RateLimiter:
         if k not in self._states:
             self._states[k] = _EndpointState(
                 capacity=self._default_capacity,
-                tokens=self._default_capacity,
+                tokens=_DEFAULT_INITIAL_TOKENS,
                 refill_rate=self._default_refill_rate,
             )
         return self._states[k]

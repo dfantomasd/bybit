@@ -200,6 +200,9 @@ class BybitRestClient:
             )
 
         if http_status >= 400:
+            # Try to raise a specific exception first (e.g. AuthenticationError,
+            # InsufficientFundsError) when the retCode is known, even on 4xx.
+            _raise_for_ret_code(response, context=path)
             ret_code = response.get("retCode")
             ret_msg = response.get("retMsg") or response.get("message") or "HTTP error"
             raise TradingSystemError(

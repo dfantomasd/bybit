@@ -67,7 +67,7 @@ class SafetyModeLadder:
         soft = float(self._limits.max_drawdown_pct)
 
         if hard <= 0:
-            return SafetyLevel.NORMAL
+            return SafetyLevel.AK47  # misconfigured hard stop → fail closed
         if dd <= soft:
             return SafetyLevel.NORMAL
 
