@@ -518,7 +518,10 @@ class BybitPrivateWebSocket:
             self._seen_events.popitem(last=False)
         return False
 
-    _CRITICAL_EVENT_TYPES = (PositionUpdateEvent, OrderUpdateEvent, ExecutionUpdateEvent)
+    # BalanceUpdateEvent is included: a dropped balance update leaves _cached_balance
+    # stale, which can cause the risk manager to approve oversized orders against
+    # a balance that no longer reflects post-loss reality.
+    _CRITICAL_EVENT_TYPES = (PositionUpdateEvent, OrderUpdateEvent, ExecutionUpdateEvent, BalanceUpdateEvent)
 
     async def _emit(self, event: BaseEvent) -> None:
         """Put event onto queue.

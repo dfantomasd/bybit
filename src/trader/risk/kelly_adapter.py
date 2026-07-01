@@ -78,11 +78,27 @@ class KellyAdapter:
             prediction = await self._predictor.predict(features)
 
             self._last_prediction = prediction
-            return (
-                prediction.kelly_fraction,
-                prediction.fractional_kelly,
-                prediction.reasoning,
-            )
+
+            # Apply a hard-cap multiplier when the predictor flags critical/high
+            # risk — the ML model may not have learned to reduce sizing enough in
+            # extreme drawdown scenarios, so this is a defence-in-depth floor.
+            kelly = prediction.kelly_fraction
+            frac = prediction.fractional_kelly
+            risk_level = prediction.risk_level or "low"
+            if risk_level == "critical":
+                kelly = kelly * Decimal("0.5")
+                frac = frac * Decimal("0.5")
+                logger.warning(
+                    "kelly_adapter.critical_risk_override",
+                    original_kelly=str(prediction.kelly_fraction),
+                    adjusted_kelly=str(kelly),
+                    drawdown_severity=getattr(self._last_prediction, "risk_level", None),
+                )
+            elif risk_level == "high":
+                kelly = kelly * Decimal("0.75")
+                frac = frac * Decimal("0.75")
+
+            return (kelly, frac, prediction.reasoning)
         except Exception as e:
             logger.warning(f"kelly_adapter.prediction_failed: {e}, falling back")
             return self._fallback_kelly(context)
