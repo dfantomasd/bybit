@@ -193,7 +193,6 @@ class PositionSizer:
         # ----------------------------------------------------------------
         if (
             remaining_position_budget_usd is not None
-            and remaining_position_budget_usd >= Decimal("0")
             and entry_price is not None
             and entry_price > Decimal("0")
         ):

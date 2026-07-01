@@ -88,8 +88,14 @@ class TPSLCalculator:
         # Final sanity check: SL and TP must not coincide or cross after rounding.
         if is_long and sl_price >= tp_price:
             sl_price = tp_price - tick_size
+            # Re-validate directional invariant: sl must remain below entry
+            if sl_price >= entry_price:
+                sl_price = self._round_to_tick(entry_price - tick_size, tick_size)
         elif not is_long and sl_price <= tp_price:
             sl_price = tp_price + tick_size
+            # Re-validate directional invariant: sl must remain above entry
+            if sl_price <= entry_price:
+                sl_price = self._round_exit_to_tick(entry_price + tick_size, tick_size, side=side, is_stop_loss=True)
 
         return sl_price, tp_price
 

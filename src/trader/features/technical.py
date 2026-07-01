@@ -38,7 +38,10 @@ def returns(closes: Sequence[float], period: int = 1) -> float | None:
     """
     if len(closes) < period + 1:
         return None
-    return (closes[-1] - closes[-(period + 1)]) / closes[-(period + 1)]
+    base = closes[-(period + 1)]
+    if base == 0:
+        return None
+    return (closes[-1] - base) / base
 
 
 def log_return(closes: Sequence[float], period: int = 1) -> float | None:

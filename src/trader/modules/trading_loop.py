@@ -1095,12 +1095,15 @@ class TradingLoopModule(AppBoundModule):
                 # Refresh balance every N iterations
                 _balance_tick += 1
                 refresh_every = max(1, int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL))
-                if _balance_tick % refresh_every == 0:
-                    await self._app._refresh_balance()
-                    await self._app._refresh_closed_pnl_memory()
-                await self._app._sync_execution_positions()
-                await self._app._manage_open_positions()
-                self._app._check_zero_trading()
+                try:
+                    if _balance_tick % refresh_every == 0:
+                        await self._app._refresh_balance()
+                        await self._app._refresh_closed_pnl_memory()
+                    await self._app._sync_execution_positions()
+                    await self._app._manage_open_positions()
+                    self._app._check_zero_trading()
+                except Exception:
+                    _log.exception("strategy_loop.cycle_maintenance_error")
 
                 balance = self._app._cached_balance
                 capital = balance

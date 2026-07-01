@@ -250,8 +250,12 @@ class ReconciliationService:
                 exch_size_str = (
                     exch_pos.get("size", "0") if isinstance(exch_pos, dict) else str(getattr(exch_pos, "size", "0"))
                 )
-                if local_size is not None and str(local_size) != exch_size_str:
-                    diffs.append(f"Position {symbol} size mismatch: local={local_size} exchange={exch_size_str}")
+                try:
+                    from decimal import Decimal as _D, InvalidOperation
+                    if local_size is not None and _D(str(local_size)) != _D(exch_size_str):
+                        diffs.append(f"Position {symbol} size mismatch: local={local_size} exchange={exch_size_str}")
+                except InvalidOperation:
+                    diffs.append(f"Position {symbol} size unreadable: exchange={exch_size_str}")
 
         for symbol in exchange_map:
             if symbol not in local_positions:
@@ -302,8 +306,9 @@ class ReconciliationService:
         # Get local active orders
         try:
             local_active = await self._order_store.get_all_active()
-        except Exception:
-            local_active = {}
+        except Exception as exc:
+            self._log.warning("reconciliation._check_orders.store_failed", error=str(exc))
+            return diffs  # cannot compare without local state; avoid false safe-mode
 
         # Only compare PENDING local orders against exchange open orders
         local_pending: dict[str, Any] = {}

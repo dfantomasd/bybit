@@ -162,24 +162,22 @@ class SignalFusion:
 
             # Если вероятность успеха > 0.5, сигнал хороший
             if success_probability > 0.6:
-                # Какой сигнал самый сильный?
+                named_signals = [
+                    ("ma_crossover", context.signal_ma_crossover),
+                    ("rsi", context.signal_rsi),
+                    ("macd", context.signal_macd),
+                    ("breakout", context.signal_breakout),
+                    ("volume", context.signal_volume),
+                ]
                 buy_signals = sum(
-                    [
-                        context.signal_ma_crossover > 0,
-                        context.signal_rsi > 0,
-                        context.signal_macd > 0,
-                        context.signal_breakout > 0,
-                        context.signal_volume > 0,
-                    ]
+                    self.signal_weights.get(name, 1.0)
+                    for name, s in named_signals
+                    if s is not None and s > 0
                 )
                 sell_signals = sum(
-                    [
-                        context.signal_ma_crossover < 0,
-                        context.signal_rsi < 0,
-                        context.signal_macd < 0,
-                        context.signal_breakout < 0,
-                        context.signal_volume < 0,
-                    ]
+                    self.signal_weights.get(name, 1.0)
+                    for name, s in named_signals
+                    if s is not None and s < 0
                 )
 
                 if buy_signals > sell_signals:
@@ -203,26 +201,29 @@ class SignalFusion:
             logger.error(f"signal_fusion.inference_failed: {e}")
             return self._simple_voting(context)
 
-    @staticmethod
-    def _simple_voting(context: SignalContext) -> tuple[float, float, str]:
-        """Простое голосование (резервный вариант)."""
-        signals = [
-            context.signal_ma_crossover,
-            context.signal_rsi,
-            context.signal_macd,
-            context.signal_breakout,
-            context.signal_volume,
+    def _simple_voting(self, context: SignalContext) -> tuple[float, float, str]:
+        """Взвешенное голосование (резервный вариант)."""
+        named_signals = [
+            ("ma_crossover", context.signal_ma_crossover),
+            ("rsi", context.signal_rsi),
+            ("macd", context.signal_macd),
+            ("breakout", context.signal_breakout),
+            ("volume", context.signal_volume),
         ]
 
-        buy_count = sum(1 for s in signals if s > 0)
-        sell_count = sum(1 for s in signals if s < 0)
+        buy_weight = sum(
+            self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s > 0
+        )
+        sell_weight = sum(
+            self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s < 0
+        )
 
-        if buy_count > sell_count:
-            return 1.0, 0.5, "Большинство сигналов BUY (простое голосование)"
-        elif sell_count > buy_count:
-            return -1.0, 0.5, "Большинство сигналов SELL (простое голосование)"
+        if buy_weight > sell_weight:
+            return 1.0, 0.5, "Большинство сигналов BUY (взвешенное голосование)"
+        elif sell_weight > buy_weight:
+            return -1.0, 0.5, "Большинство сигналов SELL (взвешенное голосование)"
         else:
-            return 0.0, 0.3, "Сигналы поделились (простое голосование)"
+            return 0.0, 0.3, "Сигналы поделились (взвешенное голосование)"
 
     def _update_signal_weights(self) -> None:
         """Обновить веса сигналов из важности признаков модели."""
