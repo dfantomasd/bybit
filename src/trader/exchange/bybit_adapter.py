@@ -247,8 +247,13 @@ class BybitAdapter:
             )
             return resp
         except Exception as exc:
-            # Any exception (timeout, network, API error) is ambiguous — mark UNKNOWN.
-            # Blind retry is forbidden; reconciliation must resolve this state.
+            # HTTP 4xx errors are definitive rejections — the order was never
+            # created. Everything else (network timeout, 5xx, unknown) is truly
+            # ambiguous and requires reconciliation to resolve.
+            exc_code = getattr(exc, "code", "") or ""
+            is_definitive_rejection = isinstance(exc, TradingSystemError) and str(exc_code).startswith("HTTP_4")
+            durable_state = "REST_REJECTED" if is_definitive_rejection else "UNKNOWN_RECONCILIATION_REQUIRED"
+
             if self._journal is not None:
                 try:
                     await self._journal.upsert_durable_order_state(
@@ -256,7 +261,7 @@ class BybitAdapter:
                         symbol=intent.symbol,
                         side=intent.side.value,
                         qty=intent.qty,
-                        state="UNKNOWN_RECONCILIATION_REQUIRED",
+                        state=durable_state,
                         last_error=str(exc)[:200],
                     )
                 except Exception as _j_exc:
@@ -265,6 +270,7 @@ class BybitAdapter:
                 "bybit_adapter.order_failed",
                 order_link_id=intent.order_link_id,
                 error=str(exc),
+                definitive_rejection=is_definitive_rejection,
             )
             raise
 

@@ -38,6 +38,11 @@ _WARN_THRESHOLDS = (70.0, 85.0, 95.0)
 # Default token bucket configuration
 _DEFAULT_CAPACITY = 120  # requests per window
 _DEFAULT_REFILL_RATE = 2.0  # tokens per second
+# Conservative initial token budget before the first response teaches us the
+# real per-endpoint limit via X-Bapi-Limit headers.  Starting at full capacity
+# (120) risks an IP ban when multiple coroutines fan-out to a low-limit endpoint
+# before any response has arrived.
+_DEFAULT_INITIAL_TOKENS = 10
 _DEFAULT_WINDOW_SECONDS = 60
 
 # Backoff configuration
@@ -52,7 +57,7 @@ class _EndpointState:
     """Per-endpoint token bucket and limit state."""
 
     capacity: float = _DEFAULT_CAPACITY
-    tokens: float = _DEFAULT_CAPACITY
+    tokens: float = _DEFAULT_INITIAL_TOKENS
     refill_rate: float = _DEFAULT_REFILL_RATE  # tokens/s
     last_refill_ts: float = field(default_factory=time.monotonic)
 
