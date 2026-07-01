@@ -4141,7 +4141,8 @@ class TradeJournal:
         """Atomically archive the current champion and promote the challenger."""
         if not self.is_enabled:
             return
-        assert self._pool is not None
+        if self._pool is None:
+            raise RuntimeError("promote_challenger_to_champion called with no DB pool")
         import json as _json
 
         async with self._pool.acquire() as conn:
@@ -4299,7 +4300,10 @@ class TradeJournal:
             self._last_write_error_at = datetime.now(tz=UTC)
             self._last_write_error = str(exc)
             self._consecutive_write_errors += 1
-            log.debug(
+            # Escalate to WARNING after the first failure so fill/PnL write
+            # errors are visible in production logs, not buried at DEBUG.
+            _log_fn = log.warning if self._consecutive_write_errors > 1 else log.debug
+            _log_fn(
                 "trade_journal.write_failed",
                 error=str(exc),
                 consecutive_errors=self._consecutive_write_errors,
