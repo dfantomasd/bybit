@@ -278,17 +278,25 @@ class RiskManager:
         # ----------------------------------------------------------------
         # 4. Daily loss limit
         # ----------------------------------------------------------------
-        if capital > Decimal("0"):
-            daily_loss_pct = (
-                abs(self._daily_pnl) / capital * Decimal("100") if self._daily_pnl < Decimal("0") else Decimal("0")
+        if capital <= Decimal("0"):
+            # Stale or missing balance — fail closed: we cannot compute daily
+            # loss % so we must not allow new entries.
+            return self._reject(
+                proposal,
+                "capital is zero or negative — balance stale or unavailable",
+                ["stale_balance"],
+                capital,
             )
-            if daily_loss_pct >= self._limits.daily_loss_limit_pct:
-                return self._reject(
-                    proposal,
-                    f"daily loss {daily_loss_pct:.2f}% >= limit {self._limits.daily_loss_limit_pct}%",
-                    ["daily_loss_limit"],
-                    capital,
-                )
+        daily_loss_pct = (
+            abs(self._daily_pnl) / capital * Decimal("100") if self._daily_pnl < Decimal("0") else Decimal("0")
+        )
+        if daily_loss_pct >= self._limits.daily_loss_limit_pct:
+            return self._reject(
+                proposal,
+                f"daily loss {daily_loss_pct:.2f}% >= limit {self._limits.daily_loss_limit_pct}%",
+                ["daily_loss_limit"],
+                capital,
+            )
 
         # ----------------------------------------------------------------
         # 5. Drawdown hard stop

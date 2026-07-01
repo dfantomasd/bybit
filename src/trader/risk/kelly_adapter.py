@@ -189,10 +189,13 @@ class KellyAdapter:
         if not win_amounts or not loss_amounts:
             kelly = Decimal("0.10")
         else:
-            avg_win = np.mean(win_amounts)
-            avg_loss = abs(np.mean(loss_amounts))
-            kelly_value = (win_rate * avg_win - (1 - win_rate) * avg_loss) / max(avg_win, 1.0)
-            kelly = Decimal(str(max(0.01, min(0.25, kelly_value))))
+            avg_win = float(np.mean(win_amounts))
+            avg_loss = abs(float(np.mean(loss_amounts)))
+            if not (avg_win >= 0 and avg_loss >= 0):  # catches NaN / inf
+                kelly = Decimal("0.10")
+            else:
+                kelly_value = (win_rate * avg_win - (1 - win_rate) * avg_loss) / max(avg_win, 1.0)
+                kelly = Decimal(str(max(0.01, min(0.25, kelly_value))))
 
         # Fractional Kelly
         frac = Decimal("0.25")

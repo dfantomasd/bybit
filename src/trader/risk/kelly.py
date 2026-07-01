@@ -192,18 +192,21 @@ def calculate_position_size_kelly(
     if entry_price <= 0 or stop_price <= 0:
         return Decimal("0")
 
+    kelly_d = Decimal(str(kelly_fraction))
+    risk_per_trade_d = Decimal(str(risk_per_trade_pct))
+
     # Risk amount from Kelly
-    risk_amount = float(capital_usd) * kelly_fraction
+    risk_amount = capital_usd * kelly_d
 
     # Cap at risk_per_trade_pct of capital
-    max_risk = float(capital_usd) * (risk_per_trade_pct / 100.0)
+    max_risk = capital_usd * risk_per_trade_d / Decimal("100")
     risk_amount = min(risk_amount, max_risk)
 
     # Calculate position size
-    price_diff = abs(float(entry_price) - float(stop_price))
-    if price_diff <= 0:
+    price_diff = abs(entry_price - stop_price)
+    if price_diff <= Decimal("0"):
         return Decimal("0")
 
-    position_size = Decimal(str(risk_amount / price_diff))
+    position_size = risk_amount / price_diff
 
     return max(Decimal("0"), position_size)
