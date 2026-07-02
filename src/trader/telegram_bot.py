@@ -5953,6 +5953,25 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
+
+        # Block escalation to a riskier profile unless explicitly allowed.
+        old_level = _RISK_LEVEL.get(old_profile, 0)
+        new_level = _RISK_LEVEL.get(new_profile_str, 0)
+        if new_level > old_level and not self._controller.allow_risk_increase:
+            await self._button_reply(
+                update,
+                f"🚫 <b>Повышение риска заблокировано</b>: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
+                "Чтобы разрешить, задайте <code>TELEGRAM_ALLOW_RISK_INCREASE=true</code> на Render.\n"
+                "После изменения нужен перезапуск сервиса.",
+                reply_markup=self._main_menu(),
+            )
+            log.warning(
+                "telegram.risk_escalation_blocked",
+                old=old_profile,
+                new=new_profile_str,
+            )
+            return
+
         cid = self._chat_id(update)
         controller = self._controller
         if cid and controller is not None:

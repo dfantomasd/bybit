@@ -127,6 +127,9 @@ class ShadowProbeStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return SHADOW_PROBE_STRATEGY_ID
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+
     def _diag(self, reason: str, *, symbol: str | None = None, side: OrderSide | str | None = None) -> None:
         if self._diag_hook is None:
             return
@@ -168,9 +171,9 @@ class ShadowProbeStrategy(BaseStrategy):
         rsi = features.get("rsi_14")
         if ema9 is None or ema21 is None:
             return None
-        if ema9 > ema21 and (rsi is None or rsi < 68):
+        if ema9 > ema21 and (rsi is None or rsi < 0.68):
             return OrderSide.BUY
-        if ema9 < ema21 and (rsi is None or rsi > 32):
+        if ema9 < ema21 and (rsi is None or rsi > 0.32):
             return OrderSide.SELL
         return None
 

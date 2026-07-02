@@ -1504,6 +1504,7 @@ class TradeJournal:
                 retry_count = EXCLUDED.retry_count,
                 last_error = EXCLUDED.last_error,
                 updated_at = now()
+            WHERE durable_order_state.state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
             """,
             order_link_id,
             proposal_id,
@@ -1695,7 +1696,7 @@ class TradeJournal:
             SELECT
                 COALESCE(pe.metadata->>'regime', 'UNKNOWN') AS regime,
                 COALESCE(pe.metadata->>'volatility', 'UNKNOWN') AS volatility,
-                extract(hour FROM pe.created_at)::int AS hour,
+                extract(hour FROM pe.created_at AT TIME ZONE 'UTC')::int AS hour,
                 avg(po.net_return_bps) AS avg_bps,
                 count(*) AS cnt
             FROM prediction_outcomes po
@@ -4120,14 +4121,16 @@ class TradeJournal:
             """
             INSERT INTO model_promotion_log
                 (event_type, decision, challenger_version, champion_version,
-                 new_champion_version, reasons, metrics_snapshot)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                 new_champion_version, from_version, to_version, reasons, metrics_snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
             """,
             event_type,
             decision,
             challenger_version,
             champion_version,
             new_champion_version,
+            champion_version,
+            new_champion_version or challenger_version,
             _json.dumps(reasons or []),
             _json.dumps(metrics_snapshot or {}),
         )
@@ -4165,8 +4168,8 @@ class TradeJournal:
                     """
                     INSERT INTO model_promotion_log
                         (event_type, decision, challenger_version, champion_version,
-                         new_champion_version, reasons, metrics_snapshot)
-                    VALUES ('PROMOTION', 'APPROVED', $1, $2, $1, '[]'::jsonb, $3::jsonb)
+                         new_champion_version, from_version, to_version, reasons, metrics_snapshot)
+                    VALUES ('PROMOTION', 'APPROVED', $1, $2, $1, $2, $1, '[]'::jsonb, $3::jsonb)
                     """,
                     version,
                     prev_version,
@@ -4268,8 +4271,8 @@ class TradeJournal:
                     """
                     INSERT INTO model_promotion_log
                         (event_type, decision, champion_version, new_champion_version,
-                         reasons, metrics_snapshot)
-                    VALUES ('ROLLBACK', 'AUTO', $1, $2, $3::jsonb, $4::jsonb)
+                         from_version, to_version, reasons, metrics_snapshot)
+                    VALUES ('ROLLBACK', 'AUTO', $1, $2, $1, $2, $3::jsonb, $4::jsonb)
                     """,
                     current_version,
                     restore_version,

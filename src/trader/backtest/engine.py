@@ -40,6 +40,11 @@ class TradeRecord:
     gross_pnl_pct: float
     net_pnl_pct: float
     exit_reason: str
+    # Trade's actual contribution to account equity, scaled by the position's
+    # notional fraction of equity — unlike net_pnl_pct (the raw directional
+    # price move), this is what compute_metrics must use to stay consistent
+    # with equity_curve.
+    equity_pnl_pct: float = 0.0
 
 
 @dataclass
@@ -112,7 +117,10 @@ class BacktestEngine:
                     net = gross - self._round_trip_cost_pct(cost, spread_bps=self._config.spread_bps)
                     notional = equity * self._config.risk_pct / max(open_trade["sl_dist_pct"], 1e-9)
                     notional = min(notional, equity * 0.3)
-                    equity += notional * (net / 100.0)
+                    equity_before = equity
+                    dollar_pnl = notional * (net / 100.0)
+                    equity += dollar_pnl
+                    equity_pnl_pct = (dollar_pnl / equity_before * 100.0) if equity_before > 0 else 0.0
                     trades.append(
                         TradeRecord(
                             symbol=symbol,
@@ -124,6 +132,7 @@ class BacktestEngine:
                             gross_pnl_pct=gross,
                             net_pnl_pct=net,
                             exit_reason=reason,
+                            equity_pnl_pct=equity_pnl_pct,
                         )
                     )
                     equity_curve.append(equity)
@@ -161,7 +170,7 @@ class BacktestEngine:
                 "tp_dist_pct": tp_dist,
             }
 
-        metrics = compute_metrics([t.net_pnl_pct for t in trades])
+        metrics = compute_metrics([t.equity_pnl_pct for t in trades])
         return BacktestResult(trades=trades, metrics=metrics, equity_curve=equity_curve)
 
     @staticmethod
@@ -217,6 +226,8 @@ class BacktestEngine:
             return None
 
         price = closes[-1]
+        if price <= 0:
+            return None
         ema9 = ema9_series[-1]
         ema21 = ema21_series[-1]
         ema9_dist = ema9 / price - 1.0
@@ -232,7 +243,7 @@ class BacktestEngine:
             return None
 
         _, _, macd_hist = macd_vals
-        log_return_1 = math.log(closes[-1] / closes[-2]) if closes[-2] > 0 else 0.0
+        log_return_1 = math.log(closes[-1] / closes[-2]) if closes[-2] > 0 and closes[-1] > 0 else 0.0
 
         names = [
             "ema_9",

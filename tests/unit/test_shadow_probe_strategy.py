@@ -12,7 +12,7 @@ def _feature_vector(*, symbol: str = "XRPUSDT", **overrides: float) -> FeatureVe
     features = {
         "ema_9": 1.01,
         "ema_21": 1.0,
-        "rsi_14": 55.0,
+        "rsi_14": 0.55,
         "atr_14_pct": 0.004,
     }
     features.update(overrides)

@@ -150,6 +150,9 @@ class ScalpMicroStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return _STRATEGY_ID
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+
     # ------------------------------------------------------------------
 
     def _diag(self, reason: str, *, symbol: str | None = None, side: OrderSide | None = None) -> None:

@@ -403,6 +403,9 @@ class LiquidationHuntingStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "liquidation_hunting_v1"
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+
     def _rate_limited(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
         if last is None:
@@ -547,6 +550,10 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
     @property
     def strategy_id(self) -> str:
         return "volatility_squeeze_v1"
+
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+        self._bw_history.pop(symbol, None)
 
     def _rate_limited(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
