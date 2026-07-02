@@ -68,6 +68,15 @@ class OperatorControlsModule(AppBoundModule):
         log.info("trading.paused")
 
     async def resume_trading(self) -> None:
+        if self._app._kill_switch is not None and self._app._kill_switch.is_active:
+            from trader.domain.enums import KillSwitchMode
+
+            if self._app._kill_switch.current_mode != KillSwitchMode.PAUSE_NEW_ENTRIES:
+                log.error(
+                    "resume_trading.blocked_by_kill_switch",
+                    mode=self._app._kill_switch.current_mode,
+                )
+                return
         self._app._trading_paused = False
         log.info("trading.resumed")
 

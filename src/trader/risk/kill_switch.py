@@ -191,11 +191,8 @@ class KillSwitch:
         return False
 
     def orders_allowed(self) -> bool:
-        """Return False if new orders of any type are blocked."""
+        """Return False if the kill switch is active in any mode."""
         if not self._active:
-            return True
-        # PAUSE_NEW_ENTRIES allows reduce-only orders
-        if self._mode == KillSwitchMode.PAUSE_NEW_ENTRIES:
             return True
         return False
 

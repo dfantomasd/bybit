@@ -81,6 +81,7 @@ class FeeRateProvider:
                 source="fallback",
                 fetched_at=datetime.now(tz=UTC),
             )
+            self._cache[symbol] = fallback
             log.debug("fee_provider.using_fallback", symbol=symbol)
             return fallback
 

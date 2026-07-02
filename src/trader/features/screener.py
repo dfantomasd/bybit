@@ -351,7 +351,7 @@ class MarketScreener:
 
             if protected:
                 log.info("screener.symbols_protected", protected=sorted(protected))
-                feature = feature + [s for s in sorted(protected) if s not in feature]
+                feature = feature + [s for s in sorted(protected) if s not in feature and s not in self._denylist]
                 new_feature = set(feature)
 
             added = sorted(new_feature - prev_feature)
