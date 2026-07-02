@@ -264,6 +264,8 @@ class ChallengerModel:
         aligned_features = self._align_features(features, feature_names)
         if aligned_features is None:
             return None
+        if not all(np.isfinite(v) for v in aligned_features):
+            return None
         try:
             x = np.array(aligned_features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
@@ -297,6 +299,11 @@ class ChallengerModel:
         x = np.asarray(features, dtype=np.float32)
         y = np.asarray(labels, dtype=np.int32)
         if x.ndim != 2 or len(x) == 0 or len(x) != len(y):
+            return
+        finite_mask = np.isfinite(x).all(axis=1)
+        x = x[finite_mask]
+        y = y[finite_mask]
+        if len(x) == 0:
             return
         # Batch training replaces any previous estimator state.
         self._scaler = StandardScaler()
@@ -409,9 +416,9 @@ class ChallengerModel:
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return False
-        if self.model_type.upper() in ("GBDT", "MLP"):
-            # Gradient-boosted trees and MLPs cannot be updated online; the
-            # periodic batch retrain covers new data instead.
+        if self.model_type.upper() in ("GBDT", "MLP", "LOGREG"):
+            # Gradient-boosted trees, MLPs, and LogisticRegression have no
+            # partial_fit; the periodic batch retrain covers new data instead.
             return False
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
@@ -427,7 +434,7 @@ class ChallengerModel:
 
     @property
     def supports_online_learning(self) -> bool:
-        return self.model_type.upper() in ("SGD", "LOGREG")
+        return self.model_type.upper() == "SGD"
 
     def to_bytes(self) -> bytes:
         """Serialize model to bytes for PostgreSQL storage."""

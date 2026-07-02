@@ -23,20 +23,30 @@ from trader.domain.models import OrderIntent
 logger = structlog.get_logger(__name__)
 
 # Valid state transitions (from → allowed next states)
+# Kept in sync with trader.exchange.state_machine.VALID_TRANSITIONS.
 _VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CREATED_LOCAL: {OrderStatus.SUBMITTING, OrderStatus.CANCELLED},
     OrderStatus.SUBMITTING: {OrderStatus.REST_ACCEPTED, OrderStatus.REJECTED, OrderStatus.CANCELLED},
-    OrderStatus.REST_ACCEPTED: {OrderStatus.WS_CONFIRMED, OrderStatus.CANCELLED, OrderStatus.REJECTED},
+    OrderStatus.REST_ACCEPTED: {
+        OrderStatus.WS_CONFIRMED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
+    },
     OrderStatus.WS_CONFIRMED: {
         OrderStatus.PARTIALLY_FILLED,
         OrderStatus.FILLED,
         OrderStatus.CANCEL_REQUESTED,
         OrderStatus.CANCELLED,
+        OrderStatus.EXPIRED,
     },
     OrderStatus.PARTIALLY_FILLED: {
         OrderStatus.FILLED,
         OrderStatus.CANCEL_REQUESTED,
         OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
     },
     OrderStatus.FILLED: set(),
     # CANCEL_REQUESTED → PARTIALLY_FILLED / FILLED: fill-vs-cancel race; the
@@ -55,6 +65,7 @@ _VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.FILLED,
         OrderStatus.CANCELLED,
         OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
     },
 }
 
@@ -271,6 +282,26 @@ class IdempotencyManager:
         if current in (OrderStatus.WS_CONFIRMED, OrderStatus.PARTIALLY_FILLED):
             self._transition(order_link_id, OrderStatus.CANCEL_REQUESTED)
         self._transition(order_link_id, OrderStatus.CANCELLED)
+
+    async def mark_rejected(self, order_link_id: str) -> None:
+        """Mark order as rejected by the exchange."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_rejected.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES:
+            return
+        self._transition(order_link_id, OrderStatus.REJECTED)
+
+    async def mark_expired(self, order_link_id: str) -> None:
+        """Mark order as expired by the exchange."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_expired.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES:
+            return
+        self._transition(order_link_id, OrderStatus.EXPIRED)
 
     # ------------------------------------------------------------------
     # Startup seeding

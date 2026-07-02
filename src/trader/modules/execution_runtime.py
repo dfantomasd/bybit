@@ -824,7 +824,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                 breakeven_stop = self.round_to_tick(
                     self.breakeven_stop(pos.entry_price, pos.side.value, fee_rates=fee_rates),
                     info.tick_size,
-                    round_up=pos.side.value == "Sell",
+                    round_up=pos.side.value == "Buy",
                 )
                 if trailing_distance < info.tick_size:
                     trailing_distance = info.tick_size

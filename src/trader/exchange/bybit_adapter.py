@@ -497,6 +497,10 @@ class BybitAdapter:
                         OrderStatus.REST_ACCEPTED,
                     }:
                         await self._idempotency.mark_partially_filled(order_link_id)
+                    elif order_status == OrderStatus.REJECTED:
+                        await self._idempotency.mark_rejected(order_link_id)
+                    elif order_status == OrderStatus.EXPIRED:
+                        await self._idempotency.mark_expired(order_link_id)
             except Exception as exc:
                 logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
 

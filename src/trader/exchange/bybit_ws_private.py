@@ -132,7 +132,10 @@ class BybitPrivateWebSocket:
                     _RECONNECT_BACKOFF_BASE * (2 ** (consecutive_failures - 1)),
                     _RECONNECT_BACKOFF_MAX,
                 )
-            await asyncio.sleep(delay)
+            try:
+                await asyncio.wait_for(self._stop_event.wait(), timeout=delay)
+            except TimeoutError:
+                pass
         self._running = False
 
     async def stop(self) -> None:
@@ -444,7 +447,7 @@ class BybitPrivateWebSocket:
                 updated_ms = 0
             if updated_ms > 0 and symbol:
                 prev = self._last_position_ts.get(symbol, 0)
-                if updated_ms < prev:
+                if updated_ms <= prev:
                     self._log.debug(
                         "ws_position_out_of_order_dropped",
                         symbol=symbol,
@@ -481,7 +484,7 @@ class BybitPrivateWebSocket:
         items = data if isinstance(data, list) else [data]
         for item in items:
             account_type = item.get("accountType", "UNIFIED")
-            for coin in item.get("coin", []):
+            for coin in item.get("coin") or []:
                 event = BalanceUpdateEvent(
                     account_type=account_type,
                     currency=coin.get("coin", "USDT"),

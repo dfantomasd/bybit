@@ -1072,7 +1072,7 @@ class TradingLoopModule(AppBoundModule):
             # Track shadow position for TP/SL simulation
             if is_shadow and proposal.stop_loss and proposal.take_profit:
                 engine_position = (
-                    self._app._execution_engine._open_positions.get(symbol)
+                    self._app._execution_engine._open_positions.get(symbol) or {}
                     if self._app._execution_engine is not None
                     else {}
                 )
@@ -1103,7 +1103,7 @@ class TradingLoopModule(AppBoundModule):
                     await self._app._manage_open_positions()
                     self._app._check_zero_trading()
                 except Exception:
-                    _log.exception("strategy_loop.cycle_maintenance_error")
+                    log.exception("strategy_loop.cycle_maintenance_error")
 
                 balance = self._app._cached_balance
                 capital = balance
