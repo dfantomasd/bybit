@@ -245,6 +245,10 @@ def build_directional_outcome(
     """Build one canonical cost-aware ML outcome."""
     if not isfinite(label_threshold_bps):
         raise ValueError("label_threshold_bps must be finite")
+    # Materialise so the same sequence can be consumed by both resolve_tpsl_exit_price
+    # and directional_excursions_bps without the second call seeing an exhausted iterator.
+    highs = list(highs)
+    lows = list(lows)
     normalized_side = normalize_side(side)
     resolved_exit = exit_price
     if use_tpsl_exit and atr_pct is not None:

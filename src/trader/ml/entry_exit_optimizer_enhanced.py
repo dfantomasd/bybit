@@ -418,7 +418,7 @@ class EntryExitOptimizerEnhanced:
             estimated_entry_slippage_bps=context.bid_ask_spread_bps,
             recommended_position_size_pct=1.0,
             split_orders=1,
-            risk_reward_ratio=atr_based_tp / atr_based_sl,
+            risk_reward_ratio=atr_based_tp / max(atr_based_sl, 1e-9),
             expected_profit_bps=atr_based_tp * 100 - context.bid_ask_spread_bps,
             probability_of_success=0.5,
             recommendation="Модель не обучена, используется ATR",

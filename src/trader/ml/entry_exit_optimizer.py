@@ -180,13 +180,13 @@ class EntryExitOptimizer:
             else:  # SELL
                 best_entry = context.current_price * (Decimal("1") - Decimal(str(entry_offset_pct / 100)))
 
-            # Определить тайминг
+            # Determine timing by comparing best_entry vs current price
             if abs(entry_offset_pct) < 0.3:
                 entry_timing = "IMMEDIATE"
-            elif entry_offset_pct < 0:  # Цена упала - ждём падения
-                entry_timing = "WAIT_FOR_DIP"
-            else:  # Цена выросла - ждём роста
+            elif best_entry > context.current_price:
                 entry_timing = "WAIT_FOR_PEAK"
+            else:
+                entry_timing = "WAIT_FOR_DIP"
 
             # Предсказать TP
             tp_distance_pct = float(self.tp_model.predict(x)[0])

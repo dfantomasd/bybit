@@ -114,8 +114,9 @@ class ReconnectSupervisor:
             self._reconnect_count += 1
             self._reconnect_times.append(now)
 
-            # Prune old timestamps outside the alert window
-            cutoff = now - _ALERT_WINDOW_SECONDS
+            # Prune old timestamps — keep the longer of the alert window and the hourly
+            # rate-limit window so the hourly count below is computed correctly.
+            cutoff = now - max(_ALERT_WINDOW_SECONDS, 3600)
             while self._reconnect_times and self._reconnect_times[0] < cutoff:
                 self._reconnect_times.popleft()
 
