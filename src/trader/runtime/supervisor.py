@@ -161,6 +161,14 @@ class RuntimeSupervisor(AppBoundModule):
                 self._app._shutdown_event.set()
                 return
 
+            # Prune completed non-critical tasks (e.g. one-off training runs)
+            # so _background_tasks doesn't grow unbounded over the process
+            # lifetime. Critical tasks are never pruned here — a done
+            # critical task is handled (and the app shut down) above.
+            self._app._background_tasks[:] = [
+                t for t in self._app._background_tasks if not t.done() or t.get_name() in _CRITICAL_TASK_NAMES
+            ]
+
             try:
                 await asyncio.wait_for(
                     self._app._shutdown_event.wait(),

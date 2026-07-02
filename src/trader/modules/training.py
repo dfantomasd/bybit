@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import html
 import json
@@ -849,6 +850,8 @@ class TrainingModule(ModuleTaskMixin):
                             stdout_b, stderr_b = await asyncio.wait_for(communicate_task, timeout=10.0)
                         except TimeoutError:
                             communicate_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await communicate_task
                             stdout_b = b""
                             stderr_b = f"training timeout after {elapsed:.0f}s".encode()
                         break
@@ -861,6 +864,8 @@ class TrainingModule(ModuleTaskMixin):
                 if proc.returncode is None:
                     proc.kill()
                 communicate_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await communicate_task
                 raise
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()

@@ -356,6 +356,7 @@ class TradeJournal:
         )
         self._pool: asyncpg.Pool | None = None
         self._diag_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._last_fetch_timeout_log_at: datetime | None = None
         self._schema_initialized: bool = False
         self._connect_failures: int = 0
@@ -422,6 +423,16 @@ class TradeJournal:
         return max(0.0, remaining)
 
     async def connect(self) -> None:
+        async with self._connect_lock:
+            await self._connect_locked()
+
+    async def _connect_locked(self) -> None:
+        """Body of connect(); caller must hold self._connect_lock.
+
+        Re-checks self._pool under the lock so concurrent connect()/
+        reconnect_if_needed() callers can't each pass the "not connected"
+        check and race to create (and leak) duplicate connection pools.
+        """
         if not self._enabled or self._pool is not None:
             return
         self._last_connect_attempt_at = datetime.now(tz=UTC)
@@ -549,16 +560,17 @@ class TradeJournal:
         if blocked_until is not None and now < blocked_until:
             if self._last_backoff_was_auth or not force:
                 return self.is_enabled
-        if self._pool is not None:
-            if not force and self.durable_state_healthy:
-                return True
-            await self._close_pool_after_failure("reconnect_pool_close_failed")
-            self._pool = None
-        if not force and self._last_connect_attempt_at is not None:
-            age = now - self._last_connect_attempt_at
-            if age < timedelta(seconds=min_interval):
-                return False
-        await self.connect()
+        async with self._connect_lock:
+            if self._pool is not None:
+                if not force and self.durable_state_healthy:
+                    return True
+                await self._close_pool_after_failure("reconnect_pool_close_failed")
+                self._pool = None
+            if not force and self._last_connect_attempt_at is not None:
+                age = now - self._last_connect_attempt_at
+                if age < timedelta(seconds=min_interval):
+                    return False
+            await self._connect_locked()
         if self.is_enabled:
             self._consecutive_write_errors = 0
             self._last_write_error = None

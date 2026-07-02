@@ -772,6 +772,10 @@ class MarketDataModule(ModuleTaskMixin):
         """
         assert self._app._settings is not None
         if not self._app._settings.ADAPTIVE_LOAD_GOVERNOR_ENABLED:
+            # This task is registered as critical in CRITICAL_TASK_NAMES —
+            # returning here would make the supervisor treat a disabled
+            # governor as a crashed task and trigger a full shutdown.
+            await self._app._shutdown_event.wait()
             return
 
         check_interval = float(self._app._settings.LOAD_GOVERNOR_CHECK_SECONDS)
