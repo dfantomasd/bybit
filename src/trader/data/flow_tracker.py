@@ -117,7 +117,7 @@ class FlowTracker:
         notional = float(price * qty)
         if notional <= 0:
             return
-        bucket = store.setdefault(symbol, deque(maxlen=self._history_slots))
+        bucket = store.setdefault(symbol.upper(), deque(maxlen=self._history_slots))
         bucket.append(_FlowPrint(ts=ts or datetime.now(tz=UTC), side=side, notional=notional))
         self._prune(bucket)
 

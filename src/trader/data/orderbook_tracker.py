@@ -101,9 +101,9 @@ class OrderbookTracker:
                 imbalance_l5=round(imbalance, 4),
                 microprice_deviation_bps=round(micro_dev_bps, 3),
             )
-        self._latest[symbol] = snap
+        self._latest[symbol.upper()] = snap
 
-        history = self._history.setdefault(symbol, deque(maxlen=self._history_slots))
+        history = self._history.setdefault(symbol.upper(), deque(maxlen=self._history_slots))
         if not history or (ts - history[-1].ts).total_seconds() >= _SNAPSHOT_MIN_INTERVAL_S:
             history.append(snap)
 
