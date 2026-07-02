@@ -207,7 +207,7 @@ class StopLossOptimizerEnhanced:
         support_stop = max_stop_pct
         if use_support_level and context.nearest_support_pct > 0:
             # Ставим стоп за поддержкой (с небольшим буфером)
-            support_stop = min(context.nearest_support_pct * 0.8, max_stop_pct)
+            support_stop = min(context.nearest_support_pct * 1.1, max_stop_pct)
             if support_stop < stop_distance:
                 # Поддержка ближе чем расчётный стоп - используем её
                 stop_distance = support_stop

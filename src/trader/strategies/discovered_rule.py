@@ -308,7 +308,7 @@ class DiscoveredRuleStrategy(BaseStrategy):
             stop_loss=(entry * sl_mult).quantize(_PRICE_DECIMALS),
             confidence=confidence,
             expected_return=best.validation_avg_net_bps / 10000.0,
-            expected_risk=self._sl_pct / 100.0,
+            expected_risk=self._sl_pct,
             feature_id=feature_vector.feature_id,
             rationale=(
                 f"discovered rule {best.rule_id}: validation "
