@@ -301,6 +301,18 @@ class ExposureTracker:
                     sum(Decimal(str(p.get("margin_used", p["notional"]))) for p in self._positions.values())
                     - existing_margin
                 )
+                # Include other in-flight reservations so concurrent orders
+                # can't each pass this check independently and collectively
+                # blow through the cap before any of them lands in _positions.
+                pending_margin = (
+                    sum(
+                        Decimal(str(p["notional"]))
+                        for oid, p in self._pending_exposure.items()
+                        if oid != order_id
+                    )
+                    / lev
+                )
+                current_margin += pending_margin
                 new_total_margin_pct = (current_margin + new_notional / lev) / self._capital * Decimal("100")
                 if new_total_margin_pct > self._limits.max_total_margin_usage_pct:
                     return (
@@ -322,6 +334,17 @@ class ExposureTracker:
                     )
                     - existing_risk
                 )
+                # Include other in-flight reservations, using the requested
+                # stop distance as the best available proxy for their risk.
+                pending_risk = (
+                    sum(
+                        Decimal(str(p["notional"]))
+                        for oid, p in self._pending_exposure.items()
+                        if oid != order_id
+                    )
+                    * sdp
+                )
+                current_risk += pending_risk
                 new_total_risk_pct = (current_risk + new_notional * sdp) / self._capital * Decimal("100")
                 if new_total_risk_pct > self._limits.max_total_risk_at_stop_pct:
                     return (

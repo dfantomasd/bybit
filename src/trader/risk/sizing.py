@@ -269,6 +269,12 @@ class PositionSizer:
                         return Decimal("0"), (
                             f"liquidity cap {max_position_notional:.4f} below min_order_qty {self._info.min_order_qty}"
                         )
+                    if self._info.min_notional is not None:
+                        capped_notional = capped_qty * entry_price
+                        if capped_notional < self._info.min_notional:
+                            return Decimal("0"), (
+                                f"liquidity-capped notional {capped_notional} < min_notional {self._info.min_notional}"
+                            )
                     approved_qty = capped_qty
             else:
                 if self._require_liquidity:

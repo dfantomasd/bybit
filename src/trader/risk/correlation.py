@@ -71,7 +71,7 @@ def calculate_strategy_correlations(
             if len(arr1) >= min_samples and len(arr2) >= min_samples:
                 corr = float(np.corrcoef(arr1, arr2)[0, 1])
                 if not np.isnan(corr):
-                    correlations[(strat1, strat2)] = corr
+                    correlations[tuple(sorted((strat1, strat2)))] = corr
                     all_corrs.append(corr)
 
     avg_corr = np.mean(all_corrs) if all_corrs else 0.0

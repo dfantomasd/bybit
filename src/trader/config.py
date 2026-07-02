@@ -873,8 +873,21 @@ class Settings(BaseSettings):
             )
             self.TRAIN_INCLUDE_CANDLE_BASELINE = True
 
-        if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0:
+        if (
+            self.STARTER_OPTIMIZED_MODE
+            and self.SCREENER_MAX_PRICE_USD <= 0
+            and self.SCREENER_MIN_PRICE_USD < 25.0
+        ):
             self.SCREENER_MAX_PRICE_USD = 25.0
+        if (
+            self.SCREENER_MAX_PRICE_USD > 0
+            and self.SCREENER_MIN_PRICE_USD > 0
+            and self.SCREENER_MIN_PRICE_USD > self.SCREENER_MAX_PRICE_USD
+        ):
+            raise ValueError(
+                f"SCREENER_MIN_PRICE_USD ({self.SCREENER_MIN_PRICE_USD}) must be <= "
+                f"SCREENER_MAX_PRICE_USD ({self.SCREENER_MAX_PRICE_USD})"
+            )
         if self.STARTER_OPTIMIZED_MODE:
             self._apply_starter_memory_caps()
         if self.STARTER_OPTIMIZED_MODE and self.SHADOW_PROBE_PAPER_COLLECTION_MODE:

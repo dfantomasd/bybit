@@ -264,18 +264,28 @@ class MLKellyPredictor(KellyPredictorBase):
 
             final_size = kelly_pred * frac_pred
 
-            # Get model confidence (based on prediction variance)
-            kelly_std = float(np.std(self.kelly_model.predict(x.reshape(1, -1))))
-            confidence = max(0.5, 1.0 - (kelly_std / 0.1))  # Higher std = lower confidence
+            # Get model confidence (based on prediction variance across the
+            # ensemble's sub-models). np.std of a single-sample prediction is
+            # always 0.0, so a plain XGBRegressor has no cheap per-call
+            # variance signal — use a fixed moderate confidence for it
+            # instead of a misleading, always-maximal value.
+            sub_models = getattr(self.kelly_model, "models", None)
+            if sub_models:
+                sub_preds = [float(m.predict(x_reshaped)[0]) for m in sub_models]
+                kelly_std = float(np.std(sub_preds))
+                confidence = max(0.5, 1.0 - (kelly_std / 0.1))  # Higher std = lower confidence
+            else:
+                confidence = 0.75
 
-            # Get feature importance
-            feature_importance = dict(
-                zip(
-                    self.get_feature_names(),
-                    self.kelly_model.feature_importances_.tolist()[:5],
-                    strict=False,
-                )
+            # Get feature importance: top 5 by importance value, not by
+            # feature-vector position.
+            importances = self.kelly_model.feature_importances_.tolist()
+            ranked = sorted(
+                zip(self.get_feature_names(), importances, strict=False),
+                key=lambda pair: pair[1],
+                reverse=True,
             )
+            feature_importance = dict(ranked[:5])
 
             # Assess risk level
             risk_level = self._assess_risk_level(features, kelly_pred)
