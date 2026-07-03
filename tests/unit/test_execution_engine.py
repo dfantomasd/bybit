@@ -493,7 +493,7 @@ class TestExecutionEngine:
         engine._exposure.update_position.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_post_risk_qty_reduction_preserves_min_notional_size(self):
+    async def test_post_risk_qty_reduction_below_min_notional_rejects_trade(self):
         exposure = _FakeExposure()
         engine = _make_engine(approved=True, shadow_mode=True, qty=Decimal("0.001"))
         engine._exposure = exposure
@@ -520,11 +520,10 @@ class TestExecutionEngine:
             feature_vector=feature_vector,
         )
 
-        assert result is not None
-        assert result.approved_qty == Decimal("0.001")
+        assert result is None
         assert exposure.released == [str(proposal.proposal_id)]
         assert exposure.reserved == []
-        engine._exposure.update_position.assert_awaited_once()
+        engine._exposure.update_position.assert_not_awaited()
 
     def test_adjusted_exposure_rejection_releases_original_reservation(self):
         exposure = _FakeExposure()

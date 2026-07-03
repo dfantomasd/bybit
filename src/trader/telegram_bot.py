@@ -4516,7 +4516,20 @@ class TelegramMonitorBot:
                     reply_markup=self._main_menu(),
                 )
                 return
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last_train = self._last_train_at.get(chat_id)
+            if last_train is not None:
+                elapsed = (datetime.now(tz=UTC) - last_train).total_seconds()
+                if elapsed < _TRAIN_RATE_LIMIT_SECONDS:
+                    wait = int(_TRAIN_RATE_LIMIT_SECONDS - elapsed)
+                    await self._button_reply(
+                        update,
+                        f"⏳ Обучение уже запущено или недавно завершилось. Подождите ещё {wait}с.",
+                        reply_markup=self._main_menu(),
+                    )
+                    return
             try:
+                self._last_train_at[chat_id] = datetime.now(tz=UTC)
                 msg = await self._controller.start_training_all()
             except Exception as exc:
                 msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
