@@ -660,6 +660,19 @@ class TradingLoopModule(AppBoundModule):
 
             if proposal is None:
                 return
+            model_decision_meta: dict[str, Any] | None = None
+            model_feature_names, model_feature_values = self._app._feature_values_for_side(vec, proposal.side.value)
+
+            async def _record_signal(blocked: str | None = None) -> None:
+                if self._app._trade_journal is not None:
+                    await self._app._trade_journal.record_signal(
+                        proposal=proposal,
+                        feature_vector=vec,
+                        regime_context=regime_ctx,
+                        model_decision=model_decision_meta,
+                        blocked_reason=blocked,
+                    )
+
             if self._app._strategy_blocked(proposal.strategy_id):
                 self._app._record_diag("strategy_expectancy_blocked")
                 log.info(
@@ -669,6 +682,7 @@ class TradingLoopModule(AppBoundModule):
                     strategy_id=proposal.strategy_id,
                     stats=self._app._strategy_stats.get(proposal.strategy_id),
                 )
+                await _record_signal("strategy_expectancy_blocked")
                 return
             if self._app._strategy_regime_blocked(proposal.strategy_id, regime_ctx):
                 self._app._record_diag("strategy_regime_expectancy_blocked")
@@ -685,6 +699,7 @@ class TradingLoopModule(AppBoundModule):
                     regime=regime,
                     stats=self._app._strategy_regime_stats.get((proposal.strategy_id, regime)),
                 )
+                await _record_signal("strategy_regime_expectancy_blocked")
                 return
 
             # Cooldown: suppress duplicate proposals for the same symbol within one candle
@@ -698,18 +713,6 @@ class TradingLoopModule(AppBoundModule):
             self._app._last_signal_at[symbol] = now_ts
 
             self._app._record_diag("signals_emitted")
-            model_decision_meta: dict[str, Any] | None = None
-            model_feature_names, model_feature_values = self._app._feature_values_for_side(vec, proposal.side.value)
-
-            async def _record_signal(blocked: str | None = None) -> None:
-                if self._app._trade_journal is not None:
-                    await self._app._trade_journal.record_signal(
-                        proposal=proposal,
-                        feature_vector=vec,
-                        regime_context=regime_ctx,
-                        model_decision=model_decision_meta,
-                        blocked_reason=blocked,
-                    )
 
             if not self._app._initial_shadow_mode() and not self._app._trend_mtf_confirmed(
                 proposal.symbol, proposal.side.value
