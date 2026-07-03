@@ -176,6 +176,42 @@ class TestShadowGateStatsFeatureSchemaFilter:
         # Verify the SQL uses $4 for the schema hash
         assert "fs.feature_schema_hash = $4" in captured_params["query"]
 
+    def test_gate_stats_split_side_filter_blocks_from_score_blocks(self) -> None:
+        """Side-filtered blocks should be visible separately from score-threshold blocks."""
+        import asyncio
+        from unittest.mock import MagicMock
+
+        journal = TradeJournal(postgres_dsn="", enabled=False)
+        journal._enabled = True
+        journal._pool = MagicMock()
+
+        async def mock_fetch(query, *args):
+            if "FROM model_versions" in query:
+                return [{"feature_schema_hash": "abc123", "metrics": {"quality": "GOOD"}}]
+            if "GROUP BY pe.decision" in query:
+                return [
+                    {"decision": "GATE_PASS", "cnt": 4, "avg_net_return_bps": 6.0, "precision": 0.75},
+                    {"decision": "GATE_BLOCK", "cnt": 6, "avg_net_return_bps": -3.0, "precision": 0.25},
+                ]
+            if "metadata->>'gate_reason'" in query:
+                return [
+                    {"reason": "side_not_selected_by_model", "cnt": 4, "avg_net_return_bps": -5.0},
+                    {"reason": "score_below_regime_threshold", "cnt": 2, "avg_net_return_bps": 1.0},
+                ]
+            return []
+
+        journal._fetch = mock_fetch
+
+        result = asyncio.run(journal.get_shadow_gate_stats("test-model", 15, "directional_net_v1"))
+
+        assert result["top_block_reasons"] == {
+            "side_not_selected_by_model": 4,
+            "score_below_regime_threshold": 2,
+        }
+        assert result["side_filtered_count"] == 4
+        assert result["score_block_count"] == 2
+        assert result["score_block_avg_net_return_bps"] == 1.0
+
 
 class TestReverseLookupExcludesUnknown:
     """Test that find_order_link_id_by_exchange_order_id() rejects unknown:* IDs."""

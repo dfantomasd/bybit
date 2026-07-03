@@ -2670,7 +2670,10 @@ class TradeJournal:
                 )
                 reason_rows = await self._fetch(
                     """
-                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    SELECT
+                        COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason,
+                        count(*) AS cnt,
+                        avg(po.net_return_bps) AS avg_net_return_bps
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
@@ -2692,6 +2695,23 @@ class TradeJournal:
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
+                    side_filtered_count = 0
+                    score_block_count = 0
+                    score_block_weighted_return = 0.0
+                    for row in reason_rows:
+                        reason = str(row["reason"])
+                        count = int(row["cnt"] or 0)
+                        avg_return = float(row.get("avg_net_return_bps") or 0.0)
+                        if reason == "side_not_selected_by_model":
+                            side_filtered_count += count
+                        else:
+                            score_block_count += count
+                            score_block_weighted_return += avg_return * count
+                    gate["side_filtered_count"] = side_filtered_count
+                    gate["score_block_count"] = score_block_count
+                    gate["score_block_avg_net_return_bps"] = (
+                        score_block_weighted_return / score_block_count if score_block_count else None
+                    )
 
             # Quality check from model metrics
             quality = "UNKNOWN"
@@ -3885,7 +3905,10 @@ class TradeJournal:
                 result["shadow_gate_15m"] = gate
                 reason_rows = await self._fetch(
                     """
-                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    SELECT
+                        COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason,
+                        count(*) AS cnt,
+                        avg(po.net_return_bps) AS avg_net_return_bps
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE pe.model_version = $1
@@ -3900,6 +3923,23 @@ class TradeJournal:
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
+                    side_filtered_count = 0
+                    score_block_count = 0
+                    score_block_weighted_return = 0.0
+                    for row in reason_rows:
+                        reason = str(row["reason"])
+                        count = int(row["cnt"] or 0)
+                        avg_return = float(row.get("avg_net_return_bps") or 0.0)
+                        if reason == "side_not_selected_by_model":
+                            side_filtered_count += count
+                        else:
+                            score_block_count += count
+                            score_block_weighted_return += avg_return * count
+                    gate["side_filtered_count"] = side_filtered_count
+                    gate["score_block_count"] = score_block_count
+                    gate["score_block_avg_net_return_bps"] = (
+                        score_block_weighted_return / score_block_count if score_block_count else None
+                    )
                 paper_baseline_rows = await self._fetch(
                     """
                     SELECT po.net_return_bps
