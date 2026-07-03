@@ -28,7 +28,7 @@ class AppStateProxy:
     @property
     def trading_mode(self) -> Any:
         s = getattr(self._app, "_settings", None)
-        return s.TRADING_MODE if s is not None else TradingMode.TESTNET
+        return getattr(s, "TRADING_MODE", TradingMode.TESTNET) if s is not None else TradingMode.TESTNET
 
     @property
     def open_position_count(self) -> int:
