@@ -251,6 +251,7 @@ class TestBucketGate:
 
         app._record_diag("shadow_probe_quality_blocked:XRPUSDT:Buy")
         app._record_diag("shadow_probe_side_blocked:DOGEUSDT:Sell")
+        app._record_diag("shadow_probe_net_rr_rejected:SOLUSDT:Buy")
 
         details = app._modules.diagnostics.get_snapshot()["hour_strategy_details"]["shadow_probe_symbols"]
 
@@ -264,6 +265,12 @@ class TestBucketGate:
             "reason": "shadow_probe_side_blocked",
             "symbol": "DOGEUSDT",
             "side": "Sell",
+            "count": 1,
+        } in details
+        assert {
+            "reason": "shadow_probe_net_rr_rejected",
+            "symbol": "SOLUSDT",
+            "side": "Buy",
             "count": 1,
         } in details
 

@@ -269,6 +269,7 @@ class DiagnosticsModule(AppBoundModule):
             "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),
             "shadow_loss_guard_blocked": int(diag.get("hour_shadow_loss_guard_blocked") or 0),
             "shadow_probe_regime_blocked": int(diag.get("hour_shadow_probe_regime_blocked") or 0),
+            "shadow_probe_net_rr_rejected": int(diag.get("hour_shadow_probe_net_rr_rejected") or 0),
         }
         top_blocker = (
             max(blockers, key=lambda k: (blockers[k], 1 if ":" in k else 0)) if any(blockers.values()) else default
@@ -442,6 +443,7 @@ class DiagnosticsModule(AppBoundModule):
                         "shadow_probe_quality_blocked",
                         "shadow_probe_side_blocked",
                         "shadow_probe_net_edge_rejected",
+                        "shadow_probe_net_rr_rejected",
                         "shadow_probe_min_notional_rejected",
                         "shadow_probe_cooldown",
                         "shadow_probe_regime_blocked",
@@ -543,6 +545,7 @@ class DiagnosticsModule(AppBoundModule):
             ),
             "hour_shadow_loss_guard_blocked": hour_counts.get("shadow_loss_guard_blocked", 0),
             "hour_shadow_probe_regime_blocked": hour_counts.get("shadow_probe_regime_blocked", 0),
+            "hour_shadow_probe_net_rr_rejected": hour_counts.get("shadow_probe_net_rr_rejected", 0),
             "hour_shadow_closed": len(shadow_closed_recent),
             "hour_shadow_closed_tp": shadow_close_reasons.get("TP", 0),
             "hour_shadow_closed_sl": shadow_close_reasons.get("SL", 0),
