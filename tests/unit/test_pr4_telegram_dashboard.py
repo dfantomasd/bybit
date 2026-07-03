@@ -914,6 +914,13 @@ async def test_deep_report_shows_model_gate_breakdown() -> None:
                 "metrics": {"quality": "GOOD", "horizon_minutes": 5, "walk_forward_expectancy_bps": 2.0},
             },
             "model_gate_horizon_minutes": 5,
+            "prediction_event_decision_counts": {
+                "by_decision": {
+                    "SHADOW_BASELINE": {"total_count": 40, "resolved_count": 30, "pending_count": 10},
+                    "GATE_PASS": {"total_count": 15, "resolved_count": 12, "pending_count": 3},
+                    "GATE_BLOCK": {"total_count": 10, "resolved_count": 8, "pending_count": 2},
+                }
+            },
             "shadow_gate_by_horizon": {
                 "5": {
                     "total_count": 33,
@@ -1347,6 +1354,13 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
                 },
             },
             "model_gate_horizon_minutes": 5,
+            "prediction_event_decision_counts": {
+                "by_decision": {
+                    "SHADOW_BASELINE": {"total_count": 40, "resolved_count": 30, "pending_count": 10},
+                    "GATE_PASS": {"total_count": 15, "resolved_count": 12, "pending_count": 3},
+                    "GATE_BLOCK": {"total_count": 10, "resolved_count": 8, "pending_count": 2},
+                }
+            },
             "shadow_gate_by_horizon": {
                 "5": {
                     "horizon_minutes": 5,
@@ -1385,6 +1399,8 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
     assert "positive_out_of_sample_side_expectancy" in reply_text
     assert "Блоки side-filter/score: <code>24/8</code>" in reply_text
     assert "score avg=<code>-1.75 bps</code>" in reply_text
+    assert "SHADOW_BASELINE: 40/30/10" in reply_text
+    assert "GATE_PASS: 15/12/3" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text
 

@@ -2807,6 +2807,82 @@ class TradeJournal:
             log.debug("trade_journal.shadow_gate_event_counts_failed", error=str(exc))
             return {}
 
+    async def get_prediction_event_decision_counts(
+        self,
+        *,
+        horizon_minutes: int,
+        label_schema_version: str,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        """Return recent prediction-event totals and outcome resolution by decision.
+
+        This is diagnostic-only. It tells operators whether paper-gate is empty
+        because events are not being written, or because outcomes are still
+        pending/unresolved for the requested horizon/schema.
+        """
+        if not self.is_enabled:
+            return {}
+
+        try:
+            rows = await self._fetch(
+                """
+                SELECT
+                    COALESCE(decision, 'NULL') AS decision,
+                    count(*) AS total_count,
+                    count(feature_snapshot_id) AS with_snapshot_count,
+                    count(po.prediction_id) AS resolved_count
+                FROM (
+                    SELECT prediction_id, decision, feature_snapshot_id, created_at
+                    FROM prediction_events
+                    WHERE decision IN ('SHADOW_BASELINE', 'GATE_PASS', 'GATE_BLOCK')
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                ) pe
+                LEFT JOIN prediction_outcomes po
+                    ON po.prediction_id = pe.prediction_id
+                   AND po.horizon_minutes = $2
+                   AND po.label_schema_version = $3
+                GROUP BY decision
+                ORDER BY total_count DESC
+                """,
+                max(1, int(limit)),
+                int(horizon_minutes),
+                label_schema_version,
+            )
+            result: dict[str, Any] = {
+                "horizon_minutes": int(horizon_minutes),
+                "label_schema_version": label_schema_version,
+                "total_count": 0,
+                "resolved_count": 0,
+                "pending_count": 0,
+                "with_snapshot_count": 0,
+                "by_decision": {},
+            }
+            by_decision: dict[str, Any] = {}
+            for row in rows:
+                decision = str(row["decision"] or "NULL")
+                total = int(row["total_count"] or 0)
+                resolved = int(row["resolved_count"] or 0)
+                with_snapshot = int(row["with_snapshot_count"] or 0)
+                pending = max(0, total - resolved)
+                by_decision[decision] = {
+                    "total_count": total,
+                    "resolved_count": resolved,
+                    "pending_count": pending,
+                    "with_snapshot_count": with_snapshot,
+                }
+                result["total_count"] += total
+                result["resolved_count"] += resolved
+                result["with_snapshot_count"] += with_snapshot
+            result["pending_count"] = max(0, int(result["total_count"]) - int(result["resolved_count"]))
+            result["by_decision"] = by_decision
+            return result
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug("trade_journal.prediction_event_decision_counts_failed", error=str(exc))
+            return {}
+
     @staticmethod
     def _decode_json_field(value: Any) -> Any:
         if isinstance(value, str):

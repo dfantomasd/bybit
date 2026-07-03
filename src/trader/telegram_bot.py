@@ -4020,6 +4020,16 @@ class TelegramMonitorBot:
             paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
             paper_baseline = paper.get("baseline", {}) or {}
             paper_gate = paper.get("model_gate", {}) or {}
+            event_counts = db_diag.get("prediction_event_decision_counts", {}) or {}
+            event_by_decision = event_counts.get("by_decision", {}) if isinstance(event_counts, dict) else {}
+
+            def _event_count_line(decision: str) -> str:
+                row = event_by_decision.get(decision, {}) if isinstance(event_by_decision, dict) else {}
+                return (
+                    f"{decision}: {int(row.get('total_count') or 0)}/"
+                    f"{int(row.get('resolved_count') or 0)}/"
+                    f"{int(row.get('pending_count') or 0)}"
+                )
 
             def _paper_line(stats: dict[str, Any]) -> str:
                 total_bps = float(stats.get("total_bps") or 0.0)
@@ -4076,6 +4086,17 @@ class TelegramMonitorBot:
             lines += [
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{trainable_model_horizon}</code>",
+                "Prediction events total/resolved/pending: <code>"
+                + html.escape(
+                    "; ".join(
+                        [
+                            _event_count_line("SHADOW_BASELINE"),
+                            _event_count_line("GATE_PASS"),
+                            _event_count_line("GATE_BLOCK"),
+                        ]
+                    )
+                )
+                + "</code>",
             ]
             if horizon_schema:
                 schema_bits = [
