@@ -415,6 +415,21 @@ class OperatorControlsModule(AppBoundModule):
                 if self._app._settings is not None
                 else None
             ),
+            "strategy_regime_confidence_gate_enabled": (
+                getattr(self._app._settings, "STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "strategy_regime_weak_min_confidence": (
+                getattr(self._app._settings, "STRATEGY_REGIME_WEAK_MIN_CONFIDENCE", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "strategy_regime_immature_min_confidence": (
+                getattr(self._app._settings, "STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE", None)
+                if self._app._settings is not None
+                else None
+            ),
             "strategy_regime_blocked": [
                 f"{strategy_id}:{regime}"
                 for (strategy_id, regime), (avg_bps, count) in strategy_regime_stats.items()

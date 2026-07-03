@@ -336,6 +336,14 @@ class Settings(BaseSettings):
     """Minimum resolved outcomes for a strategy+regime pair before it can be blocked."""
     STRATEGY_REGIME_BLOCK_AVG_BPS: float = -2.0
     """Block a strategy+regime pair when its average net return is below this (bps)."""
+    STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED: bool = True
+    """Require higher confidence for weak or still-immature strategy+regime pairs."""
+    STRATEGY_REGIME_WEAK_AVG_BPS: float = 2.0
+    """Treat a strategy+regime pair below this average net return as weak."""
+    STRATEGY_REGIME_WEAK_MIN_CONFIDENCE: float = 0.64
+    """Minimum confidence for weak strategy+regime pairs that are not blocked yet."""
+    STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE: float = 0.62
+    """Minimum confidence while a strategy+regime pair has data but not enough samples."""
     SYMBOL_SIDE_BLOCK_ENABLED: bool = True
     """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
     SYMBOL_SIDE_MIN_SAMPLES: int = 20

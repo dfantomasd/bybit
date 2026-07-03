@@ -701,6 +701,26 @@ class TradingLoopModule(AppBoundModule):
                 )
                 await _record_signal("strategy_regime_expectancy_blocked")
                 return
+            confidence_floor = self._app._strategy_regime_confidence_floor(proposal.strategy_id, regime_ctx)
+            if confidence_floor is not None and float(proposal.confidence) < confidence_floor:
+                self._app._record_diag("strategy_regime_confidence_blocked")
+                regime = (
+                    regime_ctx.regime.value
+                    if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                    else "UNKNOWN"
+                )
+                log.info(
+                    "strategy_loop.strategy_regime_confidence_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                    regime=regime,
+                    confidence=round(float(proposal.confidence), 3),
+                    required_confidence=round(confidence_floor, 3),
+                    stats=self._app._strategy_regime_stats.get((proposal.strategy_id, regime)),
+                )
+                await _record_signal("strategy_regime_confidence_blocked")
+                return
 
             # Cooldown: suppress duplicate proposals for the same symbol within one candle
             # period. The strategy loop runs every ~10s but features update every ~60s, so

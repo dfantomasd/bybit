@@ -198,6 +198,28 @@ class TestBucketGate:
 
         assert app._strategy_regime_blocked("scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")) is False
 
+    def test_strategy_regime_confidence_floor_for_immature_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (1.0, 6)}
+
+        assert app._strategy_regime_confidence_floor(
+            "scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")
+        ) == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
+
+    def test_strategy_regime_confidence_floor_for_weak_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (1.0, 12)}
+
+        assert app._strategy_regime_confidence_floor(
+            "scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")
+        ) == app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE
+
+    def test_strategy_regime_confidence_floor_not_needed_for_positive_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_regime_stats = {("scalp_micro_v1", "BULL_TREND"): (4.0, 12)}
+
+        assert app._strategy_regime_confidence_floor("scalp_micro_v1", _regime_ctx(regime="BULL_TREND")) is None
+
     def test_shadow_loss_guard_waits_for_min_closed(self) -> None:
         app = _make_app()
 
@@ -310,6 +332,12 @@ class TestBucketGate:
         assert 0 <= settings["bucket_stats_age_s"] <= 60
         assert settings["strategy_regime_stats_count"] == 1
         assert settings["strategy_regime_block_enabled"] is True
+        assert settings["strategy_regime_confidence_gate_enabled"] is True
+        assert settings["strategy_regime_weak_min_confidence"] == app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE
+        assert (
+            settings["strategy_regime_immature_min_confidence"]
+            == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
+        )
         assert settings["strategy_regime_blocked"] == ["scalp_micro_v1:SIDEWAYS"]
         assert settings["shadow_probe_side_stats_count"] == 1
         assert settings["shadow_probe_symbol_stats_count"] == 1

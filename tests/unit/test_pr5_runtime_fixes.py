@@ -384,7 +384,11 @@ def test_strategy_expectancy_blocks_are_persisted_as_blocked_signals() -> None:
     from trader.modules.trading_loop import TradingLoopModule
 
     src = inspect.getsource(TradingLoopModule.start)
-    for reason in ("strategy_expectancy_blocked", "strategy_regime_expectancy_blocked"):
+    for reason in (
+        "strategy_expectancy_blocked",
+        "strategy_regime_expectancy_blocked",
+        "strategy_regime_confidence_blocked",
+    ):
         marker = f'await _record_signal("{reason}")'
         assert marker in src
         after = src.split(marker, maxsplit=1)[1]

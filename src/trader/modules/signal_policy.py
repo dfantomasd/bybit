@@ -522,6 +522,37 @@ class SignalPolicyModule(AppBoundModule):
             and avg_bps < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
         )
 
+    def strategy_regime_confidence_floor(self, strategy_id: str, regime_ctx: Any | None) -> float | None:
+        """Return an elevated confidence floor for weak strategy+regime pairs.
+
+        Hard blocking needs enough samples and a negative edge. Before that, a
+        slightly softer rule is useful: if a pair has started to look weak, only
+        pass its strongest signals until the statistics improve or mature into a
+        full block.
+        """
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return None
+        if not self._app._settings.STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED:
+            return None
+        if not self._app._strategy_regime_stats:
+            return None
+        regime = (
+            regime_ctx.regime.value
+            if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+            else "UNKNOWN"
+        )
+        stats = self._app._strategy_regime_stats.get((strategy_id, regime))
+        if stats is None:
+            return None
+        avg_bps, count = stats
+        if count < self._app._settings.STRATEGY_REGIME_MIN_SAMPLES:
+            return float(self._app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE)
+        if avg_bps < self._app._settings.STRATEGY_REGIME_WEAK_AVG_BPS:
+            return float(self._app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE)
+        return None
+
     def shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
         """Block probe entries on symbol+side pairs with negative paper baseline."""
 
