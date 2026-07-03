@@ -339,12 +339,15 @@ class TelegramMonitorBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         app.add_error_handler(self._on_error)
 
-        # Load persisted subscriptions so push notifications survive restarts
+        # Load persisted subscriptions so push notifications survive restarts.
+        # Never expand allowed_chat_ids from DB state: removing a chat from
+        # TELEGRAM_ALLOWED_CHAT_IDS must revoke control even if an old
+        # subscription row still exists.
         if self._controller is not None and self._controller.load_subscriptions is not None:
             try:
                 for chat_id in await self._controller.load_subscriptions():
-                    self._subscribed.add(chat_id)
-                    self._config.allowed_chat_ids.add(chat_id)
+                    if chat_id in self._config.allowed_chat_ids:
+                        self._subscribed.add(chat_id)
                 log.info("telegram_subscriptions_loaded", count=len(self._subscribed))
             except Exception as exc:
                 log.warning("telegram_subscriptions_load_failed", error=str(exc))

@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -56,6 +56,30 @@ def _make_bot() -> TelegramMonitorBot:
         adapter_factory=lambda: None,
         controller=controller,
     )
+
+
+@pytest.mark.asyncio
+async def test_persisted_subscriptions_do_not_expand_allowed_chat_ids() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.load_subscriptions = AsyncMock(return_value=[12345, 99999])
+    bot._config.allowed_chat_ids = {12345}
+
+    app = MagicMock()
+    app.initialize = AsyncMock()
+    app.start = AsyncMock()
+    app.stop = AsyncMock()
+    app.shutdown = AsyncMock()
+    app.updater = MagicMock()
+    app.updater.start_polling = AsyncMock()
+
+    with patch("trader.telegram_bot.Application") as app_cls:
+        app_cls.builder.return_value.token.return_value.build.return_value = app
+        await bot.start()
+
+    assert bot._config.allowed_chat_ids == {12345}
+    assert 12345 in bot._subscribed
+    assert 99999 not in bot._subscribed
 
 
 def _fake_update(chat_id: int = 12345) -> MagicMock:

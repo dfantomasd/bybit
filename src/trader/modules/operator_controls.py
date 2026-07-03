@@ -137,10 +137,17 @@ class OperatorControlsModule(AppBoundModule):
                 reason="operator emergency stop via Telegram",
                 operator="telegram",
             )
-        log.critical("emergency_stop.activated", source="telegram")
+        cancelled = 0
+        if self._app._execution_engine is not None:
+            try:
+                cancelled = await self._app._execution_engine.cancel_all_open_orders()
+            except Exception as exc:
+                log.error("emergency_stop.cancel_orders_failed", error=str(exc))
+        log.critical("emergency_stop.activated", source="telegram", orders_cancelled=cancelled)
         if self._app._telegram_bot is not None:
+            cancel_note = f" Cancelled {cancelled} open order(s)." if cancelled else ""
             await self._app._telegram_bot.notify(
-                "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
+                f"🚨 <b>Emergency stop activated.</b> No new trades.{cancel_note} Manual restart required."
             )
 
     async def start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:

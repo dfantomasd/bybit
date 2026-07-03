@@ -49,6 +49,18 @@ class TestSettingsDefaults:
         settings = self._make_settings()
         assert settings.LIVE_MODE is False  # type: ignore[union-attr]
 
+    def test_live_ml_decisions_require_model_encrypt_key(self) -> None:
+        with pytest.raises(ValueError, match="MODEL_ENCRYPT_KEY"):
+            self._make_settings(
+                TRADING_MODE="LIVE",
+                LIVE_MODE="true",
+                LIVE_ARMED="true",
+                BYBIT_USE_TESTNET="false",
+                MODEL_ALLOW_LIVE_DECISIONS="true",
+                MODEL_GATE_CANARY_ENABLED="true",
+                MODEL_ENCRYPT_KEY="",
+            )
+
     def test_shadow_mode_defaults_to_true(self) -> None:
         settings = self._make_settings()
         assert settings.SHADOW_MODE is True  # type: ignore[union-attr]

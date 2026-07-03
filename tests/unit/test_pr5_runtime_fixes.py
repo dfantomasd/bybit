@@ -436,6 +436,96 @@ def test_mark_entry_submitted_no_symbol_still_adds_to_set():
     assert "order456" not in engine._pending_entry_symbols
 
 
+def _proposal_for_pending(symbol: str) -> Any:
+    from trader.domain.enums import MarketRegime, MarketType, OrderSide
+    from trader.domain.models import TradeProposal
+
+    return TradeProposal(
+        strategy_id="test",
+        symbol=symbol,
+        market_type=MarketType.LINEAR,
+        side=OrderSide.BUY,
+        requested_qty=Decimal("1"),
+        entry_price=Decimal("10"),
+        stop_loss=Decimal("9.8"),
+        take_profit=Decimal("10.4"),
+        confidence=0.8,
+        regime=MarketRegime.BULL_TREND,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_blocks_same_symbol_but_not_other_shadow_symbols():
+    from trader.domain.enums import RiskDecisionStatus
+    from trader.domain.models import InstrumentInfo, RiskDecision
+    from trader.execution.engine import ExecutionEngine
+
+    adapter = MagicMock()
+    adapter.get_instrument_info = AsyncMock(
+        return_value=InstrumentInfo(
+            symbol="ETHUSDT",
+            market_type=_proposal_for_pending("ETHUSDT").market_type,
+            base_coin="ETH",
+            quote_coin="USDT",
+            min_order_qty=Decimal("0.001"),
+            max_order_qty=Decimal("1000"),
+            qty_step=Decimal("0.001"),
+            tick_size=Decimal("0.01"),
+            min_notional=Decimal("5"),
+        )
+    )
+    risk_manager = MagicMock()
+    risk_manager.evaluate = AsyncMock(
+        return_value=RiskDecision(
+            proposal_id=_proposal_for_pending("ETHUSDT").proposal_id,
+            status=RiskDecisionStatus.REJECTED,
+            reason="test reached risk manager",
+        )
+    )
+    exposure = MagicMock()
+    exposure.total_exposure_pct = Decimal("0")
+    engine = ExecutionEngine(
+        adapter=adapter,
+        risk_manager=risk_manager,
+        exposure_tracker=exposure,
+        shadow_mode=True,
+        max_concurrent_pending_entries=4,
+    )
+    engine.mark_entry_submitted("oid-btc", symbol="BTCUSDT")
+
+    assert await engine.submit(_proposal_for_pending("BTCUSDT"), Decimal("1000"), Decimal("1000")) is None
+    risk_manager.evaluate.assert_not_awaited()
+
+    await engine.submit(_proposal_for_pending("ETHUSDT"), Decimal("1000"), Decimal("1000"))
+    risk_manager.evaluate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_open_orders_cancels_and_clears_pending():
+    from trader.execution.engine import ExecutionEngine
+
+    adapter = MagicMock()
+    adapter.get_open_orders = AsyncMock(
+        return_value=[
+            {"symbol": "BTCUSDT", "orderLinkId": "link-1"},
+            {"symbol": "ETHUSDT", "orderLinkId": "link-2"},
+        ]
+    )
+    adapter.cancel_order = AsyncMock(return_value={})
+
+    engine = ExecutionEngine(
+        adapter=adapter,
+        risk_manager=MagicMock(),
+        exposure_tracker=MagicMock(total_exposure_pct=Decimal("0")),
+        shadow_mode=False,
+    )
+    engine.resolve_pending_durable = AsyncMock()
+
+    assert await engine.cancel_all_open_orders() == 2
+    assert adapter.cancel_order.await_count == 2
+    assert engine.resolve_pending_durable.await_count == 2
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 3 — reconcile_restored_pending_entries
 # ---------------------------------------------------------------------------
