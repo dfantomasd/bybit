@@ -60,6 +60,24 @@ def test_active_symbols_falls_back_when_screener_empty():
     assert result == list(_SYMBOLS)
 
 
+def test_diagnostics_active_symbols_do_not_use_bootstrap_fallback():
+    from trader.modules.diagnostics import DiagnosticsModule
+
+    app = _make_app()
+    app._screener = None
+
+    assert DiagnosticsModule(app).runtime_active_symbols() == []
+
+
+def test_diagnostics_active_symbols_use_only_live_screener_symbols():
+    from trader.modules.diagnostics import DiagnosticsModule
+
+    app = _make_app()
+    app._screener = _FakeScreener(["DOGEUSDT", "XRPUSDT", "ADAUSDT"])
+
+    assert DiagnosticsModule(app).runtime_active_symbols() == ["DOGEUSDT", "XRPUSDT", "ADAUSDT"]
+
+
 def test_zero_trading_warning_is_suppressed_during_startup_warmup():
     app = _make_app()
     app._settings = MagicMock()
