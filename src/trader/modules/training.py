@@ -1033,6 +1033,9 @@ class TrainingModule(ModuleTaskMixin):
                     strategy_stats = await self._app._trade_journal.get_strategy_stats(
                         horizon_minutes=horizon_minutes,
                     )
+                    strategy_regime_stats = await self._app._trade_journal.get_strategy_regime_stats(
+                        horizon_minutes=horizon_minutes,
+                    )
                     symbol_side_stats = await self._app._trade_journal.get_symbol_side_stats(
                         horizon_minutes=horizon_minutes,
                     )
@@ -1047,6 +1050,7 @@ class TrainingModule(ModuleTaskMixin):
                     self._app._bucket_stats = stats
                     self._app._hour_stats = hour_stats
                     self._app._strategy_stats = strategy_stats
+                    self._app._strategy_regime_stats = strategy_regime_stats
                     self._app._symbol_side_stats = symbol_side_stats
                     self._app._shadow_probe_side_stats = probe_side_stats
                     self._app._shadow_probe_symbol_stats = probe_symbol_stats
@@ -1082,6 +1086,12 @@ class TrainingModule(ModuleTaskMixin):
                         if cnt >= self._app._settings.STRATEGY_MIN_SAMPLES
                         and avg < self._app._settings.STRATEGY_BLOCK_AVG_BPS
                     ]
+                    blocked_strategy_regimes = [
+                        key
+                        for key, (avg, cnt) in strategy_regime_stats.items()
+                        if cnt >= self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
+                        and avg < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
+                    ]
                     blocked_probe_sides = [
                         key
                         for key, (avg, cnt) in probe_side_stats.items()
@@ -1104,6 +1114,8 @@ class TrainingModule(ModuleTaskMixin):
                         blocked_hours=blocked_hours,
                         strategies=len(strategy_stats),
                         blocked_strategies=blocked_strategies,
+                        strategy_regimes=len(strategy_regime_stats),
+                        blocked_strategy_regimes=blocked_strategy_regimes[:10],
                         symbol_sides=len(symbol_side_stats),
                         blocked_symbol_sides=blocked_symbol_sides[:10],
                         probe_symbol_sides=len(probe_side_stats),

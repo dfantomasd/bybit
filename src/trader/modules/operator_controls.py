@@ -293,6 +293,7 @@ class OperatorControlsModule(AppBoundModule):
             )
         shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
         shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
+        strategy_regime_stats = getattr(self._app, "_strategy_regime_stats", None) or {}
         shadow_probe_symbol_cooldowns = getattr(self._app, "_shadow_probe_symbol_cooldowns", None) or {}
         active_shadow_probe_symbol_cooldowns = {
             symbol: max(0.0, (until.astimezone(UTC) - now).total_seconds())
@@ -408,6 +409,19 @@ class OperatorControlsModule(AppBoundModule):
                 else None
             ),
             "bucket_stats_age_s": bucket_stats_age_s,
+            "strategy_regime_stats_count": len(strategy_regime_stats),
+            "strategy_regime_block_enabled": (
+                getattr(self._app._settings, "STRATEGY_REGIME_BLOCK_ENABLED", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "strategy_regime_blocked": [
+                f"{strategy_id}:{regime}"
+                for (strategy_id, regime), (avg_bps, count) in strategy_regime_stats.items()
+                if self._app._settings is not None
+                and count >= self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
+                and avg_bps < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
+            ][:20],
             "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
             "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
             "shadow_probe_blocked_symbols": blocked_probe_symbols,

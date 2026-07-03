@@ -492,6 +492,36 @@ class SignalPolicyModule(AppBoundModule):
             count >= self._app._settings.STRATEGY_MIN_SAMPLES and avg_bps < self._app._settings.STRATEGY_BLOCK_AVG_BPS
         )
 
+    def strategy_regime_blocked(self, strategy_id: str, regime_ctx: Any | None) -> bool:
+        """Block a strategy only in regimes where it has proven net-negative.
+
+        This is intentionally more granular than ``strategy_blocked``. A strategy
+        can be useful in trend regimes and toxic in sideways/high-volatility
+        regimes; blocking the pair preserves useful exploration while cutting
+        known bad contexts.
+        """
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return False
+        if not self._app._settings.STRATEGY_REGIME_BLOCK_ENABLED:
+            return False
+        if not self._app._strategy_regime_stats:
+            return False
+        regime = (
+            regime_ctx.regime.value
+            if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+            else "UNKNOWN"
+        )
+        stats = self._app._strategy_regime_stats.get((strategy_id, regime))
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return bool(
+            count >= self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
+            and avg_bps < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
+        )
+
     def shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
         """Block probe entries on symbol+side pairs with negative paper baseline."""
 

@@ -330,6 +330,12 @@ class Settings(BaseSettings):
     """Exploration budget before a strategy must prove positive net expectancy."""
     STRATEGY_BLOCK_AVG_BPS: float = 0.0
     """Block a strategy once its average net return falls below this threshold."""
+    STRATEGY_REGIME_BLOCK_ENABLED: bool = True
+    """Block only the strategy+market-regime combinations with negative expectancy."""
+    STRATEGY_REGIME_MIN_SAMPLES: int = 12
+    """Minimum resolved outcomes for a strategy+regime pair before it can be blocked."""
+    STRATEGY_REGIME_BLOCK_AVG_BPS: float = -2.0
+    """Block a strategy+regime pair when its average net return is below this (bps)."""
     SYMBOL_SIDE_BLOCK_ENABLED: bool = True
     """Block symbol+side pairs whose resolved baseline expectancy is persistently negative."""
     SYMBOL_SIDE_MIN_SAMPLES: int = 20

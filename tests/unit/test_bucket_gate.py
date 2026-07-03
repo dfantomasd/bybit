@@ -180,6 +180,24 @@ class TestBucketGate:
 
         assert app._strategy_blocked("scalp_micro_v1") is False
 
+    def test_negative_strategy_regime_blocks_only_that_regime(self) -> None:
+        app = _make_active_app()
+        app._strategy_stats = {"scalp_micro_v1": (3.0, 50)}
+        app._strategy_regime_stats = {
+            ("scalp_micro_v1", "SIDEWAYS"): (-8.0, 12),
+            ("scalp_micro_v1", "BULL_TREND"): (4.0, 12),
+        }
+
+        assert app._strategy_blocked("scalp_micro_v1") is False
+        assert app._strategy_regime_blocked("scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")) is True
+        assert app._strategy_regime_blocked("scalp_micro_v1", _regime_ctx(regime="BULL_TREND")) is False
+
+    def test_strategy_regime_waits_for_min_samples(self) -> None:
+        app = _make_active_app()
+        app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (-80.0, 11)}
+
+        assert app._strategy_regime_blocked("scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")) is False
+
     def test_shadow_loss_guard_waits_for_min_closed(self) -> None:
         app = _make_app()
 
@@ -279,6 +297,7 @@ class TestBucketGate:
         app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=42)
         app._shadow_probe_side_stats = {("XRPUSDT", "Buy"): (-2.0, 8)}
         app._shadow_probe_symbol_stats = {"XRPUSDT": (-2.0, 8)}
+        app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (-8.0, 12)}
         app._shadow_probe_symbol_cooldowns = {"XRPUSDT": datetime.now(tz=UTC) + timedelta(seconds=120)}
         app._shadow_probe_eligible_symbols = {"XRPUSDT"}
 
@@ -289,6 +308,9 @@ class TestBucketGate:
         assert isinstance(settings["deploy_info"], dict)
         assert settings["bucket_stats_refresh_seconds"] == 300
         assert 0 <= settings["bucket_stats_age_s"] <= 60
+        assert settings["strategy_regime_stats_count"] == 1
+        assert settings["strategy_regime_block_enabled"] is True
+        assert settings["strategy_regime_blocked"] == ["scalp_micro_v1:SIDEWAYS"]
         assert settings["shadow_probe_side_stats_count"] == 1
         assert settings["shadow_probe_symbol_stats_count"] == 1
         assert settings["shadow_probe_blocked_symbols"] == ["XRPUSDT"]

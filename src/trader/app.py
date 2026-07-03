@@ -83,6 +83,9 @@ class TradingApplication:
         self._hour_stats: dict[int, tuple[float, int]] = {}
         # Strategy-level net expectancy used after the ensemble selects a proposal.
         self._strategy_stats: dict[str, tuple[float, int]] = {}
+        # Strategy × regime expectancy: blocks toxic combinations while keeping
+        # the same strategy available in regimes where it still works.
+        self._strategy_regime_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
         self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Shadow probe paper stats (active even in SHADOW mode)
@@ -667,6 +670,9 @@ class TradingApplication:
 
     def _strategy_blocked(self, strategy_id: str) -> bool:
         return self._modules.signal_policy.strategy_blocked(strategy_id)
+
+    def _strategy_regime_blocked(self, strategy_id: str, regime_ctx: Any | None) -> bool:
+        return self._modules.signal_policy.strategy_regime_blocked(strategy_id, regime_ctx)
 
     def _shadow_probe_side_blocked(self, symbol: str, side: str) -> bool:
         return self._modules.signal_policy.shadow_probe_side_blocked(symbol, side)

@@ -670,6 +670,22 @@ class TradingLoopModule(AppBoundModule):
                     stats=self._app._strategy_stats.get(proposal.strategy_id),
                 )
                 return
+            if self._app._strategy_regime_blocked(proposal.strategy_id, regime_ctx):
+                self._app._record_diag("strategy_regime_expectancy_blocked")
+                regime = (
+                    regime_ctx.regime.value
+                    if regime_ctx is not None and getattr(regime_ctx, "regime", None) is not None
+                    else "UNKNOWN"
+                )
+                log.info(
+                    "strategy_loop.strategy_regime_expectancy_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                    regime=regime,
+                    stats=self._app._strategy_regime_stats.get((proposal.strategy_id, regime)),
+                )
+                return
 
             # Cooldown: suppress duplicate proposals for the same symbol within one candle
             # period. The strategy loop runs every ~10s but features update every ~60s, so
