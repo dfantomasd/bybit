@@ -232,6 +232,27 @@ class TestBucketGate:
         assert diag["hour_shadow_closed_avg_pnl_pct"] == 0.1
         assert len(app._shadow_closed_results) == 2
 
+    def test_shadow_probe_quality_blocks_are_reported_by_symbol(self) -> None:
+        app = _make_app()
+
+        app._record_diag("shadow_probe_quality_blocked:XRPUSDT:Buy")
+        app._record_diag("shadow_probe_side_blocked:DOGEUSDT:Sell")
+
+        details = app._modules.diagnostics.get_snapshot()["hour_strategy_details"]["shadow_probe_symbols"]
+
+        assert {
+            "reason": "shadow_probe_quality_blocked",
+            "symbol": "XRPUSDT",
+            "side": "Buy",
+            "count": 1,
+        } in details
+        assert {
+            "reason": "shadow_probe_side_blocked",
+            "symbol": "DOGEUSDT",
+            "side": "Sell",
+            "count": 1,
+        } in details
+
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:
         app = _make_app(
             DEFAULT_LINEAR_TAKER_FEE_RATE=0.0,

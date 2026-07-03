@@ -170,6 +170,15 @@ class TradingLoopModule(AppBoundModule):
                     return False
                 return self._app._shadow_probe_regime_allows(regime_ctx)
 
+            def _probe_side_blocked(symbol: str, side: str) -> bool:
+                if self._app._shadow_probe_side_blocked(symbol, side):
+                    return True
+                if not self._app._shadow_probe_quality_allows(symbol, side):
+                    self._app._record_diag("shadow_probe_quality_blocked")
+                    self._app._record_diag(f"shadow_probe_quality_blocked:{symbol}:{side}")
+                    return True
+                return False
+
             research_v2 = bool(self._app._settings.SHADOW_PROBE_RESEARCH_PROFILE_V2)
             probe_max_open_positions = 4 if research_v2 else self._app._settings.SHADOW_PROBE_MAX_OPEN_POSITIONS
             probe_burst_max_signals = 6 if research_v2 else self._app._settings.SHADOW_PROBE_BURST_MAX_SIGNALS
@@ -186,10 +195,7 @@ class TradingLoopModule(AppBoundModule):
                         else None
                     ),
                     instrument_info_provider=_probe_instrument_info,
-                    side_blocked=lambda symbol, side: (
-                        self._app._shadow_probe_side_blocked(symbol, side)
-                        or not self._app._shadow_probe_quality_allows(symbol, side)
-                    ),
+                    side_blocked=_probe_side_blocked,
                     symbol_allowed=_probe_symbol_allowed,
                     regime_allows=_probe_regime_allows,
                     open_positions_count=(

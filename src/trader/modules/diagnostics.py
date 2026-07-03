@@ -439,6 +439,8 @@ class DiagnosticsModule(AppBoundModule):
                         "shadow_probe_imbalance_weak",
                         "shadow_probe_ema_missing",
                         "shadow_probe_book_ema_conflict",
+                        "shadow_probe_quality_blocked",
+                        "shadow_probe_side_blocked",
                         "shadow_probe_net_edge_rejected",
                         "shadow_probe_min_notional_rejected",
                         "shadow_probe_cooldown",
