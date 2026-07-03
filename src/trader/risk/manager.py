@@ -466,9 +466,13 @@ class RiskManager:
             except Exception as e:
                 self._log.debug(f"position_size_optimization_failed: {e}")
 
-        # Convert Kelly fraction (0.01-0.25) to risk percentage (clamped to profile range)
+        # Apply the model's fractional-Kelly safety scaler (0.1-0.5) to the raw
+        # Kelly fraction (0.01-0.25) before converting to a risk percentage —
+        # using kelly_fraction alone ignores the conservative scale-down the
+        # model predicted and can size positions several times larger than
+        # intended (clamped to profile range).
         desired_risk_pct = min(
-            kelly_fraction * Decimal("100") * position_size_adjustment,
+            kelly_fraction * fractional_kelly * Decimal("100") * position_size_adjustment,
             self._limits.risk_per_trade_max_pct,
         )
 
