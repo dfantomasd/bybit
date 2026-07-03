@@ -537,6 +537,29 @@ class RiskManager:
         approved_qty = approved_qty * regime_mult
 
         # ----------------------------------------------------------------
+        # 14.5. Correlation adjustment — reduce size for same-asset-family
+        # positions instead of blindly stacking correlated exposure.
+        # ----------------------------------------------------------------
+        existing_symbols: list[str] = []
+        open_symbols_fn = getattr(self._exposure, "open_symbols", None)
+        if callable(open_symbols_fn):
+            try:
+                raw_symbols = open_symbols_fn()
+                if isinstance(raw_symbols, (list, tuple, set, frozenset)):
+                    existing_symbols = [str(sym) for sym in raw_symbols]
+            except TypeError:
+                existing_symbols = []
+        corr_mult = self._exposure.get_correlation_adjustment(proposal.symbol, existing_symbols)
+        try:
+            corr_mult = Decimal(str(corr_mult))
+        except Exception:
+            corr_mult = Decimal("1")
+        corr_mult = max(Decimal("0"), min(Decimal("1"), corr_mult))
+        if corr_mult < Decimal("1"):
+            triggered_rules.append("correlation_reduced")
+        approved_qty = approved_qty * corr_mult
+
+        # ----------------------------------------------------------------
         # 15. Final hard cap check
         # ----------------------------------------------------------------
         if proposal.entry_price is not None and proposal.entry_price > Decimal("0"):

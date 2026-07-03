@@ -507,18 +507,29 @@ class SignalPolicyModule(AppBoundModule):
         )
 
     def shadow_probe_quality_allows(self, symbol: str, side: str) -> bool:
-        """Require non-negative recent probe baseline when enough samples exist."""
+        """Require non-negative recent probe baseline when enough samples exist.
+
+        Prefer symbol+side stats when they are mature. If the side is still in
+        warmup, fall back to symbol-level probe stats so a broadly toxic symbol
+        stops feeding the paper gate before every side independently proves bad.
+        """
 
         assert self._app._settings is not None
         if not self._app._settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED:
             return True
         stats = self._app._shadow_probe_side_stats.get((symbol, side))
-        if stats is None:
+        if stats is not None:
+            avg_bps, count = stats
+            if count >= self._app._settings.SHADOW_PROBE_BASELINE_MIN_SAMPLES:
+                return avg_bps >= self._app._settings.SHADOW_PROBE_BASELINE_MIN_AVG_BPS
+
+        symbol_stats = self._app._shadow_probe_symbol_stats.get(symbol)
+        if symbol_stats is None:
             return True
-        avg_bps, count = stats
-        if count < self._app._settings.SHADOW_PROBE_BASELINE_MIN_SAMPLES:
+        symbol_avg_bps, symbol_count = symbol_stats
+        if symbol_count < self._app._settings.SHADOW_PROBE_SYMBOL_MIN_SAMPLES:
             return True
-        return avg_bps >= self._app._settings.SHADOW_PROBE_BASELINE_MIN_AVG_BPS
+        return symbol_avg_bps >= self._app._settings.SHADOW_PROBE_SYMBOL_MIN_AVG_BPS
 
     def shadow_probe_symbol_allowed(self, symbol: str) -> bool:
         """Restrict probes to top-performing symbols when configured."""

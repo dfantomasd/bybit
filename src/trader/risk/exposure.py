@@ -177,6 +177,11 @@ class ExposureTracker:
         with self._lock:
             return len(self._symbols_with_exposure())
 
+    def open_symbols(self) -> list[str]:
+        """Return symbols with open or pending exposure."""
+        with self._lock:
+            return sorted(self._symbols_with_exposure())
+
     def get_position_exposure_pct(self, symbol: str) -> Decimal:
         """Return exposure of a single position as % of capital."""
         with self._lock:

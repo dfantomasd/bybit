@@ -297,3 +297,27 @@ class TestFinalExposureValidation:
         )
         # Key invariant: must not fire the premature exposure guard
         assert "exposure_cap_full" not in (decision.triggered_rules or [])
+
+
+@pytest.mark.asyncio
+async def test_correlation_adjustment_reduces_same_family_position_size():
+    capital = Decimal("10000")
+    manager, exposure = _make_manager_with_real_exposure(capital, profile=RiskProfile.CONSERVATIVE)
+    await exposure.update_position("BTCUSDT", "Buy", Decimal("1000"), leverage=Decimal("1"))
+
+    decision = await manager.evaluate(
+        proposal=_proposal(symbol="WBTCUSDT", qty="0.02", entry="50000", stop_loss_pct="0.02"),
+        capital=capital,
+        available_balance=capital,
+        instrument_info=_instrument(
+            symbol="WBTCUSDT",
+            min_notional="5",
+            min_order_qty="0.001",
+            max_order_qty="100",
+            qty_step="0.001",
+            tick_size="0.5",
+        ),
+    )
+
+    assert decision.status in (RiskDecisionStatus.APPROVED, RiskDecisionStatus.RESIZED)
+    assert "correlation_reduced" in decision.triggered_rules

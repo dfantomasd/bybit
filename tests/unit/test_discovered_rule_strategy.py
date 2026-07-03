@@ -7,6 +7,7 @@ import numpy as np
 
 from trader.domain.enums import OrderSide
 from trader.domain.models import FeatureVector
+from trader.modules.operator_controls import OperatorControlsModule
 from trader.strategies.discovered_rule import (
     DiscoveredRuleStrategy,
     load_discovered_rules,
@@ -148,3 +149,27 @@ def test_write_discovered_rules_failure_report_creates_diagnostic_json(tmp_path)
     assert payload["status"] == "auto_generate_failed"
     assert payload["rules"] == []
     assert "TimeoutError" in payload["error"]
+
+
+def test_strategy_lab_summary_exposes_failure_error_and_hint(tmp_path) -> None:
+    rules_path = tmp_path / "strategy_lab.json"
+    rules_path.write_text(
+        json.dumps(
+            {
+                "status": "auto_generate_failed",
+                "rules": [],
+                "sample_count": 0,
+                "stage": "auto_generate",
+                "error": "RuntimeError: (EAUTHQUERY) authentication query failed",
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    summary = OperatorControlsModule._strategy_lab_summary(str(rules_path))
+
+    assert summary is not None
+    assert summary["status"] == "auto_generate_failed"
+    assert summary["stage"] == "auto_generate"
+    assert "EAUTHQUERY" in summary["error"]
+    assert "POSTGRES_DSN" in summary["hint"]

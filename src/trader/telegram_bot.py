@@ -349,12 +349,15 @@ class TelegramMonitorBot:
         app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self._on_text))
         app.add_error_handler(self._on_error)
 
-        # Load persisted subscriptions so push notifications survive restarts
+        # Load persisted subscriptions so push notifications survive restarts.
+        # Never expand allowed_chat_ids from DB state: removing a chat from
+        # TELEGRAM_ALLOWED_CHAT_IDS must revoke control even if an old
+        # subscription row still exists.
         if self._controller is not None and self._controller.load_subscriptions is not None:
             try:
                 for chat_id in await self._controller.load_subscriptions():
-                    self._subscribed.add(chat_id)
-                    self._config.allowed_chat_ids.add(chat_id)
+                    if chat_id in self._config.allowed_chat_ids:
+                        self._subscribed.add(chat_id)
                 log.info("telegram_subscriptions_loaded", count=len(self._subscribed))
             except Exception as exc:
                 log.warning("telegram_subscriptions_load_failed", error=str(exc))
@@ -3035,6 +3038,9 @@ class TelegramMonitorBot:
         paper_horizon = _dict_or_empty(paper_horizon)
         paper_baseline = _dict_or_empty(paper_horizon.get("baseline"))
         paper_model_gate = _dict_or_empty(paper_horizon.get("model_gate"))
+        gate_side_filtered = int((shadow_gate or {}).get("side_filtered_count") or 0)
+        gate_score_blocks = int((shadow_gate or {}).get("score_block_count") or 0)
+        gate_score_block_avg = (shadow_gate or {}).get("score_block_avg_net_return_bps")
         candle_sampler = _dict_or_empty(runtime_diag.get("candle_sampler"))
         shadow_closes = {
             "total": runtime_diag.get("hour_shadow_closed", 0) if isinstance(runtime_diag, dict) else 0,
@@ -3126,6 +3132,12 @@ class TelegramMonitorBot:
                 "strategy_paper_baseline": paper_baseline,
                 "strategy_paper_model_gate": paper_model_gate,
                 "shadow_gate": shadow_gate,
+                "gate_breakdown": {
+                    "side_filtered_count": gate_side_filtered,
+                    "score_block_count": gate_score_blocks,
+                    "score_block_avg_net_return_bps": gate_score_block_avg,
+                    "top_block_reasons": (shadow_gate or {}).get("top_block_reasons", {}),
+                },
                 "candle_sampler_runtime": candle_sampler,
                 "shadow_closes_runtime": shadow_closes,
             },
@@ -3196,6 +3208,10 @@ class TelegramMonitorBot:
             f"pending=<code>{int((shadow_gate or {}).get('event_pending_count') or 0)}</code>, "
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
+            "• Gate breakdown: "
+            f"side-filter=<code>{gate_side_filtered}</code>, "
+            f"score-block=<code>{gate_score_blocks}</code>, "
+            f"score avg=<code>{html.escape(str(gate_score_block_avg if gate_score_block_avg is not None else 'n/a'))}</code>",
             "",
             "<b>Strategy signal pipeline</b>",
             f"• Кандидаты стратегии: <code>{hour_signal_candidates}</code>; "
@@ -4034,10 +4050,16 @@ class TelegramMonitorBot:
             gate_pass_avg = gate.get("pass_avg_net_return_bps")
             gate_block_avg = gate.get("block_avg_net_return_bps")
             gate_lift = gate.get("lift_vs_all_bps")
+            gate_side_filtered = int(gate.get("side_filtered_count") or 0)
+            gate_score_blocks = int(gate.get("score_block_count") or 0)
+            gate_score_block_avg = gate.get("score_block_avg_net_return_bps")
             gate_reasons = gate.get("top_block_reasons", {}) or {}
             gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
             gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
             gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+            gate_score_block_avg_str = (
+                f"{float(gate_score_block_avg):+.2f} bps" if gate_score_block_avg is not None else "n/a"
+            )
             gate_reasons_str = (
                 ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
             )
@@ -4051,6 +4073,16 @@ class TelegramMonitorBot:
             paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
             paper_baseline = paper.get("baseline", {}) or {}
             paper_gate = paper.get("model_gate", {}) or {}
+            event_counts = db_diag.get("prediction_event_decision_counts", {}) or {}
+            event_by_decision = event_counts.get("by_decision", {}) if isinstance(event_counts, dict) else {}
+
+            def _event_count_line(decision: str) -> str:
+                row = event_by_decision.get(decision, {}) if isinstance(event_by_decision, dict) else {}
+                return (
+                    f"{decision}: {int(row.get('total_count') or 0)}/"
+                    f"{int(row.get('resolved_count') or 0)}/"
+                    f"{int(row.get('pending_count') or 0)}"
+                )
 
             def _paper_line(stats: dict[str, Any]) -> str:
                 total_bps = float(stats.get("total_bps") or 0.0)
@@ -4107,6 +4139,17 @@ class TelegramMonitorBot:
             lines += [
                 f"Горизонты разметки: <code>{outcome_breakdown}</code>",
                 f"Готово для обучения ({model_horizon}m): <code>{trainable_model_horizon}</code>",
+                "Prediction events total/resolved/pending: <code>"
+                + html.escape(
+                    "; ".join(
+                        [
+                            _event_count_line("SHADOW_BASELINE"),
+                            _event_count_line("GATE_PASS"),
+                            _event_count_line("GATE_BLOCK"),
+                        ]
+                    )
+                )
+                + "</code>",
             ]
             if horizon_schema:
                 schema_bits = [
@@ -4177,6 +4220,8 @@ class TelegramMonitorBot:
                 + f"</code>, причина=<code>{side_filter_reason}</code>",
                 f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} resolved пропущено</code>, "
                 f"блок=<code>{gate_block}</code>, observed=<code>{gate_observed}</code>, pending=<code>{gate_pending}</code>",
+                f"Блоки side-filter/score: <code>{gate_side_filtered}/{gate_score_blocks}</code>, "
+                f"score avg=<code>{gate_score_block_avg_str}</code>",
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
                 f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
                 "Lift фильтра: <code>"
@@ -4248,6 +4293,8 @@ class TelegramMonitorBot:
             # 6. Paper gate
             paper_gate_count = int(paper_gate.get("count") or 0)
             paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
+            shadow_close_count = int(diag.get("hour_shadow_closed") or 0) if isinstance(diag, dict) else 0
+            shadow_close_avg = diag.get("hour_shadow_closed_avg_pnl_pct") if isinstance(diag, dict) else None
             if paper_gate_count < 20:
                 paper_road_icon = "⏳"
                 paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
@@ -4258,6 +4305,17 @@ class TelegramMonitorBot:
                 paper_road_icon = "❌"
                 paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
             lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+            if paper_gate_count == 0 and shadow_close_count > 0:
+                shadow_avg_str = (
+                    f"{float(shadow_close_avg):+.4f}%"
+                    if shadow_close_avg is not None
+                    else "n/a"
+                )
+                lines.append(
+                    "⚠️ Runtime shadow closes есть, но DB paper gate пуст: "
+                    f"<code>{shadow_close_count} закрытий, avg {shadow_avg_str}</code>. "
+                    "Проверьте запись prediction outcomes/DB."
+                )
 
             all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
             if (
@@ -4729,6 +4787,8 @@ class TelegramMonitorBot:
                 return html.escape(str(value))
 
         gate_lift = gate.get("lift_vs_all_bps")
+        side_filtered_count = int(gate.get("side_filtered_count") or 0)
+        score_block_count = int(gate.get("score_block_count") or 0)
         lines = [
             "<b>📊 Метрики модели</b>",
             "",
@@ -4746,6 +4806,9 @@ class TelegramMonitorBot:
             f"Pass: <code>{int(gate.get('pass_count') or 0)}</code>",
             f"Gate lift: <code>{_fmt(gate_lift, ' bps')}</code>",
             f"Pass expectancy: <code>{_fmt(gate.get('pass_avg_net_return_bps'), ' bps')}</code>",
+            f"Side-filter blocks: <code>{side_filtered_count}</code>",
+            f"Score blocks: <code>{score_block_count}</code>",
+            f"Score-block avg: <code>{_fmt(gate.get('score_block_avg_net_return_bps'), ' bps')}</code>",
         ]
         await self._button_reply(update, "\n".join(lines), reply_markup=self._canary_menu())
 

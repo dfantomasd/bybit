@@ -200,12 +200,12 @@ class TestBucketGate:
     def test_research_shadow_loss_guard_waits_for_real_sample(self) -> None:
         app = _make_app()
 
-        for idx in range(19):
+        for idx in range(4):
             app._record_shadow_close(f"SYM{idx}USDT", "TIME", -0.2)
 
         assert app._shadow_loss_guard_blocks() is False
 
-        app._record_shadow_close("SYM20USDT", "TIME", -0.2)
+        app._record_shadow_close("SYM5USDT", "TIME", -0.2)
 
         assert app._shadow_loss_guard_blocks() is True
 
@@ -231,6 +231,43 @@ class TestBucketGate:
         assert diag["hour_shadow_closed_sl"] == 0
         assert diag["hour_shadow_closed_avg_pnl_pct"] == 0.1
         assert len(app._shadow_closed_results) == 2
+
+    def test_shadow_probe_quality_blocks_are_reported_by_symbol(self) -> None:
+        app = _make_app()
+
+        app._record_diag("shadow_probe_quality_blocked:XRPUSDT:Buy")
+        app._record_diag("shadow_probe_side_blocked:DOGEUSDT:Sell")
+
+        details = app._modules.diagnostics.get_snapshot()["hour_strategy_details"]["shadow_probe_symbols"]
+
+        assert {
+            "reason": "shadow_probe_quality_blocked",
+            "symbol": "XRPUSDT",
+            "side": "Buy",
+            "count": 1,
+        } in details
+        assert {
+            "reason": "shadow_probe_side_blocked",
+            "symbol": "DOGEUSDT",
+            "side": "Sell",
+            "count": 1,
+        } in details
+
+    def test_runtime_settings_reports_shadow_probe_stats_freshness(self) -> None:
+        app = _make_app(BUCKET_STATS_REFRESH_SECONDS=300)
+        app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=42)
+        app._shadow_probe_side_stats = {("XRPUSDT", "Buy"): (-2.0, 8)}
+        app._shadow_probe_symbol_stats = {"XRPUSDT": (-2.0, 8)}
+        app._shadow_probe_eligible_symbols = {"XRPUSDT"}
+
+        settings = app._modules.operator.runtime_settings()
+
+        assert settings["bucket_stats_refresh_seconds"] == 300
+        assert 0 <= settings["bucket_stats_age_s"] <= 60
+        assert settings["shadow_probe_side_stats_count"] == 1
+        assert settings["shadow_probe_symbol_stats_count"] == 1
+        assert settings["shadow_probe_blocked_symbols"] == ["XRPUSDT"]
+        assert settings["shadow_probe_eligible_symbols"] == ["XRPUSDT"]
 
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:
         app = _make_app(

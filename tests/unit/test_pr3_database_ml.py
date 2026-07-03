@@ -626,6 +626,27 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
                 {"net_return_bps": 4.5},
                 {"net_return_bps": 3.5},
             ]
+        if "FROM (\n                    SELECT prediction_id, decision, feature_snapshot_id, created_at" in query:
+            return [
+                {
+                    "decision": "SHADOW_BASELINE",
+                    "total_count": 40,
+                    "with_snapshot_count": 40,
+                    "resolved_count": 30,
+                },
+                {
+                    "decision": "GATE_PASS",
+                    "total_count": 15,
+                    "with_snapshot_count": 15,
+                    "resolved_count": 12,
+                },
+                {
+                    "decision": "GATE_BLOCK",
+                    "total_count": 10,
+                    "with_snapshot_count": 10,
+                    "resolved_count": 8,
+                },
+            ]
         if "count(po.prediction_id) AS resolved_count" in query:
             return [
                 {"decision": "GATE_PASS", "total_count": 15, "resolved_count": 12},
@@ -704,6 +725,12 @@ async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> No
     assert diag["shadow_gate_15m"]["top_block_reasons"] == {"score_below_regime_threshold": 8}
     assert diag["paper_pnl_15m"]["baseline"]["total_bps"] == -1.0
     assert diag["paper_pnl_15m"]["model_gate"]["total_bps"] == 8.0
+    event_counts = diag["prediction_event_decision_counts"]
+    assert event_counts["total_count"] == 65
+    assert event_counts["resolved_count"] == 50
+    assert event_counts["pending_count"] == 15
+    assert event_counts["by_decision"]["SHADOW_BASELINE"]["pending_count"] == 10
+    assert event_counts["by_decision"]["GATE_PASS"]["resolved_count"] == 12
 
 
 @pytest.mark.asyncio

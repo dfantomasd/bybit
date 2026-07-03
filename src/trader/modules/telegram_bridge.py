@@ -11,7 +11,7 @@ from typing import Any, cast
 
 from trader.modules.base import AppBoundModule
 from trader.monitoring.logging import get_logger
-from trader.runtime.constants import _SYMBOLS, _WS_INTERVAL
+from trader.runtime.constants import _WS_INTERVAL
 
 log = get_logger(__name__)
 
@@ -401,9 +401,7 @@ class TelegramBridgeModule(AppBoundModule):
                 self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True
             ),
             current_profile=lambda: self._app._current_risk_profile_str,
-            active_symbols=lambda: (
-                self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
-            ),
+            active_symbols=self._app._modules.diagnostics.runtime_active_symbols,
             regime_for=_regime_for,
             signal_log=self._app._signal_log,
             diagnostics_provider=self._app._modules.diagnostics.get_snapshot,

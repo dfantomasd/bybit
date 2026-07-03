@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
 from datetime import UTC, datetime
@@ -111,6 +112,20 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
     assert app._model_side_allowed("Buy") is False
     assert app._model_gate_quality["gate_total_count"] == 77
     assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
+
+
+def test_live_ml_decision_respects_selected_side_filter_before_replacement() -> None:
+    """A side-filtered Champion must not boost the side rejected by walk-forward."""
+    from trader.modules.trading_loop import TradingLoopModule
+
+    src = inspect.getsource(TradingLoopModule.start)
+    hybrid_start = src.index("Hybrid ML mode")
+    snapshot_start = src.index("Record feature snapshot", hybrid_start)
+    hybrid_block = src[hybrid_start:snapshot_start]
+
+    assert "_model_side_allowed(proposal.side.value)" in hybrid_block
+    assert "ml_live_side_filtered" in hybrid_block
+    assert hybrid_block.index("_model_side_allowed(proposal.side.value)") < hybrid_block.index("ml_replacement")
 
 
 def test_model_gate_quality_uses_active_model_not_latest_challenger() -> None:
@@ -299,6 +314,45 @@ def test_economic_readiness_uses_model_horizon_stats() -> None:
     assert report["ready"] is True
     assert report["metrics"]["model_horizon_minutes"] == 5
     assert report["metrics"]["training_eligible_model_horizon"] == 2500
+
+
+def test_economic_readiness_flags_empty_db_paper_when_shadow_closes_exist() -> None:
+    """Shadow closes without DB paper outcomes must be visible, not reported as just '0 trades'."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+
+    report = app._economic_readiness_report(
+        db_diag={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_by_horizon": {"5": 2500},
+            "active_model_version": {
+                "version": "v_good_5m",
+                "status": "CHAMPION",
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 2.5,
+                },
+            },
+            "shadow_gate_by_horizon": {"5": {"total_count": 120, "lift_vs_all_bps": 1.2}},
+            "paper_pnl_by_horizon": {"5": {"model_gate": {"count": 0, "total_bps": 0.0}}},
+        },
+        runtime_diag={
+            "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
+            "hour_shadow_closed": 5,
+            "hour_shadow_closed_avg_pnl_pct": -0.1688,
+        },
+    )
+
+    assert report["ready"] is False
+    assert "paper_gate_db_empty_but_shadow_closes:5" in report["issues"]
+    assert report["metrics"]["shadow_close_count_1h"] == 5
+    assert report["metrics"]["shadow_close_avg_pnl_pct_1h"] == -0.1688
 
 
 def test_economic_readiness_does_not_fallback_when_model_horizon_is_zero() -> None:

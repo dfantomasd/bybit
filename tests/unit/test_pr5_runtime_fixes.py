@@ -60,6 +60,24 @@ def test_active_symbols_falls_back_when_screener_empty():
     assert result == list(_SYMBOLS)
 
 
+def test_diagnostics_active_symbols_do_not_use_bootstrap_fallback():
+    from trader.modules.diagnostics import DiagnosticsModule
+
+    app = _make_app()
+    app._screener = None
+
+    assert DiagnosticsModule(app).runtime_active_symbols() == []
+
+
+def test_diagnostics_active_symbols_use_only_live_screener_symbols():
+    from trader.modules.diagnostics import DiagnosticsModule
+
+    app = _make_app()
+    app._screener = _FakeScreener(["DOGEUSDT", "XRPUSDT", "ADAUSDT"])
+
+    assert DiagnosticsModule(app).runtime_active_symbols() == ["DOGEUSDT", "XRPUSDT", "ADAUSDT"]
+
+
 def test_zero_trading_warning_is_suppressed_during_startup_warmup():
     app = _make_app()
     app._settings = MagicMock()
@@ -79,6 +97,41 @@ def test_zero_trading_warning_is_suppressed_during_startup_warmup():
     log.warning.assert_not_called()
     log.info.assert_called_once()
     assert log.info.call_args.args[0] == "zero_trading.suppressed_warmup"
+
+
+@pytest.mark.asyncio
+async def test_risk_monitor_housekeeping_polls_kill_switch_file_and_pauses():
+    from trader.modules.execution_runtime import ExecutionRuntimeModule
+
+    app = _make_app()
+    app._kill_switch = MagicMock()
+    app._kill_switch.check_file_flag = AsyncMock()
+    app._kill_switch.is_active = True
+    app._risk_manager = MagicMock()
+    app._risk_manager.reset_daily_stats = AsyncMock()
+
+    await ExecutionRuntimeModule(app)._risk_monitor_housekeeping()
+
+    app._kill_switch.check_file_flag.assert_awaited_once()
+    assert app._trading_paused is True
+
+
+@pytest.mark.asyncio
+async def test_risk_monitor_housekeeping_resets_daily_pnl_once_per_utc_day():
+    from trader.modules.execution_runtime import ExecutionRuntimeModule
+
+    app = _make_app()
+    app._kill_switch = None
+    app._risk_manager = MagicMock()
+    app._risk_manager.reset_daily_stats = AsyncMock()
+    module = ExecutionRuntimeModule(app)
+
+    await module._risk_monitor_housekeeping()
+    first_day = app._last_daily_reset_date
+    await module._risk_monitor_housekeeping()
+
+    assert first_day is not None
+    app._risk_manager.reset_daily_stats.assert_awaited_once()
 
 
 def test_zero_trading_warning_is_suppressed_when_shadow_orders_flow():
@@ -434,6 +487,96 @@ def test_mark_entry_submitted_no_symbol_still_adds_to_set():
     assert "order456" in engine._pending_entry_order_link_ids
     # No symbol stored
     assert "order456" not in engine._pending_entry_symbols
+
+
+def _proposal_for_pending(symbol: str) -> Any:
+    from trader.domain.enums import MarketRegime, MarketType, OrderSide
+    from trader.domain.models import TradeProposal
+
+    return TradeProposal(
+        strategy_id="test",
+        symbol=symbol,
+        market_type=MarketType.LINEAR,
+        side=OrderSide.BUY,
+        requested_qty=Decimal("1"),
+        entry_price=Decimal("10"),
+        stop_loss=Decimal("9.8"),
+        take_profit=Decimal("10.4"),
+        confidence=0.8,
+        regime=MarketRegime.BULL_TREND,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_gate_blocks_same_symbol_but_not_other_shadow_symbols():
+    from trader.domain.enums import RiskDecisionStatus
+    from trader.domain.models import InstrumentInfo, RiskDecision
+    from trader.execution.engine import ExecutionEngine
+
+    adapter = MagicMock()
+    adapter.get_instrument_info = AsyncMock(
+        return_value=InstrumentInfo(
+            symbol="ETHUSDT",
+            market_type=_proposal_for_pending("ETHUSDT").market_type,
+            base_coin="ETH",
+            quote_coin="USDT",
+            min_order_qty=Decimal("0.001"),
+            max_order_qty=Decimal("1000"),
+            qty_step=Decimal("0.001"),
+            tick_size=Decimal("0.01"),
+            min_notional=Decimal("5"),
+        )
+    )
+    risk_manager = MagicMock()
+    risk_manager.evaluate = AsyncMock(
+        return_value=RiskDecision(
+            proposal_id=_proposal_for_pending("ETHUSDT").proposal_id,
+            status=RiskDecisionStatus.REJECTED,
+            reason="test reached risk manager",
+        )
+    )
+    exposure = MagicMock()
+    exposure.total_exposure_pct = Decimal("0")
+    engine = ExecutionEngine(
+        adapter=adapter,
+        risk_manager=risk_manager,
+        exposure_tracker=exposure,
+        shadow_mode=True,
+        max_concurrent_pending_entries=4,
+    )
+    engine.mark_entry_submitted("oid-btc", symbol="BTCUSDT")
+
+    assert await engine.submit(_proposal_for_pending("BTCUSDT"), Decimal("1000"), Decimal("1000")) is None
+    risk_manager.evaluate.assert_not_awaited()
+
+    await engine.submit(_proposal_for_pending("ETHUSDT"), Decimal("1000"), Decimal("1000"))
+    risk_manager.evaluate.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_cancel_all_open_orders_cancels_and_clears_pending():
+    from trader.execution.engine import ExecutionEngine
+
+    adapter = MagicMock()
+    adapter.get_open_orders = AsyncMock(
+        return_value=[
+            {"symbol": "BTCUSDT", "orderLinkId": "link-1"},
+            {"symbol": "ETHUSDT", "orderLinkId": "link-2"},
+        ]
+    )
+    adapter.cancel_order = AsyncMock(return_value={})
+
+    engine = ExecutionEngine(
+        adapter=adapter,
+        risk_manager=MagicMock(),
+        exposure_tracker=MagicMock(total_exposure_pct=Decimal("0")),
+        shadow_mode=False,
+    )
+    engine.resolve_pending_durable = AsyncMock()
+
+    assert await engine.cancel_all_open_orders() == 2
+    assert adapter.cancel_order.await_count == 2
+    assert engine.resolve_pending_durable.await_count == 2
 
 
 # ---------------------------------------------------------------------------

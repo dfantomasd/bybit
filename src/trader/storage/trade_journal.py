@@ -2789,7 +2789,10 @@ class TradeJournal:
                 )
                 reason_rows = await self._fetch(
                     """
-                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    SELECT
+                        COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason,
+                        count(*) AS cnt,
+                        avg(po.net_return_bps) AS avg_net_return_bps
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     JOIN feature_snapshots fs ON fs.snapshot_id = pe.feature_snapshot_id
@@ -2811,6 +2814,23 @@ class TradeJournal:
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
+                    side_filtered_count = 0
+                    score_block_count = 0
+                    score_block_weighted_return = 0.0
+                    for row in reason_rows:
+                        reason = str(row["reason"])
+                        count = int(row["cnt"] or 0)
+                        avg_return = float(row.get("avg_net_return_bps") or 0.0)
+                        if reason == "side_not_selected_by_model":
+                            side_filtered_count += count
+                        else:
+                            score_block_count += count
+                            score_block_weighted_return += avg_return * count
+                    gate["side_filtered_count"] = side_filtered_count
+                    gate["score_block_count"] = score_block_count
+                    gate["score_block_avg_net_return_bps"] = (
+                        score_block_weighted_return / score_block_count if score_block_count else None
+                    )
 
             # Quality check from model metrics
             quality = "UNKNOWN"
@@ -2904,6 +2924,82 @@ class TradeJournal:
             self._last_read_error_at = datetime.now(tz=UTC)
             self._last_read_error = str(exc)
             log.debug("trade_journal.shadow_gate_event_counts_failed", error=str(exc))
+            return {}
+
+    async def get_prediction_event_decision_counts(
+        self,
+        *,
+        horizon_minutes: int,
+        label_schema_version: str,
+        limit: int = 2000,
+    ) -> dict[str, Any]:
+        """Return recent prediction-event totals and outcome resolution by decision.
+
+        This is diagnostic-only. It tells operators whether paper-gate is empty
+        because events are not being written, or because outcomes are still
+        pending/unresolved for the requested horizon/schema.
+        """
+        if not self.is_enabled:
+            return {}
+
+        try:
+            rows = await self._fetch(
+                """
+                SELECT
+                    COALESCE(decision, 'NULL') AS decision,
+                    count(*) AS total_count,
+                    count(feature_snapshot_id) AS with_snapshot_count,
+                    count(po.prediction_id) AS resolved_count
+                FROM (
+                    SELECT prediction_id, decision, feature_snapshot_id, created_at
+                    FROM prediction_events
+                    WHERE decision IN ('SHADOW_BASELINE', 'GATE_PASS', 'GATE_BLOCK')
+                    ORDER BY created_at DESC
+                    LIMIT $1
+                ) pe
+                LEFT JOIN prediction_outcomes po
+                    ON po.prediction_id = pe.prediction_id
+                   AND po.horizon_minutes = $2
+                   AND po.label_schema_version = $3
+                GROUP BY decision
+                ORDER BY total_count DESC
+                """,
+                max(1, int(limit)),
+                int(horizon_minutes),
+                label_schema_version,
+            )
+            result: dict[str, Any] = {
+                "horizon_minutes": int(horizon_minutes),
+                "label_schema_version": label_schema_version,
+                "total_count": 0,
+                "resolved_count": 0,
+                "pending_count": 0,
+                "with_snapshot_count": 0,
+                "by_decision": {},
+            }
+            by_decision: dict[str, Any] = {}
+            for row in rows:
+                decision = str(row["decision"] or "NULL")
+                total = int(row["total_count"] or 0)
+                resolved = int(row["resolved_count"] or 0)
+                with_snapshot = int(row["with_snapshot_count"] or 0)
+                pending = max(0, total - resolved)
+                by_decision[decision] = {
+                    "total_count": total,
+                    "resolved_count": resolved,
+                    "pending_count": pending,
+                    "with_snapshot_count": with_snapshot,
+                }
+                result["total_count"] += total
+                result["resolved_count"] += resolved
+                result["with_snapshot_count"] += with_snapshot
+            result["pending_count"] = max(0, int(result["total_count"]) - int(result["resolved_count"]))
+            result["by_decision"] = by_decision
+            return result
+        except Exception as exc:
+            self._last_read_error_at = datetime.now(tz=UTC)
+            self._last_read_error = str(exc)
+            log.debug("trade_journal.prediction_event_decision_counts_failed", error=str(exc))
             return {}
 
     @staticmethod
@@ -4004,7 +4100,10 @@ class TradeJournal:
                 result["shadow_gate_15m"] = gate
                 reason_rows = await self._fetch(
                     """
-                    SELECT COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason, count(*) AS cnt
+                    SELECT
+                        COALESCE(pe.metadata->>'gate_reason', 'unknown') AS reason,
+                        count(*) AS cnt,
+                        avg(po.net_return_bps) AS avg_net_return_bps
                     FROM prediction_events pe
                     JOIN prediction_outcomes po ON po.prediction_id = pe.prediction_id
                     WHERE pe.model_version = $1
@@ -4019,6 +4118,23 @@ class TradeJournal:
                 )
                 if reason_rows:
                     gate["top_block_reasons"] = {str(row["reason"]): int(row["cnt"]) for row in reason_rows}
+                    side_filtered_count = 0
+                    score_block_count = 0
+                    score_block_weighted_return = 0.0
+                    for row in reason_rows:
+                        reason = str(row["reason"])
+                        count = int(row["cnt"] or 0)
+                        avg_return = float(row.get("avg_net_return_bps") or 0.0)
+                        if reason == "side_not_selected_by_model":
+                            side_filtered_count += count
+                        else:
+                            score_block_count += count
+                            score_block_weighted_return += avg_return * count
+                    gate["side_filtered_count"] = side_filtered_count
+                    gate["score_block_count"] = score_block_count
+                    gate["score_block_avg_net_return_bps"] = (
+                        score_block_weighted_return / score_block_count if score_block_count else None
+                    )
                 paper_baseline_rows = await self._fetch(
                     """
                     SELECT po.net_return_bps

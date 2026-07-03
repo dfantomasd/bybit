@@ -9,13 +9,27 @@ from typing import Any
 from trader.domain.enums import TradingMode
 from trader.modules.base import AppBoundModule
 from trader.monitoring.logging import get_logger
-from trader.runtime.constants import _DIAG_WINDOW, _SYMBOLS
+from trader.runtime.constants import _DIAG_WINDOW
 
 log = get_logger(__name__)
 
 
 class DiagnosticsModule(AppBoundModule):
     name = "diagnostics"
+
+    def runtime_active_symbols(self) -> list[str]:
+        """Return only symbols currently confirmed by the runtime screener.
+
+        ``TradingApplication._active_symbols()`` intentionally falls back to the
+        static bootstrap universe so market-data startup can continue before the
+        screener is ready. Operator diagnostics and CANARY readiness must not use
+        that fallback: a fallback universe is not proof that live screening,
+        feature collection, or subscriptions recovered after a restart.
+        """
+        screener = self._app._screener
+        if screener is None:
+            return []
+        return list(screener.active_symbols or [])
 
     @staticmethod
     def dict_or_empty(value: Any) -> dict[str, Any]:
@@ -160,6 +174,12 @@ class DiagnosticsModule(AppBoundModule):
         paper_total_bps = DiagnosticsModule.float_or_none(paper_gate.get("total_bps"))
         metrics["paper_gate_count"] = paper_count
         metrics["paper_gate_total_bps"] = paper_total_bps
+        shadow_close_count = int(runtime_diag.get("hour_shadow_closed") or 0)
+        shadow_close_avg_pct = DiagnosticsModule.float_or_none(runtime_diag.get("hour_shadow_closed_avg_pnl_pct"))
+        metrics["shadow_close_count_1h"] = shadow_close_count
+        metrics["shadow_close_avg_pnl_pct_1h"] = shadow_close_avg_pct
+        if paper_count == 0 and shadow_close_count > 0:
+            issues.append(f"paper_gate_db_empty_but_shadow_closes:{shadow_close_count}")
         if paper_count < 20:
             issues.append(f"insufficient_paper_gate_trades:{paper_count}")
         if paper_total_bps is None or paper_total_bps <= 0:
@@ -190,7 +210,7 @@ class DiagnosticsModule(AppBoundModule):
         db_diag = await self._app._trade_journal.get_db_diagnostics()
         issues = self.economic_readiness_report(
             db_diag=db_diag,
-            runtime_diag=self.get_snapshot(),
+            runtime_diag=self._app.get_diagnostics(),
         )["issues"]
         if issues:
             log.critical(
@@ -419,6 +439,8 @@ class DiagnosticsModule(AppBoundModule):
                         "shadow_probe_imbalance_weak",
                         "shadow_probe_ema_missing",
                         "shadow_probe_book_ema_conflict",
+                        "shadow_probe_quality_blocked",
+                        "shadow_probe_side_blocked",
                         "shadow_probe_net_edge_rejected",
                         "shadow_probe_min_notional_rejected",
                         "shadow_probe_cooldown",
@@ -480,9 +502,7 @@ class DiagnosticsModule(AppBoundModule):
             "net_edge_safety_margin_pct": (
                 self._app._settings.NET_EDGE_SAFETY_MARGIN_PCT if self._app._settings is not None else None
             ),
-            "active_symbols": (
-                self._app._screener.active_symbols if self._app._screener is not None else list(_SYMBOLS)
-            ),
+            "active_symbols": self.runtime_active_symbols(),
             "open_positions": (
                 list(self._app._execution_engine._open_positions.keys())
                 if self._app._execution_engine is not None

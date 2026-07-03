@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -43,12 +44,27 @@ class OperatorControlsModule(AppBoundModule):
                 return {"exists": False, "path": str(rule_path)}
             payload = json.loads(rule_path.read_text(encoding="utf-8"))
             rules = list(payload.get("rules") or []) if isinstance(payload, dict) else []
+            error = payload.get("error") if isinstance(payload, dict) else None
+            stage = payload.get("stage") if isinstance(payload, dict) else None
+            hint = None
+            error_text = str(error or "").lower()
+            if "timeout" in error_text:
+                hint = "Generator timed out; increase timeout or reduce min samples/rule search size."
+            elif "eauthquery" in error_text or "authentication query failed" in error_text:
+                hint = "Database auth/pooler failed; fix POSTGRES_DSN/Supabase availability before rule generation."
+            elif "read-only" in error_text:
+                hint = "Training/discovery is connected to a read-only DB/session; use primary writable Postgres."
+            elif error:
+                hint = "Open logs around discovered_rule.auto_generate_failed for the full traceback."
             return {
                 "exists": True,
                 "path": str(rule_path),
                 "status": payload.get("status") if isinstance(payload, dict) else None,
                 "sample_count": payload.get("sample_count") if isinstance(payload, dict) else None,
                 "rule_count": len(rules),
+                "stage": stage,
+                "error": error,
+                "hint": hint,
                 "top_rule": rules[0].get("rule_id") if rules and isinstance(rules[0], dict) else None,
                 "top_validation_avg_net_bps": (
                     rules[0].get("validation_avg_net_bps") if rules and isinstance(rules[0], dict) else None
@@ -163,10 +179,17 @@ class OperatorControlsModule(AppBoundModule):
                 reason="operator emergency stop via Telegram",
                 operator="telegram",
             )
-        log.critical("emergency_stop.activated", source="telegram")
+        cancelled = 0
+        if self._app._execution_engine is not None:
+            try:
+                cancelled = await self._app._execution_engine.cancel_all_open_orders()
+            except Exception as exc:
+                log.error("emergency_stop.cancel_orders_failed", error=str(exc))
+        log.critical("emergency_stop.activated", source="telegram", orders_cancelled=cancelled)
         if self._app._telegram_bot is not None:
+            cancel_note = f" Cancelled {cancelled} open order(s)." if cancelled else ""
             await self._app._telegram_bot.notify(
-                "🚨 <b>Emergency stop activated.</b> No new trades. Manual restart required."
+                f"🚨 <b>Emergency stop activated.</b> No new trades.{cancel_note} Manual restart required."
             )
 
     async def start_model_training(self, min_samples: int = 500, horizon: int = 15, label_bps: float = 5.0) -> str:
@@ -253,6 +276,27 @@ class OperatorControlsModule(AppBoundModule):
     def runtime_settings(self) -> dict[str, Any]:
         from trader.training.labels import active_label_schema_version
 
+        bucket_stats_age_s = None
+        bucket_stats_refreshed_at = getattr(self._app, "_bucket_stats_refreshed_at", None)
+        if isinstance(bucket_stats_refreshed_at, datetime):
+            bucket_stats_age_s = max(
+                0.0,
+                (
+                    datetime.now(tz=UTC)
+                    - bucket_stats_refreshed_at.astimezone(UTC)
+                ).total_seconds(),
+            )
+        shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
+        shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
+        blocked_probe_symbols = []
+        if self._app._settings is not None:
+            blocked_probe_symbols = [
+                symbol
+                for symbol, (avg_bps, count) in shadow_probe_symbol_stats.items()
+                if count >= getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_MIN_SAMPLES", 0)
+                and avg_bps < getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_MIN_AVG_BPS", 0.0)
+            ][:20]
+
         return {
             "paused": self._app._trading_paused,
             "shadow": self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True,
@@ -334,10 +378,19 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_side_block_enabled": (
                 self._app._settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED if self._app._settings is not None else None
             ),
+            "bucket_stats_refresh_seconds": (
+                getattr(self._app._settings, "BUCKET_STATS_REFRESH_SECONDS", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "bucket_stats_age_s": bucket_stats_age_s,
+            "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
+            "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
+            "shadow_probe_blocked_symbols": blocked_probe_symbols,
             "shadow_probe_eligible_symbols": sorted(self._app._shadow_probe_eligible_symbols or []),
             "shadow_probe_blocked_sides": [
                 f"{symbol}:{side}"
-                for (symbol, side), (avg_bps, count) in self._app._shadow_probe_side_stats.items()
+                for (symbol, side), (avg_bps, count) in shadow_probe_side_stats.items()
                 if self._app._settings is not None
                 and count >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
                 and avg_bps < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS

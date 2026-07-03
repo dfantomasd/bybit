@@ -930,13 +930,35 @@ class ExecutionEngine:
             )
             return None
 
-        # P0.2/P0.3: Block new entries while pending ones await resolution (live only)
-        if not self._shadow_mode and self.has_pending_entries():
+        # P0.2/P0.3: Block duplicate entries for the same symbol while its
+        # prior entry is pending. A global pending cap still limits burstiness,
+        # but unrelated symbols should continue collecting SHADOW/PAPER data.
+        if self.has_pending_order_for_symbol(symbol):
             self._diag_skip_pending += 1
             log.debug(
                 "execution.skipped_pending_entries",
                 symbol=symbol,
                 pending=list(self._pending_entry_order_link_ids),
+            )
+            return None
+
+        if self._pending_entry_count >= self._max_concurrent_pending:
+            self._diag_skip_pending += 1
+            log.debug(
+                "execution.skipped_pending_limit",
+                symbol=symbol,
+                pending_count=self._pending_entry_count,
+                cap=self._max_concurrent_pending,
+            )
+            return None
+
+        unmapped_pending = self._pending_entry_order_link_ids - set(self._pending_entry_symbols)
+        if unmapped_pending:
+            self._diag_skip_pending += 1
+            log.debug(
+                "execution.skipped_unmapped_pending",
+                symbol=symbol,
+                unmapped=sorted(unmapped_pending),
             )
             return None
 
@@ -2037,6 +2059,38 @@ class ExecutionEngine:
         log.info("maker.aborted", symbol=intent.symbol, order_link_id=intent.order_link_id, reason=reason)
         await self.resolve_pending_durable(intent.order_link_id, intent.symbol)
         await self._journal_order_event(intent, decision, status="MAKER_ABORTED", error=reason)
+
+    async def cancel_all_open_orders(self) -> int:
+        """Cancel every open exchange order. Used by emergency stop."""
+        if self._shadow_mode or self._adapter is None:
+            return 0
+
+        cancelled = 0
+        try:
+            open_orders = await self._adapter.get_open_orders(self._category)
+        except Exception as exc:
+            log.error("execution.cancel_all_fetch_failed", error=str(exc))
+            return 0
+
+        for order in open_orders:
+            symbol = str(order.get("symbol") or "")
+            order_link_id = str(order.get("orderLinkId") or "")
+            if not symbol or not order_link_id:
+                continue
+            try:
+                await self._adapter.cancel_order(self._category, symbol, order_link_id)
+                cancelled += 1
+                await self.resolve_pending_durable(order_link_id, symbol)
+            except Exception as exc:
+                log.warning(
+                    "execution.cancel_order_failed",
+                    symbol=symbol,
+                    order_link_id=order_link_id,
+                    error=str(exc),
+                )
+        if cancelled:
+            log.warning("execution.cancel_all_complete", cancelled=cancelled)
+        return cancelled
 
     async def _journal_order_event(
         self,

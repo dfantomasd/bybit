@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
@@ -56,6 +56,30 @@ def _make_bot() -> TelegramMonitorBot:
         adapter_factory=lambda: None,
         controller=controller,
     )
+
+
+@pytest.mark.asyncio
+async def test_persisted_subscriptions_do_not_expand_allowed_chat_ids() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.load_subscriptions = AsyncMock(return_value=[12345, 99999])
+    bot._config.allowed_chat_ids = {12345}
+
+    app = MagicMock()
+    app.initialize = AsyncMock()
+    app.start = AsyncMock()
+    app.stop = AsyncMock()
+    app.shutdown = AsyncMock()
+    app.updater = MagicMock()
+    app.updater.start_polling = AsyncMock()
+
+    with patch("trader.telegram_bot.Application") as app_cls:
+        app_cls.builder.return_value.token.return_value.build.return_value = app
+        await bot.start()
+
+    assert bot._config.allowed_chat_ids == {12345}
+    assert 12345 in bot._subscribed
+    assert 99999 not in bot._subscribed
 
 
 def _fake_update(chat_id: int = 12345) -> MagicMock:
@@ -874,6 +898,61 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "connection_target" in text
 
 
+@pytest.mark.asyncio
+async def test_deep_report_shows_model_gate_breakdown() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "model": {"challenger_version": "v5"},
+            "hour_signals_emitted": 3,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "GOOD", "horizon_minutes": 5, "walk_forward_expectancy_bps": 2.0},
+            },
+            "model_gate_horizon_minutes": 5,
+            "prediction_event_decision_counts": {
+                "by_decision": {
+                    "SHADOW_BASELINE": {"total_count": 40, "resolved_count": 30, "pending_count": 10},
+                    "GATE_PASS": {"total_count": 15, "resolved_count": 12, "pending_count": 3},
+                    "GATE_BLOCK": {"total_count": 10, "resolved_count": 8, "pending_count": 2},
+                }
+            },
+            "shadow_gate_by_horizon": {
+                "5": {
+                    "total_count": 33,
+                    "event_total_count": 40,
+                    "event_pending_count": 7,
+                    "pass_count": 12,
+                    "lift_vs_all_bps": 2.5,
+                    "side_filtered_count": 21,
+                    "score_block_count": 7,
+                    "score_block_avg_net_return_bps": -1.25,
+                    "top_block_reasons": {
+                        "side_not_selected_by_model": 21,
+                        "score_below_regime_threshold": 7,
+                    },
+                }
+            },
+            "paper_pnl_by_horizon": {"5": {"baseline": {"count": 10}, "model_gate": {"count": 4}}},
+        }
+    )
+
+    text = await bot._render_deep_report_text()
+
+    assert "Gate breakdown" in text
+    assert "side-filter=<code>21</code>" in text
+    assert "score-block=<code>7</code>" in text
+    assert "score avg=<code>-1.25</code>" in text
+    assert "&quot;gate_breakdown&quot;" in text
+
+
 def test_diagnostics_menu_has_db_probe_button() -> None:
     bot = _make_bot()
 
@@ -1278,6 +1357,13 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
                 },
             },
             "model_gate_horizon_minutes": 5,
+            "prediction_event_decision_counts": {
+                "by_decision": {
+                    "SHADOW_BASELINE": {"total_count": 40, "resolved_count": 30, "pending_count": 10},
+                    "GATE_PASS": {"total_count": 15, "resolved_count": 12, "pending_count": 3},
+                    "GATE_BLOCK": {"total_count": 10, "resolved_count": 8, "pending_count": 2},
+                }
+            },
             "shadow_gate_by_horizon": {
                 "5": {
                     "horizon_minutes": 5,
@@ -1285,6 +1371,9 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
                     "pass_count": 12,
                     "block_count": 32,
                     "lift_vs_all_bps": 2.5,
+                    "side_filtered_count": 24,
+                    "score_block_count": 8,
+                    "score_block_avg_net_return_bps": -1.75,
                 }
             },
             "paper_pnl_by_horizon": {
@@ -1311,5 +1400,54 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
     assert "Side-filter: <code>Sell</code>" in reply_text
     assert "WF до side-filter: <code>-8.00 bps</code>" in reply_text
     assert "positive_out_of_sample_side_expectancy" in reply_text
+    assert "Блоки side-filter/score: <code>24/8</code>" in reply_text
+    assert "score avg=<code>-1.75 bps</code>" in reply_text
+    assert "SHADOW_BASELINE: 40/30/10" in reply_text
+    assert "GATE_PASS: 15/12/3" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_db_model_warns_when_shadow_closes_exist_but_db_paper_gate_empty() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "model": {"champion_version": "none", "challenger_version": "v5"},
+            "hour_shadow_closed": 5,
+            "hour_shadow_closed_avg_pnl_pct": -0.1688,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "configured": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "candles_by_interval": {"1": 5000, "5": 1000, "15": 0, "60": 100},
+            "prediction_outcomes_by_horizon": {"5": 1500},
+            "training_eligible_by_horizon": {"5": 1234},
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "training_samples": 1234,
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 4.0,
+                },
+            },
+            "model_gate_horizon_minutes": 5,
+            "shadow_gate_by_horizon": {"5": {"total_count": 0, "event_pending_count": 5}},
+            "paper_pnl_by_horizon": {"5": {"baseline": {"count": 0}, "model_gate": {"count": 0}}},
+        }
+    )
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_db_model(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Runtime shadow closes есть, но DB paper gate пуст" in reply_text
+    assert "5 закрытий, avg -0.1688%" in reply_text
+    assert "Проверьте запись prediction outcomes/DB" in reply_text

@@ -860,12 +860,13 @@ class Settings(BaseSettings):
             self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
             self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60
             self.SHADOW_PROBE_SELL_ENABLED = True
-            self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = False
-            self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = False
+            self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = True
+            self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = True
             self.SCALP_STRICT_SHADOW = True
+            self.BUCKET_STATS_REFRESH_SECONDS = 300
             self.SHADOW_LOSS_GUARD_ENABLED = True
-            self.SHADOW_LOSS_GUARD_MIN_CLOSED = 20
-            self.SHADOW_LOSS_GUARD_WINDOW = 20
+            self.SHADOW_LOSS_GUARD_MIN_CLOSED = 5
+            self.SHADOW_LOSS_GUARD_WINDOW = 5
             self.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS = 300
             self.TRAIN_STRATEGY_ALLOWLIST = (
                 "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,"
@@ -930,6 +931,11 @@ class Settings(BaseSettings):
                 raise ValueError(
                     f"TRADING_MODE={self.TRADING_MODE.value} requires BYBIT_USE_TESTNET=false. "
                     "Set BYBIT_USE_TESTNET=false to use real Bybit endpoints."
+                )
+            if self.MODEL_ALLOW_LIVE_DECISIONS and not self.MODEL_ENCRYPT_KEY.get_secret_value().strip():
+                raise ValueError(
+                    "MODEL_ENCRYPT_KEY must be set when MODEL_ALLOW_LIVE_DECISIONS=true in LIVE/CANARY_LIVE. "
+                    "Model artifacts are pickle — encrypt at rest to prevent code execution from a compromised database."
                 )
 
         # Hybrid ML mode sanity check: live model decisions without the canary

@@ -928,6 +928,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
         )
         analysis_horizon = self._model_horizon_minutes(active_model or latest_model)
         result["model_gate_horizon_minutes"] = analysis_horizon
+        result["prediction_event_decision_counts"] = await self.get_prediction_event_decision_counts(
+            horizon_minutes=analysis_horizon,
+            label_schema_version=label_schema,
+        )
         if active_version:
             gate = await self.get_shadow_gate_stats(active_version, analysis_horizon, label_schema)
             gate_events = await self.get_shadow_gate_event_counts(active_version, analysis_horizon, label_schema)
