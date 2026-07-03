@@ -652,6 +652,13 @@ class MarketDataModule(ModuleTaskMixin):
             from trader.data.candles import candle_from_kline_event
             from trader.domain.events import KlineEvent, LiquidationEvent, OrderBookEvent, TickerEvent, TradeEvent
 
+            # Consecutive-failure counter per symbol: a persistently failing
+            # candle/feature update for one symbol otherwise looks identical
+            # to a single transient blip (both just a warning log), silently
+            # freezing that symbol's CandleStore/features forever.
+            consecutive_failures: dict[str, int] = {}
+            _ESCALATE_AFTER = 10
+
             while not self._app._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
@@ -747,6 +754,9 @@ class MarketDataModule(ModuleTaskMixin):
                             connected=True,
                             last_message_at=datetime.now(tz=UTC),
                         )
+                    symbol = getattr(event, "symbol", None)
+                    if symbol is not None:
+                        consecutive_failures.pop(symbol, None)
                 except TimeoutError:
                     # Check if WS is still connected
                     if self._app._ws_public and not self._app._ws_public.is_connected:
@@ -755,7 +765,19 @@ class MarketDataModule(ModuleTaskMixin):
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    log.warning("ws_consumer.error", error=str(exc))
+                    symbol = getattr(event, "symbol", None) if "event" in locals() else None
+                    if symbol is not None:
+                        count = consecutive_failures.get(symbol, 0) + 1
+                        consecutive_failures[symbol] = count
+                        if count >= _ESCALATE_AFTER:
+                            log.error(
+                                "ws_consumer.persistent_failure",
+                                symbol=symbol,
+                                consecutive_failures=count,
+                                error=str(exc),
+                            )
+                            continue
+                    log.warning("ws_consumer.error", error=str(exc), symbol=symbol)
 
         ws_task = asyncio.create_task(self._app._ws_public.start(), name="ws-public")
         consumer_task = asyncio.create_task(consume_events(), name="ws-consumer")
