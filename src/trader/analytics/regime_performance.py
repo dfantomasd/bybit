@@ -90,7 +90,7 @@ def build_regime_performance_matrix(
         # Calculate profit factor
         win_sum = sum(r for r in returns if r > 0)
         loss_sum = abs(sum(r for r in returns if r < 0))
-        profit_factor = (win_sum / loss_sum) if loss_sum > 0 else (1.0 if win_sum > 0 else 0.0)
+        profit_factor = (win_sum / loss_sum) if loss_sum > 0 else (float("inf") if win_sum > 0 else 0.0)
 
         # Calculate Sharpe (simple version: mean / std)
         import numpy as np
@@ -248,7 +248,7 @@ def get_regime_weighted_sizing(
 
     # Calculate multiplier from win_rate
     # Perfect win_rate (100%) = 1.5x, poor (40%) = 0.7x
-    win_rate_multiplier = 0.7 + (perf.win_rate * 0.8)
+    win_rate_multiplier = 0.1667 + (perf.win_rate * 1.3333)
 
     # Apply confidence as dampening
     final_multiplier = base_size * win_rate_multiplier * perf.confidence

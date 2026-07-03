@@ -1,22 +1,26 @@
-"""Read-only FastAPI observability application.
+"""FastAPI observability application.
 
 Endpoints:
-  GET /livez           - Unauthenticated process liveness
-  GET /health          - Component health status
-  GET /status          - System status summary
-  GET /positions       - Current open positions (no secrets)
-  GET /metrics         - Prometheus text exposition
-  GET /regime          - Current market regime per symbol
-  GET /model           - Deployed model metadata
+  GET  /livez           - Unauthenticated process liveness
+  GET  /health          - Component health status
+  GET  /status          - System status summary
+  GET  /positions       - Current open positions (no secrets)
+  GET  /metrics         - Prometheus text exposition
+  GET  /regime          - Current market regime per symbol
+  GET  /model           - Deployed model metadata
+  POST /api/settings    - Mutates live runtime risk/execution settings
+                           (position limits, entry rate, model-gate
+                           threshold) — NOT read-only; see operator_controls.
 
 Security:
   - API key authentication via X-API-Key header (internal use only)
   - CORS restricted to configured origins
   - Security headers (X-Content-Type-Options, etc.)
   - Request-level structured logging
-  - Rate limiting via slowapi
 
-All endpoints are READ-ONLY. No trading actions can be triggered via this API.
+Most endpoints are read-only observability data. POST /api/settings is the
+one exception and changes trading behavior in real time — the X-API-Key
+header is its only authorization/audit control.
 """
 
 from __future__ import annotations
@@ -154,7 +158,9 @@ def create_app(
         """Return 200 when the system is healthy/degraded, 503 when unhealthy.
 
         Use this for Kubernetes/Render readiness probes — the container should
-        not receive traffic when unhealthy (e.g. DB or WS feed is down).
+        not receive traffic when unhealthy (e.g. DB is down). Note: a stale/
+        disconnected WS feed alone only degrades the overall status, it does
+        not fail this probe — see HealthChecker._compute_overall_health.
         """
         if health_checker is None:
             return JSONResponse(status_code=200, content={"status": "ok", "note": "no health checker"})
