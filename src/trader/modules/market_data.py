@@ -30,17 +30,22 @@ class MarketDataModule(ModuleTaskMixin):
 
     async def on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
-        if self._app._subscribe_watchdog is not None:
-            self._app._subscribe_watchdog.register(symbols)
         self._app._record_shadow_probe_symbol_subscribed(symbols)
         for symbol in symbols:
             # Seed historical candles (also invalidates cache, triggers recompute,
-            # and pre-warms turnover_24h — see _seed_candle_store).
+            # and pre-warms turnover_24h — see _seed_candle_store). This is a
+            # REST call that can retry with backoff under rate limiting, so
+            # the watchdog timer below is armed only once subscribe()
+            # actually happens — arming it before seeding would let the
+            # watchdog declare a subscription "expired" while it hadn't even
+            # been requested yet.
             await self.seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._app._ws_public is not None:
                 topics = self._app._ws_topics_for_symbol(symbol)
                 await self._app._ws_public.subscribe(topics)
+                if self._app._subscribe_watchdog is not None:
+                    self._app._subscribe_watchdog.register([symbol])
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
 
     async def on_screener_symbols_removed(self, symbols: list[str]) -> None:
