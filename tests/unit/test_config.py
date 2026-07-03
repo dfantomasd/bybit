@@ -249,6 +249,7 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is True  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is True  # type: ignore[union-attr]
         assert settings.SCALP_STRICT_SHADOW is True  # type: ignore[union-attr]
+        assert settings.BUCKET_STATS_REFRESH_SECONDS == 300  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_ENABLED is True  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_MIN_CLOSED == 5  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_WINDOW == 5  # type: ignore[union-attr]

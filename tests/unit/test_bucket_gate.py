@@ -253,6 +253,21 @@ class TestBucketGate:
             "count": 1,
         } in details
 
+    def test_runtime_settings_reports_shadow_probe_stats_freshness(self) -> None:
+        app = _make_app(BUCKET_STATS_REFRESH_SECONDS=300)
+        app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=42)
+        app._shadow_probe_side_stats = {("XRPUSDT", "Buy"): (-2.0, 8)}
+        app._shadow_probe_symbol_stats = {"XRPUSDT": (-1.0, 8)}
+        app._shadow_probe_eligible_symbols = {"XRPUSDT"}
+
+        settings = app._modules.operator.runtime_settings()
+
+        assert settings["bucket_stats_refresh_seconds"] == 300
+        assert 0 <= settings["bucket_stats_age_s"] <= 60
+        assert settings["shadow_probe_side_stats_count"] == 1
+        assert settings["shadow_probe_symbol_stats_count"] == 1
+        assert settings["shadow_probe_eligible_symbols"] == ["XRPUSDT"]
+
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:
         app = _make_app(
             DEFAULT_LINEAR_TAKER_FEE_RATE=0.0,

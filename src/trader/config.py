@@ -863,6 +863,7 @@ class Settings(BaseSettings):
             self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = True
             self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = True
             self.SCALP_STRICT_SHADOW = True
+            self.BUCKET_STATS_REFRESH_SECONDS = 300
             self.SHADOW_LOSS_GUARD_ENABLED = True
             self.SHADOW_LOSS_GUARD_MIN_CLOSED = 5
             self.SHADOW_LOSS_GUARD_WINDOW = 5

@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import html
 import json
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -248,6 +249,19 @@ class OperatorControlsModule(AppBoundModule):
     def runtime_settings(self) -> dict[str, Any]:
         from trader.training.labels import active_label_schema_version
 
+        bucket_stats_age_s = None
+        bucket_stats_refreshed_at = getattr(self._app, "_bucket_stats_refreshed_at", None)
+        if isinstance(bucket_stats_refreshed_at, datetime):
+            bucket_stats_age_s = max(
+                0.0,
+                (
+                    datetime.now(tz=UTC)
+                    - bucket_stats_refreshed_at.astimezone(UTC)
+                ).total_seconds(),
+            )
+        shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
+        shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
+
         return {
             "paused": self._app._trading_paused,
             "shadow": self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True,
@@ -329,10 +343,18 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_side_block_enabled": (
                 self._app._settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED if self._app._settings is not None else None
             ),
+            "bucket_stats_refresh_seconds": (
+                getattr(self._app._settings, "BUCKET_STATS_REFRESH_SECONDS", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "bucket_stats_age_s": bucket_stats_age_s,
+            "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
+            "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
             "shadow_probe_eligible_symbols": sorted(self._app._shadow_probe_eligible_symbols or []),
             "shadow_probe_blocked_sides": [
                 f"{symbol}:{side}"
-                for (symbol, side), (avg_bps, count) in self._app._shadow_probe_side_stats.items()
+                for (symbol, side), (avg_bps, count) in shadow_probe_side_stats.items()
                 if self._app._settings is not None
                 and count >= self._app._settings.SHADOW_PROBE_SIDE_MIN_SAMPLES
                 and avg_bps < self._app._settings.SHADOW_PROBE_SIDE_BLOCK_AVG_BPS
