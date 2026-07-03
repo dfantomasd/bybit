@@ -71,7 +71,7 @@ class RegimeClassifier:
         # 1. LOW_LIQUIDITY — volume drying up
         # ------------------------------------------------------------------
         if vol_z < _VOL_ZSCORE_LOW:
-            confidence = min(0.6 + abs(vol_z + _VOL_ZSCORE_LOW) * 0.05, 0.85)
+            confidence = min(0.6 + abs(vol_z - _VOL_ZSCORE_LOW) * 0.05, 0.85)
             regime = MarketRegime.LOW_LIQUIDITY
             return self._make_context(
                 symbol=symbol,

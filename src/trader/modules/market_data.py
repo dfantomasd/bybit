@@ -30,17 +30,22 @@ class MarketDataModule(ModuleTaskMixin):
 
     async def on_screener_symbols_added(self, symbols: list[str]) -> None:
         """Seed candles and subscribe WebSocket for newly added screener symbols."""
-        if self._app._subscribe_watchdog is not None:
-            self._app._subscribe_watchdog.register(symbols)
         self._app._record_shadow_probe_symbol_subscribed(symbols)
         for symbol in symbols:
             # Seed historical candles (also invalidates cache, triggers recompute,
-            # and pre-warms turnover_24h — see _seed_candle_store).
+            # and pre-warms turnover_24h — see _seed_candle_store). This is a
+            # REST call that can retry with backoff under rate limiting, so
+            # the watchdog timer below is armed only once subscribe()
+            # actually happens — arming it before seeding would let the
+            # watchdog declare a subscription "expired" while it hadn't even
+            # been requested yet.
             await self.seed_candle_store(symbols=[symbol])
             # Subscribe WebSocket to the new symbol's topics
             if self._app._ws_public is not None:
                 topics = self._app._ws_topics_for_symbol(symbol)
                 await self._app._ws_public.subscribe(topics)
+                if self._app._subscribe_watchdog is not None:
+                    self._app._subscribe_watchdog.register([symbol])
                 log.info("screener.symbol_subscribed", symbol=symbol, topics=topics)
 
     async def on_screener_symbols_removed(self, symbols: list[str]) -> None:
@@ -647,6 +652,13 @@ class MarketDataModule(ModuleTaskMixin):
             from trader.data.candles import candle_from_kline_event
             from trader.domain.events import KlineEvent, LiquidationEvent, OrderBookEvent, TickerEvent, TradeEvent
 
+            # Consecutive-failure counter per symbol: a persistently failing
+            # candle/feature update for one symbol otherwise looks identical
+            # to a single transient blip (both just a warning log), silently
+            # freezing that symbol's CandleStore/features forever.
+            consecutive_failures: dict[str, int] = {}
+            _ESCALATE_AFTER = 10
+
             while not self._app._shutdown_event.is_set():
                 try:
                     event = await asyncio.wait_for(event_queue.get(), timeout=1.0)
@@ -742,6 +754,9 @@ class MarketDataModule(ModuleTaskMixin):
                             connected=True,
                             last_message_at=datetime.now(tz=UTC),
                         )
+                    symbol = getattr(event, "symbol", None)
+                    if symbol is not None:
+                        consecutive_failures.pop(symbol, None)
                 except TimeoutError:
                     # Check if WS is still connected
                     if self._app._ws_public and not self._app._ws_public.is_connected:
@@ -750,7 +765,19 @@ class MarketDataModule(ModuleTaskMixin):
                 except asyncio.CancelledError:
                     break
                 except Exception as exc:
-                    log.warning("ws_consumer.error", error=str(exc))
+                    symbol = getattr(event, "symbol", None) if "event" in locals() else None
+                    if symbol is not None:
+                        count = consecutive_failures.get(symbol, 0) + 1
+                        consecutive_failures[symbol] = count
+                        if count >= _ESCALATE_AFTER:
+                            log.error(
+                                "ws_consumer.persistent_failure",
+                                symbol=symbol,
+                                consecutive_failures=count,
+                                error=str(exc),
+                            )
+                            continue
+                    log.warning("ws_consumer.error", error=str(exc), symbol=symbol)
 
         ws_task = asyncio.create_task(self._app._ws_public.start(), name="ws-public")
         consumer_task = asyncio.create_task(consume_events(), name="ws-consumer")
@@ -772,6 +799,10 @@ class MarketDataModule(ModuleTaskMixin):
         """
         assert self._app._settings is not None
         if not self._app._settings.ADAPTIVE_LOAD_GOVERNOR_ENABLED:
+            # This task is registered as critical in CRITICAL_TASK_NAMES —
+            # returning here would make the supervisor treat a disabled
+            # governor as a crashed task and trigger a full shutdown.
+            await self._app._shutdown_event.wait()
             return
 
         check_interval = float(self._app._settings.LOAD_GOVERNOR_CHECK_SECONDS)
@@ -789,80 +820,89 @@ class MarketDataModule(ModuleTaskMixin):
 
         while not self._app._shutdown_event.is_set():
             await asyncio.sleep(check_interval)
-            if self._app._screener is None:
+            try:
+                if self._app._screener is None:
+                    continue
+
+                if original_max is None:
+                    original_max = getattr(
+                        self._app._screener, "_original_feature_max", self._app._screener._feature_max
+                    )
+                if original_exec is None:
+                    original_exec = getattr(
+                        self._app._screener, "_original_exec_candidates", self._app._screener._exec_candidates
+                    )
+
+                # --- Measure event-loop lag ---
+                t0 = asyncio.get_event_loop().time()
+                await asyncio.sleep(0)  # yield and immediately return
+                lag_ms = (asyncio.get_event_loop().time() - t0) * 1000
+
+                # --- Measure WS queue utilisation (if accessible) ---
+                # The event queue is local to _start_public_ws, so we track pressure
+                # by checking if health checker reports recent WS staleness
+                ws_stale = False
+                if (
+                    self._app._health_checker is not None
+                    and self._app._health_checker._last_ws_message_at is not None
+                ):
+                    ws_age = (datetime.now(tz=UTC) - self._app._health_checker._last_ws_message_at).total_seconds()
+                    ws_stale = ws_age > ws_stale_threshold_s
+
+                symbol_count = max(1, len(self._app._active_symbols()))
+                per_symbol_cycle_ms = self._app._last_strategy_cycle_ms / symbol_count
+                feature_cycle_overload = max_feature_cycle_ms > 0 and per_symbol_cycle_ms > max_feature_cycle_ms
+                overloaded = lag_ms > max_lag_ms or ws_stale or feature_cycle_overload
+                if overloaded:
+                    overload_streak += 1
+                    restore_streak = 0
+                else:
+                    restore_streak += 1
+                    overload_streak = 0
+                current = self._app._screener._feature_max
+                current_exec = self._app._screener._exec_candidates
+
+                if overloaded and overload_streak >= 2 and current > min_symbols:
+                    streak = overload_streak
+                    new_max = max(min_symbols, current - 1)
+                    self._app._screener._feature_max = new_max
+                    if current_exec > min_exec:
+                        self._app._screener._exec_candidates = max(min_exec, current_exec - 1)
+                    overload_streak = 0
+                    log.warning(
+                        "load_governor.reducing_symbols",
+                        lag_ms=round(lag_ms, 1),
+                        ws_stale=ws_stale,
+                        feature_cycle_ms=round(self._app._last_strategy_cycle_ms, 1),
+                        per_symbol_cycle_ms=round(per_symbol_cycle_ms, 1),
+                        symbol_count=symbol_count,
+                        overload_streak=streak,
+                        from_max=current,
+                        to_max=new_max,
+                        from_exec=current_exec,
+                        to_exec=self._app._screener._exec_candidates,
+                        min_symbols=min_symbols,
+                    )
+                elif not overloaded and restore_streak >= 2 and current < original_max:
+                    # Restore one symbol at a time
+                    streak = restore_streak
+                    new_max = min(original_max, current + 1)
+                    self._app._screener._feature_max = new_max
+                    if original_exec is not None and current_exec < original_exec:
+                        self._app._screener._exec_candidates = min(original_exec, current_exec + 1)
+                    restore_streak = 0
+                    log.info(
+                        "load_governor.restoring_symbols",
+                        lag_ms=round(lag_ms, 1),
+                        restore_streak=streak,
+                        from_max=current,
+                        to_max=new_max,
+                        from_exec=current_exec,
+                        to_exec=self._app._screener._exec_candidates,
+                    )
+            except Exception as exc:
+                log.exception("load_governor.cycle_failed", error=str(exc))
                 continue
-
-            if original_max is None:
-                original_max = getattr(self._app._screener, "_original_feature_max", self._app._screener._feature_max)
-            if original_exec is None:
-                original_exec = getattr(
-                    self._app._screener, "_original_exec_candidates", self._app._screener._exec_candidates
-                )
-
-            # --- Measure event-loop lag ---
-            t0 = asyncio.get_event_loop().time()
-            await asyncio.sleep(0)  # yield and immediately return
-            lag_ms = (asyncio.get_event_loop().time() - t0) * 1000
-
-            # --- Measure WS queue utilisation (if accessible) ---
-            # The event queue is local to _start_public_ws, so we track pressure
-            # by checking if health checker reports recent WS staleness
-            ws_stale = False
-            if self._app._health_checker is not None and self._app._health_checker._last_ws_message_at is not None:
-                ws_age = (datetime.now(tz=UTC) - self._app._health_checker._last_ws_message_at).total_seconds()
-                ws_stale = ws_age > ws_stale_threshold_s
-
-            symbol_count = max(1, len(self._app._active_symbols()))
-            per_symbol_cycle_ms = self._app._last_strategy_cycle_ms / symbol_count
-            feature_cycle_overload = max_feature_cycle_ms > 0 and per_symbol_cycle_ms > max_feature_cycle_ms
-            overloaded = lag_ms > max_lag_ms or ws_stale or feature_cycle_overload
-            if overloaded:
-                overload_streak += 1
-                restore_streak = 0
-            else:
-                restore_streak += 1
-                overload_streak = 0
-            current = self._app._screener._feature_max
-            current_exec = self._app._screener._exec_candidates
-
-            if overloaded and overload_streak >= 2 and current > min_symbols:
-                streak = overload_streak
-                new_max = max(min_symbols, current - 1)
-                self._app._screener._feature_max = new_max
-                if current_exec > min_exec:
-                    self._app._screener._exec_candidates = max(min_exec, current_exec - 1)
-                overload_streak = 0
-                log.warning(
-                    "load_governor.reducing_symbols",
-                    lag_ms=round(lag_ms, 1),
-                    ws_stale=ws_stale,
-                    feature_cycle_ms=round(self._app._last_strategy_cycle_ms, 1),
-                    per_symbol_cycle_ms=round(per_symbol_cycle_ms, 1),
-                    symbol_count=symbol_count,
-                    overload_streak=streak,
-                    from_max=current,
-                    to_max=new_max,
-                    from_exec=current_exec,
-                    to_exec=self._app._screener._exec_candidates,
-                    min_symbols=min_symbols,
-                )
-            elif not overloaded and restore_streak >= 2 and current < original_max:
-                # Restore one symbol at a time
-                streak = restore_streak
-                new_max = min(original_max, current + 1)
-                self._app._screener._feature_max = new_max
-                if original_exec is not None and current_exec < original_exec:
-                    self._app._screener._exec_candidates = min(original_exec, current_exec + 1)
-                restore_streak = 0
-                log.info(
-                    "load_governor.restoring_symbols",
-                    lag_ms=round(lag_ms, 1),
-                    restore_streak=streak,
-                    from_max=current,
-                    to_max=new_max,
-                    from_exec=current_exec,
-                    to_exec=self._app._screener._exec_candidates,
-                )
 
     async def run_symbol_subscribe_watchdog(self) -> None:
         """Retry or reconnect WS when screener symbols never receive 1m klines."""
@@ -877,26 +917,30 @@ class MarketDataModule(ModuleTaskMixin):
             except TimeoutError:
                 pass
 
-            expired = self._app._subscribe_watchdog.expired()
-            if not expired:
-                continue
+            try:
+                expired = self._app._subscribe_watchdog.expired()
+                if not expired:
+                    continue
 
-            for symbol in expired:
-                self._app._subscribe_watchdog.record_timeout(symbol)
-                force_reconnect = self._app._subscribe_watchdog.mark_retry(symbol)
-                if self._app._ws_public is not None:
-                    if force_reconnect:
-                        log.warning(
-                            "screener.subscribe_watchdog.force_reconnect",
-                            symbol=symbol,
-                            timeout_s=self._app._settings.SCREENER_SUBSCRIBE_TIMEOUT_SECONDS,
-                        )
-                        await self._app._ws_public.force_reconnect()
-                    else:
-                        topics = self._app._ws_topics_for_symbol(symbol)
-                        log.warning(
-                            "screener.subscribe_watchdog.resubscribe",
-                            symbol=symbol,
-                            topics=topics,
-                        )
-                        await self._app._ws_public.subscribe(topics)
+                for symbol in expired:
+                    self._app._subscribe_watchdog.record_timeout(symbol)
+                    force_reconnect = self._app._subscribe_watchdog.mark_retry(symbol)
+                    if self._app._ws_public is not None:
+                        if force_reconnect:
+                            log.warning(
+                                "screener.subscribe_watchdog.force_reconnect",
+                                symbol=symbol,
+                                timeout_s=self._app._settings.SCREENER_SUBSCRIBE_TIMEOUT_SECONDS,
+                            )
+                            await self._app._ws_public.force_reconnect()
+                        else:
+                            topics = self._app._ws_topics_for_symbol(symbol)
+                            log.warning(
+                                "screener.subscribe_watchdog.resubscribe",
+                                symbol=symbol,
+                                topics=topics,
+                            )
+                            await self._app._ws_public.subscribe(topics)
+            except Exception as exc:
+                log.exception("subscribe_watchdog.cycle_failed", error=str(exc))
+                continue

@@ -110,7 +110,7 @@ class TradingMetrics:
     # ------------------------------------------------------------------
     position_size_usd: Gauge = field(init=False)
     unrealised_pnl_usd: Gauge = field(init=False)
-    realised_pnl_usd_total: Counter = field(init=False)
+    realised_pnl_usd_total: Gauge = field(init=False)
     trade_pnl_usd: Histogram = field(init=False)
 
     # ------------------------------------------------------------------
@@ -328,9 +328,9 @@ class TradingMetrics:
             "Current unrealised P&L in USD",
             ["symbol"],
         )
-        self.realised_pnl_usd_total = Counter(
+        self.realised_pnl_usd_total = Gauge(
             "trader_realised_pnl_usd_total",
-            "Cumulative realised P&L in USD (can be negative via exemplars)",
+            "Cumulative realised P&L in USD (can be negative — use .set(), Counter cannot decrease)",
             ["symbol", "strategy_id"],
         )
         self.trade_pnl_usd = Histogram(

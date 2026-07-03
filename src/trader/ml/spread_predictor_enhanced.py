@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -112,7 +113,7 @@ class SpreadPredictorEnhanced:
                 if not features:
                     continue
 
-                # Вектор всех признаков (15 штук)
+                # Вектор всех признаков (16 штук)
                 x = np.array(
                     [
                         features.hour_of_day,
@@ -129,6 +130,7 @@ class SpreadPredictorEnhanced:
                         features.volume_ratio,
                         features.momentum,
                         features.recent_max_spread_bps,
+                        features.recent_avg_spread_bps,
                         features.spread_mean_reversion_pct,
                     ],
                     dtype=np.float32,
@@ -224,6 +226,7 @@ class SpreadPredictorEnhanced:
                     features.volume_ratio,
                     features.momentum,
                     features.recent_max_spread_bps,
+                    features.recent_avg_spread_bps,
                     features.spread_mean_reversion_pct,
                 ],
                 dtype=np.float32,
@@ -231,10 +234,14 @@ class SpreadPredictorEnhanced:
 
             # 1. Предсказать размер спреда
             predicted_spread = float(self.spread_model.predict(x)[0])
+            if not math.isfinite(predicted_spread):
+                return self._get_fallback_prediction(features)
             predicted_spread = max(1.0, min(100.0, predicted_spread))
 
             # 2. Предсказать вероятность взрыва
             widening_proba = float(self.widening_model.predict_proba(x)[0][1])  # Вероятность класса 1
+            if not math.isfinite(widening_proba):
+                return self._get_fallback_prediction(features)
 
             # 3. Рекомендации по размеру спреда
             if predicted_spread < 10:

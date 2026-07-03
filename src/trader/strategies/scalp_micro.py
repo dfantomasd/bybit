@@ -150,6 +150,9 @@ class ScalpMicroStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return _STRATEGY_ID
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+
     # ------------------------------------------------------------------
 
     def _diag(self, reason: str, *, symbol: str | None = None, side: OrderSide | None = None) -> None:
@@ -326,7 +329,7 @@ class ScalpMicroStrategy(BaseStrategy):
             sl = entry + atr_abs * _SL_ATR_MULT
             regime = MarketRegime.BEAR_TREND
 
-        confidence = min(0.90, 0.55 + min(0.25, net_edge_pct / max(self._min_net_return_pct, 1e-9) * 0.05))
+        confidence = max(0.0, min(0.90, 0.55 + min(0.25, net_edge_pct / max(self._min_net_return_pct, 1e-9) * 0.05)))
 
         self._register_signal(symbol)
         ob_imb_str = f"{ob_imbalance:.3f}" if ob_imbalance is not None else "N/A"

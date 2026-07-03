@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import structlog
+
 from trader.domain.enums import BybitRegion
 from trader.domain.errors import ConfigurationError
+
+logger = structlog.get_logger(__name__)
 
 # ---------------------------------------------------------------------------
 # Endpoint registry
@@ -151,7 +155,17 @@ class EndpointSelector:
             )
         if self._use_testnet and self._region in _TESTNET_FALLBACK_REGIONS:
             # Allowed, but endpoints are shared with GLOBAL testnet — not an error.
-            pass
+            logger.warning(
+                "endpoint_selector.testnet_fallback_region",
+                region=self._region.value,
+                detail="testnet endpoints for this region alias to GLOBAL testnet infrastructure",
+            )
+        if not self._use_testnet and self._region != BybitRegion.GLOBAL:
+            logger.warning(
+                "endpoint_selector.non_global_live_region",
+                region=self._region.value,
+                detail="live trading on a non-GLOBAL region — confirm this endpoint routing is intended",
+            )
 
     # ------------------------------------------------------------------
     # Helpers

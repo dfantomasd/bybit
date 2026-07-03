@@ -263,6 +263,16 @@ class PreflightChecker:
                     warning=warning,
                 )
 
+            missing_perms = _REQUIRED_PERMISSIONS - all_perm_keys
+            if missing_perms:
+                return CheckResult(
+                    name="api_key_permissions",
+                    passed=False,
+                    critical=True,
+                    message=f"API key missing required permissions: {missing_perms}",
+                    details={"permissions": list(all_perms), "missing": list(missing_perms)},
+                )
+
             return CheckResult(
                 name="api_key_permissions",
                 passed=True,
@@ -385,6 +395,31 @@ class PreflightChecker:
     async def _check_testnet_vs_live(self) -> CheckResult:
         """Ensure testnet mode matches the declared trading mode."""
         live_trading_mode = self._trading_mode in {"LIVE", "CANARY_LIVE"}
+
+        if self._use_testnet and live_trading_mode:
+            return CheckResult(
+                name="testnet_vs_live",
+                passed=False,
+                critical=True,
+                message=(
+                    f"Configuration mismatch: use_testnet=True but trading_mode={self._trading_mode}. "
+                    "A LIVE/CANARY_LIVE session must use the mainnet endpoint."
+                ),
+                details={"use_testnet": self._use_testnet, "trading_mode": self._trading_mode},
+            )
+
+        if not self._use_testnet and self._trading_mode == "TESTNET":
+            return CheckResult(
+                name="testnet_vs_live",
+                passed=False,
+                critical=True,
+                message=(
+                    "Configuration mismatch: use_testnet=False but trading_mode=TESTNET. "
+                    "Set USE_TESTNET=true or change TRADING_MODE."
+                ),
+                details={"use_testnet": self._use_testnet, "trading_mode": self._trading_mode},
+            )
+
         if self._use_testnet:
             mode_label = "TESTNET"
         elif live_trading_mode:

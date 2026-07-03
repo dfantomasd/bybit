@@ -56,6 +56,8 @@ def _proposal(
     adjusted_tp_mult = tp_mult * confidence_adjustment
 
     sl_dist = max(atr_pct * sl_mult, 0.001)
+    if sl_dist >= 1.0:
+        return None
     tp_dist = max(atr_pct * adjusted_tp_mult, sl_dist * 1.5)
 
     # 2. Ensure minimum R:R ratio (1.5x or better)
@@ -273,6 +275,10 @@ class MACDZeroCrossStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "macd_zerocross_v1"
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_macd_hist.pop(symbol, None)
+        self._last_signal_at.pop(symbol, None)
+
     def evaluate(
         self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float
     ) -> TradeProposal | None:
@@ -314,13 +320,13 @@ class MACDZeroCrossStrategy(BaseStrategy):
             )
             return None
 
-        # Check rate limiting
+        last_hist = self._last_macd_hist.get(symbol)
+        self._last_macd_hist[symbol] = macd_hist
+
+        # Check rate limiting (after updating histogram so state is current)
         last = self._last_signal_at.get(symbol)
         if last is not None and (datetime.now(UTC) - last).total_seconds() < _MC_COOLDOWN_SECONDS:
             return None
-
-        last_hist = self._last_macd_hist.get(symbol)
-        self._last_macd_hist[symbol] = macd_hist
 
         # No previous value = can't detect cross
         if last_hist is None:
@@ -402,6 +408,10 @@ class ATRBreakoutStrategy(BaseStrategy):
     @property
     def strategy_id(self) -> str:
         return "atr_breakout_v1"
+
+    def evict_symbol(self, symbol: str) -> None:
+        self._price_history.pop(symbol, None)
+        self._last_signal_at.pop(symbol, None)
 
     def evaluate(
         self, feature_vector: FeatureVector, current_price: float, available_balance_usd: float

@@ -84,31 +84,33 @@ class CandleStore:
     def latest(self, symbol: str, interval: str, n: int) -> list[Candle]:
         """Return the last *n* confirmed candles, oldest-first."""
         conf = self.confirmed(symbol, interval)
+        if n <= 0:
+            return []
         return conf[-n:] if len(conf) >= n else conf
 
     def closes(self, symbol: str, interval: str, n: int | None = None) -> list[float]:
         """Closing prices of confirmed candles, newest-last."""
         data = self.confirmed(symbol, interval)
         if n is not None:
-            data = data[-n:]
+            data = data[-n:] if n > 0 else []
         return [c.close for c in data]
 
     def highs(self, symbol: str, interval: str, n: int | None = None) -> list[float]:
         data = self.confirmed(symbol, interval)
         if n is not None:
-            data = data[-n:]
+            data = data[-n:] if n > 0 else []
         return [c.high for c in data]
 
     def lows(self, symbol: str, interval: str, n: int | None = None) -> list[float]:
         data = self.confirmed(symbol, interval)
         if n is not None:
-            data = data[-n:]
+            data = data[-n:] if n > 0 else []
         return [c.low for c in data]
 
     def volumes(self, symbol: str, interval: str, n: int | None = None) -> list[float]:
         data = self.confirmed(symbol, interval)
         if n is not None:
-            data = data[-n:]
+            data = data[-n:] if n > 0 else []
         return [c.volume for c in data]
 
     def count(self, symbol: str, interval: str, confirmed_only: bool = True) -> int:

@@ -453,6 +453,7 @@ def _make_engine(
         max_concurrent_pending_entries=max_concurrent_pending,
         max_same_side_positions=max_same_side,
         startup_warmup_seconds=startup_warmup_seconds,
+        live_armed=True,
     )
     return engine, adapter, rm
 

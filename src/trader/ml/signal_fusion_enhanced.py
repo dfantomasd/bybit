@@ -272,7 +272,7 @@ class SignalFusionEnhanced:
                 ]
             )
 
-            final_signal = np.sum(weighted_signals) / np.sum(
+            weight_sum = np.sum(
                 [
                     attention_scores["MA"],
                     attention_scores["RSI"],
@@ -281,6 +281,7 @@ class SignalFusionEnhanced:
                     attention_scores["Volume"],
                 ]
             )
+            final_signal = np.sum(weighted_signals) / weight_sum if weight_sum > 0 else 0.0
 
             # 5. ОЖИДАЕМАЯ ПРИБЫЛЬ
             expected_profit_bps = (expected_outcome - 0.5) * 200 + predicted_confidence * 100

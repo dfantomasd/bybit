@@ -55,6 +55,14 @@ class StrategyEnsemble:
         self._min_confirmation_sources = max(1, int(min_confirmation_sources))
         self._diag_hook = diag_hook
 
+    def evict_symbol(self, symbol: str) -> None:
+        """Clear per-symbol cached state on every strategy that tracks it."""
+        for strategy in self._strategies:
+            try:
+                strategy.evict_symbol(symbol)
+            except Exception as exc:
+                log.debug("ensemble.evict_symbol_failed", symbol=symbol, error=str(exc))
+
     def _diag(self, event: str) -> None:
         if self._diag_hook is None:
             return

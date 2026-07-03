@@ -328,6 +328,12 @@ class LifecycleModule(AppBoundModule):
         log.info("feature_pipeline.started", mode="event_driven", watchdog_interval_s=60.0)
 
     async def graceful_shutdown(self) -> None:
+        if self._app._status in (SystemStatus.STOPPING, SystemStatus.STOPPED):
+            # Already shutting down/shut down (e.g. SIGTERM followed by
+            # SIGINT) — running this concurrently a second time would race
+            # on stop()/close() calls that aren't all guaranteed idempotent.
+            log.debug("graceful_shutdown_already_in_progress", status=self._app._status)
+            return
         log.info("graceful_shutdown_starting")
         self._app._status = SystemStatus.STOPPING
         self._app._trading_paused = True  # pause new entries immediately
@@ -350,6 +356,15 @@ class LifecycleModule(AppBoundModule):
                 )
             except Exception as exc:
                 log.warning("graceful_shutdown.reconciliation_failed", error=str(exc))
+                if self._app._telegram_bot is not None:
+                    try:
+                        await self._app._telegram_bot.notify(
+                            "⚠️ <b>Shutdown reconciliation failed</b>: "
+                            f"<code>{exc}</code>\nProceeding with shutdown without a verified "
+                            "consistent exchange/local state."
+                        )
+                    except Exception as notify_exc:
+                        log.debug("graceful_shutdown.reconciliation_alert_failed", error=str(notify_exc))
 
         # Log final execution state and open positions before shutdown
         if self._app._execution_engine is not None:
@@ -379,16 +394,22 @@ class LifecycleModule(AppBoundModule):
         if self._app._ws_private:
             await self._app._ws_private.stop()
 
+        # Signal uvicorn to drain in-flight HTTP requests gracefully before
+        # its task gets force-cancelled below — should_exit=True must be set
+        # (and given a moment to take effect) before the generic
+        # cancel-everything loop reaches the http-server task, otherwise an
+        # in-flight operator request is torn down mid-response instead of
+        # completing.
+        if self._app._uvicorn_server:
+            self._app._uvicorn_server.should_exit = True
+            await asyncio.sleep(1)
+
         # Cancel all background tasks
         for task in self._app._background_tasks:
             if not task.done():
                 task.cancel()
         if self._app._background_tasks:
             await asyncio.gather(*self._app._background_tasks, return_exceptions=True)
-
-        if self._app._uvicorn_server:
-            self._app._uvicorn_server.should_exit = True
-            await asyncio.sleep(1)
 
         if self._app._bybit_adapter:
             await self._app._bybit_adapter.close()

@@ -377,7 +377,7 @@ class TestPosition:
         assert p.size == Decimal("0.01")
 
     def test_negative_size_rejected(self) -> None:
-        with pytest.raises(ValidationError, match="size must be non-negative"):
+        with pytest.raises(ValidationError, match="size must be positive"):
             Position(
                 symbol="BTCUSDT",
                 market_type=MarketType.LINEAR,
@@ -386,15 +386,15 @@ class TestPosition:
                 entry_price=Decimal("65000"),
             )
 
-    def test_zero_size_allowed(self) -> None:
-        p = Position(
-            symbol="BTCUSDT",
-            market_type=MarketType.LINEAR,
-            side=OrderSide.BUY,
-            size=Decimal("0"),
-            entry_price=Decimal("65000"),
-        )
-        assert p.size == Decimal("0")
+    def test_zero_size_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="size must be positive"):
+            Position(
+                symbol="BTCUSDT",
+                market_type=MarketType.LINEAR,
+                side=OrderSide.BUY,
+                size=Decimal("0"),
+                entry_price=Decimal("65000"),
+            )
 
 
 # ---------------------------------------------------------------------------

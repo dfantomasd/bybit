@@ -28,7 +28,7 @@ def _make_rest_mock(
     import time as _time
 
     if api_key_permissions is None:
-        api_key_permissions = {"ContractTrade": ["Order", "Position"]}
+        api_key_permissions = {"ContractTrade": ["Order", "Position"], "Trade": ["SpotTrade"]}
 
     # Default: use current time so drift check passes
     if server_time_seconds is None:
@@ -217,7 +217,9 @@ class TestIndividualChecks:
         assert result.passed is False
 
     async def test_withdrawal_permission_warns(self) -> None:
-        rest = _make_rest_mock(api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]})
+        rest = _make_rest_mock(
+            api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"], "Trade": ["SpotTrade"]}
+        )
         checker = _make_checker(rest=rest, trading_mode="SHADOW")
         result = await checker._check_api_key_permissions()
         assert result.warning is not None
@@ -226,7 +228,9 @@ class TestIndividualChecks:
         assert "WITHDRAWAL" in result.warning.upper() or "Wallet" in result.warning
 
     async def test_withdrawal_permission_blocks_active_mode(self) -> None:
-        rest = _make_rest_mock(api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"]})
+        rest = _make_rest_mock(
+            api_key_permissions={"Wallet": ["Withdraw", "Transfer"], "ContractTrade": ["Order"], "Trade": ["SpotTrade"]}
+        )
         checker = _make_checker(rest=rest, trading_mode="TESTNET")
         result = await checker._check_api_key_permissions()
         assert result.warning is not None
@@ -234,7 +238,7 @@ class TestIndividualChecks:
         assert result.critical is True
 
     async def test_no_withdrawal_permission_no_warning(self) -> None:
-        rest = _make_rest_mock(api_key_permissions={"ContractTrade": ["Order", "Position"]})
+        rest = _make_rest_mock(api_key_permissions={"ContractTrade": ["Order", "Position"], "Trade": ["SpotTrade"]})
         checker = _make_checker(rest=rest)
         result = await checker._check_api_key_permissions()
         assert result.warning is None

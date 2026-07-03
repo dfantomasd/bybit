@@ -275,21 +275,19 @@ class RegimePredictorEnhanced:
             # 2. ПЕРЕХОДЫ
             transition_proba = self.transition_model.predict_proba(x)[0]
 
+            # transition_model is a 4-class model; all three horizons share the
+            # same prediction because the model was trained on mixed horizons.
             next_5m_class = np.argmax(transition_proba[:4])
             next_5m_regime = self.regime_names[next_5m_class]
             prob_next_5m = float(transition_proba[next_5m_class])
 
-            next_15m_class = np.argmax(transition_proba[4:8]) if len(transition_proba) > 4 else next_5m_class
-            next_15m_regime = self.regime_names[next_15m_class]
-            prob_next_15m = float(
-                transition_proba[next_15m_class] if len(transition_proba) > 4 else transition_proba[next_5m_class]
-            )
+            next_15m_class = next_5m_class
+            next_15m_regime = next_5m_regime
+            prob_next_15m = prob_next_5m
 
-            next_60m_class = np.argmax(transition_proba[8:12]) if len(transition_proba) > 8 else next_15m_class
-            next_60m_regime = self.regime_names[next_60m_class]
-            prob_next_60m = float(
-                transition_proba[next_60m_class] if len(transition_proba) > 8 else transition_proba[next_15m_class]
-            )
+            next_60m_class = next_5m_class
+            next_60m_regime = next_5m_regime
+            prob_next_60m = prob_next_5m
 
             # 3. ЭНТРОПИЯ
             market_entropy = float(self.entropy_model.predict(x)[0])

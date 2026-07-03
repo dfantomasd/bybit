@@ -88,6 +88,8 @@ class DrawdownTracker:
 
     def is_at_hard_stop(self, hard_stop_pct: Decimal) -> bool:
         """True if current drawdown has reached or exceeded the hard stop."""
+        if hard_stop_pct <= Decimal("0"):
+            return False
         return self.drawdown_pct >= hard_stop_pct
 
     def is_at_soft_warning(self, warning_pct: Decimal) -> bool:

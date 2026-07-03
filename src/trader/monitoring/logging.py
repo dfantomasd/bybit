@@ -51,6 +51,17 @@ def _is_secret_field(key: str) -> bool:
     return any(p.search(key) for p in _SECRET_FIELD_PATTERNS)
 
 
+def _redact_value(value: Any) -> Any:
+    """Recursively redact secret-named keys within nested dicts/lists."""
+    if isinstance(value, dict):
+        return {k: _REDACTED if _is_secret_field(k) else _redact_value(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_redact_value(v) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_redact_value(v) for v in value)
+    return value
+
+
 def _redact_secrets(
     _logger: WrappedLogger,
     _method_name: str,
@@ -61,11 +72,8 @@ def _redact_secrets(
     for key, value in event_dict.items():
         if _is_secret_field(key):
             redacted[key] = _REDACTED
-        elif isinstance(value, dict):
-            # Recursively redact nested dicts
-            redacted[key] = {k: _REDACTED if _is_secret_field(k) else v for k, v in value.items()}
         else:
-            redacted[key] = value
+            redacted[key] = _redact_value(value)
     event_dict.clear()
     event_dict.update(redacted)
     return event_dict

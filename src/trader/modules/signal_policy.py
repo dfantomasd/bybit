@@ -780,7 +780,7 @@ class SignalPolicyModule(AppBoundModule):
             return True
         if self._app._feature_pipeline is None:
             return False
-        intervals = self._app._trend_confirmation_intervals()
+        intervals = self.trend_confirmation_intervals()
         if not intervals:
             return True
         confirmations = 0

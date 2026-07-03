@@ -405,7 +405,7 @@ async def test_shadow_gate_stats_preserves_missing_pass_expectancy() -> None:
 
     class Pool:
         async def fetch(self, query: str, *args: object) -> list[dict[str, object]]:
-            assert "COALESCE(fs.training_eligible, true) = true" in query
+            assert "fs.training_eligible = true" in query
             assert args[0] == "model-v1"
             return [
                 {

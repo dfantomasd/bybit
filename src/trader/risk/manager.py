@@ -14,7 +14,9 @@ CRITICAL INVARIANTS:
 
 from __future__ import annotations
 
+import asyncio
 import logging
+from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal
 from typing import Any
 
@@ -154,6 +156,8 @@ class RiskManager:
 
         self._daily_pnl: Decimal = Decimal("0")
         self._paused: bool = False
+        self._last_daily_reset: datetime = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+        self._daily_reset_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Primary evaluation
@@ -171,6 +175,7 @@ class RiskManager:
         atr: Decimal | None = None,
         shadow_mode: bool = False,
         min_atr_multiple: Decimal | None = None,
+        confirmed_leverage: Decimal | None = None,
     ) -> RiskDecision:
         """Evaluate a trade proposal and return a RiskDecision."""
         triggered_rules: list[str] = []
@@ -273,17 +278,25 @@ class RiskManager:
         # ----------------------------------------------------------------
         # 4. Daily loss limit
         # ----------------------------------------------------------------
-        if capital > Decimal("0"):
-            daily_loss_pct = (
-                abs(self._daily_pnl) / capital * Decimal("100") if self._daily_pnl < Decimal("0") else Decimal("0")
+        if capital <= Decimal("0"):
+            # Stale or missing balance — fail closed: we cannot compute daily
+            # loss % so we must not allow new entries.
+            return self._reject(
+                proposal,
+                "capital is zero or negative — balance stale or unavailable",
+                ["stale_balance"],
+                capital,
             )
-            if daily_loss_pct >= self._limits.daily_loss_limit_pct:
-                return self._reject(
-                    proposal,
-                    f"daily loss {daily_loss_pct:.2f}% >= limit {self._limits.daily_loss_limit_pct}%",
-                    ["daily_loss_limit"],
-                    capital,
-                )
+        daily_loss_pct = (
+            abs(self._daily_pnl) / capital * Decimal("100") if self._daily_pnl < Decimal("0") else Decimal("0")
+        )
+        if daily_loss_pct >= self._limits.daily_loss_limit_pct:
+            return self._reject(
+                proposal,
+                f"daily loss {daily_loss_pct:.2f}% >= limit {self._limits.daily_loss_limit_pct}%",
+                ["daily_loss_limit"],
+                capital,
+            )
 
         # ----------------------------------------------------------------
         # 5. Drawdown hard stop
@@ -374,6 +387,10 @@ class RiskManager:
         if instrument_info.max_leverage is not None:
             if instrument_info.max_leverage > self._limits.max_leverage:
                 triggered_rules.append("leverage_reduced")
+                # Enforce the profile cap: override confirmed_leverage so the
+                # sizer never uses a leverage the profile doesn't permit.
+                if confirmed_leverage is not None and confirmed_leverage > self._limits.max_leverage:
+                    confirmed_leverage = self._limits.max_leverage
 
         # ----------------------------------------------------------------
         # 10. Validate stop distance
@@ -449,9 +466,13 @@ class RiskManager:
             except Exception as e:
                 self._log.debug(f"position_size_optimization_failed: {e}")
 
-        # Convert Kelly fraction (0.01-0.25) to risk percentage (clamped to profile range)
+        # Apply the model's fractional-Kelly safety scaler (0.1-0.5) to the raw
+        # Kelly fraction (0.01-0.25) before converting to a risk percentage —
+        # using kelly_fraction alone ignores the conservative scale-down the
+        # model predicted and can size positions several times larger than
+        # intended (clamped to profile range).
         desired_risk_pct = min(
-            kelly_fraction * Decimal("100") * position_size_adjustment,
+            kelly_fraction * fractional_kelly * Decimal("100") * position_size_adjustment,
             self._limits.risk_per_trade_max_pct,
         )
 
@@ -494,6 +515,7 @@ class RiskManager:
             remaining_position_budget_usd=remaining_position_budget_usd,
             realized_vol=realized_vol,
             min_atr_multiple=min_atr_multiple,
+            confirmed_leverage=confirmed_leverage,
         )
 
         if approved_qty <= Decimal("0"):
@@ -528,7 +550,12 @@ class RiskManager:
             try:
                 raw_symbols = open_symbols_fn()
                 if isinstance(raw_symbols, (list, tuple, set, frozenset)):
-                    existing_symbols = [str(sym) for sym in raw_symbols]
+                    # Exclude the symbol being evaluated itself — scaling into
+                    # an already-open position on the same symbol is not
+                    # cross-asset correlation risk, and get_correlation_adjustment
+                    # would otherwise always find "the same family as itself"
+                    # and spuriously shrink the size on every pyramiding add.
+                    existing_symbols = [str(sym) for sym in raw_symbols if str(sym) != proposal.symbol]
             except TypeError:
                 existing_symbols = []
         corr_mult = self._exposure.get_correlation_adjustment(proposal.symbol, existing_symbols)
@@ -709,9 +736,34 @@ class RiskManager:
         self._daily_pnl += realized_pnl
 
     async def reset_daily_stats(self) -> None:
-        """Reset daily stats — call at UTC midnight."""
+        """Reset daily stats at UTC midnight."""
         self._daily_pnl = Decimal("0")
+        self._last_daily_reset = datetime.now(tz=UTC).replace(hour=0, minute=0, second=0, microsecond=0)
         self._log.info("Daily risk stats reset")
+
+    def start_daily_reset_scheduler(self) -> None:
+        """Start a background task that resets daily stats at UTC midnight."""
+        if self._daily_reset_task is not None and not self._daily_reset_task.done():
+            return
+        self._daily_reset_task = asyncio.create_task(
+            self._daily_reset_loop(), name="risk-manager-daily-reset"
+        )
+
+    def stop_daily_reset_scheduler(self) -> None:
+        if self._daily_reset_task is not None:
+            self._daily_reset_task.cancel()
+            self._daily_reset_task = None
+
+    async def _daily_reset_loop(self) -> None:
+        while True:
+            now = datetime.now(tz=UTC)
+            next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            if next_midnight <= now:
+                from datetime import timedelta
+                next_midnight = next_midnight + timedelta(days=1)
+            wait_seconds = (next_midnight - now).total_seconds()
+            await asyncio.sleep(wait_seconds)
+            await self.reset_daily_stats()
 
     # ------------------------------------------------------------------
     # Properties

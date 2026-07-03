@@ -139,6 +139,7 @@ async def fetch_training_sample_snapshot(
               AND fs.training_eligible = true
               AND pe.model_version = 'RULE_BASELINE_V1'
               AND pe.strategy_signal IN ('Buy', 'Sell')
+              AND {training_decision_filter_sql("$5")}
               AND {strategy_filter}
         )
         SELECT label_threshold_bps::text AS threshold, count(*)::int AS sample_count

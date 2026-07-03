@@ -110,6 +110,14 @@ class RiskLimits:
         if self.hard_stop_drawdown_pct < self.max_drawdown_pct:
             raise ValueError("hard_stop_drawdown_pct must be >= max_drawdown_pct")
 
+        # Sanity: risk_per_trade bounds must be ordered
+        if self.risk_per_trade_min_pct > self.risk_per_trade_max_pct:
+            raise ValueError("risk_per_trade_min_pct must be <= risk_per_trade_max_pct")
+
+        # Sanity: daily loss soft limit must fire before the hard stop
+        if self.daily_loss_limit_pct > self.daily_loss_hard_stop_pct:
+            raise ValueError("daily_loss_limit_pct must be <= daily_loss_hard_stop_pct")
+
 
 # ---------------------------------------------------------------------------
 # Profile definitions — values from spec table

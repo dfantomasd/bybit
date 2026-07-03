@@ -38,6 +38,7 @@ def assess_liquidity(
     position_size_usd: Decimal,
     max_spread_bps: float = 5.0,
     min_depth_usd: Decimal = Decimal("10000"),
+    side: str | None = None,
 ) -> LiquidityAssessment:
     """Assess liquidity for a trading opportunity.
 
@@ -50,6 +51,9 @@ def assess_liquidity(
         position_size_usd: Size of intended position in USD
         max_spread_bps: Maximum acceptable spread in basis points
         min_depth_usd: Minimum depth required in USD
+        side: "Buy" consumes ask depth, "Sell" consumes bid depth. If not
+            given, the more conservative (smaller) of the two sides is used
+            since the eventual trade direction is unknown.
 
     Returns:
         LiquidityAssessment with evaluation and reasoning.
@@ -85,6 +89,16 @@ def assess_liquidity(
 
     total_depth = bid_depth + ask_depth
 
+    # Depth on the side the trade will actually consume: a buy eats ask
+    # depth, a sell eats bid depth. When the side is unknown, use the
+    # smaller of the two as a conservative proxy.
+    if side == "Buy":
+        directional_depth = ask_depth
+    elif side == "Sell":
+        directional_depth = bid_depth
+    else:
+        directional_depth = min(bid_depth, ask_depth)
+
     # Determine if liquid enough
     is_liquid = True
     rejection_reasons = []
@@ -97,10 +111,12 @@ def assess_liquidity(
         is_liquid = False
         rejection_reasons.append(f"Depth ${total_depth} < minimum ${min_depth_usd}")
 
-    if position_size_usd > total_depth / 2:
-        # Position would be >50% of available depth (risky)
+    if position_size_usd > directional_depth / 2:
+        # Position would be >50% of the relevant side's depth (risky)
         is_liquid = False
-        rejection_reasons.append(f"Position size ${position_size_usd} > 50% of depth ${total_depth}")
+        rejection_reasons.append(
+            f"Position size ${position_size_usd} > 50% of directional depth ${directional_depth}"
+        )
 
     # Calculate liquidity score (0-1)
     depth_ratio = min(1.0, float(total_depth / max(Decimal("100000"), min_depth_usd)))
@@ -109,10 +125,10 @@ def assess_liquidity(
 
     liquidity_score = depth_ratio * 0.4 + spread_ratio * 0.4 + size_ratio * 0.2
 
-    # Estimate slippage
+    # Estimate slippage using the depth the trade will actually consume
     estimated_slippage = estimate_market_impact(
         position_size_usd=position_size_usd,
-        total_depth_usd=total_depth,
+        total_depth_usd=directional_depth,
         spread_bps=spread_bps,
     )
 

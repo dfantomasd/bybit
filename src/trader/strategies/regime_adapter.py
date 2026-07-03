@@ -202,18 +202,18 @@ class RegimeAwarePrioritizer:
             return 1.0  # No adjustment
 
         # Buy signals aligned with uptrend = boost
-        if proposal_side == "BUY" and regime_ctx.regime == MarketRegime.BULL_TREND:
+        if proposal_side in ("BUY", "Buy") and regime_ctx.regime == MarketRegime.BULL_TREND:
             return 1.10  # +10% confidence boost
 
         # Sell signals aligned with downtrend = boost
-        if proposal_side == "SELL" and regime_ctx.regime == MarketRegime.BEAR_TREND:
+        if proposal_side in ("SELL", "Sell") and regime_ctx.regime == MarketRegime.BEAR_TREND:
             return 1.10  # +10% confidence boost
 
         # Counter-trend signals get slight penalty (but not too harsh)
-        if proposal_side == "BUY" and regime_ctx.regime == MarketRegime.BEAR_TREND:
+        if proposal_side in ("BUY", "Buy") and regime_ctx.regime == MarketRegime.BEAR_TREND:
             return 0.95  # -5% confidence penalty
 
-        if proposal_side == "SELL" and regime_ctx.regime == MarketRegime.BULL_TREND:
+        if proposal_side in ("SELL", "Sell") and regime_ctx.regime == MarketRegime.BULL_TREND:
             return 0.95  # -5% confidence penalty
 
         # In sideways/volatile, alignment matters less

@@ -331,8 +331,8 @@ class Position(BaseModel):
     @field_validator("size")
     @classmethod
     def size_non_negative(cls, v: Decimal) -> Decimal:
-        if v < 0:
-            raise ValueError("size must be non-negative")
+        if v <= 0:
+            raise ValueError("size must be positive")
         return v
 
 

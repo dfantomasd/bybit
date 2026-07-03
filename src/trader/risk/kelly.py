@@ -77,8 +77,8 @@ def calculate_kelly_fraction(
 
     kelly_fraction = (win_rate * avg_win_bps - (1 - win_rate) * abs_avg_loss) / avg_win_bps
 
-    # Cap at 0.25 (fractional Kelly) for safety
-    kelly_fraction = max(0.0, min(kelly_fraction, 0.25))
+    # Clamp raw Kelly to [0, 1]; callers apply their own fractional multiplier.
+    kelly_fraction = max(0.0, min(kelly_fraction, 1.0))
 
     return kelly_fraction
 
@@ -192,18 +192,21 @@ def calculate_position_size_kelly(
     if entry_price <= 0 or stop_price <= 0:
         return Decimal("0")
 
+    kelly_d = Decimal(str(kelly_fraction))
+    risk_per_trade_d = Decimal(str(risk_per_trade_pct))
+
     # Risk amount from Kelly
-    risk_amount = float(capital_usd) * kelly_fraction
+    risk_amount = capital_usd * kelly_d
 
     # Cap at risk_per_trade_pct of capital
-    max_risk = float(capital_usd) * (risk_per_trade_pct / 100.0)
+    max_risk = capital_usd * risk_per_trade_d / Decimal("100")
     risk_amount = min(risk_amount, max_risk)
 
     # Calculate position size
-    price_diff = abs(float(entry_price) - float(stop_price))
-    if price_diff <= 0:
+    price_diff = abs(entry_price - stop_price)
+    if price_diff <= Decimal("0"):
         return Decimal("0")
 
-    position_size = Decimal(str(risk_amount / price_diff))
+    position_size = risk_amount / price_diff
 
     return max(Decimal("0"), position_size)

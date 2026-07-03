@@ -144,7 +144,7 @@ def _score_ticker(
     turnover_score = math.log1p(turnover) / log_max if log_max > 0 else 0.0
 
     # Spread: lower is better; 0 bps → 1.0, max_spread_bps → 0.0
-    spread_score = max(0.0, 1.0 - spread_bps / max_spread_bps)
+    spread_score = max(0.0, 1.0 - spread_bps / max_spread_bps) if max_spread_bps > 0 else 1.0
 
     # Depth: sigmoid-like normalisation around min_depth_usd
     depth_score = min(1.0, top_depth_usd / (min_depth_usd * 5)) if min_depth_usd > 0 else 0.5
@@ -351,7 +351,7 @@ class MarketScreener:
 
             if protected:
                 log.info("screener.symbols_protected", protected=sorted(protected))
-                feature = feature + [s for s in sorted(protected) if s not in feature]
+                feature = feature + [s for s in sorted(protected) if s not in feature and s not in self._denylist]
                 new_feature = set(feature)
 
             added = sorted(new_feature - prev_feature)

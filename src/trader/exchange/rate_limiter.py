@@ -38,6 +38,11 @@ _WARN_THRESHOLDS = (70.0, 85.0, 95.0)
 # Default token bucket configuration
 _DEFAULT_CAPACITY = 120  # requests per window
 _DEFAULT_REFILL_RATE = 2.0  # tokens per second
+# Conservative initial token budget before the first response teaches us the
+# real per-endpoint limit via X-Bapi-Limit headers.  Starting at full capacity
+# (120) risks an IP ban when multiple coroutines fan-out to a low-limit endpoint
+# before any response has arrived.
+_DEFAULT_INITIAL_TOKENS = 10
 _DEFAULT_WINDOW_SECONDS = 60
 
 # Backoff configuration
@@ -52,7 +57,7 @@ class _EndpointState:
     """Per-endpoint token bucket and limit state."""
 
     capacity: float = _DEFAULT_CAPACITY
-    tokens: float = _DEFAULT_CAPACITY
+    tokens: float = _DEFAULT_INITIAL_TOKENS
     refill_rate: float = _DEFAULT_REFILL_RATE  # tokens/s
     last_refill_ts: float = field(default_factory=time.monotonic)
 
@@ -127,7 +132,7 @@ class RateLimiter:
         if k not in self._states:
             self._states[k] = _EndpointState(
                 capacity=self._default_capacity,
-                tokens=self._default_capacity,
+                tokens=_DEFAULT_INITIAL_TOKENS,
                 refill_rate=self._default_refill_rate,
             )
         return self._states[k]
@@ -163,30 +168,32 @@ class RateLimiter:
     # ------------------------------------------------------------------
 
     async def acquire(self, endpoint: str, method: str = "GET") -> None:
-        """Wait until a token is available for the given endpoint/method pair."""
-        async with self._lock:
-            state = self._get_or_create(endpoint, method)
-            state.refill()
+        """Wait until a token is available for the given endpoint/method pair.
 
-            if state.tokens >= 1.0:
-                state.tokens -= 1.0
-                key = self._key(endpoint, method)
-                self._emit_metrics(key, state)
-                self._check_thresholds(key, state)
-                return
-
-        # No token available — compute wait time outside the lock to avoid blocking
+        Uses an iterative loop instead of recursion to avoid stack overflow
+        under prolonged exchange-side rate limiting.
+        """
         key = self._key(endpoint, method)
-        wait_seconds = (1.0 - state.tokens) / state.refill_rate
-        wait_seconds = max(0.01, wait_seconds)
-        logger.debug(
-            "rate_limiter_waiting",
-            endpoint=key,
-            wait_seconds=round(wait_seconds, 3),
-        )
-        await asyncio.sleep(wait_seconds)
-        # Re-acquire after waiting
-        await self.acquire(endpoint, method)
+        while True:
+            async with self._lock:
+                state = self._get_or_create(endpoint, method)
+                state.refill()
+
+                if state.tokens >= 1.0:
+                    state.tokens -= 1.0
+                    self._emit_metrics(key, state)
+                    self._check_thresholds(key, state)
+                    return
+
+                # Compute wait while still holding the lock so refill_rate is stable.
+                wait_seconds = max(0.01, (1.0 - state.tokens) / max(state.refill_rate, 1e-9))
+
+            logger.debug(
+                "rate_limiter_waiting",
+                endpoint=key,
+                wait_seconds=round(wait_seconds, 3),
+            )
+            await asyncio.sleep(wait_seconds)
 
     def record_response(self, endpoint: str, headers: dict[str, Any], method: str = "GET") -> None:
         """Update internal state from Bybit response headers.
@@ -195,9 +202,16 @@ class RateLimiter:
         - X-Bapi-Limit-Status: remaining calls
         - X-Bapi-Limit: total capacity
         - X-Bapi-Limit-Reset-Timestamp: reset epoch ms
+
+        Note: this method is synchronous and called from within the same asyncio
+        event loop as acquire(). In asyncio there is no concurrent interleaving
+        between two synchronous code paths (no await means no yield), so the
+        updates are atomic within a single event-loop turn. The lock is NOT
+        acquired here to avoid deadlock (callers may already hold it indirectly).
+        All mutations are therefore safe in a single-event-loop context.
         """
-        state = self._get_or_create(endpoint, method)
         key = self._key(endpoint, method)
+        state = self._get_or_create(endpoint, method)
 
         # Parse headers (case-insensitive lookup)
         lower_headers = {k.lower(): v for k, v in headers.items()}
@@ -208,7 +222,7 @@ class RateLimiter:
             if "x-bapi-limit" in lower_headers:
                 limit_total = int(lower_headers["x-bapi-limit"])
                 state.limit_total = limit_total
-                # Sync local bucket capacity with server-reported limit
+                # Sync local bucket capacity with server-reported limit atomically.
                 if limit_total != state.capacity:
                     state.capacity = float(limit_total)
                     state.refill_rate = limit_total / _DEFAULT_WINDOW_SECONDS

@@ -98,6 +98,7 @@ def _make_engine(shadow_mode: bool = True) -> ExecutionEngine:
         shadow_mode=shadow_mode,
         cooldown_s=0,
         failure_cooldown_s=0,
+        live_armed=True,
     )
 
 

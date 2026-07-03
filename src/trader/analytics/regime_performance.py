@@ -23,6 +23,7 @@ class RegimePerformance:
     loss_count: int = 0
     total_return_bps: float = 0.0
     avg_return_bps: float = 0.0
+    avg_loss_bps: float = 0.0  # abs(mean of losing-trade return_bps); 0.0 if no losses
     win_rate: float = 0.0
     profit_factor: float = 0.0  # sum_wins / abs(sum_losses)
     sharpe_ratio: float = 0.0
@@ -90,7 +91,7 @@ def build_regime_performance_matrix(
         # Calculate profit factor
         win_sum = sum(r for r in returns if r > 0)
         loss_sum = abs(sum(r for r in returns if r < 0))
-        profit_factor = (win_sum / loss_sum) if loss_sum > 0 else (1.0 if win_sum > 0 else 0.0)
+        profit_factor = (win_sum / loss_sum) if loss_sum > 0 else (float("inf") if win_sum > 0 else 0.0)
 
         # Calculate Sharpe (simple version: mean / std)
         import numpy as np
@@ -105,6 +106,8 @@ def build_regime_performance_matrix(
         drawdown = running_max - cumulative
         max_drawdown = float(np.max(drawdown)) if len(drawdown) > 0 else 0.0
 
+        avg_loss_bps = (loss_sum / losses) if losses > 0 else 0.0
+
         perf = RegimePerformance(
             strategy_id=strategy,
             regime=regime,
@@ -112,6 +115,7 @@ def build_regime_performance_matrix(
             loss_count=losses,
             total_return_bps=total_return,
             avg_return_bps=avg_return,
+            avg_loss_bps=avg_loss_bps,
             win_rate=win_rate,
             profit_factor=profit_factor,
             sharpe_ratio=sharpe,
@@ -196,7 +200,7 @@ def calculate_dynamic_tp_sl(
         # Use historical win/loss to calculate levels
         # Typical win is (avg_return / win_count), loss is abs(total_loss / loss_count)
         avg_win_pct = (perf.avg_return_bps / 10000.0) if perf.win_rate > 0 else 0.5
-        avg_loss_pct = 0.5 if perf.loss_count == 0 else 0.5  # Conservative
+        avg_loss_pct = (perf.avg_loss_bps / 10000.0) if perf.loss_count > 0 else 0.5
 
         tp_pct = max(0.3, avg_win_pct * (0.75 if conservative else 1.0))
         sl_pct = min(1.0, avg_loss_pct * (0.5 if conservative else 1.0))
@@ -248,7 +252,7 @@ def get_regime_weighted_sizing(
 
     # Calculate multiplier from win_rate
     # Perfect win_rate (100%) = 1.5x, poor (40%) = 0.7x
-    win_rate_multiplier = 0.7 + (perf.win_rate * 0.8)
+    win_rate_multiplier = 0.1667 + (perf.win_rate * 1.3333)
 
     # Apply confidence as dampening
     final_multiplier = base_size * win_rate_multiplier * perf.confidence

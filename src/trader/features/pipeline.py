@@ -311,10 +311,13 @@ class FeaturePipeline:
         if result is not None:
             m, s, h = result
             # Normalise by last close price
-            price = closes[-1] if closes else 1.0
-            features["macd_line"] = m / price if price else 0.0
-            features["macd_signal"] = s / price if price else 0.0
-            features["macd_hist"] = h / price if price else 0.0
+            price = closes[-1] if closes else 0.0
+            if price != 0.0:
+                features["macd_line"] = m / price
+                features["macd_signal"] = s / price
+                features["macd_hist"] = h / price
+            else:
+                missing.extend(["macd_line", "macd_signal", "macd_hist"])
         else:
             missing.extend(["macd_line", "macd_signal", "macd_hist"])
 

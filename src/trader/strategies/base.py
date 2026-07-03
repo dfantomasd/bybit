@@ -27,3 +27,9 @@ class BaseStrategy(ABC):
         available_balance_usd: float,
     ) -> TradeProposal | None:
         """Evaluate features and return a TradeProposal or None (no signal)."""
+
+    def evict_symbol(self, symbol: str) -> None:
+        """Clear any per-symbol cached state when a symbol is removed.
+
+        Default: no-op. Stateful strategies must override.
+        """

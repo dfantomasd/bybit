@@ -181,9 +181,12 @@ class BybitAdapter:
 
         Returns the raw Bybit response dict.
         """
-        # Check duplicate
+        # Check duplicate and register atomically (no await between the two)
+        # so a concurrent caller can't observe "not registered yet" for the
+        # same order_link_id before this one finishes registering it.
         if await self._idempotency.check_duplicate(intent.order_link_id):
             raise ValueError(f"Duplicate order detected: {intent.order_link_id}")
+        await self._idempotency.register_intent(intent)
 
         # Write CREATED_LOCAL to durable state before touching the exchange
         if self._journal is not None:
@@ -200,8 +203,6 @@ class BybitAdapter:
             except Exception as _j_exc:
                 logger.debug("bybit_adapter.durable_created_local_failed", error=str(_j_exc))
 
-        # Register in idempotency store
-        await self._idempotency.register_intent(intent)
         await self._idempotency.mark_submitted(intent.order_link_id)
 
         # Write SUBMITTING to durable state before REST
@@ -247,8 +248,13 @@ class BybitAdapter:
             )
             return resp
         except Exception as exc:
-            # Any exception (timeout, network, API error) is ambiguous — mark UNKNOWN.
-            # Blind retry is forbidden; reconciliation must resolve this state.
+            # HTTP 4xx errors are definitive rejections — the order was never
+            # created. Everything else (network timeout, 5xx, unknown) is truly
+            # ambiguous and requires reconciliation to resolve.
+            exc_code = getattr(exc, "code", "") or ""
+            is_definitive_rejection = isinstance(exc, TradingSystemError) and str(exc_code).startswith("HTTP_4")
+            durable_state = "REST_REJECTED" if is_definitive_rejection else "UNKNOWN_RECONCILIATION_REQUIRED"
+
             if self._journal is not None:
                 try:
                     await self._journal.upsert_durable_order_state(
@@ -256,7 +262,7 @@ class BybitAdapter:
                         symbol=intent.symbol,
                         side=intent.side.value,
                         qty=intent.qty,
-                        state="UNKNOWN_RECONCILIATION_REQUIRED",
+                        state=durable_state,
                         last_error=str(exc)[:200],
                     )
                 except Exception as _j_exc:
@@ -265,6 +271,7 @@ class BybitAdapter:
                 "bybit_adapter.order_failed",
                 order_link_id=intent.order_link_id,
                 error=str(exc),
+                definitive_rejection=is_definitive_rejection,
             )
             raise
 
@@ -399,7 +406,7 @@ class BybitAdapter:
         try:
             open_orders_resp = await self._rest.get_open_orders(category=self._default_category)
             exchange_open = (open_orders_resp.get("result") or {}).get("list", [])
-            exchange_ids = {o.get("orderLinkId") for o in exchange_open}
+            exchange_ids = {o.get("orderLinkId") for o in exchange_open if o.get("orderLinkId")}
 
             all_states = self._idempotency.all_states()
             pending_ids = {lid for lid, status_str in all_states.items() if OrderStatus(status_str) in _pending_states}
@@ -485,12 +492,16 @@ class BybitAdapter:
                         OrderStatus.REST_ACCEPTED,
                         OrderStatus.SUBMITTING,
                     }:
-                        self._idempotency._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+                        await self._idempotency.mark_ws_confirmed(order_link_id)
                     elif order_status == OrderStatus.PARTIALLY_FILLED and current in {
                         OrderStatus.WS_CONFIRMED,
                         OrderStatus.REST_ACCEPTED,
                     }:
-                        self._idempotency._store[order_link_id]["status"] = OrderStatus.PARTIALLY_FILLED
+                        await self._idempotency.mark_partially_filled(order_link_id)
+                    elif order_status == OrderStatus.REJECTED:
+                        await self._idempotency.mark_rejected(order_link_id)
+                    elif order_status == OrderStatus.EXPIRED:
+                        await self._idempotency.mark_expired(order_link_id)
             except Exception as exc:
                 logger.debug("handle_order_update.idempotency_update_failed", error=str(exc))
 

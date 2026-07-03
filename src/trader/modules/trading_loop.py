@@ -1010,10 +1010,17 @@ class TradingLoopModule(AppBoundModule):
                 return
 
             try:
+                # Re-read balance right before submit rather than using the
+                # value captured once at the top of this cycle: symbols are
+                # evaluated concurrently via gather(), and submit() itself is
+                # serialized by execution_engine's lock, so an earlier
+                # symbol's fill in this same cycle can leave the captured
+                # balance stale by the time a later symbol reaches here.
+                fresh_balance = self._app._cached_balance
                 decision = await self._app._execution_engine.submit(
                     proposal=proposal,
-                    capital=capital,
-                    available_balance=balance,
+                    capital=fresh_balance,
+                    available_balance=fresh_balance,
                     feature_vector=vec,
                     regime_context=regime_ctx,
                 )
@@ -1087,7 +1094,7 @@ class TradingLoopModule(AppBoundModule):
             # Track shadow position for TP/SL simulation
             if is_shadow and proposal.stop_loss and proposal.take_profit:
                 engine_position = (
-                    self._app._execution_engine._open_positions.get(symbol)
+                    self._app._execution_engine._open_positions.get(symbol) or {}
                     if self._app._execution_engine is not None
                     else {}
                 )
@@ -1110,12 +1117,15 @@ class TradingLoopModule(AppBoundModule):
                 # Refresh balance every N iterations
                 _balance_tick += 1
                 refresh_every = max(1, int(_BALANCE_REFRESH_INTERVAL / _STRATEGY_LOOP_INTERVAL))
-                if _balance_tick % refresh_every == 0:
-                    await self._app._refresh_balance()
-                    await self._app._refresh_closed_pnl_memory()
-                await self._app._sync_execution_positions()
-                await self._app._manage_open_positions()
-                self._app._check_zero_trading()
+                try:
+                    if _balance_tick % refresh_every == 0:
+                        await self._app._refresh_balance()
+                        await self._app._refresh_closed_pnl_memory()
+                    await self._app._sync_execution_positions()
+                    await self._app._manage_open_positions()
+                    self._app._check_zero_trading()
+                except Exception:
+                    log.exception("strategy_loop.cycle_maintenance_error")
 
                 balance = self._app._cached_balance
                 capital = balance

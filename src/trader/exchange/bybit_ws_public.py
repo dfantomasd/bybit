@@ -32,6 +32,8 @@ logger = structlog.get_logger(__name__)
 _HEARTBEAT_INTERVAL = 20.0  # send ping every 20 s
 _PONG_TIMEOUT = 5.0  # expect pong within 5 s
 _WATCHDOG_TIMEOUT = 30.0  # reconnect if no message for 30 s
+_RECONNECT_BACKOFF_BASE = 1.0
+_RECONNECT_BACKOFF_MAX = 30.0
 
 
 class BybitPublicWebSocket:
@@ -89,8 +91,9 @@ class BybitPublicWebSocket:
     async def start(self) -> None:
         """Connect and start processing messages (runs until stop() called)."""
         self._running = True
+        consecutive_failures = 0
         while not self._stop_event.is_set():
-            await self._run_connection()
+            connected_ok = await self._run_connection()
             if self._stop_event.is_set():
                 break
             self._reconnect_count += 1
@@ -99,8 +102,16 @@ class BybitPublicWebSocket:
                     self._metrics.ws_reconnect_total.labels(name="public").inc()
                 except Exception:  # noqa: S110
                     pass
-            # Small backoff before reconnecting (supervisor manages larger backoff)
-            await asyncio.sleep(1.0)
+            if connected_ok:
+                consecutive_failures = 0
+                delay = _RECONNECT_BACKOFF_BASE
+            else:
+                consecutive_failures += 1
+                delay = min(
+                    _RECONNECT_BACKOFF_BASE * (2 ** (consecutive_failures - 1)),
+                    _RECONNECT_BACKOFF_MAX,
+                )
+            await asyncio.sleep(delay)
         self._running = False
 
     async def stop(self) -> None:
@@ -148,15 +159,16 @@ class BybitPublicWebSocket:
     # Internal connection loop
     # ------------------------------------------------------------------
 
-    async def _run_connection(self) -> None:
-        """Single connection attempt — returns when disconnected."""
+    async def _run_connection(self) -> bool:
+        """Single connection attempt — returns True if the connection was ever established."""
         try:
             import websockets
         except ImportError:
             self._log.error("websockets_not_installed")
             await asyncio.sleep(5.0)
-            return
+            return False
 
+        connected_ok = False
         self._downtime_start = time.monotonic()
         try:
             async with websockets.connect(
@@ -167,6 +179,7 @@ class BybitPublicWebSocket:
             ) as ws:
                 self._ws = ws
                 self._connected = True
+                connected_ok = True
                 now = time.monotonic()
                 self._last_message_ts = now
                 self._last_market_message_ts = now
@@ -220,8 +233,11 @@ class BybitPublicWebSocket:
         finally:
             self._connected = False
             self._ws = None
+            for ob in self._orderbooks.values():
+                ob.invalidate()
             if self._downtime_start is None:
                 self._downtime_start = time.monotonic()
+        return connected_ok
 
     async def _send_subscribe(self, topics: list[str]) -> None:
         """Send subscription request."""
@@ -232,6 +248,32 @@ class BybitPublicWebSocket:
             await self._ws.send(msg)
         except Exception as exc:
             self._log.warning("ws_public.subscribe_failed", error=str(exc))
+
+    async def _resubscribe_orderbook(self, topic: str) -> None:
+        """Force Bybit to push a fresh snapshot after a sequence gap.
+
+        Bybit does not resend a snapshot on a duplicate subscribe to an
+        already-subscribed topic, so we must unsubscribe first.
+        """
+        if self._ws is None:
+            return
+        ws = self._ws
+        try:
+            await ws.send(json.dumps({"op": "unsubscribe", "args": [topic]}))
+        except Exception as exc:
+            self._log.warning("ws_public.orderbook_unsubscribe_failed", topic=topic, error=str(exc))
+            return
+        try:
+            await ws.send(json.dumps({"op": "subscribe", "args": [topic]}))
+        except Exception as exc:
+            # Unsubscribe succeeded but subscribe failed: the topic is now unregistered
+            # on the server. Log as error (not warning) — no snapshot will arrive and
+            # the book stays broken until the next full reconnect.
+            self._log.error(
+                "ws_public.orderbook_resubscribe_subscribe_failed",
+                topic=topic,
+                error=str(exc),
+            )
 
     async def _heartbeat_loop(self, ws: Any) -> None:
         """Send ping every 20s and verify pong received within 5s."""
@@ -361,15 +403,15 @@ class BybitPublicWebSocket:
         elif msg_type == "delta":
             ok = ob.apply_delta(data)
             if not ok:
-                # Sequence gap — invalidate and emit invalid marker
+                # Sequence gap — book is now invalid; force a fresh snapshot.
                 self._log.warning(
                     "ws_public.orderbook_seq_gap",
                     symbol=symbol,
                     last_id=ob.last_update_id,
                 )
-                update_type = "delta"
-            else:
-                update_type = "delta"
+                await self._resubscribe_orderbook(topic)
+                return
+            update_type = "delta"
         else:
             return
 

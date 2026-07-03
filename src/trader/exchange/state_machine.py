@@ -67,6 +67,8 @@ VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
         OrderStatus.FILLED,
         OrderStatus.CANCEL_REQUESTED,
         OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
     },
     OrderStatus.CANCEL_REQUESTED: {
         OrderStatus.CANCELLED,
@@ -80,6 +82,7 @@ VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED: {
         OrderStatus.WS_CONFIRMED,
         OrderStatus.FILLED,
+        OrderStatus.PARTIALLY_FILLED,
         OrderStatus.CANCELLED,
         OrderStatus.REJECTED,
         OrderStatus.EXPIRED,

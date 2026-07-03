@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -173,6 +174,8 @@ class EntryExitOptimizer:
 
             # Предсказать лучший момент входа
             entry_offset_pct = float(self.entry_model.predict(x)[0])
+            if not math.isfinite(entry_offset_pct):
+                raise ValueError(f"non-finite entry_offset_pct: {entry_offset_pct}")
             entry_offset_pct = max(-2.0, min(2.0, entry_offset_pct))  # -2% до +2%
 
             if side == "BUY":
@@ -180,16 +183,18 @@ class EntryExitOptimizer:
             else:  # SELL
                 best_entry = context.current_price * (Decimal("1") - Decimal(str(entry_offset_pct / 100)))
 
-            # Определить тайминг
+            # Determine timing by comparing best_entry vs current price
             if abs(entry_offset_pct) < 0.3:
                 entry_timing = "IMMEDIATE"
-            elif entry_offset_pct < 0:  # Цена упала - ждём падения
-                entry_timing = "WAIT_FOR_DIP"
-            else:  # Цена выросла - ждём роста
+            elif best_entry > context.current_price:
                 entry_timing = "WAIT_FOR_PEAK"
+            else:
+                entry_timing = "WAIT_FOR_DIP"
 
             # Предсказать TP
             tp_distance_pct = float(self.tp_model.predict(x)[0])
+            if not math.isfinite(tp_distance_pct):
+                raise ValueError(f"non-finite tp_distance_pct: {tp_distance_pct}")
             tp_distance_pct = max(0.5, min(3.0, tp_distance_pct))  # 0.5% до 3%
 
             if side == "BUY":

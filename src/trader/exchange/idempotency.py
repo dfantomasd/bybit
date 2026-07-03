@@ -23,31 +23,49 @@ from trader.domain.models import OrderIntent
 logger = structlog.get_logger(__name__)
 
 # Valid state transitions (from → allowed next states)
+# Kept in sync with trader.exchange.state_machine.VALID_TRANSITIONS.
 _VALID_TRANSITIONS: dict[OrderStatus, set[OrderStatus]] = {
     OrderStatus.CREATED_LOCAL: {OrderStatus.SUBMITTING, OrderStatus.CANCELLED},
     OrderStatus.SUBMITTING: {OrderStatus.REST_ACCEPTED, OrderStatus.REJECTED, OrderStatus.CANCELLED},
-    OrderStatus.REST_ACCEPTED: {OrderStatus.WS_CONFIRMED, OrderStatus.CANCELLED, OrderStatus.REJECTED},
+    OrderStatus.REST_ACCEPTED: {
+        OrderStatus.WS_CONFIRMED,
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
+    },
     OrderStatus.WS_CONFIRMED: {
         OrderStatus.PARTIALLY_FILLED,
         OrderStatus.FILLED,
         OrderStatus.CANCEL_REQUESTED,
         OrderStatus.CANCELLED,
+        OrderStatus.EXPIRED,
     },
     OrderStatus.PARTIALLY_FILLED: {
         OrderStatus.FILLED,
         OrderStatus.CANCEL_REQUESTED,
         OrderStatus.CANCELLED,
+        OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
     },
     OrderStatus.FILLED: set(),
-    OrderStatus.CANCEL_REQUESTED: {OrderStatus.CANCELLED},
+    # CANCEL_REQUESTED → PARTIALLY_FILLED / FILLED: fill-vs-cancel race; the
+    # exchange may ack a fill after we sent a cancel request.
+    OrderStatus.CANCEL_REQUESTED: {
+        OrderStatus.PARTIALLY_FILLED,
+        OrderStatus.FILLED,
+        OrderStatus.CANCELLED,
+    },
     OrderStatus.CANCELLED: set(),
     OrderStatus.REJECTED: set(),
     OrderStatus.EXPIRED: set(),
     OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED: {
         OrderStatus.WS_CONFIRMED,
+        OrderStatus.PARTIALLY_FILLED,
         OrderStatus.FILLED,
         OrderStatus.CANCELLED,
         OrderStatus.REJECTED,
+        OrderStatus.EXPIRED,
     },
 }
 
@@ -205,34 +223,127 @@ class IdempotencyManager:
         self._transition(order_link_id, OrderStatus.REST_ACCEPTED)
         self._store[order_link_id]["exchange_order_id"] = exchange_order_id
 
+    async def mark_ws_confirmed(self, order_link_id: str) -> None:
+        """Mark order as WS-confirmed (exchange acknowledged)."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_ws_confirmed.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES or current == OrderStatus.WS_CONFIRMED:
+            return
+        allowed = _VALID_TRANSITIONS.get(current, set())
+        if OrderStatus.WS_CONFIRMED in allowed:
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
+
+    async def mark_partially_filled(self, order_link_id: str) -> None:
+        """Mark order as partially filled."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_partially_filled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES or current == OrderStatus.PARTIALLY_FILLED:
+            return
+        # Ensure we're in WS_CONFIRMED first if coming from REST_ACCEPTED
+        if current == OrderStatus.REST_ACCEPTED:
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
+        self._transition(order_link_id, OrderStatus.PARTIALLY_FILLED)
+
     async def mark_filled(self, order_link_id: str) -> None:
         """Mark order as fully filled."""
-        current = self._store.get(order_link_id, {}).get("status")
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_filled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
         if current == OrderStatus.PARTIALLY_FILLED:
             self._transition(order_link_id, OrderStatus.FILLED)
         elif current == OrderStatus.WS_CONFIRMED:
             self._transition(order_link_id, OrderStatus.FILLED)
         elif current == OrderStatus.REST_ACCEPTED:
-            # Fast-fill: jump straight to FILLED via WS_CONFIRMED intermediate
-            self._store[order_link_id]["status"] = OrderStatus.WS_CONFIRMED
+            # Fast-fill: step through WS_CONFIRMED to satisfy state machine
+            self._transition(order_link_id, OrderStatus.WS_CONFIRMED)
             self._transition(order_link_id, OrderStatus.FILLED)
-        else:
+        elif current not in _TERMINAL_STATES:
             self._transition(order_link_id, OrderStatus.FILLED)
 
     async def mark_cancelled(self, order_link_id: str) -> None:
         """Mark order as cancelled."""
-        current = self._store.get(order_link_id, {}).get("status")
-        if current in (OrderStatus.FILLED, OrderStatus.CANCELLED, OrderStatus.REJECTED):
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_cancelled.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES:
             logger.warning(
                 "idempotency.cancel_in_terminal_state",
                 order_link_id=order_link_id,
                 status=current.value if current else "None",
             )
             return
-        # Move to CANCEL_REQUESTED first if needed
-        if current == OrderStatus.WS_CONFIRMED or current == OrderStatus.PARTIALLY_FILLED:
-            self._store[order_link_id]["status"] = OrderStatus.CANCEL_REQUESTED
+        # Step through CANCEL_REQUESTED for WS_CONFIRMED / PARTIALLY_FILLED orders
+        if current in (OrderStatus.WS_CONFIRMED, OrderStatus.PARTIALLY_FILLED):
+            self._transition(order_link_id, OrderStatus.CANCEL_REQUESTED)
         self._transition(order_link_id, OrderStatus.CANCELLED)
+
+    async def mark_rejected(self, order_link_id: str) -> None:
+        """Mark order as rejected by the exchange."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_rejected.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES:
+            return
+        self._transition(order_link_id, OrderStatus.REJECTED)
+
+    async def mark_expired(self, order_link_id: str) -> None:
+        """Mark order as expired by the exchange."""
+        if order_link_id not in self._store:
+            logger.warning("idempotency.mark_expired.unknown", order_link_id=order_link_id)
+            return
+        current = self._store[order_link_id]["status"]
+        if current in _TERMINAL_STATES:
+            return
+        self._transition(order_link_id, OrderStatus.EXPIRED)
+
+    # ------------------------------------------------------------------
+    # Startup seeding
+    # ------------------------------------------------------------------
+
+    def seed_from_records(
+        self,
+        records: Iterable[dict[str, Any]],
+    ) -> int:
+        """Pre-populate the store from DB records on startup.
+
+        Each record must have ``order_link_id`` and ``status`` (OrderStatus value
+        string or OrderStatus enum).  Records for IDs already present are skipped.
+        Returns the number of records actually seeded.
+
+        Call this once during system startup (before any orders are submitted) so
+        the idempotency guard survives process restarts.
+        """
+        seeded = 0
+        for rec in records:
+            order_link_id = rec.get("order_link_id") or rec.get("orderLinkId")
+            if not order_link_id or order_link_id in self._store:
+                continue
+            raw_status = rec.get("status")
+            try:
+                if isinstance(raw_status, OrderStatus):
+                    status = raw_status
+                else:
+                    status = OrderStatus(str(raw_status))
+            except ValueError:
+                status = OrderStatus.UNKNOWN_RECONCILIATION_REQUIRED
+            self._store[order_link_id] = {
+                "status": status,
+                "exchange_order_id": rec.get("exchange_order_id") or rec.get("orderId"),
+                "intent": None,
+                "created_at": rec.get("created_at") or datetime.now(tz=UTC),
+                "terminal_at": rec.get("terminal_at"),
+            }
+            seeded += 1
+        if seeded:
+            logger.info("idempotency.seeded_from_db", count=seeded)
+        return seeded
 
     # ------------------------------------------------------------------
     # Introspection
@@ -247,22 +358,32 @@ class IdempotencyManager:
         return sum(1 for v in self._store.values() if v["status"] not in _TERMINAL_STATES)
 
     def _terminal_order_ids_oldest_first(self) -> Iterable[str]:
+        _fallback = datetime.min.replace(tzinfo=UTC)
+
+        def _ts(entry: dict) -> datetime:
+            for key in ("terminal_at", "created_at"):
+                val = entry.get(key)
+                if isinstance(val, datetime):
+                    return val
+            return _fallback
+
         terminal_items = [
-            (order_link_id, entry.get("terminal_at") or entry.get("created_at") or datetime.min.replace(tzinfo=UTC))
+            (order_link_id, _ts(entry))
             for order_link_id, entry in self._store.items()
             if entry.get("status") in _TERMINAL_STATES
         ]
         return (order_link_id for order_link_id, _ in sorted(terminal_items, key=lambda item: item[1]))
 
     def _prune_terminal_orders(self) -> None:
-        """Bound memory use by retaining only the newest terminal orders."""
+        """Bound memory use by retaining only the newest terminal orders.
+
+        A max_terminal_retained of 0 or negative means unlimited retention.
+        """
         if self._max_terminal_retained <= 0:
-            terminal_ids = list(self._terminal_order_ids_oldest_first())
-        else:
-            terminal_ids = list(self._terminal_order_ids_oldest_first())
-            overflow = len(terminal_ids) - self._max_terminal_retained
-            if overflow <= 0:
-                return
-            terminal_ids = terminal_ids[:overflow]
-        for order_link_id in terminal_ids:
+            return
+        terminal_ids = list(self._terminal_order_ids_oldest_first())
+        overflow = len(terminal_ids) - self._max_terminal_retained
+        if overflow <= 0:
+            return
+        for order_link_id in terminal_ids[:overflow]:
             self._store.pop(order_link_id, None)

@@ -10,6 +10,7 @@ requests.
 from __future__ import annotations
 
 import asyncio
+import re
 import time
 from datetime import UTC, datetime
 from typing import Any
@@ -33,6 +34,7 @@ _REDIS_TIMEOUT_S = 2.0
 _BYBIT_TIMEOUT_S = 5.0
 _MODEL_STALE_THRESHOLD_S = 3600.0  # 1 hour
 _FEATURE_STALE_THRESHOLD_S = 120.0  # 2 minutes — allows pipeline warm-up on startup
+_OVERALL_HEALTH_CACHE_TTL_S = 2.0  # debounce repeated unauthenticated /readyz hits
 _CIRCUIT_BREAKER_MARKERS = (
     "ECIRCUITBREAKER",
     "EAUTHQUERY",
@@ -40,6 +42,15 @@ _CIRCUIT_BREAKER_MARKERS = (
     "failed to retrieve database credentials",
     "too many authentication failures",
 )
+
+
+_DSN_CREDENTIALS_RE = re.compile(r"//[^/@\s]+@")
+
+
+def _scrub_dsn_credentials(text: str) -> str:
+    """Strip embedded user:pass@ credentials from a connection string that may
+    appear inside a driver exception message before it is logged."""
+    return _DSN_CREDENTIALS_RE.sub("//***@", text)
 
 
 def _postgres_retry_wait_seconds(
@@ -97,6 +108,9 @@ class HealthChecker:
         self._last_ws_message_at: datetime | None = None
         self._last_model_inference_at: datetime | None = None
         self._last_feature_computed_at: datetime | None = None
+        self._health_cache: HealthStatus | None = None
+        self._health_cache_at: float = 0.0
+        self._health_cache_lock = asyncio.Lock()
 
     # ------------------------------------------------------------------
     # State setters (called by other components)
@@ -140,7 +154,7 @@ class HealthChecker:
             latency = (time.monotonic() - start) * 1000
             return True, latency, None
         except Exception as exc:
-            return False, None, str(exc)
+            return False, None, _scrub_dsn_credentials(str(exc))
 
     async def check_postgres(self) -> tuple[bool, float | None]:
         """Ping PostgreSQL.
@@ -273,7 +287,20 @@ class HealthChecker:
         """Run all checks concurrently and return an aggregate HealthStatus.
 
         This method is designed to be called from a FastAPI route handler.
+        Results are cached for a short TTL so that repeated unauthenticated
+        calls (e.g. /readyz hit in a tight loop) cannot force a fresh
+        Postgres/Redis/Bybit round-trip on every request.
         """
+        async with self._health_cache_lock:
+            now = time.monotonic()
+            if self._health_cache is not None and (now - self._health_cache_at) < _OVERALL_HEALTH_CACHE_TTL_S:
+                return self._health_cache
+            result = await self._compute_overall_health()
+            self._health_cache = result
+            self._health_cache_at = time.monotonic()
+            return result
+
+    async def _compute_overall_health(self) -> HealthStatus:
         (
             (pg_ok, pg_lat),
             (redis_ok, redis_lat),

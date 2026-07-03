@@ -1,26 +1,31 @@
-"""Read-only FastAPI observability application.
+"""FastAPI observability application.
 
 Endpoints:
-  GET /livez           - Unauthenticated process liveness
-  GET /health          - Component health status
-  GET /status          - System status summary
-  GET /positions       - Current open positions (no secrets)
-  GET /metrics         - Prometheus text exposition
-  GET /regime          - Current market regime per symbol
-  GET /model           - Deployed model metadata
+  GET  /livez           - Unauthenticated process liveness
+  GET  /health          - Component health status
+  GET  /status          - System status summary
+  GET  /positions       - Current open positions (no secrets)
+  GET  /metrics         - Prometheus text exposition
+  GET  /regime          - Current market regime per symbol
+  GET  /model           - Deployed model metadata
+  POST /api/settings    - Mutates live runtime risk/execution settings
+                           (position limits, entry rate, model-gate
+                           threshold) — NOT read-only; see operator_controls.
 
 Security:
   - API key authentication via X-API-Key header (internal use only)
   - CORS restricted to configured origins
   - Security headers (X-Content-Type-Options, etc.)
   - Request-level structured logging
-  - Rate limiting via slowapi
 
-All endpoints are READ-ONLY. No trading actions can be triggered via this API.
+Most endpoints are read-only observability data. POST /api/settings is the
+one exception and changes trading behavior in real time — the X-API-Key
+header is its only authorization/audit control.
 """
 
 from __future__ import annotations
 
+import hmac
 import json
 import time
 from collections.abc import Awaitable, Callable
@@ -118,7 +123,7 @@ def create_app(
 
     def verify_api_key(request: Request) -> None:
         provided = request.headers.get(_API_KEY_HEADER)
-        if not provided or provided != api_key:
+        if not provided or not hmac.compare_digest(provided, api_key):
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Invalid or missing API key",
@@ -137,16 +142,12 @@ def create_app(
         tags=["observability"],
     )
     async def get_livez() -> dict[str, str]:
-        """Return minimal unauthenticated liveness for container probes."""
-        from trader.monitoring.deploy_info import get_deploy_info
+        """Return minimal unauthenticated liveness for container probes.
 
-        info = get_deploy_info()
-        payload = {"status": "ok"}
-        if info["deploy_id"]:
-            payload["deploy_id"] = info["deploy_id"]
-        if info["git_commit"]:
-            payload["git_commit"] = info["git_commit"]
-        return payload
+        Intentionally returns only status — deploy/commit metadata would be
+        visible to any unauthenticated caller and is available on /status.
+        """
+        return {"status": "ok"}
 
     @app.get(
         "/readyz",
@@ -157,7 +158,9 @@ def create_app(
         """Return 200 when the system is healthy/degraded, 503 when unhealthy.
 
         Use this for Kubernetes/Render readiness probes — the container should
-        not receive traffic when unhealthy (e.g. DB or WS feed is down).
+        not receive traffic when unhealthy (e.g. DB is down). Note: a stale/
+        disconnected WS feed alone only degrades the overall status, it does
+        not fail this probe — see HealthChecker._compute_overall_health.
         """
         if health_checker is None:
             return JSONResponse(status_code=200, content={"status": "ok", "note": "no health checker"})
@@ -293,7 +296,7 @@ def create_app(
                 status_code=500,
                 content=f"<html><body><h1>Dashboard error</h1><pre>{data['error']}</pre></body></html>",
             )
-        payload = json.dumps(data, default=str).replace("</", "<\\/")
+        payload = json.dumps(data, default=str)
         html = f"""
 <!doctype html>
 <html lang="en">
@@ -325,8 +328,9 @@ def create_app(
   </div>
   <section style="margin-top:18px"><h2>Baseline PnL heatmap, UTC</h2><div id="heatmap"></div></section>
 </main>
+<script type="application/json" id="__data__">{payload}</script>
 <script>
-const DATA = {payload};
+const DATA = JSON.parse(document.getElementById('__data__').textContent);
 document.getElementById('meta').textContent = `horizon=${{DATA.horizon_minutes}}m, model=${{DATA.model_version || 'none'}}`;
 const base = DATA.equity_baseline || [];
 const gate = DATA.equity_gate_pass || [];

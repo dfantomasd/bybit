@@ -92,6 +92,11 @@ class ExecutionRuntimeModule(AppBoundModule):
             kelly_adapter = KellyAdapter()
             self._app._ml_controller = None
             self._app._kelly_predictor = None
+            self._app._regime_predictor = None
+            self._app._signal_fusion = None
+            self._app._spread_predictor = None
+            self._app._stoploss_optimizer = None
+            self._app._entry_exit_optimizer = None
 
         self._app._risk_manager = RiskManager(
             risk_profile=profile,
@@ -109,6 +114,8 @@ class ExecutionRuntimeModule(AppBoundModule):
             ml_controller=self._app._ml_controller,
         )
         self._app._kill_switch = kill_switch
+        # Automatically reset daily PnL at UTC midnight.
+        self._app._risk_manager.start_daily_reset_scheduler()
         log.info(
             "risk_manager.initialized",
             profile=profile.value,
@@ -299,20 +306,39 @@ class ExecutionRuntimeModule(AppBoundModule):
             # duplicate terminal event. The authoritative record is order_pending_state
             # (resolved_at) which survives restarts.
             _released_cache: set[str] = set()
+            _RELEASED_CACHE_MAX = 10_000
 
             async def _release_pending(order_link_id: str, symbol: str) -> None:
                 """Release a pending entry slot exactly once and persist the resolution."""
                 if order_link_id in _released_cache:
                     return
-                if (
-                    self._app._trade_journal is not None
-                    and self._app._trade_journal.is_enabled
-                    and await self._app._trade_journal.is_order_resolved(order_link_id)
-                ):
+                already_resolved = False
+                if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
+                    try:
+                        already_resolved = await self._app._trade_journal.is_order_resolved(order_link_id)
+                    except Exception as _check_exc:
+                        # A DB hiccup here must not prevent releasing the
+                        # in-memory pending slot below — otherwise a single
+                        # transient error permanently leaks one of the
+                        # limited MAX_CONCURRENT_PENDING_ENTRIES slots.
+                        log.debug(
+                            "private_ws.is_order_resolved_failed",
+                            order_link_id=order_link_id,
+                            error=str(_check_exc),
+                        )
+                if already_resolved:
+                    # Order already resolved in DB (e.g. after restart): release the in-memory
+                    # pending slot so it doesn't leak and block future orders.
+                    if self._app._execution_engine is not None:
+                        self._app._execution_engine.mark_entry_resolved(order_link_id)
+                    if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                        _released_cache.clear()
                     _released_cache.add(order_link_id)
                     return
                 if self._app._execution_engine is not None:
                     self._app._execution_engine.mark_entry_resolved(order_link_id)
+                if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                    _released_cache.clear()
                 _released_cache.add(order_link_id)
                 if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
                     try:
@@ -365,13 +391,13 @@ class ExecutionRuntimeModule(AppBoundModule):
                         # Use order_link_id if present, otherwise reverse-lookup via exchange_order_id.
                         order_link_id = event.order_link_id
                         exchange_order_id = event.order_id
-                        if order_link_id is None and exchange_order_id:
+                        if not order_link_id and exchange_order_id:
                             if self._app._trade_journal is not None:
                                 order_link_id = await self._app._trade_journal.find_order_link_id_by_exchange_order_id(
                                     exchange_order_id
                                 )
                             # If lookup fails, we still process the event but can't tie it to a pending slot
-                        if order_link_id is None:
+                        if not order_link_id:
                             # Generate a fallback ID for logging only — never used for pending slot
                             order_link_id = f"unknown:{exchange_order_id or 'no_exchange_id'}"
 
@@ -421,6 +447,8 @@ class ExecutionRuntimeModule(AppBoundModule):
                             if not order_link_id.startswith("unknown:"):
                                 await _release_pending(order_link_id, event.symbol)
                             else:
+                                if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                                    _released_cache.clear()
                                 _released_cache.add(order_link_id)
                         # Trigger position sync on fill
                         if order_status == OrderStatus.FILLED and self._app._execution_engine is not None:
@@ -830,7 +858,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                 breakeven_stop = self.round_to_tick(
                     self.breakeven_stop(pos.entry_price, pos.side.value, fee_rates=fee_rates),
                     info.tick_size,
-                    round_up=pos.side.value == "Sell",
+                    round_up=pos.side.value == "Buy",
                 )
                 if trailing_distance < info.tick_size:
                     trailing_distance = info.tick_size

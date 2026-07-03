@@ -140,7 +140,7 @@ class KillSwitch:
         if self._flag_file.exists():
             try:
                 with self._flag_file.open(encoding="utf-8") as fh:
-                    content = fh.read().strip()
+                    content = fh.read(4096).strip()
                 reason = content or "kill flag file present"
             except OSError:
                 reason = "kill flag file present"
@@ -191,11 +191,8 @@ class KillSwitch:
         return False
 
     def orders_allowed(self) -> bool:
-        """Return False if new orders of any type are blocked."""
+        """Return False if the kill switch is active in any mode."""
         if not self._active:
-            return True
-        # PAUSE_NEW_ENTRIES allows reduce-only orders
-        if self._mode == KillSwitchMode.PAUSE_NEW_ENTRIES:
             return True
         return False
 

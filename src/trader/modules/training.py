@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import gc
 import html
 import json
@@ -789,25 +790,36 @@ class TrainingModule(ModuleTaskMixin):
             return html.escape(value[-limit:])
 
         try:
-            train_env = {
-                **os.environ,
-                # Keep sklearn/BLAS from saturating the single Render starter CPU.
-                "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
-                "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
-                "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
-                "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
-                "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
-                "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
-                "TRAIN_STRATEGY_ALLOWLIST": (
-                    self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
-                ),
-                "TRAIN_INCLUDE_CANDLE_BASELINE": (
-                    "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
-                ),
-                "MODEL_LABEL_USE_TPSL_EXIT": (
-                    "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
-                ),
+            # Pass only the variables the training subprocess needs.
+            # Never forward the full os.environ to avoid leaking secrets
+            # (API keys, tokens, DSN passwords) to the child process.
+            _safe_env_passthrough = {
+                "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE",
+                "TZ", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV",
+                # Postgres DSN is required for training data queries.
+                "POSTGRES_DSN", "DATABASE_URL",
             }
+            train_env = {k: v for k, v in os.environ.items() if k in _safe_env_passthrough}
+            # Keep sklearn/BLAS from saturating the single Render starter CPU.
+            train_env.update(
+                {
+                    "OMP_NUM_THREADS": os.environ.get("OMP_NUM_THREADS", "1"),
+                    "OPENBLAS_NUM_THREADS": os.environ.get("OPENBLAS_NUM_THREADS", "1"),
+                    "MKL_NUM_THREADS": os.environ.get("MKL_NUM_THREADS", "1"),
+                    "NUMEXPR_NUM_THREADS": os.environ.get("NUMEXPR_NUM_THREADS", "1"),
+                    "VECLIB_MAXIMUM_THREADS": os.environ.get("VECLIB_MAXIMUM_THREADS", "1"),
+                    "BLIS_NUM_THREADS": os.environ.get("BLIS_NUM_THREADS", "1"),
+                    "TRAIN_STRATEGY_ALLOWLIST": (
+                        self._app._settings.TRAIN_STRATEGY_ALLOWLIST if self._app._settings is not None else ""
+                    ),
+                    "TRAIN_INCLUDE_CANDLE_BASELINE": (
+                        "true" if self._app._settings and self._app._settings.TRAIN_INCLUDE_CANDLE_BASELINE else "false"
+                    ),
+                    "MODEL_LABEL_USE_TPSL_EXIT": (
+                        "true" if self._app._settings and self._app._settings.MODEL_LABEL_USE_TPSL_EXIT else "false"
+                    ),
+                }
+            )
             create_kwargs: dict[str, Any] = {"env": train_env}
             if hasattr(os, "nice"):
                 create_kwargs["preexec_fn"] = lambda: os.nice(10)
@@ -820,7 +832,8 @@ class TrainingModule(ModuleTaskMixin):
             communicate_task = asyncio.create_task(proc.communicate(), name="model-training-communicate")
             timed_out = False
             _notified_running = False
-            while True:
+            try:
+              while True:
                 try:
                     stdout_b, stderr_b = await asyncio.wait_for(
                         asyncio.shield(communicate_task),
@@ -837,12 +850,23 @@ class TrainingModule(ModuleTaskMixin):
                             stdout_b, stderr_b = await asyncio.wait_for(communicate_task, timeout=10.0)
                         except TimeoutError:
                             communicate_task.cancel()
+                            with contextlib.suppress(asyncio.CancelledError):
+                                await communicate_task
                             stdout_b = b""
                             stderr_b = f"training timeout after {elapsed:.0f}s".encode()
                         break
                     if self._app._telegram_bot is not None and not _notified_running:
                         await self._app._telegram_bot.notify(f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)")
                         _notified_running = True
+            except asyncio.CancelledError:
+                # Kill the subprocess so it does not become an orphan when the
+                # event loop is shutting down.
+                if proc.returncode is None:
+                    proc.kill()
+                communicate_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await communicate_task
+                raise
             stdout = stdout_b.decode(errors="replace").strip()
             stderr = stderr_b.decode(errors="replace").strip()
             if timed_out:
@@ -912,6 +936,17 @@ class TrainingModule(ModuleTaskMixin):
         )
         if not batch:
             return
+        if self._app._model_registry.challenger is None or self._app._model_registry.challenger.version != challenger.version:
+            # A promotion/retrain swapped the registry's challenger while we
+            # were awaiting the batch fetch above. This batch was labelled
+            # against the old challenger_version filter — applying it to
+            # whatever model is current now would mutate the wrong model.
+            log.warning(
+                "online_learning.batch_skipped_challenger_changed",
+                fetched_for_version=challenger.version,
+                current_version=getattr(self._app._model_registry.challenger, "version", None),
+            )
+            return
         applied = 0
         prediction_ids: list[str] = []
         for row in batch:
@@ -927,13 +962,28 @@ class TrainingModule(ModuleTaskMixin):
             self._app._online_learning_updates_since_checkpoint += applied
             checkpoint_every = max(1, int(self._app._settings.MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY))
             if self._app._online_learning_updates_since_checkpoint >= checkpoint_every:
-                await self._app._model_registry.save_checkpoint(challenger)
-                self._app._online_learning_updates_since_checkpoint = 0
-                log.info(
-                    "online_learning.checkpoint_saved",
-                    version=challenger.version,
-                    samples=challenger.training_samples,
-                )
+                # partial_fit_challenger mutates whatever the registry's
+                # *current* challenger is; a promotion/retrain running
+                # concurrently on the awaits above could have swapped it out
+                # from under this stale local reference. Only checkpoint if
+                # it's still the same model, otherwise the mutated model
+                # would go unpersisted while a different (untouched) one
+                # gets checkpointed instead.
+                current_challenger = self._app._model_registry.challenger
+                if current_challenger is not None and current_challenger.version == challenger.version:
+                    await self._app._model_registry.save_checkpoint(current_challenger)
+                    self._app._online_learning_updates_since_checkpoint = 0
+                    log.info(
+                        "online_learning.checkpoint_saved",
+                        version=challenger.version,
+                        samples=current_challenger.training_samples,
+                    )
+                else:
+                    log.warning(
+                        "online_learning.checkpoint_skipped_challenger_changed",
+                        applied_to_version=challenger.version,
+                        current_version=getattr(current_challenger, "version", None),
+                    )
             log.info("online_learning.updated", samples=applied, model_version=challenger.version)
 
     async def evaluate_feature_drift(self) -> dict[str, Any]:

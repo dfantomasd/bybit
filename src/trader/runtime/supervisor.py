@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import sys
 from datetime import UTC, datetime
 from typing import Any
 
@@ -156,7 +155,19 @@ class RuntimeSupervisor(AppBoundModule):
                         )
                     except Exception as notify_exc:  # noqa: BLE001
                         log.warning("supervisor.telegram_notify_failed", error=str(notify_exc))
-                sys.exit(1)
+                # Signal the main loop to exit via graceful_shutdown rather than
+                # calling sys.exit() directly, which would bypass journal flushing
+                # and adapter teardown.
+                self._app._shutdown_event.set()
+                return
+
+            # Prune completed non-critical tasks (e.g. one-off training runs)
+            # so _background_tasks doesn't grow unbounded over the process
+            # lifetime. Critical tasks are never pruned here — a done
+            # critical task is handled (and the app shut down) above.
+            self._app._background_tasks[:] = [
+                t for t in self._app._background_tasks if not t.done() or t.get_name() in _CRITICAL_TASK_NAMES
+            ]
 
             try:
                 await asyncio.wait_for(

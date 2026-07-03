@@ -560,9 +560,13 @@ def _settings_horizon() -> int:
         from trader.config import Settings
 
         return int(getattr(Settings(), "MODEL_LABEL_HORIZON", 15))
-    except Exception:
+    except Exception as exc:
+        import logging
         import os
 
+        logging.getLogger(__name__).warning(
+            "historical_seed.settings_load_failed_using_default_horizon", exc_info=exc
+        )
         try:
             return int(os.environ.get("MODEL_LABEL_HORIZON", "15"))
         except (TypeError, ValueError):

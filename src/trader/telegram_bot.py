@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import hmac
 import html
 import inspect
 import io
@@ -76,6 +77,10 @@ _CONFIRM_TTL_SECONDS = 300.0
 _CONFIRM_MAX_PENDING = 1000
 _TELEGRAM_MESSAGE_LIMIT = 4000
 _POLLING_LOCK_KEY_PREFIX = "bybit-trader:telegram-polling"
+_TRAIN_RATE_LIMIT_SECONDS = 120
+_DB_PROBE_RATE_LIMIT_SECONDS = 30
+_DEEP_REPORT_RATE_LIMIT_SECONDS = 60
+_DB_MODEL_RATE_LIMIT_SECONDS = 30
 
 AdapterFactory = Callable[[], Any | None]
 HealthProvider = Callable[[], Awaitable[HealthStatus]]
@@ -262,6 +267,11 @@ class TelegramMonitorBot:
         self._webhook_route_mounted: bool = False
         self._redis_client: Any | None = None
         self._model_performance_cache: list[dict[str, Any]] = []
+        # Rate limit: track last training invocation time per chat to prevent subprocess spam.
+        self._last_train_at: dict[int, datetime] = {}
+        self._last_db_probe_at: dict[int, datetime] = {}
+        self._last_deep_report_at: dict[int, datetime] = {}
+        self._last_db_model_at: dict[int, datetime] = {}
 
     def _uses_webhook(self) -> bool:
         return self._config.delivery_mode == "webhook"
@@ -444,10 +454,11 @@ class TelegramMonitorBot:
         @http_app.post("/telegram/webhook")
         async def telegram_webhook(incoming: Request) -> Response:
             secret = bot_ref._config.webhook_secret.strip()
-            if secret:
-                provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-                if provided != secret:
-                    raise HTTPException(status_code=403, detail="invalid webhook secret")
+            if not secret:
+                raise HTTPException(status_code=403, detail="webhook secret not configured")
+            provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+            if not hmac.compare_digest(provided, secret):
+                raise HTTPException(status_code=403, detail="invalid webhook secret")
             tg_app = bot_ref._app
             if tg_app is None:
                 raise HTTPException(status_code=503, detail="telegram not ready")
@@ -892,7 +903,7 @@ class TelegramMonitorBot:
         await self.notify(f"{icon} <b>Позиция закрыта</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>")
 
     async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
-        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{breaker_type}</code>\nПричина: {reason}")
+        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{html.escape(breaker_type)}</code>\nПричина: {html.escape(reason)}")
 
     async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
         await self.notify(f"⚙️ <b>Риск-профиль изменен</b>\n{old_profile} → <code>{new_profile}</code>")
@@ -1580,7 +1591,7 @@ class TelegramMonitorBot:
         try:
             health = await self._health_provider()
         except Exception as exc:
-            await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{exc}</code>")
+            await self._reply(update, f"<b>Статус</b>\nПроверка не прошла: <code>{html.escape(str(exc))}</code>")
             return
 
         from trader.monitoring.deploy_info import get_deploy_info
@@ -1622,7 +1633,7 @@ class TelegramMonitorBot:
         ]
         if health.messages:
             lines += ["", "<b>Предупреждения</b>"]
-            lines.extend(f"• {m}" for m in health.messages[:6])
+            lines.extend(f"• {html.escape(m)}" for m in health.messages[:6])
         await self._reply(update, "\n".join(lines))
 
     async def _cmd_balance(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -1636,7 +1647,7 @@ class TelegramMonitorBot:
         try:
             bal: Balance = await adapter.get_balance()
         except Exception as exc:
-            await self._reply(update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>Баланс</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         lines = [
             "<b>Баланс Bybit UNIFIED</b>",
@@ -1662,7 +1673,7 @@ class TelegramMonitorBot:
         try:
             positions: list[Position] = await adapter.get_positions(self._config.default_category)
         except Exception as exc:
-            await self._reply(update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>Позиции</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         open_pos = [p for p in positions if p.size > 0]
         if not open_pos:
@@ -1703,7 +1714,7 @@ class TelegramMonitorBot:
                 "",
                 f"{icon} <b>{s.symbol}</b> {s.side} [{mode}] {ts}",
                 f"  Уверенность: <code>{s.confidence:.2f}</code>  Режим рынка: <code>{s.regime}</code>",
-                f"  {s.rationale[:80]}",
+                f"  {html.escape(s.rationale[:80])}",
             ]
         await self._reply(update, "\n".join(lines))
 
@@ -1761,7 +1772,7 @@ class TelegramMonitorBot:
             resp = await adapter._rest.get_closed_pnl(category=self._config.default_category, limit=20)
             records = resp.get("result", {}).get("list", [])
         except Exception as exc:
-            await self._reply(update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{exc}</code>")
+            await self._reply(update, f"<b>PnL</b>\nЗапрос к Bybit не прошел: <code>{html.escape(str(exc))}</code>")
             return
         if not records:
             await self._reply(update, "<b>Закрытый PnL</b>\nЗакрытых сделок пока нет.")
@@ -1930,7 +1941,7 @@ class TelegramMonitorBot:
             log.warning("telegram.costs_detailed_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Издержки детально</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Издержки детально</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -1986,7 +1997,7 @@ class TelegramMonitorBot:
             log.warning("telegram.pnl_analysis_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>PnL-анализ</b>\nОшибка: <code>{exc}</code>",
+                f"<b>PnL-анализ</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2098,7 +2109,7 @@ class TelegramMonitorBot:
             log.warning("telegram.compare_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Compare</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Compare</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2151,7 +2162,7 @@ class TelegramMonitorBot:
             log.warning("telegram.worst_failed", error=str(exc))
             await self._reply(
                 update,
-                f"<b>Worst</b>\nОшибка: <code>{exc}</code>",
+                f"<b>Worst</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._main_menu(),
             )
             return
@@ -2211,7 +2222,7 @@ class TelegramMonitorBot:
             else:
                 await self._respond(
                     update,
-                    f"<b>История моделей</b>\nОшибка: <code>{exc}</code>",
+                    f"<b>История моделей</b>\nОшибка: <code>{html.escape(str(exc))}</code>",
                     reply_markup=self._main_menu(),
                 )
                 return
@@ -2404,7 +2415,7 @@ class TelegramMonitorBot:
         try:
             rows = await self._controller.attribution_provider(7)
         except Exception as exc:
-            await self._reply(update, f"<b>Attribution</b>\nОшибка: <code>{exc}</code>")
+            await self._reply(update, f"<b>Attribution</b>\nОшибка: <code>{html.escape(str(exc))}</code>")
             return
         if not rows:
             await self._reply(
@@ -2434,7 +2445,7 @@ class TelegramMonitorBot:
         try:
             diag = self._controller.diagnostics_provider()
         except Exception as exc:
-            await self._reply(update, f"<b>Диагностика</b>\nОшибка: <code>{exc}</code>")
+            await self._reply(update, f"<b>Диагностика</b>\nОшибка: <code>{html.escape(str(exc))}</code>")
             return
 
         loop_at = diag.get("last_strategy_loop_at") or "никогда"
@@ -2449,8 +2460,8 @@ class TelegramMonitorBot:
             "<b>Диагностика за последний час</b>",
             f"Цикл стратегии: <code>{loop_at}</code>",
             f"Последнее WS-сообщение: <code>{ws_str}</code>",
-            f"Активные монеты: <code>{len(symbols)}</code>  {' '.join(symbols[:5])}{'…' if len(symbols) > 5 else ''}",
-            f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(positions[:5])}{'…' if len(positions) > 5 else ''}",
+            f"Активные монеты: <code>{len(symbols)}</code>  {' '.join(html.escape(s) for s in symbols[:5])}{'…' if len(symbols) > 5 else ''}",
+            f"Открытые позиции: <code>{len(positions)}</code>  {' '.join(html.escape(p) for p in positions[:5])}{'…' if len(positions) > 5 else ''}",
             f"Риск портфеля: <code>{heat_str}</code>",
         ]
         drift = diag.get("drift_status")
@@ -2498,7 +2509,7 @@ class TelegramMonitorBot:
         pending_symbols = diag.get("pending_entry_symbols") or []
         pending_count = diag.get("pending_entry_count") or 0
         if pending_count > 0:
-            ids_str = ", ".join(f"<code>{pid[:16]}…</code>" for pid in pending_ids[:3])
+            ids_str = ", ".join(f"<code>{html.escape(pid[:16])}…</code>" for pid in pending_ids[:3])
             sym_str = ", ".join(pending_symbols[:3]) if pending_symbols else "неизвестно"
             lines.append(
                 f"\n⚠️ Новые входы <b>заблокированы</b> pending-заявкой:\n"
@@ -2533,6 +2544,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last_probe = self._last_db_probe_at.get(cid)
+            if last_probe is not None:
+                elapsed = (datetime.now(tz=UTC) - last_probe).total_seconds()
+                if elapsed < _DB_PROBE_RATE_LIMIT_SECONDS:
+                    wait = int(_DB_PROBE_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным /db_probe.")
+                    return
+            self._last_db_probe_at[cid] = datetime.now(tz=UTC)
         text = await self._render_db_probe_text()
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
 
@@ -2544,6 +2565,8 @@ class TelegramMonitorBot:
                 if isinstance(value, ssl.SSLContext):
                     if value.verify_mode == ssl.CERT_NONE:
                         return "SSLContext(no_verify)"
+                    if value.verify_mode == ssl.CERT_OPTIONAL:
+                        return "SSLContext(optional_verify)"
                     return "SSLContext(verify)"
             except Exception:
                 pass
@@ -2665,6 +2688,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_deep_report_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DEEP_REPORT_RATE_LIMIT_SECONDS:
+                    wait = int(_DEEP_REPORT_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным запросом отчёта.")
+                    return
+            self._last_deep_report_at[cid] = datetime.now(tz=UTC)
         text = await self._render_deep_report_text()
         await self._send_deep_report_document(update, text)
 
@@ -2673,6 +2706,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_deep_report_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DEEP_REPORT_RATE_LIMIT_SECONDS:
+                    wait = int(_DEEP_REPORT_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с перед повторным запросом отчёта.")
+                    return
+            self._last_deep_report_at[cid] = datetime.now(tz=UTC)
         text = await self._render_deep_report_text()
         await self._respond(update, text, reply_markup=self._diagnostics_menu())
 
@@ -3861,6 +3904,16 @@ class TelegramMonitorBot:
         del context
         if not await self._authorised(update):
             return
+        cid = self._chat_id(update)
+        if cid is not None:
+            last = self._last_db_model_at.get(cid)
+            if last is not None:
+                elapsed = (datetime.now(tz=UTC) - last).total_seconds()
+                if elapsed < _DB_MODEL_RATE_LIMIT_SECONDS:
+                    wait = int(_DB_MODEL_RATE_LIMIT_SECONDS - elapsed)
+                    await self._reply(update, f"⏳ Подождите ещё {wait}с.")
+                    return
+            self._last_db_model_at[cid] = datetime.now(tz=UTC)
         try:
             db_diag = await self._load_db_diag(lite=update.callback_query is not None)
             diag: dict[str, Any] = {}
@@ -4432,11 +4485,24 @@ class TelegramMonitorBot:
                     reply_markup=self._main_menu(),
                 )
                 return
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last_train = self._last_train_at.get(chat_id)
+            if last_train is not None:
+                elapsed = (datetime.now(tz=UTC) - last_train).total_seconds()
+                if elapsed < _TRAIN_RATE_LIMIT_SECONDS:
+                    wait = int(_TRAIN_RATE_LIMIT_SECONDS - elapsed)
+                    await self._button_reply(
+                        update,
+                        f"⏳ Обучение уже запущено или недавно завершилось. Подождите ещё {wait}с.",
+                        reply_markup=self._main_menu(),
+                    )
+                    return
             try:
                 _, min_s_raw, horizon_raw, label_raw = action.split(":", maxsplit=3)
                 min_samples = int(min_s_raw)
                 horizon = int(horizon_raw)
                 label_bps = float(label_raw)
+                self._last_train_at[chat_id] = datetime.now(tz=UTC)
                 msg = await self._controller.start_training(min_samples, horizon, label_bps)
             except Exception as exc:
                 msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
@@ -4450,7 +4516,20 @@ class TelegramMonitorBot:
                     reply_markup=self._main_menu(),
                 )
                 return
+            chat_id = update.effective_chat.id if update.effective_chat else 0
+            last_train = self._last_train_at.get(chat_id)
+            if last_train is not None:
+                elapsed = (datetime.now(tz=UTC) - last_train).total_seconds()
+                if elapsed < _TRAIN_RATE_LIMIT_SECONDS:
+                    wait = int(_TRAIN_RATE_LIMIT_SECONDS - elapsed)
+                    await self._button_reply(
+                        update,
+                        f"⏳ Обучение уже запущено или недавно завершилось. Подождите ещё {wait}с.",
+                        reply_markup=self._main_menu(),
+                    )
+                    return
             try:
+                self._last_train_at[chat_id] = datetime.now(tz=UTC)
                 msg = await self._controller.start_training_all()
             except Exception as exc:
                 msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
@@ -4639,7 +4718,7 @@ class TelegramMonitorBot:
                 value = int(raw_value)
             msg = await self._controller.set_runtime_setting(key, value)
         except Exception as exc:
-            await self._reply(update, f"❌ Изменение лимита отклонено: <code>{exc}</code>")
+            await self._reply(update, f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>")
             return
         await self._reply(
             update,
@@ -4680,7 +4759,7 @@ class TelegramMonitorBot:
             await self._reply(update, f"✅ Готово: <i>{action_name}</i>")
             log.info("telegram_control_confirmed", action=action_name, chat_id=cid)
         except Exception as exc:
-            await self._reply(update, f"❌ Не получилось: <code>{exc}</code>")
+            await self._reply(update, f"❌ Не получилось: <code>{html.escape(str(exc))}</code>")
             log.error("telegram_control_failed", action=action_name, error=str(exc))
 
     async def _show_canary_model_metrics(self, update: Update) -> None:
@@ -5214,7 +5293,7 @@ class TelegramMonitorBot:
                 else:
                     text_parts.append("Нет данных")
             except Exception as exc:
-                text_parts.append(f"Ошибка: <code>{exc}</code>")
+                text_parts.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
             text_parts.append("Контроллер недоступен")
         keyboard = InlineKeyboardMarkup(
@@ -5239,7 +5318,7 @@ class TelegramMonitorBot:
                 if net is not None:
                     text_parts.append(f"Net PnL: <code>{net:+.2f} USD</code>")
             except Exception as exc:
-                text_parts.append(f"Ошибка: <code>{exc}</code>")
+                text_parts.append(f"Ошибка: <code>{html.escape(str(exc))}</code>")
         else:
             text_parts.append("Провайдер PnL недоступен")
         keyboard = InlineKeyboardMarkup(
@@ -5457,12 +5536,10 @@ class TelegramMonitorBot:
             if ctrl is None:
                 await self._button_reply(update, "Управление недоступно.", reply_markup=self._main_menu())
                 return
-            if action == "pause":
-                await ctrl.pause()
-            else:
-                await ctrl.resume()
-            text, markup = await self._render_home()
-            await self._button_reply(update, text, reply_markup=markup)
+            # Route through the same confirm-dialog flow as /pause, /resume,
+            # and the control:pause/control:resume submenu buttons, instead
+            # of mutating trading state on the very first tap.
+            await self._handle_control_button(update, action)
             return
         if action == "canary":
             fake_context = type("_Context", (), {"args": []})()
@@ -5845,7 +5922,7 @@ class TelegramMonitorBot:
             )
             markup = self._confirm_menu(f"train:{min_samples}:{horizon}:{label_bps:g}")
         except Exception as exc:
-            msg = f"❌ Обучение не стартовало: <code>{exc}</code>"
+            msg = f"❌ Обучение не стартовало: <code>{html.escape(str(exc))}</code>"
             markup = self._main_menu()
         await self._button_reply(update, msg, reply_markup=markup)
 
@@ -5898,7 +5975,7 @@ class TelegramMonitorBot:
         except Exception as exc:
             await self._button_reply(
                 update,
-                f"❌ Изменение лимита отклонено: <code>{exc}</code>",
+                f"❌ Изменение лимита отклонено: <code>{html.escape(str(exc))}</code>",
                 reply_markup=self._limits_menu(),
             )
             return
@@ -5950,6 +6027,25 @@ class TelegramMonitorBot:
                 reply_markup=self._main_menu(),
             )
             return
+
+        # Block escalation to a riskier profile unless explicitly allowed.
+        old_level = _RISK_LEVEL.get(old_profile, 0)
+        new_level = _RISK_LEVEL.get(new_profile_str, 0)
+        if new_level > old_level and not self._controller.allow_risk_increase:
+            await self._button_reply(
+                update,
+                f"🚫 <b>Повышение риска заблокировано</b>: <code>{old_profile}</code> → <code>{new_profile_str}</code>\n"
+                "Чтобы разрешить, задайте <code>TELEGRAM_ALLOW_RISK_INCREASE=true</code> на Render.\n"
+                "После изменения нужен перезапуск сервиса.",
+                reply_markup=self._main_menu(),
+            )
+            log.warning(
+                "telegram.risk_escalation_blocked",
+                old=old_profile,
+                new=new_profile_str,
+            )
+            return
+
         cid = self._chat_id(update)
         controller = self._controller
         if cid and controller is not None:

@@ -45,6 +45,17 @@ class _FakeConnection:
         self.fetchval_sql.append(sql)
         return None
 
+    def transaction(self) -> "_FakeTransaction":
+        return _FakeTransaction()
+
+
+class _FakeTransaction:
+    async def __aenter__(self) -> "_FakeTransaction":
+        return self
+
+    async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
+        return None
+
 
 class _AcquireContext:
     def __init__(self, conn: _FakeConnection) -> None:

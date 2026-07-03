@@ -85,6 +85,18 @@ class TPSLCalculator:
             if tp_price >= entry_price:
                 tp_price = self._round_exit_to_tick(entry_price - tick_size, tick_size, side=side, is_stop_loss=False)
 
+        # Final sanity check: SL and TP must not coincide or cross after rounding.
+        if is_long and sl_price >= tp_price:
+            sl_price = tp_price - tick_size
+            # Re-validate directional invariant: sl must remain below entry
+            if sl_price >= entry_price:
+                sl_price = self._round_to_tick(entry_price - tick_size, tick_size)
+        elif not is_long and sl_price <= tp_price:
+            sl_price = tp_price + tick_size
+            # Re-validate directional invariant: sl must remain above entry
+            if sl_price <= entry_price:
+                sl_price = self._round_exit_to_tick(entry_price + tick_size, tick_size, side=side, is_stop_loss=True)
+
         return sl_price, tp_price
 
     # ------------------------------------------------------------------
@@ -191,8 +203,16 @@ class TPSLCalculator:
         side: str,
         is_stop_loss: bool,
     ) -> Decimal:
-        """Round exit prices conservatively for the trade direction."""
-        del is_stop_loss
+        """Round exit prices conservatively for the trade direction.
+
+        Both SL and TP use the same conservative direction per side:
+          - Long  (buy)  → ROUND_DOWN:    keeps SL below entry; keeps TP at or below target
+          - Short (sell) → ROUND_CEILING: keeps SL above entry; keeps TP at or above target
+
+        `is_stop_loss` is accepted for API compatibility but does not change the
+        rounding direction because the conservative rounding is identical for SL and TP.
+        """
+        _ = is_stop_loss  # same rounding direction for both SL and TP — see docstring
         if tick_size <= Decimal("0"):
             return price
         is_short = side.lower() in ("sell", "short")

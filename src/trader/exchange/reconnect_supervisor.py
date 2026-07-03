@@ -91,6 +91,7 @@ class ReconnectSupervisor:
             # Block entries while connecting
             self._entries_blocked = True
             self._downtime_start = time.monotonic()
+            attempt_started_at = self._downtime_start
 
             try:
                 log.info("ws.connecting", attempt=attempt)
@@ -106,6 +107,13 @@ class ReconnectSupervisor:
                 self._total_downtime += time.monotonic() - self._downtime_start
                 self._downtime_start = None
 
+            # If the connection stayed up for a meaningful stretch, treat it
+            # as recovered and reset the backoff — otherwise a single brief
+            # blip long after a rocky start reconnects using a stale, large
+            # attempt count instead of retrying quickly.
+            if time.monotonic() - attempt_started_at >= 60.0:
+                attempt = 0
+
             if self._stop_event.is_set():
                 break
 
@@ -114,8 +122,9 @@ class ReconnectSupervisor:
             self._reconnect_count += 1
             self._reconnect_times.append(now)
 
-            # Prune old timestamps outside the alert window
-            cutoff = now - _ALERT_WINDOW_SECONDS
+            # Prune old timestamps — keep the longer of the alert window and the hourly
+            # rate-limit window so the hourly count below is computed correctly.
+            cutoff = now - max(_ALERT_WINDOW_SECONDS, 3600)
             while self._reconnect_times and self._reconnect_times[0] < cutoff:
                 self._reconnect_times.popleft()
 

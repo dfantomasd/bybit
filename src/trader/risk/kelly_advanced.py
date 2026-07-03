@@ -270,8 +270,8 @@ class AdvancedKellySizer:
         skew = float(np.mean((arr - mean) ** 3) / (std**3))
         kurt = float(np.mean((arr - mean) ** 4) / (std**4))
         var_95 = float(np.percentile(arr, 5))
-        losses = arr[arr < 0]
-        cvar_95 = float(np.mean(losses)) if len(losses) > 0 else 0.0
+        tail_losses = arr[arr <= var_95]
+        cvar_95 = float(np.mean(tail_losses)) if len(tail_losses) > 0 else float(var_95)
 
         has_tails = kurt > self.config.fat_tail_kurtosis_threshold
 

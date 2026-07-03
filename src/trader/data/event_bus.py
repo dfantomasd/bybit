@@ -142,12 +142,14 @@ class EventBus:
         while not self._shutdown:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=1.0)
-                yield event
-                queue.task_done()
             except TimeoutError:
                 continue
             except asyncio.CancelledError:
                 break
+            try:
+                yield event
+            finally:
+                queue.task_done()
 
     async def get(self, queue_name: str, timeout: float | None = None) -> BaseEvent | None:
         """Get a single event from the named queue."""

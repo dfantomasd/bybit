@@ -5,10 +5,13 @@ Thread-safe via a re-entrant lock. All financial arithmetic uses Decimal.
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from threading import RLock
 from typing import Any
+
+# Pending exposure reservations older than this are considered stale and pruned.
+_PENDING_EXPOSURE_TTL_S = 120
 
 from trader.risk.profiles import RiskLimits
 
@@ -80,8 +83,17 @@ class ExposureTracker:
         notional_value: Decimal,
         leverage: Decimal | None = None,
         stop_distance_pct: Decimal | None = None,
+        order_id: str | None = None,
     ) -> None:
-        """Add or update a position's notional and derived risk metrics."""
+        """Add or update a position's notional and derived risk metrics.
+
+        When ``order_id`` is given, only that reservation is released — this
+        preserves other concurrent in-flight reservations for the same symbol
+        (e.g. pyramiding). When omitted (sync/WS snapshot paths with no
+        specific order in hand), all pending reservations for the symbol are
+        released as a self-healing fallback for callers that never resolved
+        their own reservation explicitly.
+        """
         lev = leverage if leverage is not None and leverage > Decimal("0") else Decimal("1")
         margin_used = notional_value / lev
         sdp = (
@@ -97,7 +109,10 @@ class ExposureTracker:
                 "stop_distance_pct": sdp,
                 "risk_at_stop": risk_at_stop,
             }
-            self._release_pending_for_symbol_unlocked(symbol)
+            if order_id:
+                self._pending_exposure.pop(order_id, None)
+            else:
+                self._release_pending_for_symbol_unlocked(symbol)
 
     async def remove_position(self, symbol: str) -> None:
         """Remove a closed position."""
@@ -227,6 +242,7 @@ class ExposureTracker:
         """
         with self._lock:
             current_total = sum(Decimal(str(p["notional"])) for p in self._positions.values())
+            current_total += sum(Decimal(str(p["notional"])) for p in self._pending_exposure.values())
             if symbol is not None and symbol in self._positions:
                 current_total -= Decimal(str(self._positions[symbol]["notional"]))
             max_total = capital * self._limits.max_total_exposure_pct / Decimal("100")
@@ -250,6 +266,8 @@ class ExposureTracker:
             (allowed, reason_if_not_allowed)
         """
         with self._lock:
+            self._prune_stale_pending_unlocked()
+
             if order_id and order_id in self._pending_exposure:
                 return False, f"order {order_id} already has pending exposure reserved"
 
@@ -302,6 +320,18 @@ class ExposureTracker:
                     sum(Decimal(str(p.get("margin_used", p["notional"]))) for p in self._positions.values())
                     - existing_margin
                 )
+                # Include other in-flight reservations so concurrent orders
+                # can't each pass this check independently and collectively
+                # blow through the cap before any of them lands in _positions.
+                pending_margin = (
+                    sum(
+                        Decimal(str(p["notional"]))
+                        for oid, p in self._pending_exposure.items()
+                        if oid != order_id
+                    )
+                    / lev
+                )
+                current_margin += pending_margin
                 new_total_margin_pct = (current_margin + new_notional / lev) / self._capital * Decimal("100")
                 if new_total_margin_pct > self._limits.max_total_margin_usage_pct:
                     return (
@@ -323,6 +353,17 @@ class ExposureTracker:
                     )
                     - existing_risk
                 )
+                # Include other in-flight reservations, using the requested
+                # stop distance as the best available proxy for their risk.
+                pending_risk = (
+                    sum(
+                        Decimal(str(p["notional"]))
+                        for oid, p in self._pending_exposure.items()
+                        if oid != order_id
+                    )
+                    * sdp
+                )
+                current_risk += pending_risk
                 new_total_risk_pct = (current_risk + new_notional * sdp) / self._capital * Decimal("100")
                 if new_total_risk_pct > self._limits.max_total_risk_at_stop_pct:
                     return (
@@ -335,6 +376,7 @@ class ExposureTracker:
                 self._pending_exposure[order_id] = {
                     "symbol": symbol,
                     "notional": additional_notional,
+                    "reserved_at": datetime.now(UTC),
                 }
             return True, ""
 
@@ -443,4 +485,15 @@ class ExposureTracker:
             if str(pending.get("symbol", "")).upper() == symbol.upper()
         ]
         for oid in to_release:
+            self._pending_exposure.pop(oid, None)
+
+    def _prune_stale_pending_unlocked(self) -> None:
+        """Drop pending reservations older than _PENDING_EXPOSURE_TTL_S."""
+        cutoff = datetime.now(UTC) - timedelta(seconds=_PENDING_EXPOSURE_TTL_S)
+        stale = [
+            oid
+            for oid, pending in self._pending_exposure.items()
+            if isinstance(pending.get("reserved_at"), datetime) and pending["reserved_at"] < cutoff
+        ]
+        for oid in stale:
             self._pending_exposure.pop(oid, None)

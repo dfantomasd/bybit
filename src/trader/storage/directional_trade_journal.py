@@ -396,11 +396,11 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 cp.closed_pnl,
                 cp.created_at AS closed_at
             FROM prediction_events pe
-            JOIN closed_pnl cp ON cp.symbol = pe.symbol
+            JOIN closed_pnl cp ON cp.symbol = pe.symbol AND cp.order_link_id = pe.order_link_id
             LEFT JOIN prediction_outcomes po
                 ON po.prediction_id = pe.prediction_id
                 AND po.horizon_minutes = $1
-                AND po.label_schema_version = $4
+                AND po.label_schema_version = $3
             WHERE po.prediction_id IS NULL
               AND pe.order_link_id IS NOT NULL
               AND cp.created_at > pe.created_at
@@ -412,7 +412,6 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             """,
             horizon_minutes,
             limit,
-            label_schema,
             label_schema,
         )
 

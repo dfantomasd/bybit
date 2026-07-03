@@ -205,11 +205,11 @@ class PredictionApplier:
                 return False, f"Low confidence: {params.entry_confidence:.2f}"
 
             # Additional checks based on regime
-            if params.regime == "SIDEWAYS" and params.entry_confidence < 0.55:
-                return False, "Sideways market needs higher confidence"
-
-            if params.regime not in ["TREND_UP", "TREND_DOWN"]:
-                # Check if signal is really strong in non-trend
+            if params.regime == "SIDEWAYS":
+                if params.entry_confidence < 0.55:
+                    return False, "Sideways market needs higher confidence"
+            elif params.regime not in ["TREND_UP", "TREND_DOWN"]:
+                # Non-sideways, non-trend regimes require stronger signal
                 if params.entry_confidence < 0.60:
                     return False, "Non-trend regime needs >0.60 confidence"
 
@@ -217,7 +217,7 @@ class PredictionApplier:
 
         except Exception as e:
             logger.error(f"should_take_trade failed: {e}")
-            return False, f"ML analysis failed: {e}"
+            return True, f"ML analysis failed, allowing trade: {e}"
 
     async def optimize_exit(
         self,

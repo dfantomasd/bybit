@@ -114,8 +114,11 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
                 # libpq sslmode=require encrypts the connection without
                 # requiring certificate-chain verification. Supabase pooler can
                 # present a chain that is not trusted by Render's CA bundle; a
-                # plain ssl=True in asyncpg verifies it and fails. Use an
-                # explicit context to preserve sslmode=require semantics.
+                # plain ssl=True in asyncpg verifies it and fails. CERT_OPTIONAL
+                # would still validate a presented server cert and raise on an
+                # untrusted chain (the client always receives a cert in a TLS
+                # handshake, so CERT_OPTIONAL != "skip verification" here) —
+                # only CERT_NONE actually reproduces libpq's sslmode=require.
                 context = ssl.create_default_context()
                 context.check_hostname = False
                 context.verify_mode = ssl.CERT_NONE
@@ -127,7 +130,21 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
             continue
         kept_query.append((key, value))
     cleaned = urlunparse(parsed._replace(query=urlencode(kept_query, doseq=True)))
+    # Expand DSN into explicit kwargs so the password is never in a loggable
+    # string (asyncpg may log connection kwargs on error).
     kwargs: dict[str, Any] = {"dsn": cleaned}
+    if parsed.username:
+        kwargs["user"] = parsed.username
+    if parsed.password:
+        kwargs["password"] = parsed.password
+        # Remove credentials from the DSN string to avoid leaking them in logs.
+        cleaned_no_creds = urlunparse(
+            parsed._replace(
+                netloc=f"{parsed.hostname}:{parsed.port}" if parsed.port else (parsed.hostname or ""),
+                query=urlencode(kept_query, doseq=True),
+            )
+        )
+        kwargs["dsn"] = cleaned_no_creds
     if ssl_arg is not None:
         kwargs["ssl"] = ssl_arg
     return kwargs
@@ -141,6 +158,73 @@ def _schema_statement_label(statement: str) -> str:
     return statement.strip()[:160]
 
 
+def _split_sql_statements(script: str) -> list[str]:
+    """Split SQL script into individual statements, respecting string literals.
+
+    Handles single-quoted strings, double-quoted identifiers, and PostgreSQL
+    dollar-quoted literals ($$...$$ or $tag$...$tag$).
+    """
+    import re
+
+    statements: list[str] = []
+    current: list[str] = []
+    in_string = False
+    string_char = ""
+    dollar_tag: str | None = None  # non-None while inside $tag$...$tag$
+    i = 0
+    while i < len(script):
+        ch = script[i]
+
+        if dollar_tag is not None:
+            # Inside a dollar-quoted block — scan for the closing tag
+            end = script.find(dollar_tag, i)
+            if end == -1:
+                # Unterminated dollar-quote: consume the rest as-is
+                current.append(script[i:])
+                break
+            tag_end = end + len(dollar_tag)
+            current.append(script[i:tag_end])
+            i = tag_end
+            dollar_tag = None
+            continue
+
+        if in_string:
+            current.append(ch)
+            if ch == string_char:
+                # Handle escaped quote by doubling ('' or "")
+                if i + 1 < len(script) and script[i + 1] == string_char:
+                    current.append(script[i + 1])
+                    i += 2
+                    continue
+                in_string = False
+        elif ch == "$":
+            # Look for a dollar-quote opening tag: $identifier$ or $$
+            m = re.match(r"\$([A-Za-z_]\w*)?\$", script[i:])
+            if m:
+                dollar_tag = m.group(0)
+                current.append(dollar_tag)
+                i += len(dollar_tag)
+                continue
+            else:
+                current.append(ch)
+        elif ch in ("'", '"'):
+            in_string = True
+            string_char = ch
+            current.append(ch)
+        elif ch == ";":
+            stmt = "".join(current).strip()
+            if stmt:
+                statements.append(stmt)
+            current = []
+        else:
+            current.append(ch)
+        i += 1
+    remainder = "".join(current).strip()
+    if remainder:
+        statements.append(remainder)
+    return statements
+
+
 async def _execute_schema_script(conn: Any, script: str) -> None:
     """Execute DDL one statement at a time.
 
@@ -149,8 +233,7 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
     and makes failures point at the exact DDL statement.
     """
     statement_index = 0
-    for raw_statement in script.split(";"):
-        statement = raw_statement.strip()
+    for statement in _split_sql_statements(script):
         if not statement:
             continue
         statement_index += 1
@@ -162,7 +245,14 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
 
 
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
-    returns = [float(row.get("net_return_bps") or 0.0) for row in rows]
+    import math
+
+    returns = [
+        v
+        for row in rows
+        for v in [float(row.get("net_return_bps") or 0.0)]
+        if math.isfinite(v)
+    ]
     equity = 0.0
     peak = 0.0
     max_drawdown = 0.0
@@ -270,6 +360,7 @@ class TradeJournal:
         )
         self._pool: asyncpg.Pool | None = None
         self._diag_lock = asyncio.Lock()
+        self._connect_lock = asyncio.Lock()
         self._last_fetch_timeout_log_at: datetime | None = None
         self._schema_initialized: bool = False
         self._connect_failures: int = 0
@@ -284,6 +375,7 @@ class TradeJournal:
         self._last_write_error_at: datetime | None = None
         self._last_write_error: str | None = None
         self._consecutive_write_errors: int = 0
+        self._background_tasks: set[asyncio.Task] = set()
 
     @property
     def is_enabled(self) -> bool:
@@ -335,6 +427,16 @@ class TradeJournal:
         return max(0.0, remaining)
 
     async def connect(self) -> None:
+        async with self._connect_lock:
+            await self._connect_locked()
+
+    async def _connect_locked(self) -> None:
+        """Body of connect(); caller must hold self._connect_lock.
+
+        Re-checks self._pool under the lock so concurrent connect()/
+        reconnect_if_needed() callers can't each pass the "not connected"
+        check and race to create (and leak) duplicate connection pools.
+        """
         if not self._enabled or self._pool is not None:
             return
         self._last_connect_attempt_at = datetime.now(tz=UTC)
@@ -462,16 +564,17 @@ class TradeJournal:
         if blocked_until is not None and now < blocked_until:
             if self._last_backoff_was_auth or not force:
                 return self.is_enabled
-        if self._pool is not None:
-            if not force and self.durable_state_healthy:
-                return True
-            await self._close_pool_after_failure("reconnect_pool_close_failed")
-            self._pool = None
-        if not force and self._last_connect_attempt_at is not None:
-            age = now - self._last_connect_attempt_at
-            if age < timedelta(seconds=min_interval):
-                return False
-        await self.connect()
+        async with self._connect_lock:
+            if self._pool is not None:
+                if not force and self.durable_state_healthy:
+                    return True
+                await self._close_pool_after_failure("reconnect_pool_close_failed")
+                self._pool = None
+            if not force and self._last_connect_attempt_at is not None:
+                age = now - self._last_connect_attempt_at
+                if age < timedelta(seconds=min_interval):
+                    return False
+            await self._connect_locked()
         if self.is_enabled:
             self._consecutive_write_errors = 0
             self._last_write_error = None
@@ -848,14 +951,13 @@ class TradeJournal:
                 );
             """,
             )
-        asyncio.create_task(
-            self._ensure_model_registry_indexes_deferred(),
-            name="trade-journal-model-registry-index",
-        )
-        asyncio.create_task(
-            self._ensure_feature_snapshot_unique_index_deferred(),
-            name="trade-journal-feature-index",
-        )
+        for coro, name in (
+            (self._ensure_model_registry_indexes_deferred(), "trade-journal-model-registry-index"),
+            (self._ensure_feature_snapshot_unique_index_deferred(), "trade-journal-feature-index"),
+        ):
+            task = asyncio.create_task(coro, name=name)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
 
     async def _ensure_model_registry_indexes_deferred(self) -> None:
         """Repair model registry metadata and champion uniqueness outside startup."""
@@ -864,45 +966,54 @@ class TradeJournal:
         try:
             async with self._pool.acquire() as conn:
                 await conn.execute("SET statement_timeout = '120s'")
-                await conn.execute(
-                    """
-                    UPDATE model_versions
-                    SET feature_schema_hash = metrics->>'source_feature_schema_hash'
-                    WHERE metrics ? 'source_feature_schema_hash'
-                      AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
-                      AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash';
-                    WITH ranked AS (
-                        SELECT model_id,
-                               row_number() OVER (
-                                   ORDER BY
-                                       CASE WHEN COALESCE(
-                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                           NULLIF(metrics->>'wf_mean_bps', ''),
-                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
-                                       )::double precision > 0 THEN 0 ELSE 1 END,
-                                       COALESCE(
-                                           NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
-                                           NULLIF(metrics->>'wf_mean_bps', ''),
-                                           NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
-                                           '-1000000'
-                                       )::double precision DESC,
-                                       COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
-                                       training_finished_at DESC NULLS LAST,
-                                       created_at DESC
-                               ) AS rn
-                        FROM model_versions
-                        WHERE status = 'CHAMPION'
+                async with conn.transaction():
+                    await conn.execute(
+                        """
+                        UPDATE model_versions
+                        SET feature_schema_hash = metrics->>'source_feature_schema_hash'
+                        WHERE metrics ? 'source_feature_schema_hash'
+                          AND COALESCE(metrics->>'source_feature_schema_hash', '') <> ''
+                          AND feature_schema_hash IS DISTINCT FROM metrics->>'source_feature_schema_hash'
+                        """
                     )
-                    UPDATE model_versions mv
-                    SET status = 'ARCHIVED'
-                    FROM ranked
-                    WHERE mv.model_id = ranked.model_id
-                      AND ranked.rn > 1;
-                    CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
-                        ON model_versions ((status))
-                        WHERE status = 'CHAMPION';
-                    """
-                )
+                    await conn.execute(
+                        """
+                        WITH ranked AS (
+                            SELECT model_id,
+                                   row_number() OVER (
+                                       ORDER BY
+                                           CASE WHEN COALESCE(
+                                               NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                               NULLIF(metrics->>'wf_mean_bps', ''),
+                                               NULLIF(metrics->>'best_threshold_avg_net_return_bps', '')
+                                           )::double precision > 0 THEN 0 ELSE 1 END,
+                                           COALESCE(
+                                               NULLIF(metrics->>'walk_forward_expectancy_bps', ''),
+                                               NULLIF(metrics->>'wf_mean_bps', ''),
+                                               NULLIF(metrics->>'best_threshold_avg_net_return_bps', ''),
+                                               '-1000000'
+                                           )::double precision DESC,
+                                           COALESCE(NULLIF(metrics->>'lift_bps', ''), '0')::double precision DESC,
+                                           training_finished_at DESC NULLS LAST,
+                                           created_at DESC
+                                   ) AS rn
+                            FROM model_versions
+                            WHERE status = 'CHAMPION'
+                        )
+                        UPDATE model_versions mv
+                        SET status = 'ARCHIVED'
+                        FROM ranked
+                        WHERE mv.model_id = ranked.model_id
+                          AND ranked.rn > 1
+                        """
+                    )
+                    await conn.execute(
+                        """
+                        CREATE UNIQUE INDEX IF NOT EXISTS uq_model_versions_one_champion
+                            ON model_versions ((status))
+                            WHERE status = 'CHAMPION'
+                        """
+                    )
         except Exception as exc:
             log.warning("trade_journal.model_registry_indexes_deferred_failed", error=str(exc))
 
@@ -922,39 +1033,40 @@ class TradeJournal:
         if exists:
             return
         try:
-            await conn.execute(
-                """
-                WITH ranked AS (
-                    SELECT
-                        snapshot_id,
-                        ROW_NUMBER() OVER (
-                            PARTITION BY
-                                symbol,
-                                interval,
-                                candle_open_time,
-                                feature_schema_hash
-                            ORDER BY created_at ASC, snapshot_id ASC
-                        ) AS rn
-                    FROM feature_snapshots
-                    WHERE training_eligible = true
+            async with conn.transaction():
+                await conn.execute(
+                    """
+                    WITH ranked AS (
+                        SELECT
+                            snapshot_id,
+                            ROW_NUMBER() OVER (
+                                PARTITION BY
+                                    symbol,
+                                    interval,
+                                    candle_open_time,
+                                    feature_schema_hash
+                                ORDER BY created_at ASC, snapshot_id ASC
+                            ) AS rn
+                        FROM feature_snapshots
+                        WHERE training_eligible = true
+                    )
+                    UPDATE feature_snapshots fs
+                    SET
+                        training_eligible = false,
+                        invalid_reason = 'duplicate_snapshot_same_candle',
+                        invalidated_at = now()
+                    FROM ranked
+                    WHERE fs.snapshot_id = ranked.snapshot_id
+                      AND ranked.rn > 1
+                    """
                 )
-                UPDATE feature_snapshots fs
-                SET
-                    training_eligible = false,
-                    invalid_reason = 'duplicate_snapshot_same_candle',
-                    invalidated_at = now()
-                FROM ranked
-                WHERE fs.snapshot_id = ranked.snapshot_id
-                  AND ranked.rn > 1
-                """
-            )
-            await conn.execute(
-                """
-                CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
-                    ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
-                    WHERE training_eligible = true
-                """
-            )
+                await conn.execute(
+                    """
+                    CREATE UNIQUE INDEX IF NOT EXISTS idx_feature_snapshots_unique_eligible
+                        ON feature_snapshots (symbol, interval, candle_open_time, feature_schema_hash)
+                        WHERE training_eligible = true
+                    """
+                )
         except Exception as exc:
             log.warning(
                 "trade_journal.feature_snapshot_unique_index_deferred",
@@ -979,7 +1091,7 @@ class TradeJournal:
         regime = regime_context.regime.value if regime_context is not None else None
         requested_notional = None
         if proposal.entry_price is not None:
-            requested_notional = proposal.entry_price * proposal.requested_qty
+            requested_notional = Decimal(str(proposal.entry_price)) * Decimal(str(proposal.requested_qty))
         await self._execute(
             """
             INSERT INTO trade_signals (
@@ -1304,7 +1416,7 @@ class TradeJournal:
             taker_count = int(exec_rows[0]["taker_count"]) if exec_rows else 0
             total_fills = maker_count + taker_count
             maker_pct = (maker_count / total_fills * 100.0) if total_fills > 0 else 0.0
-            taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 100.0
+            taker_pct = (taker_count / total_fills * 100.0) if total_fills > 0 else 0.0
 
             # Bybit closedPnl ALREADY nets out open/close fees and funding
             # (help center: Closed P&L = position P&L - fees - funding), so it
@@ -1408,6 +1520,7 @@ class TradeJournal:
                 retry_count = EXCLUDED.retry_count,
                 last_error = EXCLUDED.last_error,
                 updated_at = now()
+            WHERE durable_order_state.state NOT IN ('FILLED','CANCELLED','REJECTED','EXPIRED','SHADOW','FAILED')
             """,
             order_link_id,
             proposal_id,
@@ -1599,7 +1712,7 @@ class TradeJournal:
             SELECT
                 COALESCE(pe.metadata->>'regime', 'UNKNOWN') AS regime,
                 COALESCE(pe.metadata->>'volatility', 'UNKNOWN') AS volatility,
-                extract(hour FROM pe.created_at)::int AS hour,
+                extract(hour FROM pe.created_at AT TIME ZONE 'UTC')::int AS hour,
                 avg(po.net_return_bps) AS avg_bps,
                 count(*) AS cnt
             FROM prediction_outcomes po
@@ -2249,6 +2362,7 @@ class TradeJournal:
                     feature_schema_hash, feature_names, feature_values
                 )
                 VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb)
+                ON CONFLICT DO NOTHING
                 RETURNING snapshot_id
                 """,
                 *args,
@@ -2424,7 +2538,7 @@ class TradeJournal:
             # at horizon_time is almost certainly confirmed. Still we filter confirmed.
             horizon_rows = await self._fetch(
                 """
-                SELECT close, high, low FROM market_candles
+                SELECT close, high, low, open_time FROM market_candles
                 WHERE symbol=$1 AND interval='1' AND open_time <= $2 AND confirmed = true
                 ORDER BY open_time DESC LIMIT 1
                 """,
@@ -2432,6 +2546,15 @@ class TradeJournal:
                 horizon_time,
             )
             if not horizon_rows:
+                continue
+            # Reject if the closest candle is more than 5 minutes stale — a gap
+            # in market data would produce systematically biased training labels.
+            candle_open_time = horizon_rows[0]["open_time"]
+            if candle_open_time.tzinfo is None:
+                candle_open_time = candle_open_time.replace(tzinfo=UTC)
+            from datetime import timedelta as _td
+
+            if abs((candle_open_time - horizon_time).total_seconds()) > 5 * 60:
                 continue
             horizon_close = float(horizon_rows[0]["close"])
             horizon_high = float(horizon_rows[0]["high"])
@@ -3124,7 +3247,7 @@ class TradeJournal:
                       AND po.label_schema_version = $1
                       AND po.horizon_minutes = $2
                       AND po.net_return_bps IS NOT NULL
-                    ORDER BY random()
+                      AND random() < 0.20
                     LIMIT $3
                     """,
                     label_schema_version,
@@ -4130,14 +4253,16 @@ class TradeJournal:
             """
             INSERT INTO model_promotion_log
                 (event_type, decision, challenger_version, champion_version,
-                 new_champion_version, reasons, metrics_snapshot)
-            VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb)
+                 new_champion_version, from_version, to_version, reasons, metrics_snapshot)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb)
             """,
             event_type,
             decision,
             challenger_version,
             champion_version,
             new_champion_version,
+            champion_version,
+            new_champion_version or challenger_version,
             _json.dumps(reasons or []),
             _json.dumps(metrics_snapshot or {}),
         )
@@ -4151,7 +4276,8 @@ class TradeJournal:
         """Atomically archive the current champion and promote the challenger."""
         if not self.is_enabled:
             return
-        assert self._pool is not None
+        if self._pool is None:
+            raise RuntimeError("promote_challenger_to_champion called with no DB pool")
         import json as _json
 
         async with self._pool.acquire() as conn:
@@ -4174,8 +4300,8 @@ class TradeJournal:
                     """
                     INSERT INTO model_promotion_log
                         (event_type, decision, challenger_version, champion_version,
-                         new_champion_version, reasons, metrics_snapshot)
-                    VALUES ('PROMOTION', 'APPROVED', $1, $2, $1, '[]'::jsonb, $3::jsonb)
+                         new_champion_version, from_version, to_version, reasons, metrics_snapshot)
+                    VALUES ('PROMOTION', 'APPROVED', $1, $2, $1, $2, $1, '[]'::jsonb, $3::jsonb)
                     """,
                     version,
                     prev_version,
@@ -4277,8 +4403,8 @@ class TradeJournal:
                     """
                     INSERT INTO model_promotion_log
                         (event_type, decision, champion_version, new_champion_version,
-                         reasons, metrics_snapshot)
-                    VALUES ('ROLLBACK', 'AUTO', $1, $2, $3::jsonb, $4::jsonb)
+                         from_version, to_version, reasons, metrics_snapshot)
+                    VALUES ('ROLLBACK', 'AUTO', $1, $2, $1, $2, $3::jsonb, $4::jsonb)
                     """,
                     current_version,
                     restore_version,
@@ -4309,7 +4435,10 @@ class TradeJournal:
             self._last_write_error_at = datetime.now(tz=UTC)
             self._last_write_error = str(exc)
             self._consecutive_write_errors += 1
-            log.debug(
+            # Escalate to WARNING after the first failure so fill/PnL write
+            # errors are visible in production logs, not buried at DEBUG.
+            _log_fn = log.warning if self._consecutive_write_errors >= 1 else log.debug
+            _log_fn(
                 "trade_journal.write_failed",
                 error=str(exc),
                 consecutive_errors=self._consecutive_write_errors,

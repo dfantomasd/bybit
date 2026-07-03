@@ -94,16 +94,16 @@ class OrderbookTracker:
 
         ts = now or datetime.now(tz=UTC)
         snap = ObSnapshot(ts=ts, imbalance_l5=imbalance, microprice_deviation_bps=micro_dev_bps)
-        if symbol not in self._latest:
+        if symbol.upper() not in self._latest:
             log.info(
                 "orderbook.updated",
                 symbol=symbol,
                 imbalance_l5=round(imbalance, 4),
                 microprice_deviation_bps=round(micro_dev_bps, 3),
             )
-        self._latest[symbol] = snap
+        self._latest[symbol.upper()] = snap
 
-        history = self._history.setdefault(symbol, deque(maxlen=self._history_slots))
+        history = self._history.setdefault(symbol.upper(), deque(maxlen=self._history_slots))
         if not history or (ts - history[-1].ts).total_seconds() >= _SNAPSHOT_MIN_INTERVAL_S:
             history.append(snap)
 
@@ -113,7 +113,7 @@ class OrderbookTracker:
     # ------------------------------------------------------------------
 
     def _fresh_latest(self, symbol: str, now: datetime | None = None) -> ObSnapshot | None:
-        snap = self._latest.get(symbol)
+        snap = self._latest.get(symbol.upper())
         if snap is None:
             return None
         ref = now or datetime.now(tz=UTC)
@@ -138,7 +138,7 @@ class OrderbookTracker:
         needs at least two snapshots spanning >= 2 seconds to be meaningful.
         """
         snap = self._fresh_latest(symbol)
-        history = self._history.get(symbol)
+        history = self._history.get(symbol.upper())
         if snap is None or not history:
             return None
         baseline: ObSnapshot | None = None

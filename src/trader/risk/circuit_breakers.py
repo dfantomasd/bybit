@@ -194,9 +194,18 @@ class CircuitBreakerManager:
         daily_pnl: Decimal,
         capital: Decimal,
     ) -> bool:
-        """Trigger if daily loss exceeds the limit."""
+        """Trigger if daily loss exceeds the limit.
+
+        Fails closed when capital is zero or unknown: trigger the breaker rather
+        than bypassing it, because a zero capital reading most likely indicates a
+        stale/failed balance query, not a genuinely zero account.
+        """
         if capital <= Decimal("0"):
-            return False
+            await self.trigger(
+                CircuitBreakerType.DAILY_LOSS_LIMIT,
+                "capital reported as zero or negative — failing closed on daily loss check",
+            )
+            return True
         loss_pct = abs(daily_pnl) / capital * Decimal("100") if daily_pnl < 0 else Decimal("0")
         if loss_pct >= self._limits.daily_loss_limit_pct:
             await self.trigger(
@@ -365,17 +374,24 @@ class CircuitBreakerManager:
     async def reset_all_auto(self) -> None:
         """Reset all circuit breakers that have auto_reset_after_seconds configured."""
         now = datetime.now(tz=UTC)
-        to_reset: list[CircuitBreakerType] = []
 
         async with self._lock:
-            for bt, state in self._breakers.items():
+            for bt, state in list(self._breakers.items()):
                 if state.triggered and state.auto_reset_after_seconds is not None and state.triggered_at is not None:
                     age = (now - state.triggered_at).total_seconds()
                     if age >= state.auto_reset_after_seconds:
-                        to_reset.append(bt)
-
-        for bt in to_reset:
-            await self.reset(bt)
+                        self._breakers[bt] = CircuitBreakerState(
+                            breaker_type=bt,
+                            triggered=False,
+                            triggered_at=None,
+                            reason="",
+                            severity=state.severity,
+                            auto_reset_after_seconds=state.auto_reset_after_seconds,
+                        )
+                        self._log.info(
+                            "Circuit breaker reset",
+                            extra={"breaker": bt.value},
+                        )
 
     # ------------------------------------------------------------------
     # Query methods

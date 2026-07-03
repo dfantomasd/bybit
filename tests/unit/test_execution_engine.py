@@ -113,6 +113,7 @@ def _make_engine(
     qty: Decimal | None = None,
     trade_journal: MagicMock | None = None,
     shadow_apply_net_edge_gate: bool = False,
+    live_armed: bool = True,
 ) -> ExecutionEngine:
     adapter = MagicMock()
     adapter.get_positions = AsyncMock(return_value=[])
@@ -140,6 +141,7 @@ def _make_engine(
         shadow_apply_net_edge_gate=shadow_apply_net_edge_gate,
         cooldown_s=0,  # disable cooldown for tests
         trade_journal=trade_journal,
+        live_armed=live_armed,
     )
     return engine
 
@@ -292,29 +294,30 @@ class TestExecutionEngine:
         engine._adapter.place_order.assert_awaited_once()
 
     @pytest.mark.asyncio
-    async def test_live_order_uses_market_tp_sl(self):
+    async def test_live_order_uses_limit_tp_and_market_sl(self):
         engine = _make_engine(approved=True, shadow_mode=False)
         proposal = _proposal()
         await engine.submit(proposal, Decimal("10000"), Decimal("10000"))
 
         intent = engine._adapter.place_order.await_args.args[0]
-        assert intent.tp_order_type == OrderType.MARKET
+        # TP uses LIMIT so the order rests at the target price; SL must be MARKET
+        assert intent.tp_order_type == OrderType.LIMIT
         assert intent.sl_order_type == OrderType.MARKET
 
     def test_exit_price_rounding_is_conservative_for_both_sides(self):
         engine = _make_engine()
 
         assert engine._round_exit_price(
-            Decimal("101.24"), Decimal("0.1"), OrderSide.BUY, is_stop_loss=False
+            Decimal("101.24"), Decimal("0.1"), OrderSide.BUY
         ) == Decimal("101.2")
-        assert engine._round_exit_price(Decimal("99.26"), Decimal("0.1"), OrderSide.BUY, is_stop_loss=True) == Decimal(
+        assert engine._round_exit_price(Decimal("99.26"), Decimal("0.1"), OrderSide.BUY, ) == Decimal(
             "99.2"
         )
         assert engine._round_exit_price(
-            Decimal("98.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=False
+            Decimal("98.24"), Decimal("0.1"), OrderSide.SELL
         ) == Decimal("98.3")
         assert engine._round_exit_price(
-            Decimal("101.24"), Decimal("0.1"), OrderSide.SELL, is_stop_loss=True
+            Decimal("101.24"), Decimal("0.1"), OrderSide.SELL, 
         ) == Decimal("101.3")
 
     @pytest.mark.asyncio
@@ -490,7 +493,7 @@ class TestExecutionEngine:
         engine._exposure.update_position.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_post_risk_qty_reduction_preserves_min_notional_size(self):
+    async def test_post_risk_qty_reduction_below_min_notional_rejects_trade(self):
         exposure = _FakeExposure()
         engine = _make_engine(approved=True, shadow_mode=True, qty=Decimal("0.001"))
         engine._exposure = exposure
@@ -517,11 +520,10 @@ class TestExecutionEngine:
             feature_vector=feature_vector,
         )
 
-        assert result is not None
-        assert result.approved_qty == Decimal("0.001")
+        assert result is None
         assert exposure.released == [str(proposal.proposal_id)]
         assert exposure.reserved == []
-        engine._exposure.update_position.assert_awaited_once()
+        engine._exposure.update_position.assert_not_awaited()
 
     def test_adjusted_exposure_rejection_releases_original_reservation(self):
         exposure = _FakeExposure()

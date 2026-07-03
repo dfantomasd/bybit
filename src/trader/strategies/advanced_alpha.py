@@ -403,6 +403,9 @@ class LiquidationHuntingStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "liquidation_hunting_v1"
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+
     def _rate_limited(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
         if last is None:
@@ -548,6 +551,10 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
     def strategy_id(self) -> str:
         return "volatility_squeeze_v1"
 
+    def evict_symbol(self, symbol: str) -> None:
+        self._last_signal_at.pop(symbol, None)
+        self._bw_history.pop(symbol, None)
+
     def _rate_limited(self, symbol: str) -> bool:
         last = self._last_signal_at.get(symbol)
         if last is None:
@@ -591,13 +598,16 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
 
         # Track bandwidth history to confirm squeeze buildup
         history = self._bw_history[symbol]
+        prior = list(history)  # snapshot before appending current bar
         history.append(bb_bw)
 
         # Require squeeze: current AND recent bandwidth low
         if bb_bw > self._squeeze_bw:
             _reject(self.strategy_id, symbol, "no_squeeze_bandwidth_too_wide", bb_bandwidth=bb_bw)
             return None
-        if len(history) >= 3 and min(list(history)[-3:]) > self._squeeze_bw * 1.5:
+        # Verify sustained squeeze in prior bars (checked before current append to avoid
+        # always-false: current bar already passed the squeeze guard above)
+        if len(prior) >= 3 and min(prior[-3:]) > self._squeeze_bw * 1.5:
             _reject(self.strategy_id, symbol, "no_sustained_squeeze_in_history")
             return None
 
@@ -656,7 +666,10 @@ class VolatilitySqueezeBreakoutStrategy(BaseStrategy):
             available_balance_usd=available_balance_usd,
             atr_pct=atr_pct,
             confidence=confidence,
-            rationale=(f"bb_squeeze_breakout: bw={bb_bw:.4f} pct_b={bb_pb:.2f} vol_z={vol_z:.2f} body={body:.2f}"),
+            rationale=(
+                f"bb_squeeze_breakout: bw={bb_bw:.4f} pct_b={bb_pb:.2f} "
+                f"vol_z={(vol_z or 0.0):.2f} body={(body or 0.0):.2f}"
+            ),
             feature_id=feature_vector.feature_id,
             tp_mult=1.6,  # R:R ≈ 2.46
             sl_mult=0.65,

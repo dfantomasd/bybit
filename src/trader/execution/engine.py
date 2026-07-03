@@ -120,7 +120,7 @@ class ExecutionEngine:
         trailing_stop_min_pct: float = 0.01,
         profit_gate_pct: float = 3.0,
         profit_lock_pct: float = 5.0,
-        live_armed: bool = True,
+        live_armed: bool = False,
         shadow_min_atr_multiple: float | None = None,
     ) -> None:
         self._adapter = adapter
@@ -181,6 +181,12 @@ class ExecutionEngine:
         self._pending_entry_created_at: dict[str, datetime] = {}
         # Legacy count — kept for compatibility with rate-limit check
         self._pending_entry_count: int = 0
+        # proposal_ids whose exposure reservation must survive
+        # _execute_maker_first returning False, because the order's true
+        # state is unresolved (cancel failed and the order may still be
+        # live / unknown) rather than genuinely aborted — the pending WS
+        # fill/cancel event or reconciliation is what should resolve it.
+        self._exposure_hold_pending_resolution: set[uuid.UUID] = set()
         # Per-session diagnostic counters (cumulative, not windowed)
         self._diag_skip_pending: int = 0
         self._diag_skipped_startup_warmup: int = 0
@@ -668,6 +674,10 @@ class ExecutionEngine:
             }
             notional = position.size * position.entry_price
             await self._exposure.update_position(position.symbol, position.side.value, notional)
+            # Stamp an entry time so _apply_position_snapshot respects the grace
+            # period even when the position was opened via WS (not via submit()).
+            if position.symbol not in self._last_entry_at:
+                self._last_entry_at[position.symbol] = datetime.now(tz=UTC)
 
     async def _remove_position(self, symbol: str) -> None:
         self._open_positions.pop(symbol, None)
@@ -712,7 +722,7 @@ class ExecutionEngine:
     async def _ensure_leverage(self, symbol: str, max_leverage: Decimal) -> None:
         """Set exchange leverage to match profile max, if not already confirmed."""
         confirmed = self._leverage_confirmed.get(symbol)
-        if confirmed is not None and confirmed <= max_leverage:
+        if confirmed is not None and confirmed == max_leverage:
             return
         try:
             lev_str = str(int(max_leverage)) if max_leverage == max_leverage.to_integral_value() else str(max_leverage)
@@ -1149,6 +1159,7 @@ class ExecutionEngine:
                     atr=atr,
                     shadow_mode=self._shadow_mode,
                     min_atr_multiple=shadow_min_atr,
+                    confirmed_leverage=self._leverage_confirmed.get(symbol),
                 ),
             )
         except Exception as exc:
@@ -1254,7 +1265,6 @@ class ExecutionEngine:
                 proposal.take_profit,
                 instrument_info.tick_size,
                 proposal.side,
-                is_stop_loss=False,
             )
             if tp_d is None:
                 self._release_exposure_reservation(proposal)
@@ -1345,6 +1355,26 @@ class ExecutionEngine:
                         )
 
             if adjustment_skipped_reason is not None:
+                if signal_qty_multiplier < Decimal("1"):
+                    # This multiplier exists specifically to shrink size under
+                    # degraded/risky conditions (stale-signal penalty, safety
+                    # ladder throttle, contra-trend penalty). Falling back to
+                    # the original, unpenalized qty here would submit at full
+                    # size exactly when the risk controls most want it
+                    # reduced — reject instead, mirroring how a boost
+                    # (multiplier > 1) that can't be reserved rejects below.
+                    self._diag_signal_qty_adjustment_rejected += 1
+                    log.warning(
+                        "execution.signal_qty_reduction_rejected",
+                        symbol=symbol,
+                        multiplier=str(signal_qty_multiplier),
+                        approved_qty=str(decision.approved_qty),
+                        adjusted_qty=str(adjusted_qty),
+                        reason=adjustment_skipped_reason,
+                    )
+                    self._release_exposure_reservation(proposal)
+                    exposure_reserved = False
+                    return None
                 log.info(
                     "execution.signal_qty_adjustment_skipped",
                     symbol=symbol,
@@ -1555,8 +1585,15 @@ class ExecutionEngine:
             if self._entry_order_mode == "MAKER_FIRST":
                 entered = await self._execute_maker_first(intent, proposal, decision, instrument_info)
                 if not entered:
-                    self._release_exposure_reservation(proposal)
-                    exposure_reserved = False
+                    if proposal.proposal_id in self._exposure_hold_pending_resolution:
+                        # Order state is unresolved (cancel failed, may still
+                        # be live) — keep the reservation until the pending
+                        # WS fill/cancel event or reconciliation resolves it,
+                        # or the reservation's own TTL sweep clears it.
+                        self._exposure_hold_pending_resolution.discard(proposal.proposal_id)
+                    else:
+                        self._release_exposure_reservation(proposal)
+                        exposure_reserved = False
                     return None
             else:
                 try:
@@ -1636,7 +1673,9 @@ class ExecutionEngine:
         }
 
         if notional > Decimal("0"):
-            await self._exposure.update_position(symbol, proposal.side.value, notional)
+            await self._exposure.update_position(
+                symbol, proposal.side.value, notional, order_id=str(proposal.proposal_id)
+            )
         if exposure_reserved:
             self._release_exposure_reservation(proposal)
 
@@ -1776,6 +1815,10 @@ class ExecutionEngine:
                         error=str(verify_exc),
                     )
                     self._last_failure_at[symbol] = datetime.now(tz=UTC)
+                    # Order state is unresolved — its exposure reservation
+                    # must not be released alongside the pending slot; see
+                    # _exposure_hold_pending_resolution.
+                    self._exposure_hold_pending_resolution.add(proposal.proposal_id)
                     return False
                 if still_live:
                     self._diag_maker_aborted += 1
@@ -1785,6 +1828,7 @@ class ExecutionEngine:
                         symbol=symbol,
                         order_link_id=intent.order_link_id,
                     )
+                    self._exposure_hold_pending_resolution.add(proposal.proposal_id)
                     return False
             try:
                 await self._sync_positions_locked()
@@ -2132,7 +2176,6 @@ class ExecutionEngine:
             proposal.take_profit,
             instrument_info.tick_size,
             proposal.side,
-            is_stop_loss=False,
         )
         stop_loss = self._round_exit_price(
             proposal.stop_loss,
@@ -2140,21 +2183,20 @@ class ExecutionEngine:
             proposal.side,
             is_stop_loss=True,
         )
-        use_limit = self._entry_order_mode == "POST_ONLY_LIMIT"
         return OrderIntent(
             decision_id=decision.decision_id,
             proposal_id=proposal.proposal_id,
             symbol=proposal.symbol,
             market_type=proposal.market_type,
             side=proposal.side,
-            order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
+            order_type=OrderType.MARKET,
             qty=decision.approved_qty,
-            price=None,  # Market order — no price needed
+            price=None,
             order_link_id=link_id,
             take_profit=take_profit,
             stop_loss=stop_loss,
-            tp_order_type=OrderType.LIMIT if use_limit else OrderType.MARKET,
-            sl_order_type=OrderType.MARKET,  # SL always market
+            tp_order_type=OrderType.LIMIT,
+            sl_order_type=OrderType.MARKET,
         )
 
     def _round_exit_price(
@@ -2162,14 +2204,23 @@ class ExecutionEngine:
         price: Decimal | None,
         tick_size: Decimal,
         side: OrderSide,
-        is_stop_loss: bool,
+        *,
+        is_stop_loss: bool = False,
     ) -> Decimal | None:
-        """Round exit prices without moving stops to the wrong side."""
+        """Round exit prices toward the conservative side, never widening risk.
+
+        TP always rounds toward entry (a tick less profit is safe). SL must
+        also round toward entry — rounding it away from entry would silently
+        widen the loss distance beyond what RiskManager sized the position
+        for. Since TP and SL sit on opposite sides of entry for a given
+        side, they need opposite rounding directions.
+        """
         if price is None or tick_size <= Decimal("0"):
             return price
-        rounding = ROUND_DOWN
-        if side == OrderSide.SELL:
-            rounding = ROUND_CEILING
+        # BUY: TP is above entry (round down = toward entry), SL is below
+        # entry (round up = toward entry). SELL is the mirror image.
+        round_up = (side == OrderSide.BUY) == is_stop_loss
+        rounding = ROUND_CEILING if round_up else ROUND_DOWN
         ticks = (price / tick_size).to_integral_value(rounding=rounding)
         return ticks * tick_size
 

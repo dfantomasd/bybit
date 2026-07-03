@@ -212,6 +212,8 @@ class TradingApplication:
             self._orderbook_tracker.remove_symbol(sym)
         if self._flow_tracker is not None:
             self._flow_tracker.remove_symbol(sym)
+        if self._strategy_ensemble is not None:
+            self._strategy_ensemble.evict_symbol(sym)
 
     def _symbol_microstructure_topics_enabled(self, symbol: str) -> bool:
         """Orderbook/trade/liquidation WS topics only for execution candidates on Starter."""
@@ -784,6 +786,7 @@ class TradingApplication:
         for sig in (signal.SIGTERM, signal.SIGINT):
             loop.add_signal_handler(sig, self._handle_signal, sig)
 
+        startup_reached_main_loop = False
         try:
             await self._load_settings()
             await self._configure_observability()
@@ -844,6 +847,7 @@ class TradingApplication:
                 except Exception as tg_refresh_exc:
                     log.warning("telegram.refresh_delivery_failed", error=str(tg_refresh_exc))
 
+            startup_reached_main_loop = True
             try:
                 await self._main_loop()
             finally:
@@ -859,6 +863,14 @@ class TradingApplication:
                 exc_info=True,
             )
             self._status = SystemStatus.ERROR
+            # If the exception occurred before we entered the main loop, the
+            # inner finally above never ran, so we must run shutdown here to
+            # close any resources that were already opened during startup.
+            if not startup_reached_main_loop:
+                try:
+                    await self._graceful_shutdown()
+                except Exception as shutdown_exc:
+                    log.warning("graceful_shutdown_on_startup_error_failed", error=str(shutdown_exc))
             raise
 
 

@@ -74,6 +74,7 @@ class PositionSizer:
         remaining_position_budget_usd: Decimal | None = None,
         realized_vol: Decimal | None = None,
         min_atr_multiple: Decimal | None = None,
+        confirmed_leverage: Decimal | None = None,
     ) -> tuple[Decimal, str]:
         """Compute approved quantity.
 
@@ -166,12 +167,14 @@ class PositionSizer:
         # ----------------------------------------------------------------
         # Volatility-adaptive sizing — scale down in high-vol, up in low-vol
         # target_vol is the profile's max_drawdown_pct as a daily vol proxy;
-        # multiplier clamped to [0.5, 1.5] so it never doubles or halves.
+        # multiplier clamped to [0.5, 1.0] when drawdown is active so it can
+        # never undo the drawdown multiplier applied above.
         # ----------------------------------------------------------------
         if realized_vol is not None and realized_vol > Decimal("0"):
             target_vol = self._limits.max_drawdown_pct / Decimal("100")
             vol_multiplier = target_vol / realized_vol
-            vol_multiplier = max(Decimal("0.5"), min(Decimal("1.5"), vol_multiplier))
+            vol_upper = Decimal("1") if drawdown_multiplier < Decimal("1") else Decimal("1.5")
+            vol_multiplier = max(Decimal("0.5"), min(vol_upper, vol_multiplier))
             raw_qty = raw_qty * vol_multiplier
 
         # ----------------------------------------------------------------
@@ -190,7 +193,6 @@ class PositionSizer:
         # ----------------------------------------------------------------
         if (
             remaining_position_budget_usd is not None
-            and remaining_position_budget_usd >= Decimal("0")
             and entry_price is not None
             and entry_price > Decimal("0")
         ):
@@ -203,7 +205,13 @@ class PositionSizer:
         # Available balance cap
         # ----------------------------------------------------------------
         if entry_price is not None and entry_price > Decimal("0"):
-            leverage = max(self._limits.max_leverage, Decimal("1"))
+            # Use the leverage actually confirmed by the exchange when available;
+            # fall back to the profile max so we never exceed what the exchange allows.
+            effective_leverage = min(
+                confirmed_leverage if confirmed_leverage is not None else self._limits.max_leverage,
+                self._limits.max_leverage,
+            )
+            leverage = max(effective_leverage, Decimal("1"))
             max_qty_from_balance = (available_balance * leverage) / entry_price
             raw_qty = min(raw_qty, max_qty_from_balance)
 
@@ -261,6 +269,12 @@ class PositionSizer:
                         return Decimal("0"), (
                             f"liquidity cap {max_position_notional:.4f} below min_order_qty {self._info.min_order_qty}"
                         )
+                    if self._info.min_notional is not None:
+                        capped_notional = capped_qty * entry_price
+                        if capped_notional < self._info.min_notional:
+                            return Decimal("0"), (
+                                f"liquidity-capped notional {capped_notional} < min_notional {self._info.min_notional}"
+                            )
                     approved_qty = capped_qty
             else:
                 if self._require_liquidity:

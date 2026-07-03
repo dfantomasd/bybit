@@ -44,6 +44,7 @@ class KellyTrainingScheduler:
         self._trades_since_training: int = 0
         self._background_task: asyncio.Task[None] | None = None
         self._is_training: bool = False
+        self._trade_getter: Callable[[], list[dict[str, Any]]] | None = None
 
     async def start(self, trade_getter: Callable[[], list[dict[str, Any]]]) -> None:
         """Start background training scheduler.
@@ -54,6 +55,7 @@ class KellyTrainingScheduler:
         if self._background_task is not None:
             return
 
+        self._trade_getter = trade_getter
         self._background_task = asyncio.create_task(self._training_loop(trade_getter))
         logger.info("kelly_training_scheduler.started")
 
@@ -72,8 +74,9 @@ class KellyTrainingScheduler:
         """Notify scheduler that a trade closed (trigger potential training)."""
         self._trades_since_training += 1
 
-        if self._should_train():
-            await self.trigger_training([])
+        if self._should_train() and self._trade_getter is not None:
+            trades = self._trade_getter()
+            await self.trigger_training(trades)
 
     async def trigger_training(self, trades: list[dict[str, Any]]) -> tuple[bool, str]:
         """Manually trigger training immediately."""

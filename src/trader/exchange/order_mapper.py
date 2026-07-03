@@ -71,19 +71,28 @@ class OrderMapper:
             "timeInForce": intent.time_in_force,
         }
 
-        if intent.order_type == OrderType.LIMIT and intent.price is not None:
-            params["price"] = str(intent.price)
+        if intent.order_type == OrderType.LIMIT:
+            if intent.price is not None:
+                params["price"] = str(intent.price)
+            else:
+                logger.warning(
+                    "order_mapper.limit_order_missing_price",
+                    order_link_id=intent.order_link_id,
+                    symbol=intent.symbol,
+                )
 
         if intent.reduce_only:
             params["reduceOnly"] = True
 
         if intent.take_profit is not None:
             params["takeProfit"] = str(intent.take_profit)
-            params["tpOrderType"] = intent.tp_order_type.value
+            if intent.tp_order_type is not None:
+                params["tpOrderType"] = intent.tp_order_type.value
 
         if intent.stop_loss is not None:
             params["stopLoss"] = str(intent.stop_loss)
-            params["slOrderType"] = intent.sl_order_type.value
+            if intent.sl_order_type is not None:
+                params["slOrderType"] = intent.sl_order_type.value
 
         if intent.take_profit is not None or intent.stop_loss is not None:
             params["tpslMode"] = "Full"

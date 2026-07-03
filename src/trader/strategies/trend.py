@@ -237,7 +237,7 @@ class EMAcrossoverStrategy(BaseStrategy):
                 bonus_conditions = sum(
                     [
                         ema9_slope < -_EMA_SLOPE_MIN * 3,  # strong downward momentum
-                        rsi14 < 0.40,  # clearly oversold territory
+                        rsi14 > 0.40,  # bearish but not yet oversold (mirrors long-side rsi14 > 0.55)
                         (volume_z or 0) > 0.5,  # above-average volume
                     ]
                 )

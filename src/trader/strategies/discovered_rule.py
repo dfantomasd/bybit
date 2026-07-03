@@ -95,7 +95,7 @@ def _parse_rule(raw: dict[str, Any], *, min_validation_count: int, min_validatio
         validation_lift_bps=(
             float(raw["validation_lift_bps"]) if raw.get("validation_lift_bps") is not None else None
         ),
-        score=float(raw.get("score") or validation_avg_f),
+        score=float(raw["score"]) if raw.get("score") is not None else validation_avg_f,
     )
 
 
@@ -308,7 +308,7 @@ class DiscoveredRuleStrategy(BaseStrategy):
             stop_loss=(entry * sl_mult).quantize(_PRICE_DECIMALS),
             confidence=confidence,
             expected_return=best.validation_avg_net_bps / 10000.0,
-            expected_risk=self._sl_pct / 100.0,
+            expected_risk=self._sl_pct,
             feature_id=feature_vector.feature_id,
             rationale=(
                 f"discovered rule {best.rule_id}: validation "

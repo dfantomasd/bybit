@@ -264,6 +264,8 @@ class ChallengerModel:
         aligned_features = self._align_features(features, feature_names)
         if aligned_features is None:
             return None
+        if not all(np.isfinite(v) for v in aligned_features):
+            return None
         try:
             x = np.array(aligned_features, dtype=np.float32).reshape(1, -1)
             if self.training_samples > 0:
@@ -297,6 +299,11 @@ class ChallengerModel:
         x = np.asarray(features, dtype=np.float32)
         y = np.asarray(labels, dtype=np.int32)
         if x.ndim != 2 or len(x) == 0 or len(x) != len(y):
+            return
+        finite_mask = np.isfinite(x).all(axis=1)
+        x = x[finite_mask]
+        y = y[finite_mask]
+        if len(x) == 0:
             return
         # Batch training replaces any previous estimator state.
         self._scaler = StandardScaler()
@@ -401,7 +408,7 @@ class ChallengerModel:
             labels = np.argmax(proba, axis=1).astype(np.int32)
             return scores, labels
         except Exception as exc:
-            log.debug("challenger.predict_batch_failed", exc_info=exc)
+            log.warning("challenger.predict_batch_failed", exc_info=exc)
             return zero_scores, zero_labels
 
     def partial_fit(self, features: list[float], label: int) -> bool:
@@ -409,9 +416,9 @@ class ChallengerModel:
 
         if not _SKLEARN_AVAILABLE or self._clf is None:
             return False
-        if self.model_type.upper() in ("GBDT", "MLP"):
-            # Gradient-boosted trees and MLPs cannot be updated online; the
-            # periodic batch retrain covers new data instead.
+        if self.model_type.upper() in ("GBDT", "MLP", "LOGREG"):
+            # Gradient-boosted trees, MLPs, and LogisticRegression have no
+            # partial_fit; the periodic batch retrain covers new data instead.
             return False
         x = np.array(features, dtype=np.float32).reshape(1, -1)
         y = np.array([label], dtype=np.int32)
@@ -427,7 +434,7 @@ class ChallengerModel:
 
     @property
     def supports_online_learning(self) -> bool:
-        return self.model_type.upper() in ("SGD", "LOGREG")
+        return self.model_type.upper() == "SGD"
 
     def to_bytes(self) -> bytes:
         """Serialize model to bytes for PostgreSQL storage."""
@@ -557,7 +564,12 @@ class ModelRegistry:
         if self._journal is None or not self._journal.is_enabled:
             return
         try:
-            artifact = model.to_bytes()
+            import asyncio
+
+            # to_bytes() pickles the estimator + scaler and encrypts the
+            # artifact — CPU-bound work that would otherwise block the
+            # event loop (order placement, risk checks) for its duration.
+            artifact = await asyncio.get_running_loop().run_in_executor(None, model.to_bytes)
             await self._journal._execute(
                 """
                 INSERT INTO model_versions (version, status, training_samples, feature_schema_hash, artifact, metrics)
@@ -582,7 +594,7 @@ class ModelRegistry:
                 ),
             )
         except Exception as exc:
-            log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
+            log.warning("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
         """Load the best compatible CHAMPION model."""
@@ -615,7 +627,7 @@ class ModelRegistry:
             )
             return model
         except Exception as exc:
-            log.debug("model_registry.load_champion_failed", exc_info=exc)
+            log.warning("model_registry.load_champion_failed", exc_info=exc)
             return None
 
     async def select_best_champion(self) -> Any | None:
@@ -826,5 +838,5 @@ class ModelRegistry:
             )
             return model
         except Exception as exc:
-            log.debug("model_registry.load_challenger_failed", exc_info=exc)
+            log.warning("model_registry.load_challenger_failed", exc_info=exc)
             return None

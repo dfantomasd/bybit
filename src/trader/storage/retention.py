@@ -29,6 +29,7 @@ _SHADOW_EVENT_DELETE_QUERIES: dict[str, str] = {
     "order_events": """
         DELETE FROM order_events
         WHERE created_at < now() - ($1::text || ' days')::interval
+          AND status IN ('FILLED', 'CANCELLED', 'REJECTED', 'EXPIRED')
     """,
     "execution_events": """
         DELETE FROM execution_events
@@ -118,10 +119,13 @@ async def get_storage_stats(store: RetentionStore) -> dict[str, Any]:
     except Exception as exc:
         stats.setdefault("errors", []).append(f"pg_database_size: {exc}")
 
-    eligible = await store._fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE training_eligible = true")
-    stats["feature_snapshots_eligible"] = int(eligible[0]["cnt"]) if eligible else 0
-    invalid = await store._fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE training_eligible = false")
-    stats["feature_snapshots_invalid"] = int(invalid[0]["cnt"]) if invalid else 0
+    try:
+        eligible = await store._fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE training_eligible = true")
+        stats["feature_snapshots_eligible"] = int(eligible[0]["cnt"]) if eligible else 0
+        invalid = await store._fetch("SELECT count(*) AS cnt FROM feature_snapshots WHERE training_eligible = false")
+        stats["feature_snapshots_invalid"] = int(invalid[0]["cnt"]) if invalid else 0
+    except Exception as exc:
+        stats.setdefault("errors", []).append(f"feature_snapshots_counts: {exc}")
     return stats
 
 
