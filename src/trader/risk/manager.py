@@ -546,7 +546,12 @@ class RiskManager:
             try:
                 raw_symbols = open_symbols_fn()
                 if isinstance(raw_symbols, (list, tuple, set, frozenset)):
-                    existing_symbols = [str(sym) for sym in raw_symbols]
+                    # Exclude the symbol being evaluated itself — scaling into
+                    # an already-open position on the same symbol is not
+                    # cross-asset correlation risk, and get_correlation_adjustment
+                    # would otherwise always find "the same family as itself"
+                    # and spuriously shrink the size on every pyramiding add.
+                    existing_symbols = [str(sym) for sym in raw_symbols if str(sym) != proposal.symbol]
             except TypeError:
                 existing_symbols = []
         corr_mult = self._exposure.get_correlation_adjustment(proposal.symbol, existing_symbols)
