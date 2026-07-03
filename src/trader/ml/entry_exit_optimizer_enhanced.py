@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import logging
+import math
 from dataclasses import dataclass
 from decimal import Decimal
 
@@ -273,6 +274,11 @@ class EntryExitOptimizerEnhanced:
             tp_distance = float(self.tp_model.predict(x)[0])
             sl_distance = float(self.sl_model.predict(x)[0])
             execution_class = int(self.execution_model.predict(x)[0])
+            if not (math.isfinite(entry_offset) and math.isfinite(tp_distance) and math.isfinite(sl_distance)):
+                raise ValueError(
+                    f"non-finite prediction: entry_offset={entry_offset} tp_distance={tp_distance} "
+                    f"sl_distance={sl_distance}"
+                )
 
             # Зажать значения
             entry_offset = max(-1.0, min(1.0, entry_offset))

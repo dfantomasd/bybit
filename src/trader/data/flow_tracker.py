@@ -72,7 +72,7 @@ class FlowTracker:
         self._record(self._liquidations, symbol, side, price, qty, ts)
 
     def trade_stats(self, symbol: str, now: datetime | None = None) -> FlowStats | None:
-        prints = self._fresh(self._trades.get(symbol), now)
+        prints = self._fresh(self._trades.get(symbol.upper()), now)
         if not prints:
             return None
         buy = sum(p.notional for p in prints if p.side == OrderSide.BUY)
@@ -90,7 +90,7 @@ class FlowTracker:
         )
 
     def liquidation_stats(self, symbol: str, now: datetime | None = None) -> LiquidationStats | None:
-        prints = self._fresh(self._liquidations.get(symbol), now)
+        prints = self._fresh(self._liquidations.get(symbol.upper()), now)
         if not prints:
             return None
         buy = sum(p.notional for p in prints if p.side == OrderSide.BUY)

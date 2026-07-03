@@ -213,10 +213,29 @@ class UnifiedMLController:
                 next_5m_regime=regime_result.next_5m_regime if regime_result else "SIDEWAYS",
                 next_15m_regime=regime_result.next_15m_regime if regime_result else "SIDEWAYS",
                 trend_phase=regime_result.trend_phase if regime_result else "CHAOTIC",
-                # Signals (fuse_signals returns (final_signal, success_probability, explanation))
-                fused_signal=signal_result[0] if signal_result else 0.0,
-                signal_confidence=signal_result[1] if signal_result else 0.3,
-                signal_recommendation=signal_result[2] if signal_result else "NEUTRAL",
+                # Signals — SignalFusionEnhanced.fuse_signals() returns a dict
+                # {"final_signal", "confidence", "recommendation", ...}; the
+                # legacy SignalFusion.fuse_signals() returns a 3-tuple. Handle
+                # both so predict_all() doesn't silently fall back on every call.
+                fused_signal=(
+                    (signal_result.get("final_signal", 0.0) if isinstance(signal_result, dict) else signal_result[0])
+                    if signal_result
+                    else 0.0
+                ),
+                signal_confidence=(
+                    (signal_result.get("confidence", 0.3) if isinstance(signal_result, dict) else signal_result[1])
+                    if signal_result
+                    else 0.3
+                ),
+                signal_recommendation=(
+                    (
+                        signal_result.get("recommendation", "NEUTRAL")
+                        if isinstance(signal_result, dict)
+                        else signal_result[2]
+                    )
+                    if signal_result
+                    else "NEUTRAL"
+                ),
                 # Spread
                 predicted_spread_bps=spread_result.get("predicted_spread_bps", 25.0) if spread_result else 25.0,
                 spread_risk=spread_result.get("widening_risk", 0.5) if spread_result else 0.5,

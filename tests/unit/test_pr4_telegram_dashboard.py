@@ -677,6 +677,9 @@ async def test_callback_answer_failure_still_handles_button() -> None:
 
 @pytest.mark.asyncio
 async def test_dashboard_action_pause_button_is_routed() -> None:
+    """The dashboard pause button must go through a confirm dialog, not
+    mutate trading state on the first tap — same as /pause and the
+    control:pause submenu button."""
     bot = _make_bot()
     update = _fake_callback_update()
     update.callback_query.data = "action:pause"
@@ -684,10 +687,10 @@ async def test_dashboard_action_pause_button_is_routed() -> None:
     await bot._on_button(update, MagicMock())  # type: ignore[arg-type]
 
     assert bot._controller is not None
-    bot._controller.pause.assert_awaited_once()
+    bot._controller.pause.assert_not_awaited()
     update.callback_query.edit_message_text.assert_awaited()
     edited_text = update.callback_query.edit_message_text.await_args.args[0]
-    assert "Bybit AI Trader" in edited_text
+    assert "пауз" in edited_text.lower()
 
 
 @pytest.mark.asyncio

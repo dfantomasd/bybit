@@ -77,7 +77,7 @@ async def count_trainable_by_horizon(pool: Any) -> list[TrainableSnapshot]:
         min_samples=1,
     )
     return [
-        TrainableSnapshot(horizon_minutes=int(horizon), sample_count=snapshot.best_schema_count)
+        TrainableSnapshot(horizon_minutes=int(horizon), sample_count=snapshot.trainable_schema_count)
         for horizon, snapshot in snapshots.items()
     ]
 

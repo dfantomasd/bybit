@@ -5460,12 +5460,10 @@ class TelegramMonitorBot:
             if ctrl is None:
                 await self._button_reply(update, "Управление недоступно.", reply_markup=self._main_menu())
                 return
-            if action == "pause":
-                await ctrl.pause()
-            else:
-                await ctrl.resume()
-            text, markup = await self._render_home()
-            await self._button_reply(update, text, reply_markup=markup)
+            # Route through the same confirm-dialog flow as /pause, /resume,
+            # and the control:pause/control:resume submenu buttons, instead
+            # of mutating trading state on the very first tap.
+            await self._handle_control_button(update, action)
             return
         if action == "canary":
             fake_context = type("_Context", (), {"args": []})()

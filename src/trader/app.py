@@ -211,6 +211,8 @@ class TradingApplication:
             self._orderbook_tracker.remove_symbol(sym)
         if self._flow_tracker is not None:
             self._flow_tracker.remove_symbol(sym)
+        if self._strategy_ensemble is not None:
+            self._strategy_ensemble.evict_symbol(sym)
 
     def _symbol_microstructure_topics_enabled(self, symbol: str) -> bool:
         """Orderbook/trade/liquidation WS topics only for execution candidates on Starter."""

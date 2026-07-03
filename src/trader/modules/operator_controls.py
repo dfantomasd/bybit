@@ -116,6 +116,15 @@ class OperatorControlsModule(AppBoundModule):
         # that ignores losses already taken — a critical safety hole.
         old_drawdown = self._app._risk_manager._drawdown if self._app._risk_manager is not None else None
         old_daily_pnl = self._app._risk_manager.daily_pnl if self._app._risk_manager is not None else Decimal("0")
+        # Preserve the kill switch too — init_risk_manager() always builds a
+        # fresh, inactive KillSwitch, which would silently clear an active
+        # FULL_STOP/emergency-stop condition on every profile hot-swap.
+        old_kill_switch = self._app._kill_switch
+        # Stop the outgoing risk manager's daily-reset background task before
+        # it's discarded; init_risk_manager() doesn't track/cancel it, so
+        # skipping this leaks one orphaned task per profile change.
+        if self._app._risk_manager is not None:
+            self._app._risk_manager.stop_daily_reset_scheduler()
 
         if self._app._settings is not None:
             self._app._settings.RISK_PROFILE = profile
@@ -127,10 +136,18 @@ class OperatorControlsModule(AppBoundModule):
             # Restore daily PnL so daily loss limit is not reset mid-day
             if old_daily_pnl != Decimal("0"):
                 self._app._risk_manager._daily_pnl = old_daily_pnl
+            if old_kill_switch is not None and old_kill_switch.is_active:
+                self._app._kill_switch = old_kill_switch
+                self._app._risk_manager._kill_switch = old_kill_switch
 
-        # Rewire execution engine to the new risk manager
+        # Rewire execution engine to the new risk manager and exposure
+        # tracker — init_risk_manager() always builds a fresh ExposureTracker
+        # (self._app._exposure_tracker), so without this the execution
+        # engine keeps recording fills into the discarded old tracker while
+        # risk checks read from the new (falsely empty) one.
         if self._app._execution_engine is not None:
             self._app._execution_engine._risk_manager = self._app._risk_manager
+            self._app._execution_engine._exposure = self._app._exposure_tracker
         self._app._current_risk_profile_str = profile.value
         log.info("risk_profile.changed", old=old, new=profile.value)
         if self._app._telegram_bot is not None:
@@ -230,6 +247,7 @@ class OperatorControlsModule(AppBoundModule):
         except TimeoutError:
             return "❌ Промоут завис (timeout 60s)"
         except Exception as exc:
+            log.exception("model_promote.failed", version=version)
             return f"❌ Ошибка промоута: <code>{html.escape(str(exc))}</code>"
 
     def runtime_settings(self) -> dict[str, Any]:

@@ -36,10 +36,10 @@ class OpsModule(ModuleTaskMixin):
             or not self._app._trade_journal.is_enabled
         ):
             return
-        self._app._startup_retention_done = True
         try:
             report = await self._app._trade_journal.run_data_retention_policy(self._app._settings)
             self._app._last_retention_run_at = datetime.now(tz=UTC)
+            self._app._startup_retention_done = True
             log.info("data_retention.startup_complete", **report)
         except Exception as exc:
             log.warning("data_retention.startup_failed", error=str(exc))
@@ -131,11 +131,11 @@ class OpsModule(ModuleTaskMixin):
         interval = max(1.0, float(self._app._settings.TRANSACTION_LOG_SYNC_INTERVAL_SECONDS))
 
         while not self._app._shutdown_event.is_set():
-            self._app._last_tx_log_sync_at = datetime.now(tz=UTC)
             try:
                 await self._app._sync_transaction_log()
+                self._app._last_tx_log_sync_at = datetime.now(tz=UTC)
             except Exception as exc:
-                log.debug("transaction_log.periodic_sync_failed", error=str(exc))
+                log.warning("transaction_log.periodic_sync_failed", error=str(exc))
 
             try:
                 await asyncio.wait_for(

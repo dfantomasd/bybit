@@ -95,7 +95,7 @@ def _parse_rule(raw: dict[str, Any], *, min_validation_count: int, min_validatio
         validation_lift_bps=(
             float(raw["validation_lift_bps"]) if raw.get("validation_lift_bps") is not None else None
         ),
-        score=float(raw.get("score") or validation_avg_f),
+        score=float(raw["score"]) if raw.get("score") is not None else validation_avg_f,
     )
 
 

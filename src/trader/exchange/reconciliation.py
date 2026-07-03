@@ -223,10 +223,11 @@ class ReconciliationService:
             return diffs
 
         try:
-            exchange_positions = await self._rest.get_positions(category=category)
+            resp = await self._rest.get_positions(category=category)
         except Exception as exc:
             self._log.warning("reconciliation._check_positions.rest_failed", error=str(exc))
             return diffs
+        exchange_positions = (resp.get("result") or {}).get("list", []) if isinstance(resp, dict) else resp
 
         # Build exchange position map {symbol: position}
         exchange_map: dict[str, Any] = {}
@@ -291,10 +292,11 @@ class ReconciliationService:
         }
 
         try:
-            exchange_orders = await self._rest.get_open_orders(category=category)
+            resp = await self._rest.get_open_orders(category=category)
         except Exception as exc:
             self._log.warning("reconciliation._check_orders.rest_failed", error=str(exc))
             return diffs
+        exchange_orders = (resp.get("result") or {}).get("list", []) if isinstance(resp, dict) else resp
 
         # Build exchange order set by orderLinkId
         exchange_link_ids: set[str] = set()
