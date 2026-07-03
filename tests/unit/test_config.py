@@ -242,8 +242,10 @@ class TestSettingsSafetyGates:
 
         assert settings.SHADOW_PROBE_MIN_ABS_IMBALANCE == 0.04  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.60  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MAX_TP_PCT == 1.50  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MIN_SL_PCT == 0.25  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MIN_NET_RETURN_PCT == 0.12  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_NET_REWARD_RISK == 1.10  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS == 60  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SELL_ENABLED is True  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is True  # type: ignore[union-attr]

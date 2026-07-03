@@ -127,7 +127,7 @@ def test_shadow_probe_blocks_book_ema_conflict() -> None:
     assert "shadow_probe_book_ema_conflict:XRPUSDT" in rejections
 
 
-def test_shadow_probe_rejects_weak_net_edge() -> None:
+def test_shadow_probe_rejects_weak_net_edge_when_required_tp_exceeds_cap() -> None:
     rejections: list[str] = []
     cost_params = NetEdgeParams(
         taker_fee_pct=0.11,
@@ -139,6 +139,7 @@ def test_shadow_probe_rejects_weak_net_edge() -> None:
     strategy = ShadowProbeStrategy(
         imbalance_provider=lambda _symbol: 0.08,
         min_tp_pct=0.10,
+        max_tp_pct=0.90,
         min_sl_pct=0.05,
         min_net_return_pct=0.50,
         cost_params=cost_params,
@@ -148,7 +149,7 @@ def test_shadow_probe_rejects_weak_net_edge() -> None:
     proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
 
     assert proposal is None
-    assert "shadow_probe_net_edge_rejected:XRPUSDT:Buy" in rejections
+    assert "shadow_probe_net_rr_rejected:XRPUSDT:Buy" in rejections
 
 
 def test_shadow_probe_skips_symbol_failing_min_notional() -> None:
@@ -217,7 +218,7 @@ def test_shadow_probe_burst_limit_blocks_fourth_signal() -> None:
     assert strategy.evaluate(vec, current_price=1.0, available_balance_usd=25.0) is None
 
 
-def test_shadow_probe_net_edge_with_new_min_tp() -> None:
+def test_shadow_probe_adjusts_tp_to_net_reward_risk() -> None:
     costs = NetEdgeParams(
         taker_fee_pct=0.11,
         expected_slippage_pct=0.06,
@@ -225,23 +226,42 @@ def test_shadow_probe_net_edge_with_new_min_tp() -> None:
         funding_buffer_pct=0.01,
         safety_margin_pct=0.01,
     )
-    passing = ShadowProbeStrategy(
-        imbalance_provider=lambda _symbol: 0.10,
-        min_tp_pct=0.75,
-        min_sl_pct=0.40,
-        min_net_return_pct=0.30,
-        cost_params=costs,
-    )
-    failing = ShadowProbeStrategy(
+    strategy = ShadowProbeStrategy(
         imbalance_provider=lambda _symbol: 0.10,
         min_tp_pct=0.45,
+        max_tp_pct=1.50,
         min_sl_pct=0.40,
         min_net_return_pct=0.30,
+        min_net_reward_risk=1.10,
+        cost_params=costs,
+    )
+    proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is not None
+    assert proposal.take_profit is not None
+    assert float(proposal.take_profit) > 1.01
+    assert "net_rr=" in proposal.rationale
+
+
+def test_shadow_probe_rejects_when_net_reward_risk_requires_too_distant_tp() -> None:
+    costs = NetEdgeParams(
+        taker_fee_pct=0.11,
+        expected_slippage_pct=0.06,
+        max_spread_bps=8.0,
+        funding_buffer_pct=0.01,
+        safety_margin_pct=0.01,
+    )
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.10,
+        min_tp_pct=0.45,
+        max_tp_pct=0.90,
+        min_sl_pct=0.40,
+        min_net_return_pct=0.30,
+        min_net_reward_risk=1.10,
         cost_params=costs,
     )
 
-    assert passing.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is not None
-    assert failing.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
+    assert strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0) is None
 
 
 def test_probe_notional_viable_requires_buffer_after_penalties() -> None:

@@ -282,6 +282,8 @@ class TestBucketGate:
         assert settings["shadow_probe_side_stats_count"] == 1
         assert settings["shadow_probe_symbol_stats_count"] == 1
         assert settings["shadow_probe_blocked_symbols"] == ["XRPUSDT"]
+        assert settings["shadow_probe_max_tp_pct"] == app._settings.SHADOW_PROBE_MAX_TP_PCT
+        assert settings["shadow_probe_min_net_reward_risk"] == app._settings.SHADOW_PROBE_MIN_NET_REWARD_RISK
         assert settings["shadow_probe_symbol_loss_cooldown_enabled"] is True
         assert settings["shadow_probe_symbol_cooldowns"]["XRPUSDT"] > 0
         assert settings["shadow_probe_eligible_symbols"] == ["XRPUSDT"]

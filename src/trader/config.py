@@ -160,10 +160,14 @@ class Settings(BaseSettings):
     SHADOW_PROBE_MAX_NOTIONAL_USD: float = 8.0
     SHADOW_PROBE_MIN_TP_PCT: float = 0.75
     """Minimum gross TP distance for paper probes; must exceed round-trip costs."""
+    SHADOW_PROBE_MAX_TP_PCT: float = 1.50
+    """Maximum gross TP distance after cost-aware reward/risk adjustment."""
     SHADOW_PROBE_MIN_SL_PCT: float = 0.40
     """Minimum SL distance for paper probes to avoid instant noise stop-outs."""
     SHADOW_PROBE_MIN_NET_RETURN_PCT: float = 0.30
     """Minimum expected net return after round-trip costs before emitting a probe."""
+    SHADOW_PROBE_MIN_NET_REWARD_RISK: float = 1.10
+    """Minimum reward/loss ratio after round-trip costs; TP is adjusted up to satisfy it."""
     SHADOW_PROBE_MIN_NOTIONAL_BUFFER_PCT: float = 3.0
     """Safety buffer when pre-checking probe notional against exchange min_notional."""
     SHADOW_PROBE_SYMBOL_WARMUP_SECONDS: int = 300
@@ -863,8 +867,10 @@ class Settings(BaseSettings):
             # data and speed up schema-change sample accumulation.
             self.SHADOW_PROBE_MIN_ABS_IMBALANCE = 0.04
             self.SHADOW_PROBE_MIN_TP_PCT = 0.60
+            self.SHADOW_PROBE_MAX_TP_PCT = 1.50
             self.SHADOW_PROBE_MIN_SL_PCT = 0.25
             self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
+            self.SHADOW_PROBE_MIN_NET_REWARD_RISK = 1.10
             self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60
             self.SHADOW_PROBE_SELL_ENABLED = True
             self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = True

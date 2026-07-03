@@ -373,6 +373,16 @@ class OperatorControlsModule(AppBoundModule):
                 if self._app._settings is not None
                 else None
             ),
+            "shadow_probe_max_tp_pct": (
+                getattr(self._app._settings, "SHADOW_PROBE_MAX_TP_PCT", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "shadow_probe_min_net_reward_risk": (
+                getattr(self._app._settings, "SHADOW_PROBE_MIN_NET_REWARD_RISK", None)
+                if self._app._settings is not None
+                else None
+            ),
             "shadow_probe_symbol_top_n": (
                 self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N if self._app._settings is not None else None
             ),

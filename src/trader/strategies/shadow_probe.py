@@ -15,7 +15,7 @@ from decimal import ROUND_DOWN, Decimal
 
 from trader.domain.enums import MarketRegime, MarketType, OrderSide
 from trader.domain.models import FeatureVector, InstrumentInfo, TradeProposal
-from trader.risk.net_edge import NetEdgeParams, passes_min_net_edge
+from trader.risk.net_edge import NetEdgeParams, net_edge_from_tp_distance, passes_min_net_edge
 from trader.strategies.base import BaseStrategy
 
 SHADOW_PROBE_STRATEGY_ID = "shadow_probe_hv_v2"
@@ -88,8 +88,10 @@ class ShadowProbeStrategy(BaseStrategy):
         tp_atr_mult: float = 1.4,
         sl_atr_mult: float = 0.8,
         min_tp_pct: float = 0.45,
+        max_tp_pct: float = 1.50,
         min_sl_pct: float = 0.25,
         min_net_return_pct: float = 0.05,
+        min_net_reward_risk: float = 1.10,
         min_notional_buffer_pct: float = 3.0,
         cost_params: NetEdgeParams | None = None,
         sell_enabled: bool = False,
@@ -113,8 +115,10 @@ class ShadowProbeStrategy(BaseStrategy):
         self._tp_atr_mult = max(0.2, float(tp_atr_mult))
         self._sl_atr_mult = max(0.2, float(sl_atr_mult))
         self._min_tp_pct = max(0.05, float(min_tp_pct))
+        self._max_tp_pct = max(self._min_tp_pct, float(max_tp_pct))
         self._min_sl_pct = max(0.05, float(min_sl_pct))
         self._min_net_return_pct = max(0.0, float(min_net_return_pct))
+        self._min_net_reward_risk = max(0.0, float(min_net_reward_risk))
         self._min_notional_buffer_pct = max(0.0, float(min_notional_buffer_pct))
         self._cost_params = cost_params
         self._sell_enabled = bool(sell_enabled)
@@ -257,6 +261,21 @@ class ShadowProbeStrategy(BaseStrategy):
 
         sl_dist = max(float(atr_pct) * self._sl_atr_mult, self._min_sl_pct / 100.0)
         tp_dist = max(float(atr_pct) * self._tp_atr_mult, self._min_tp_pct / 100.0, sl_dist * 1.5)
+        net_reward_risk = None
+        if self._cost_params is not None and self._min_net_reward_risk > 0:
+            gross_sl_pct = sl_dist * 100.0
+            net_tp_pct = net_edge_from_tp_distance(tp_dist, self._cost_params)
+            round_trip_cost_pct = max(0.0, tp_dist * 100.0 - net_tp_pct)
+            net_loss_pct = gross_sl_pct + round_trip_cost_pct
+            required_tp_dist = (self._min_net_reward_risk * net_loss_pct + round_trip_cost_pct) / 100.0
+            if required_tp_dist > tp_dist:
+                tp_dist = required_tp_dist
+            if tp_dist > self._max_tp_pct / 100.0:
+                self._diag("shadow_probe_net_rr_rejected", symbol=feature_vector.symbol, side=side)
+                return None
+            net_tp_pct = net_edge_from_tp_distance(tp_dist, self._cost_params)
+            if net_loss_pct > 0:
+                net_reward_risk = net_tp_pct / net_loss_pct
         if self._cost_params is not None and not passes_min_net_edge(
             tp_dist,
             self._cost_params,
@@ -310,5 +329,8 @@ class ShadowProbeStrategy(BaseStrategy):
             expected_risk=1.0,
             regime=regime,
             feature_id=feature_vector.feature_id,
-            rationale=f"SHADOW cost-aware probe: {reason}, tp={tp_dist * 100:.3f}%, sl={sl_dist * 100:.3f}%",
+            rationale=(
+                f"SHADOW cost-aware probe: {reason}, tp={tp_dist * 100:.3f}%, sl={sl_dist * 100:.3f}%"
+                + (f", net_rr={net_reward_risk:.2f}" if net_reward_risk is not None else "")
+            ),
         )
