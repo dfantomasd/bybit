@@ -860,8 +860,8 @@ class Settings(BaseSettings):
             self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
             self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60
             self.SHADOW_PROBE_SELL_ENABLED = True
-            self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = False
-            self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = False
+            self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = True
+            self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = True
             self.SCALP_STRICT_SHADOW = True
             self.SHADOW_LOSS_GUARD_ENABLED = True
             self.SHADOW_LOSS_GUARD_MIN_CLOSED = 5
