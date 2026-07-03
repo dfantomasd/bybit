@@ -146,6 +146,10 @@ class _Journal:
             "lift_vs_all_bps": float(metrics.get("lift_bps", 5.0)),
             "pass_avg_net_return_bps": float(metrics.get("walk_forward_expectancy_bps", 5.0)),
             "pass_precision": float(metrics.get("precision", 0.42)),
+            "side_filtered_count": int(metrics.get("side_filtered_count", 0)),
+            "score_block_count": int(metrics.get("score_block_count", 0)),
+            "score_block_avg_net_return_bps": metrics.get("score_block_avg_net_return_bps"),
+            "top_block_reasons": metrics.get("top_block_reasons", {}),
             "quality": metrics.get("quality", "GOOD"),
         }
 
@@ -226,6 +230,28 @@ async def test_should_promote_uses_configured_tpsl_label_schema() -> None:
     decision = await engine.should_promote(None, "dnv2")
 
     assert not any(reason.startswith("incompatible_label_schema") for reason in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_should_promote_exposes_side_filter_gate_breakdown() -> None:
+    challenger = _model("side-filtered")
+    challenger["metrics"]["side_filtered_count"] = 44
+    challenger["metrics"]["score_block_count"] = 11
+    challenger["metrics"]["score_block_avg_net_return_bps"] = -1.25
+    challenger["metrics"]["top_block_reasons"] = {
+        "side_not_selected_by_model": 44,
+        "score_below_regime_threshold": 11,
+    }
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), challenger])
+    engine = AutoPromotionEngine(trade_journal=journal, config=_config())
+
+    decision = await engine.should_promote(None, "side-filtered")
+
+    assert decision.metrics["side_filtered_count"] == 44
+    assert decision.metrics["score_block_count"] == 11
+    assert decision.metrics["score_block_expectancy_bps"] == -1.25
+    assert decision.metrics["top_block_reasons"]["side_not_selected_by_model"] == 44
+    assert decision.metrics["snapshot"]["challenger_gate"]["side_filtered_count"] == 44
 
 
 @pytest.mark.asyncio

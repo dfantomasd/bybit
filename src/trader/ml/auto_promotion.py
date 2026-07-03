@@ -265,6 +265,10 @@ class AutoPromotionEngine:
         lift_bps = _float_or_none(gate.get("lift_vs_all_bps"))
         pass_expectancy = _float_or_none(gate.get("pass_avg_net_return_bps"))
         pass_precision = _float_or_none(gate.get("pass_precision"))
+        side_filtered_count = _int_or_zero(gate.get("side_filtered_count"))
+        score_block_count = _int_or_zero(gate.get("score_block_count"))
+        score_block_expectancy = _float_or_none(gate.get("score_block_avg_net_return_bps"))
+        top_block_reasons = gate.get("top_block_reasons") if isinstance(gate.get("top_block_reasons"), dict) else {}
         if total_count < self._config.min_shadow_signals:
             reasons.append(f"insufficient_shadow_signals:{total_count}<{self._config.min_shadow_signals}")
         if pass_count < self._config.min_pass_count:
@@ -329,6 +333,10 @@ class AutoPromotionEngine:
             "lift_bps": lift_bps,
             "pass_expectancy_bps": pass_expectancy,
             "pass_precision": pass_precision,
+            "side_filtered_count": side_filtered_count,
+            "score_block_count": score_block_count,
+            "score_block_expectancy_bps": score_block_expectancy,
+            "top_block_reasons": top_block_reasons,
             "champion_wf_bps": champion_wf,
             "wf_folds": wf_folds,
             "wf_positive_folds": wf_positive_folds,
