@@ -43,12 +43,27 @@ class OperatorControlsModule(AppBoundModule):
                 return {"exists": False, "path": str(rule_path)}
             payload = json.loads(rule_path.read_text(encoding="utf-8"))
             rules = list(payload.get("rules") or []) if isinstance(payload, dict) else []
+            error = payload.get("error") if isinstance(payload, dict) else None
+            stage = payload.get("stage") if isinstance(payload, dict) else None
+            hint = None
+            error_text = str(error or "").lower()
+            if "timeout" in error_text:
+                hint = "Generator timed out; increase timeout or reduce min samples/rule search size."
+            elif "eauthquery" in error_text or "authentication query failed" in error_text:
+                hint = "Database auth/pooler failed; fix POSTGRES_DSN/Supabase availability before rule generation."
+            elif "read-only" in error_text:
+                hint = "Training/discovery is connected to a read-only DB/session; use primary writable Postgres."
+            elif error:
+                hint = "Open logs around discovered_rule.auto_generate_failed for the full traceback."
             return {
                 "exists": True,
                 "path": str(rule_path),
                 "status": payload.get("status") if isinstance(payload, dict) else None,
                 "sample_count": payload.get("sample_count") if isinstance(payload, dict) else None,
                 "rule_count": len(rules),
+                "stage": stage,
+                "error": error,
+                "hint": hint,
                 "top_rule": rules[0].get("rule_id") if rules and isinstance(rules[0], dict) else None,
                 "top_validation_avg_net_bps": (
                     rules[0].get("validation_avg_net_bps") if rules and isinstance(rules[0], dict) else None

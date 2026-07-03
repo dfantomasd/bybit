@@ -250,8 +250,8 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is False  # type: ignore[union-attr]
         assert settings.SCALP_STRICT_SHADOW is True  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_ENABLED is True  # type: ignore[union-attr]
-        assert settings.SHADOW_LOSS_GUARD_MIN_CLOSED == 20  # type: ignore[union-attr]
-        assert settings.SHADOW_LOSS_GUARD_WINDOW == 20  # type: ignore[union-attr]
+        assert settings.SHADOW_LOSS_GUARD_MIN_CLOSED == 5  # type: ignore[union-attr]
+        assert settings.SHADOW_LOSS_GUARD_WINDOW == 5  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS == 300  # type: ignore[union-attr]
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
             "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,"

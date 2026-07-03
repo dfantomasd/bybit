@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ssl
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -29,6 +30,34 @@ class TestPostgresRetryBackoff:
 
 
 class TestHealthCheckerPostgresRetries:
+    @pytest.mark.asyncio
+    async def test_postgres_ping_uses_normalized_asyncpg_kwargs_for_sslmode_require(self) -> None:
+        checker = HealthChecker(
+            postgres_dsn=(
+                "postgresql+asyncpg://postgres.projectref:secret@"
+                "aws-0-eu-west-1.pooler.supabase.com:6543/postgres?sslmode=require"
+            ),
+            redis_url="",
+        )
+        fake_conn = AsyncMock()
+
+        with patch("trader.monitoring.health.asyncpg.connect", AsyncMock(return_value=fake_conn)) as connect:
+            ok, latency, error = await checker._postgres_ping()
+
+        assert ok is True
+        assert latency is not None
+        assert error is None
+        connect.assert_awaited_once()
+        kwargs = connect.await_args.kwargs
+        assert kwargs["dsn"] == (
+            "postgresql://postgres.projectref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+        )
+        assert isinstance(kwargs["ssl"], ssl.SSLContext)
+        assert kwargs["ssl"].verify_mode == ssl.CERT_NONE
+        assert kwargs["statement_cache_size"] == 0
+        fake_conn.fetchval.assert_awaited_once_with("SELECT 1")
+        fake_conn.close.assert_awaited_once()
+
     @pytest.mark.asyncio
     async def test_postgres_preflight_recovers_on_second_attempt(self) -> None:
         checker = HealthChecker(

@@ -20,6 +20,7 @@ import redis.asyncio as aioredis
 from trader.domain.enums import SystemStatus, TradingMode
 from trader.domain.models import HealthStatus
 from trader.monitoring.logging import get_logger
+from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
 
 log = get_logger(__name__)
 
@@ -78,7 +79,7 @@ class HealthChecker:
         postgres_required: bool = True,
         postgres_optional_max_attempts: int = 3,
     ) -> None:
-        self._postgres_dsn = postgres_dsn.replace("postgresql+asyncpg://", "postgresql://", 1)
+        self._postgres_connect_kwargs = asyncpg_pool_connect_kwargs(postgres_dsn) if postgres_dsn else {}
         self._redis_url = redis_url.strip().strip("\"'")
         self._redis_required = redis_required
         self._bybit_required = bybit_required
@@ -123,13 +124,13 @@ class HealthChecker:
     # ------------------------------------------------------------------
 
     async def _postgres_ping(self) -> tuple[bool, float | None, str | None]:
-        if not self._postgres_dsn:
+        if not self._postgres_connect_kwargs:
             return True, None, None
 
         start = time.monotonic()
         try:
             conn = await asyncio.wait_for(
-                asyncpg.connect(self._postgres_dsn, statement_cache_size=0),
+                asyncpg.connect(**self._postgres_connect_kwargs, statement_cache_size=0),
                 timeout=_DB_TIMEOUT_S,
             )
             try:

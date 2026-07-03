@@ -200,12 +200,12 @@ class TestBucketGate:
     def test_research_shadow_loss_guard_waits_for_real_sample(self) -> None:
         app = _make_app()
 
-        for idx in range(19):
+        for idx in range(4):
             app._record_shadow_close(f"SYM{idx}USDT", "TIME", -0.2)
 
         assert app._shadow_loss_guard_blocks() is False
 
-        app._record_shadow_close("SYM20USDT", "TIME", -0.2)
+        app._record_shadow_close("SYM5USDT", "TIME", -0.2)
 
         assert app._shadow_loss_guard_blocks() is True
 
