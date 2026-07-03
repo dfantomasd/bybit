@@ -717,7 +717,16 @@ class TradingLoopModule(AppBoundModule):
             # proposal's own direction, so a high score IS the model's directional view.
             if settings.MODEL_ENABLED and settings.MODEL_ALLOW_LIVE_DECISIONS and self._app._model_registry is not None:
                 try:
-                    ml_pred = self._app._model_registry.score_live(model_feature_values, model_feature_names)
+                    if not self._app._model_side_allowed(proposal.side.value):
+                        self._app._record_diag("ml_live_side_filtered")
+                        log.info(
+                            "ml_live.side_filtered",
+                            symbol=proposal.symbol,
+                            side=proposal.side.value,
+                        )
+                        ml_pred = None
+                    else:
+                        ml_pred = self._app._model_registry.score_live(model_feature_values, model_feature_names)
                     ml_threshold = self._app._model_gate_threshold(regime_ctx)
                     if (
                         ml_pred is not None

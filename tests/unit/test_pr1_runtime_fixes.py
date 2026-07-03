@@ -17,6 +17,7 @@ Covers:
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import uuid
 from datetime import UTC, datetime
@@ -111,6 +112,20 @@ def test_model_gate_quality_accepts_json_string_metrics() -> None:
     assert app._model_side_allowed("Buy") is False
     assert app._model_gate_quality["gate_total_count"] == 77
     assert app._model_gate_quality["gate_lift_vs_all_bps"] == 1.2
+
+
+def test_live_ml_decision_respects_selected_side_filter_before_replacement() -> None:
+    """A side-filtered Champion must not boost the side rejected by walk-forward."""
+    from trader.modules.trading_loop import TradingLoopModule
+
+    src = inspect.getsource(TradingLoopModule.start)
+    hybrid_start = src.index("Hybrid ML mode")
+    snapshot_start = src.index("Record feature snapshot", hybrid_start)
+    hybrid_block = src[hybrid_start:snapshot_start]
+
+    assert "_model_side_allowed(proposal.side.value)" in hybrid_block
+    assert "ml_live_side_filtered" in hybrid_block
+    assert hybrid_block.index("_model_side_allowed(proposal.side.value)") < hybrid_block.index("ml_replacement")
 
 
 def test_model_gate_quality_uses_active_model_not_latest_challenger() -> None:
