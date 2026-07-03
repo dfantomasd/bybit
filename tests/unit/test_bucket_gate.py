@@ -284,6 +284,9 @@ class TestBucketGate:
 
         settings = app._modules.operator.runtime_settings()
 
+        assert settings["app_started_at"] is not None
+        assert settings["app_uptime_s"] >= 0
+        assert isinstance(settings["deploy_info"], dict)
         assert settings["bucket_stats_refresh_seconds"] == 300
         assert 0 <= settings["bucket_stats_age_s"] <= 60
         assert settings["shadow_probe_side_stats_count"] == 1

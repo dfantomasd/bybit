@@ -26,7 +26,7 @@ import json
 import signal
 import sys
 from collections import deque
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import Any, cast
 
@@ -122,6 +122,7 @@ class TradingApplication:
         self._trading_paused: bool = False
         self._current_risk_profile_str: str = ""
         self._last_daily_reset_date: date | None = None
+        self._app_started_at: datetime = datetime.now(tz=UTC)
         self._signal_log: deque[Any] = deque(maxlen=20)
         self._kill_switch: Any | None = None
         self._trade_journal: Any | None = None

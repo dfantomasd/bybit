@@ -11,6 +11,7 @@ from typing import Any, cast
 
 from trader.domain.enums import TradingMode
 from trader.modules.base import AppBoundModule
+from trader.monitoring.deploy_info import get_deploy_info
 from trader.monitoring.logging import get_logger
 from trader.runtime.constants import _SYMBOLS
 
@@ -276,20 +277,23 @@ class OperatorControlsModule(AppBoundModule):
     def runtime_settings(self) -> dict[str, Any]:
         from trader.training.labels import active_label_schema_version
 
+        now = datetime.now(tz=UTC)
+        app_started_at = getattr(self._app, "_app_started_at", None)
+        app_uptime_s = None
+        if isinstance(app_started_at, datetime):
+            app_uptime_s = max(0.0, (now - app_started_at.astimezone(UTC)).total_seconds())
         bucket_stats_age_s = None
         bucket_stats_refreshed_at = getattr(self._app, "_bucket_stats_refreshed_at", None)
         if isinstance(bucket_stats_refreshed_at, datetime):
             bucket_stats_age_s = max(
                 0.0,
                 (
-                    datetime.now(tz=UTC)
-                    - bucket_stats_refreshed_at.astimezone(UTC)
+                    now - bucket_stats_refreshed_at.astimezone(UTC)
                 ).total_seconds(),
             )
         shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
         shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
         shadow_probe_symbol_cooldowns = getattr(self._app, "_shadow_probe_symbol_cooldowns", None) or {}
-        now = datetime.now(tz=UTC)
         active_shadow_probe_symbol_cooldowns = {
             symbol: max(0.0, (until.astimezone(UTC) - now).total_seconds())
             for symbol, until in shadow_probe_symbol_cooldowns.items()
@@ -305,6 +309,9 @@ class OperatorControlsModule(AppBoundModule):
             ][:20]
 
         return {
+            "app_started_at": app_started_at.astimezone(UTC).isoformat() if isinstance(app_started_at, datetime) else None,
+            "app_uptime_s": app_uptime_s,
+            "deploy_info": get_deploy_info(),
             "paused": self._app._trading_paused,
             "shadow": self._app._execution_engine._shadow_mode if self._app._execution_engine is not None else True,
             "risk_profile": self._app._current_risk_profile_str,
