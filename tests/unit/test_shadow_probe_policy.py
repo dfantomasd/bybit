@@ -48,6 +48,16 @@ def test_shadow_probe_quality_requires_non_negative_baseline() -> None:
     assert policy.shadow_probe_quality_allows("XRPUSDT", "Sell") is True
 
 
+def test_shadow_probe_quality_blocks_toxic_symbol_before_side_matures() -> None:
+    policy = _policy_module(
+        side_stats={("XRPUSDT", "Buy"): (1.0, 2)},
+        symbol_stats={"XRPUSDT": (-4.0, 8), "SOLUSDT": (2.0, 8)},
+    )
+
+    assert policy.shadow_probe_quality_allows("XRPUSDT", "Buy") is False
+    assert policy.shadow_probe_quality_allows("SOLUSDT", "Buy") is True
+
+
 def test_shadow_probe_symbol_allowed_uses_eligible_set() -> None:
     policy = _policy_module(eligible={"XRPUSDT", "SOLUSDT"})
 

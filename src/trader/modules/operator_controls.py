@@ -261,6 +261,14 @@ class OperatorControlsModule(AppBoundModule):
             )
         shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
         shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
+        blocked_probe_symbols = []
+        if self._app._settings is not None:
+            blocked_probe_symbols = [
+                symbol
+                for symbol, (avg_bps, count) in shadow_probe_symbol_stats.items()
+                if count >= getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_MIN_SAMPLES", 0)
+                and avg_bps < getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_MIN_AVG_BPS", 0.0)
+            ][:20]
 
         return {
             "paused": self._app._trading_paused,
@@ -351,6 +359,7 @@ class OperatorControlsModule(AppBoundModule):
             "bucket_stats_age_s": bucket_stats_age_s,
             "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
             "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
+            "shadow_probe_blocked_symbols": blocked_probe_symbols,
             "shadow_probe_eligible_symbols": sorted(self._app._shadow_probe_eligible_symbols or []),
             "shadow_probe_blocked_sides": [
                 f"{symbol}:{side}"
