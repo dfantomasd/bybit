@@ -4219,6 +4219,8 @@ class TelegramMonitorBot:
             # 6. Paper gate
             paper_gate_count = int(paper_gate.get("count") or 0)
             paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
+            shadow_close_count = int(diag.get("hour_shadow_closed") or 0) if isinstance(diag, dict) else 0
+            shadow_close_avg = diag.get("hour_shadow_closed_avg_pnl_pct") if isinstance(diag, dict) else None
             if paper_gate_count < 20:
                 paper_road_icon = "⏳"
                 paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
@@ -4229,6 +4231,17 @@ class TelegramMonitorBot:
                 paper_road_icon = "❌"
                 paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
             lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+            if paper_gate_count == 0 and shadow_close_count > 0:
+                shadow_avg_str = (
+                    f"{float(shadow_close_avg):+.4f}%"
+                    if shadow_close_avg is not None
+                    else "n/a"
+                )
+                lines.append(
+                    "⚠️ Runtime shadow closes есть, но DB paper gate пуст: "
+                    f"<code>{shadow_close_count} закрытий, avg {shadow_avg_str}</code>. "
+                    "Проверьте запись prediction outcomes/DB."
+                )
 
             all_done = all([lbl_ok, trained_ok, wfe_ok, champ_ok])
             if (

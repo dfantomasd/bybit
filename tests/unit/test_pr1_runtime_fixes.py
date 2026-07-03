@@ -316,6 +316,45 @@ def test_economic_readiness_uses_model_horizon_stats() -> None:
     assert report["metrics"]["training_eligible_model_horizon"] == 2500
 
 
+def test_economic_readiness_flags_empty_db_paper_when_shadow_closes_exist() -> None:
+    """Shadow closes without DB paper outcomes must be visible, not reported as just '0 trades'."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+
+    report = app._economic_readiness_report(
+        db_diag={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_by_horizon": {"5": 2500},
+            "active_model_version": {
+                "version": "v_good_5m",
+                "status": "CHAMPION",
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 2.5,
+                },
+            },
+            "shadow_gate_by_horizon": {"5": {"total_count": 120, "lift_vs_all_bps": 1.2}},
+            "paper_pnl_by_horizon": {"5": {"model_gate": {"count": 0, "total_bps": 0.0}}},
+        },
+        runtime_diag={
+            "active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"],
+            "hour_shadow_closed": 5,
+            "hour_shadow_closed_avg_pnl_pct": -0.1688,
+        },
+    )
+
+    assert report["ready"] is False
+    assert "paper_gate_db_empty_but_shadow_closes:5" in report["issues"]
+    assert report["metrics"]["shadow_close_count_1h"] == 5
+    assert report["metrics"]["shadow_close_avg_pnl_pct_1h"] == -0.1688
+
+
 def test_economic_readiness_does_not_fallback_when_model_horizon_is_zero() -> None:
     """Explicit 5m=0 must not be masked by legacy 15m sample counts."""
     from trader.app import TradingApplication

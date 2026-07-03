@@ -1387,3 +1387,48 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
     assert "score avg=<code>-1.75 bps</code>" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text
+
+
+@pytest.mark.asyncio
+async def test_db_model_warns_when_shadow_closes_exist_but_db_paper_gate_empty() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "model": {"champion_version": "none", "challenger_version": "v5"},
+            "hour_shadow_closed": 5,
+            "hour_shadow_closed_avg_pnl_pct": -0.1688,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "configured": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "candles_by_interval": {"1": 5000, "5": 1000, "15": 0, "60": 100},
+            "prediction_outcomes_by_horizon": {"5": 1500},
+            "training_eligible_by_horizon": {"5": 1234},
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "training_samples": 1234,
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 4.0,
+                },
+            },
+            "model_gate_horizon_minutes": 5,
+            "shadow_gate_by_horizon": {"5": {"total_count": 0, "event_pending_count": 5}},
+            "paper_pnl_by_horizon": {"5": {"baseline": {"count": 0}, "model_gate": {"count": 0}}},
+        }
+    )
+    update = _fake_update()
+    ctx = type("_Ctx", (), {"args": []})()
+
+    await bot._cmd_db_model(update, ctx)  # type: ignore[arg-type]
+
+    reply_text = update.effective_message.reply_text.call_args[0][0]
+    assert "Runtime shadow closes есть, но DB paper gate пуст" in reply_text
+    assert "5 закрытий, avg -0.1688%" in reply_text
+    assert "Проверьте запись prediction outcomes/DB" in reply_text
