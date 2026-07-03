@@ -36,7 +36,7 @@ def main(force: bool, once: bool, interval_hours: int) -> None:
     """Train automatically from existing labelled market data."""
     args = ["--force"] if force else []
 
-    if once or force:
+    if once:
         raise SystemExit(_run_module("trader.training.auto_train", args))
 
     while True:
