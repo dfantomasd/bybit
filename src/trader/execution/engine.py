@@ -1673,7 +1673,9 @@ class ExecutionEngine:
         }
 
         if notional > Decimal("0"):
-            await self._exposure.update_position(symbol, proposal.side.value, notional)
+            await self._exposure.update_position(
+                symbol, proposal.side.value, notional, order_id=str(proposal.proposal_id)
+            )
         if exposure_reserved:
             self._release_exposure_reservation(proposal)
 

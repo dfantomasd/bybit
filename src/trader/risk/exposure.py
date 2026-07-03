@@ -83,8 +83,17 @@ class ExposureTracker:
         notional_value: Decimal,
         leverage: Decimal | None = None,
         stop_distance_pct: Decimal | None = None,
+        order_id: str | None = None,
     ) -> None:
-        """Add or update a position's notional and derived risk metrics."""
+        """Add or update a position's notional and derived risk metrics.
+
+        When ``order_id`` is given, only that reservation is released — this
+        preserves other concurrent in-flight reservations for the same symbol
+        (e.g. pyramiding). When omitted (sync/WS snapshot paths with no
+        specific order in hand), all pending reservations for the symbol are
+        released as a self-healing fallback for callers that never resolved
+        their own reservation explicitly.
+        """
         lev = leverage if leverage is not None and leverage > Decimal("0") else Decimal("1")
         margin_used = notional_value / lev
         sdp = (
@@ -100,7 +109,10 @@ class ExposureTracker:
                 "stop_distance_pct": sdp,
                 "risk_at_stop": risk_at_stop,
             }
-            self._release_pending_for_symbol_unlocked(symbol)
+            if order_id:
+                self._pending_exposure.pop(order_id, None)
+            else:
+                self._release_pending_for_symbol_unlocked(symbol)
 
     async def remove_position(self, symbol: str) -> None:
         """Remove a closed position."""
@@ -254,6 +266,8 @@ class ExposureTracker:
             (allowed, reason_if_not_allowed)
         """
         with self._lock:
+            self._prune_stale_pending_unlocked()
+
             if order_id and order_id in self._pending_exposure:
                 return False, f"order {order_id} already has pending exposure reserved"
 
@@ -358,7 +372,6 @@ class ExposureTracker:
                         f"{self._limits.max_total_risk_at_stop_pct}%",
                     )
 
-            self._prune_stale_pending_unlocked()
             if order_id:
                 self._pending_exposure[order_id] = {
                     "symbol": symbol,
