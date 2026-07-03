@@ -92,6 +92,11 @@ class ExecutionRuntimeModule(AppBoundModule):
             kelly_adapter = KellyAdapter()
             self._app._ml_controller = None
             self._app._kelly_predictor = None
+            self._app._regime_predictor = None
+            self._app._signal_fusion = None
+            self._app._spread_predictor = None
+            self._app._stoploss_optimizer = None
+            self._app._entry_exit_optimizer = None
 
         self._app._risk_manager = RiskManager(
             risk_profile=profile,
@@ -307,11 +312,21 @@ class ExecutionRuntimeModule(AppBoundModule):
                 """Release a pending entry slot exactly once and persist the resolution."""
                 if order_link_id in _released_cache:
                     return
-                if (
-                    self._app._trade_journal is not None
-                    and self._app._trade_journal.is_enabled
-                    and await self._app._trade_journal.is_order_resolved(order_link_id)
-                ):
+                already_resolved = False
+                if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
+                    try:
+                        already_resolved = await self._app._trade_journal.is_order_resolved(order_link_id)
+                    except Exception as _check_exc:
+                        # A DB hiccup here must not prevent releasing the
+                        # in-memory pending slot below — otherwise a single
+                        # transient error permanently leaks one of the
+                        # limited MAX_CONCURRENT_PENDING_ENTRIES slots.
+                        log.debug(
+                            "private_ws.is_order_resolved_failed",
+                            order_link_id=order_link_id,
+                            error=str(_check_exc),
+                        )
+                if already_resolved:
                     # Order already resolved in DB (e.g. after restart): release the in-memory
                     # pending slot so it doesn't leak and block future orders.
                     if self._app._execution_engine is not None:

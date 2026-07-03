@@ -181,9 +181,12 @@ class BybitAdapter:
 
         Returns the raw Bybit response dict.
         """
-        # Check duplicate
+        # Check duplicate and register atomically (no await between the two)
+        # so a concurrent caller can't observe "not registered yet" for the
+        # same order_link_id before this one finishes registering it.
         if await self._idempotency.check_duplicate(intent.order_link_id):
             raise ValueError(f"Duplicate order detected: {intent.order_link_id}")
+        await self._idempotency.register_intent(intent)
 
         # Write CREATED_LOCAL to durable state before touching the exchange
         if self._journal is not None:
@@ -200,8 +203,6 @@ class BybitAdapter:
             except Exception as _j_exc:
                 logger.debug("bybit_adapter.durable_created_local_failed", error=str(_j_exc))
 
-        # Register in idempotency store
-        await self._idempotency.register_intent(intent)
         await self._idempotency.mark_submitted(intent.order_link_id)
 
         # Write SUBMITTING to durable state before REST
