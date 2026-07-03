@@ -25,9 +25,14 @@ class SimpleModelState:
 class SimpleLinearModel:
     """Simple linear regression model using numpy only."""
 
-    def __init__(self, n_features: int = 20) -> None:
+    def __init__(self, n_features: int | None = None, **_xgboost_kwargs: object) -> None:
+        # n_features may be None/wrong here since this class is also used as
+        # a drop-in fallback for xgboost.XGBRegressor when xgboost isn't
+        # installed — callers pass xgboost-specific kwargs (max_depth,
+        # learning_rate, n_estimators, ...) that this simple model doesn't
+        # use; accept and ignore them instead of raising TypeError.
         self.n_features = n_features
-        self.weights = np.zeros(n_features, dtype=np.float32)
+        self.weights = np.zeros(n_features, dtype=np.float32) if n_features else None
         self.bias = 0.0
         self.feature_means = None
         self.feature_stds = None
@@ -35,6 +40,11 @@ class SimpleLinearModel:
 
     def fit(self, X: np.ndarray, y: np.ndarray, learning_rate: float = 0.01, epochs: int = 10) -> float:
         """Train using simple gradient descent."""
+        if self.n_features is None or self.weights is None:
+            # Lazily size to the actual training data instead of requiring
+            # the caller to know/pass the right feature count up front.
+            self.n_features = X.shape[1]
+            self.weights = np.zeros(self.n_features, dtype=np.float32)
         if X.shape[1] != self.n_features:
             raise ValueError(f"Expected {self.n_features} features, got {X.shape[1]}")
 
@@ -81,9 +91,11 @@ class SimpleLinearModel:
 class SimpleClassifier:
     """Simple logistic regression classifier using numpy only."""
 
-    def __init__(self, n_features: int = 20) -> None:
+    def __init__(self, n_features: int | None = None, **_xgboost_kwargs: object) -> None:
+        # See SimpleLinearModel.__init__ — also used as an xgboost.XGBClassifier
+        # fallback, so unknown xgboost kwargs must not raise TypeError here.
         self.n_features = n_features
-        self.weights = np.zeros(n_features, dtype=np.float32)
+        self.weights = np.zeros(n_features, dtype=np.float32) if n_features else None
         self.bias = 0.0
         self.feature_means = None
         self.feature_stds = None
@@ -95,6 +107,9 @@ class SimpleClassifier:
 
     def fit(self, X: np.ndarray, y: np.ndarray, learning_rate: float = 0.01, epochs: int = 10) -> float:
         """Train using gradient descent."""
+        if self.n_features is None or self.weights is None:
+            self.n_features = X.shape[1]
+            self.weights = np.zeros(self.n_features, dtype=np.float32)
         if X.shape[1] != self.n_features:
             raise ValueError(f"Expected {self.n_features} features, got {X.shape[1]}")
 
@@ -146,7 +161,9 @@ class SimpleClassifier:
 class SimpleEnsembleRegressor:
     """Ensemble of simple linear models."""
 
-    def __init__(self, n_features: int = 20, n_models: int = 3) -> None:
+    def __init__(self, n_features: int | None = None, n_models: int = 3, **_xgboost_kwargs: object) -> None:
+        # See SimpleLinearModel.__init__ — also used as an xgboost.XGBRegressor
+        # fallback, so unknown xgboost kwargs must not raise TypeError here.
         self.n_features = n_features
         self.n_models = n_models
         self.models = [SimpleLinearModel(n_features) for _ in range(n_models)]
@@ -154,6 +171,8 @@ class SimpleEnsembleRegressor:
 
     def fit(self, X: np.ndarray, y: np.ndarray) -> float:
         """Train ensemble."""
+        if self.n_features is None:
+            self.n_features = X.shape[1]
         if X.shape[1] != self.n_features:
             raise ValueError(f"Expected {self.n_features} features, got {X.shape[1]}")
 

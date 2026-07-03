@@ -936,6 +936,17 @@ class TrainingModule(ModuleTaskMixin):
         )
         if not batch:
             return
+        if self._app._model_registry.challenger is None or self._app._model_registry.challenger.version != challenger.version:
+            # A promotion/retrain swapped the registry's challenger while we
+            # were awaiting the batch fetch above. This batch was labelled
+            # against the old challenger_version filter — applying it to
+            # whatever model is current now would mutate the wrong model.
+            log.warning(
+                "online_learning.batch_skipped_challenger_changed",
+                fetched_for_version=challenger.version,
+                current_version=getattr(self._app._model_registry.challenger, "version", None),
+            )
+            return
         applied = 0
         prediction_ids: list[str] = []
         for row in batch:
@@ -951,13 +962,28 @@ class TrainingModule(ModuleTaskMixin):
             self._app._online_learning_updates_since_checkpoint += applied
             checkpoint_every = max(1, int(self._app._settings.MODEL_ONLINE_LEARNING_CHECKPOINT_EVERY))
             if self._app._online_learning_updates_since_checkpoint >= checkpoint_every:
-                await self._app._model_registry.save_checkpoint(challenger)
-                self._app._online_learning_updates_since_checkpoint = 0
-                log.info(
-                    "online_learning.checkpoint_saved",
-                    version=challenger.version,
-                    samples=challenger.training_samples,
-                )
+                # partial_fit_challenger mutates whatever the registry's
+                # *current* challenger is; a promotion/retrain running
+                # concurrently on the awaits above could have swapped it out
+                # from under this stale local reference. Only checkpoint if
+                # it's still the same model, otherwise the mutated model
+                # would go unpersisted while a different (untouched) one
+                # gets checkpointed instead.
+                current_challenger = self._app._model_registry.challenger
+                if current_challenger is not None and current_challenger.version == challenger.version:
+                    await self._app._model_registry.save_checkpoint(current_challenger)
+                    self._app._online_learning_updates_since_checkpoint = 0
+                    log.info(
+                        "online_learning.checkpoint_saved",
+                        version=challenger.version,
+                        samples=current_challenger.training_samples,
+                    )
+                else:
+                    log.warning(
+                        "online_learning.checkpoint_skipped_challenger_changed",
+                        applied_to_version=challenger.version,
+                        current_version=getattr(current_challenger, "version", None),
+                    )
             log.info("online_learning.updated", samples=applied, model_version=challenger.version)
 
     async def evaluate_feature_drift(self) -> dict[str, Any]:

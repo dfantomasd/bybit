@@ -995,10 +995,17 @@ class TradingLoopModule(AppBoundModule):
                 return
 
             try:
+                # Re-read balance right before submit rather than using the
+                # value captured once at the top of this cycle: symbols are
+                # evaluated concurrently via gather(), and submit() itself is
+                # serialized by execution_engine's lock, so an earlier
+                # symbol's fill in this same cycle can leave the captured
+                # balance stale by the time a later symbol reaches here.
+                fresh_balance = self._app._cached_balance
                 decision = await self._app._execution_engine.submit(
                     proposal=proposal,
-                    capital=capital,
-                    available_balance=balance,
+                    capital=fresh_balance,
+                    available_balance=fresh_balance,
                     feature_vector=vec,
                     regime_context=regime_ctx,
                 )

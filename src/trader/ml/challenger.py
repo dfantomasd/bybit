@@ -408,7 +408,7 @@ class ChallengerModel:
             labels = np.argmax(proba, axis=1).astype(np.int32)
             return scores, labels
         except Exception as exc:
-            log.debug("challenger.predict_batch_failed", exc_info=exc)
+            log.warning("challenger.predict_batch_failed", exc_info=exc)
             return zero_scores, zero_labels
 
     def partial_fit(self, features: list[float], label: int) -> bool:
@@ -564,7 +564,12 @@ class ModelRegistry:
         if self._journal is None or not self._journal.is_enabled:
             return
         try:
-            artifact = model.to_bytes()
+            import asyncio
+
+            # to_bytes() pickles the estimator + scaler and encrypts the
+            # artifact — CPU-bound work that would otherwise block the
+            # event loop (order placement, risk checks) for its duration.
+            artifact = await asyncio.get_running_loop().run_in_executor(None, model.to_bytes)
             await self._journal._execute(
                 """
                 INSERT INTO model_versions (version, status, training_samples, feature_schema_hash, artifact, metrics)
@@ -589,7 +594,7 @@ class ModelRegistry:
                 ),
             )
         except Exception as exc:
-            log.debug("model_registry.save_checkpoint_failed", exc_info=exc)
+            log.warning("model_registry.save_checkpoint_failed", exc_info=exc)
 
     async def load_champion(self) -> ChallengerModel | None:
         """Load the best compatible CHAMPION model."""
@@ -622,7 +627,7 @@ class ModelRegistry:
             )
             return model
         except Exception as exc:
-            log.debug("model_registry.load_champion_failed", exc_info=exc)
+            log.warning("model_registry.load_champion_failed", exc_info=exc)
             return None
 
     async def select_best_champion(self) -> Any | None:
@@ -833,5 +838,5 @@ class ModelRegistry:
             )
             return model
         except Exception as exc:
-            log.debug("model_registry.load_challenger_failed", exc_info=exc)
+            log.warning("model_registry.load_challenger_failed", exc_info=exc)
             return None
