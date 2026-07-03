@@ -207,6 +207,13 @@ class Settings(BaseSettings):
     SHADOW_PROBE_SYMBOL_MIN_SAMPLES: int = 6
     SHADOW_PROBE_SYMBOL_MIN_AVG_BPS: float = -1.0
     SHADOW_PROBE_STATS_LOOKBACK_DAYS: int = 7
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_ENABLED: bool = True
+    """Temporarily block a probe symbol after a poor local run of shadow closes."""
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MIN_CLOSED: int = 2
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_WINDOW: int = 3
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MAX_LOSS_RATE: float = 1.0
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MIN_AVG_PNL_PCT: float = 0.0
+    SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_SECONDS: int = 900
     SHADOW_PROBE_ALLOWED_REGIMES: str = "HIGH_VOLATILITY"
     """Comma-separated market regimes where shadow probes may fire.
 

@@ -148,6 +148,8 @@ class TradingApplication:
         self._last_zero_trading_warn_at: datetime | None = None
         self._last_ws_recovery_at: datetime | None = None
         self._shadow_closed_results: deque[tuple[datetime, str, float]] = deque(maxlen=50)
+        self._shadow_closed_results_by_symbol: dict[str, deque[tuple[datetime, str, float]]] = {}
+        self._shadow_probe_symbol_cooldowns: dict[str, datetime] = {}
         self._shadow_loss_guard_until: datetime | None = None
         # Set on every confirmed WS kline; drives the canary "fresh confirmed candles" check
         self._last_confirmed_candle_at: datetime | None = None

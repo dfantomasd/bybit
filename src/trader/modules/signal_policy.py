@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections import deque
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -535,6 +536,8 @@ class SignalPolicyModule(AppBoundModule):
         """Restrict probes to top-performing symbols when configured."""
 
         assert self._app._settings is not None
+        if self.shadow_probe_symbol_cooldown_active(symbol):
+            return False
         top_n = int(self._app._settings.SHADOW_PROBE_SYMBOL_TOP_N)
         if top_n <= 0:
             return True
@@ -628,6 +631,12 @@ class SignalPolicyModule(AppBoundModule):
         self._app._shadow_closed_results.append((now, normalized_reason, float(pnl_pct)))
         self._record_diag("shadow_closed")
         self._record_diag(f"shadow_closed:{normalized_reason.lower()}")
+        self._record_shadow_probe_symbol_loss_cooldown(
+            symbol=str(symbol),
+            reason=normalized_reason,
+            pnl_pct=float(pnl_pct),
+            now=now,
+        )
         if not self._app._settings.SHADOW_LOSS_GUARD_ENABLED:
             return
         window_size = max(1, int(self._app._settings.SHADOW_LOSS_GUARD_WINDOW))
@@ -652,6 +661,62 @@ class SignalPolicyModule(AppBoundModule):
                 avg_pnl_pct=round(avg_pnl, 4),
                 cooldown_seconds=cooldown_s,
             )
+
+    def _record_shadow_probe_symbol_loss_cooldown(
+        self,
+        *,
+        symbol: str,
+        reason: str,
+        pnl_pct: float,
+        now: datetime,
+    ) -> None:
+        """Arm a local probe cooldown for symbols with a fresh losing streak."""
+
+        if not symbol:
+            return
+        if not bool(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_ENABLED", False)):
+            return
+        history = self._app._shadow_closed_results_by_symbol.setdefault(symbol, deque(maxlen=20))
+        history.append((now, reason, float(pnl_pct)))
+        window_size = max(1, int(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_WINDOW", 3)))
+        min_closed = max(1, int(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MIN_CLOSED", 2)))
+        recent = list(history)[-window_size:]
+        if len(recent) < min_closed:
+            return
+        losses = [value for _, _, value in recent if value < 0]
+        loss_rate = len(losses) / len(recent)
+        avg_pnl = sum(value for _, _, value in recent) / len(recent)
+        if loss_rate < float(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MAX_LOSS_RATE", 1.0)):
+            return
+        if avg_pnl > float(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_MIN_AVG_PNL_PCT", 0.0)):
+            return
+        cooldown_s = max(0, int(getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_SECONDS", 900)))
+        until = now + timedelta(seconds=cooldown_s)
+        self._app._shadow_probe_symbol_cooldowns[symbol] = until
+        self._record_diag("shadow_probe_symbol_loss_cooldown")
+        self._record_diag(f"shadow_probe_symbol_loss_cooldown:{symbol}")
+        log.info(
+            "shadow_probe_symbol_loss_cooldown.activated",
+            symbol=symbol,
+            reason=reason,
+            recent_count=len(recent),
+            loss_rate=round(loss_rate, 3),
+            avg_pnl_pct=round(avg_pnl, 4),
+            cooldown_seconds=cooldown_s,
+        )
+
+    def shadow_probe_symbol_cooldown_active(self, symbol: str) -> bool:
+        """Return True while symbol-local shadow loss cooldown is active."""
+
+        now = datetime.now(tz=UTC)
+        cooldowns = getattr(self._app, "_shadow_probe_symbol_cooldowns", {})
+        until = cooldowns.get(symbol)
+        if until is None:
+            return False
+        if now >= until:
+            cooldowns.pop(symbol, None)
+            return False
+        return True
 
     @staticmethod
     def shadow_exit_hit(

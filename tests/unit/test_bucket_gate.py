@@ -232,6 +232,20 @@ class TestBucketGate:
         assert diag["hour_shadow_closed_avg_pnl_pct"] == 0.1
         assert len(app._shadow_closed_results) == 2
 
+    def test_shadow_probe_symbol_loss_cooldown_blocks_recent_loser(self) -> None:
+        app = _make_app(SHADOW_LOSS_GUARD_ENABLED=False)
+
+        app._record_shadow_close("XRPUSDT", "SL", -0.3)
+        assert app._shadow_probe_symbol_allowed("XRPUSDT") is True
+
+        app._record_shadow_close("XRPUSDT", "TIME", -0.1)
+
+        assert app._shadow_probe_symbol_allowed("XRPUSDT") is False
+        assert app._shadow_probe_symbol_allowed("SOLUSDT") is True
+
+        app._shadow_probe_symbol_cooldowns["XRPUSDT"] = datetime.now(tz=UTC) - timedelta(seconds=1)
+        assert app._shadow_probe_symbol_allowed("XRPUSDT") is True
+
     def test_shadow_probe_quality_blocks_are_reported_by_symbol(self) -> None:
         app = _make_app()
 
@@ -258,6 +272,7 @@ class TestBucketGate:
         app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=42)
         app._shadow_probe_side_stats = {("XRPUSDT", "Buy"): (-2.0, 8)}
         app._shadow_probe_symbol_stats = {"XRPUSDT": (-2.0, 8)}
+        app._shadow_probe_symbol_cooldowns = {"XRPUSDT": datetime.now(tz=UTC) + timedelta(seconds=120)}
         app._shadow_probe_eligible_symbols = {"XRPUSDT"}
 
         settings = app._modules.operator.runtime_settings()
@@ -267,6 +282,8 @@ class TestBucketGate:
         assert settings["shadow_probe_side_stats_count"] == 1
         assert settings["shadow_probe_symbol_stats_count"] == 1
         assert settings["shadow_probe_blocked_symbols"] == ["XRPUSDT"]
+        assert settings["shadow_probe_symbol_loss_cooldown_enabled"] is True
+        assert settings["shadow_probe_symbol_cooldowns"]["XRPUSDT"] > 0
         assert settings["shadow_probe_eligible_symbols"] == ["XRPUSDT"]
 
     def test_shadow_exit_uses_intrabar_high_for_buy_tp(self) -> None:

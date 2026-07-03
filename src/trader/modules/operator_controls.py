@@ -288,6 +288,13 @@ class OperatorControlsModule(AppBoundModule):
             )
         shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
         shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
+        shadow_probe_symbol_cooldowns = getattr(self._app, "_shadow_probe_symbol_cooldowns", None) or {}
+        now = datetime.now(tz=UTC)
+        active_shadow_probe_symbol_cooldowns = {
+            symbol: max(0.0, (until.astimezone(UTC) - now).total_seconds())
+            for symbol, until in shadow_probe_symbol_cooldowns.items()
+            if isinstance(until, datetime) and until > now
+        }
         blocked_probe_symbols = []
         if self._app._settings is not None:
             blocked_probe_symbols = [
@@ -387,6 +394,15 @@ class OperatorControlsModule(AppBoundModule):
             "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
             "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
             "shadow_probe_blocked_symbols": blocked_probe_symbols,
+            "shadow_probe_symbol_loss_cooldown_enabled": (
+                getattr(self._app._settings, "SHADOW_PROBE_SYMBOL_LOSS_COOLDOWN_ENABLED", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "shadow_probe_symbol_cooldowns": {
+                symbol: round(seconds_left, 1)
+                for symbol, seconds_left in sorted(active_shadow_probe_symbol_cooldowns.items())
+            },
             "shadow_probe_eligible_symbols": sorted(self._app._shadow_probe_eligible_symbols or []),
             "shadow_probe_blocked_sides": [
                 f"{symbol}:{side}"
