@@ -550,6 +550,8 @@ class ExecutionRuntimeModule(AppBoundModule):
 
         while not self._app._shutdown_event.is_set():
             try:
+                await self._risk_monitor_housekeeping()
+
                 # Refresh balance and update DrawdownTracker with current equity
                 if (
                     self._app._bybit_adapter is not None
@@ -635,6 +637,23 @@ class ExecutionRuntimeModule(AppBoundModule):
                 )
             except TimeoutError:
                 pass
+
+    async def _risk_monitor_housekeeping(self) -> None:
+        """Apply safety housekeeping that must run even when DB/exchange sync fails."""
+        if self._app._kill_switch is not None:
+            try:
+                await self._app._kill_switch.check_file_flag()
+                if self._app._kill_switch.is_active:
+                    self._app._trading_paused = True
+            except Exception as exc:
+                log.debug("risk_monitor.kill_switch_file_check_failed", error=str(exc))
+
+        today = datetime.now(tz=UTC).date()
+        if getattr(self._app, "_last_daily_reset_date", None) != today:
+            if self._app._risk_manager is not None:
+                await self._app._risk_manager.reset_daily_stats()
+            self._app._last_daily_reset_date = today
+            log.info("risk_monitor.daily_stats_reset", day=str(today))
 
     async def maybe_recover_stale_ws(self, market_data_age_s: float) -> None:
         """Nudge the public WS to reconnect when market data stops flowing."""

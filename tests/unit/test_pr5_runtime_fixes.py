@@ -81,6 +81,41 @@ def test_zero_trading_warning_is_suppressed_during_startup_warmup():
     assert log.info.call_args.args[0] == "zero_trading.suppressed_warmup"
 
 
+@pytest.mark.asyncio
+async def test_risk_monitor_housekeeping_polls_kill_switch_file_and_pauses():
+    from trader.modules.execution_runtime import ExecutionRuntimeModule
+
+    app = _make_app()
+    app._kill_switch = MagicMock()
+    app._kill_switch.check_file_flag = AsyncMock()
+    app._kill_switch.is_active = True
+    app._risk_manager = MagicMock()
+    app._risk_manager.reset_daily_stats = AsyncMock()
+
+    await ExecutionRuntimeModule(app)._risk_monitor_housekeeping()
+
+    app._kill_switch.check_file_flag.assert_awaited_once()
+    assert app._trading_paused is True
+
+
+@pytest.mark.asyncio
+async def test_risk_monitor_housekeeping_resets_daily_pnl_once_per_utc_day():
+    from trader.modules.execution_runtime import ExecutionRuntimeModule
+
+    app = _make_app()
+    app._kill_switch = None
+    app._risk_manager = MagicMock()
+    app._risk_manager.reset_daily_stats = AsyncMock()
+    module = ExecutionRuntimeModule(app)
+
+    await module._risk_monitor_housekeeping()
+    first_day = app._last_daily_reset_date
+    await module._risk_monitor_housekeeping()
+
+    assert first_day is not None
+    app._risk_manager.reset_daily_stats.assert_awaited_once()
+
+
 def test_zero_trading_warning_is_suppressed_when_shadow_orders_flow():
     app = _make_app()
     app._settings = MagicMock()
