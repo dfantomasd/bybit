@@ -1306,6 +1306,9 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
                     "pass_count": 12,
                     "block_count": 32,
                     "lift_vs_all_bps": 2.5,
+                    "side_filtered_count": 24,
+                    "score_block_count": 8,
+                    "score_block_avg_net_return_bps": -1.75,
                 }
             },
             "paper_pnl_by_horizon": {
@@ -1332,5 +1335,7 @@ async def test_db_model_screen_uses_model_gate_horizon() -> None:
     assert "Side-filter: <code>Sell</code>" in reply_text
     assert "WF до side-filter: <code>-8.00 bps</code>" in reply_text
     assert "positive_out_of_sample_side_expectancy" in reply_text
+    assert "Блоки side-filter/score: <code>24/8</code>" in reply_text
+    assert "score avg=<code>-1.75 bps</code>" in reply_text
     assert "+2.50 bps" in reply_text
     assert "Фильтр модели 15m" not in reply_text

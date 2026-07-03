@@ -3984,10 +3984,16 @@ class TelegramMonitorBot:
             gate_pass_avg = gate.get("pass_avg_net_return_bps")
             gate_block_avg = gate.get("block_avg_net_return_bps")
             gate_lift = gate.get("lift_vs_all_bps")
+            gate_side_filtered = int(gate.get("side_filtered_count") or 0)
+            gate_score_blocks = int(gate.get("score_block_count") or 0)
+            gate_score_block_avg = gate.get("score_block_avg_net_return_bps")
             gate_reasons = gate.get("top_block_reasons", {}) or {}
             gate_pass_avg_str = f"{float(gate_pass_avg):+.2f} bps" if gate_pass_avg is not None else "n/a"
             gate_block_avg_str = f"{float(gate_block_avg):+.2f} bps" if gate_block_avg is not None else "n/a"
             gate_lift_str = f"{float(gate_lift):+.2f} bps" if gate_lift is not None else "n/a"
+            gate_score_block_avg_str = (
+                f"{float(gate_score_block_avg):+.2f} bps" if gate_score_block_avg is not None else "n/a"
+            )
             gate_reasons_str = (
                 ", ".join(f"{html.escape(str(reason))}:{count}" for reason, count in gate_reasons.items()) or "n/a"
             )
@@ -4127,6 +4133,8 @@ class TelegramMonitorBot:
                 + f"</code>, причина=<code>{side_filter_reason}</code>",
                 f"Фильтр модели {model_horizon}m: <code>{gate_pass}/{gate_total} resolved пропущено</code>, "
                 f"блок=<code>{gate_block}</code>, observed=<code>{gate_observed}</code>, pending=<code>{gate_pending}</code>",
+                f"Блоки side-filter/score: <code>{gate_side_filtered}/{gate_score_blocks}</code>, "
+                f"score avg=<code>{gate_score_block_avg_str}</code>",
                 f"Среднее пропущенных: <code>{gate_pass_avg_str}</code>",
                 f"Среднее заблокированных: <code>{gate_block_avg_str}</code>",
                 "Lift фильтра: <code>"
@@ -4666,6 +4674,8 @@ class TelegramMonitorBot:
                 return html.escape(str(value))
 
         gate_lift = gate.get("lift_vs_all_bps")
+        side_filtered_count = int(gate.get("side_filtered_count") or 0)
+        score_block_count = int(gate.get("score_block_count") or 0)
         lines = [
             "<b>📊 Метрики модели</b>",
             "",
@@ -4683,6 +4693,9 @@ class TelegramMonitorBot:
             f"Pass: <code>{int(gate.get('pass_count') or 0)}</code>",
             f"Gate lift: <code>{_fmt(gate_lift, ' bps')}</code>",
             f"Pass expectancy: <code>{_fmt(gate.get('pass_avg_net_return_bps'), ' bps')}</code>",
+            f"Side-filter blocks: <code>{side_filtered_count}</code>",
+            f"Score blocks: <code>{score_block_count}</code>",
+            f"Score-block avg: <code>{_fmt(gate.get('score_block_avg_net_return_bps'), ' bps')}</code>",
         ]
         await self._button_reply(update, "\n".join(lines), reply_markup=self._canary_menu())
 
