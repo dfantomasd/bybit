@@ -895,6 +895,54 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "connection_target" in text
 
 
+@pytest.mark.asyncio
+async def test_deep_report_shows_model_gate_breakdown() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "model": {"challenger_version": "v5"},
+            "hour_signals_emitted": 3,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "GOOD", "horizon_minutes": 5, "walk_forward_expectancy_bps": 2.0},
+            },
+            "model_gate_horizon_minutes": 5,
+            "shadow_gate_by_horizon": {
+                "5": {
+                    "total_count": 33,
+                    "event_total_count": 40,
+                    "event_pending_count": 7,
+                    "pass_count": 12,
+                    "lift_vs_all_bps": 2.5,
+                    "side_filtered_count": 21,
+                    "score_block_count": 7,
+                    "score_block_avg_net_return_bps": -1.25,
+                    "top_block_reasons": {
+                        "side_not_selected_by_model": 21,
+                        "score_below_regime_threshold": 7,
+                    },
+                }
+            },
+            "paper_pnl_by_horizon": {"5": {"baseline": {"count": 10}, "model_gate": {"count": 4}}},
+        }
+    )
+
+    text = await bot._render_deep_report_text()
+
+    assert "Gate breakdown" in text
+    assert "side-filter=<code>21</code>" in text
+    assert "score-block=<code>7</code>" in text
+    assert "score avg=<code>-1.25</code>" in text
+    assert "&quot;gate_breakdown&quot;" in text
+
+
 def test_diagnostics_menu_has_db_probe_button() -> None:
     bot = _make_bot()
 

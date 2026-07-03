@@ -2995,6 +2995,9 @@ class TelegramMonitorBot:
         paper_horizon = _dict_or_empty(paper_horizon)
         paper_baseline = _dict_or_empty(paper_horizon.get("baseline"))
         paper_model_gate = _dict_or_empty(paper_horizon.get("model_gate"))
+        gate_side_filtered = int((shadow_gate or {}).get("side_filtered_count") or 0)
+        gate_score_blocks = int((shadow_gate or {}).get("score_block_count") or 0)
+        gate_score_block_avg = (shadow_gate or {}).get("score_block_avg_net_return_bps")
         candle_sampler = _dict_or_empty(runtime_diag.get("candle_sampler"))
         shadow_closes = {
             "total": runtime_diag.get("hour_shadow_closed", 0) if isinstance(runtime_diag, dict) else 0,
@@ -3086,6 +3089,12 @@ class TelegramMonitorBot:
                 "strategy_paper_baseline": paper_baseline,
                 "strategy_paper_model_gate": paper_model_gate,
                 "shadow_gate": shadow_gate,
+                "gate_breakdown": {
+                    "side_filtered_count": gate_side_filtered,
+                    "score_block_count": gate_score_blocks,
+                    "score_block_avg_net_return_bps": gate_score_block_avg,
+                    "top_block_reasons": (shadow_gate or {}).get("top_block_reasons", {}),
+                },
                 "candle_sampler_runtime": candle_sampler,
                 "shadow_closes_runtime": shadow_closes,
             },
@@ -3156,6 +3165,10 @@ class TelegramMonitorBot:
             f"pending=<code>{int((shadow_gate or {}).get('event_pending_count') or 0)}</code>, "
             f"pass=<code>{int((shadow_gate or {}).get('pass_count') or 0)}</code>, "
             f"lift=<code>{html.escape(str((shadow_gate or {}).get('lift_vs_all_bps') or 'n/a'))}</code>",
+            "• Gate breakdown: "
+            f"side-filter=<code>{gate_side_filtered}</code>, "
+            f"score-block=<code>{gate_score_blocks}</code>, "
+            f"score avg=<code>{html.escape(str(gate_score_block_avg if gate_score_block_avg is not None else 'n/a'))}</code>",
             "",
             "<b>Strategy signal pipeline</b>",
             f"• Кандидаты стратегии: <code>{hour_signal_candidates}</code>; "
