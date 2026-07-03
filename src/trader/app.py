@@ -350,6 +350,9 @@ class TradingApplication:
     def _expectancy_gates_apply(self) -> bool:
         return self._modules.signal_policy.expectancy_gates_apply()
 
+    def _expectancy_stats_ready(self) -> tuple[bool, str | None]:
+        return self._modules.signal_policy.expectancy_stats_ready()
+
     async def _change_risk_profile(self, profile: Any) -> None:
 
         await self._modules.operator.change_risk_profile(profile)

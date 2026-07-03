@@ -291,6 +291,18 @@ class OperatorControlsModule(AppBoundModule):
                     now - bucket_stats_refreshed_at.astimezone(UTC)
                 ).total_seconds(),
             )
+        expectancy_stats_max_age_s = (
+            getattr(self._app._settings, "EXPECTANCY_STATS_MAX_AGE_SECONDS", None)
+            if self._app._settings is not None
+            else None
+        )
+        expectancy_stats_ready = True
+        if self._app._settings is not None and getattr(
+            self._app._settings, "EXPECTANCY_STATS_REQUIRED_FOR_ENTRIES", False
+        ):
+            expectancy_stats_ready = bucket_stats_age_s is not None and (
+                expectancy_stats_max_age_s is None or bucket_stats_age_s <= float(expectancy_stats_max_age_s)
+            )
         shadow_probe_side_stats = getattr(self._app, "_shadow_probe_side_stats", None) or {}
         shadow_probe_symbol_stats = getattr(self._app, "_shadow_probe_symbol_stats", None) or {}
         strategy_regime_stats = getattr(self._app, "_strategy_regime_stats", None) or {}
@@ -409,6 +421,13 @@ class OperatorControlsModule(AppBoundModule):
                 else None
             ),
             "bucket_stats_age_s": bucket_stats_age_s,
+            "expectancy_stats_required_for_entries": (
+                getattr(self._app._settings, "EXPECTANCY_STATS_REQUIRED_FOR_ENTRIES", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "expectancy_stats_max_age_s": expectancy_stats_max_age_s,
+            "expectancy_stats_ready": expectancy_stats_ready,
             "strategy_regime_stats_count": len(strategy_regime_stats),
             "strategy_regime_block_enabled": (
                 getattr(self._app._settings, "STRATEGY_REGIME_BLOCK_ENABLED", None)

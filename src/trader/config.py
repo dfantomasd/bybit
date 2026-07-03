@@ -318,6 +318,10 @@ class Settings(BaseSettings):
     """Block a bucket when its average net return is below this (bps)."""
     BUCKET_STATS_REFRESH_SECONDS: int = 3600
     """How often the in-memory bucket statistics are refreshed from Postgres."""
+    EXPECTANCY_STATS_REQUIRED_FOR_ENTRIES: bool = True
+    """Fail closed when live expectancy gates apply but their statistics are missing/stale."""
+    EXPECTANCY_STATS_MAX_AGE_SECONDS: int = 7200
+    """Maximum age for in-memory expectancy statistics before entries are blocked."""
     HOUR_BLOCK_ENABLED: bool = True
     """Fallback gate for toxic UTC hours when regime buckets are too sparse."""
     HOUR_MIN_SAMPLES: int = 30

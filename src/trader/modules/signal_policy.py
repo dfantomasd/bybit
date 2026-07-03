@@ -60,6 +60,35 @@ class SignalPolicyModule(AppBoundModule):
             return True
         return not self.initial_shadow_mode()
 
+    def expectancy_stats_ready(self) -> tuple[bool, str | None]:
+        """Return whether expectancy-gate statistics are fresh enough for entries."""
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return True, None
+        if not self._app._settings.EXPECTANCY_STATS_REQUIRED_FOR_ENTRIES:
+            return True, None
+        gates_enabled = any(
+            (
+                self._app._settings.BUCKET_BLOCK_ENABLED,
+                self._app._settings.HOUR_BLOCK_ENABLED,
+                self._app._settings.STRATEGY_BLOCK_ENABLED,
+                self._app._settings.STRATEGY_REGIME_BLOCK_ENABLED,
+                self._app._settings.STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED,
+                self._app._settings.SYMBOL_SIDE_BLOCK_ENABLED,
+            )
+        )
+        if not gates_enabled:
+            return True, None
+        refreshed_at = getattr(self._app, "_bucket_stats_refreshed_at", None)
+        if not isinstance(refreshed_at, datetime):
+            return False, "expectancy_stats_not_loaded"
+        max_age_s = max(0.0, float(self._app._settings.EXPECTANCY_STATS_MAX_AGE_SECONDS))
+        age_s = (datetime.now(tz=UTC) - refreshed_at.astimezone(UTC)).total_seconds()
+        if age_s > max_age_s:
+            return False, "expectancy_stats_stale"
+        return True, None
+
     def model_gate_threshold(self, regime_context: Any | None) -> float:
         """Return a conservative threshold adjusted by market regime."""
         assert self._app._settings is not None

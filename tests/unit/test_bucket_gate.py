@@ -132,6 +132,23 @@ class TestBucketGate:
         app._bucket_stats = {("UNKNOWN", "UNKNOWN", datetime.now(tz=UTC).hour): (-10.0, 100)}
         assert app._bucket_blocked(None) is True
 
+    def test_expectancy_stats_not_loaded_blocks_when_gates_apply(self) -> None:
+        app = _make_active_app()
+
+        assert app._expectancy_stats_ready() == (False, "expectancy_stats_not_loaded")
+
+    def test_expectancy_stats_stale_blocks_when_gates_apply(self) -> None:
+        app = _make_active_app(EXPECTANCY_STATS_MAX_AGE_SECONDS=60)
+        app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=90)
+
+        assert app._expectancy_stats_ready() == (False, "expectancy_stats_stale")
+
+    def test_fresh_expectancy_stats_allow_entries(self) -> None:
+        app = _make_active_app(EXPECTANCY_STATS_MAX_AGE_SECONDS=60)
+        app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=30)
+
+        assert app._expectancy_stats_ready() == (True, None)
+
     def test_toxic_symbol_side_blocks(self) -> None:
         app = _make_active_app()
         app._symbol_side_stats = {("ADAUSDT", "Buy"): (-5.0, 25)}
@@ -330,6 +347,9 @@ class TestBucketGate:
         assert isinstance(settings["deploy_info"], dict)
         assert settings["bucket_stats_refresh_seconds"] == 300
         assert 0 <= settings["bucket_stats_age_s"] <= 60
+        assert settings["expectancy_stats_required_for_entries"] is True
+        assert settings["expectancy_stats_max_age_s"] == app._settings.EXPECTANCY_STATS_MAX_AGE_SECONDS
+        assert settings["expectancy_stats_ready"] is True
         assert settings["strategy_regime_stats_count"] == 1
         assert settings["strategy_regime_block_enabled"] is True
         assert settings["strategy_regime_confidence_gate_enabled"] is True

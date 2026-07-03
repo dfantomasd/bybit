@@ -629,6 +629,22 @@ class TradingLoopModule(AppBoundModule):
                 except Exception as exc:
                     log.warning("strategy_loop.regime_error", symbol=symbol, error=str(exc))
 
+            stats_ready, stats_block_reason = self._app._expectancy_stats_ready()
+            if not stats_ready:
+                reason = stats_block_reason or "expectancy_stats_not_ready"
+                self._app._record_diag(reason)
+                log.warning(
+                    "strategy_loop.expectancy_stats_not_ready",
+                    symbol=symbol,
+                    reason=reason,
+                    bucket_stats_refreshed_at=(
+                        self._app._bucket_stats_refreshed_at.isoformat()
+                        if self._app._bucket_stats_refreshed_at is not None
+                        else None
+                    ),
+                )
+                return
+
             # Regime-bucket gate: skip evaluation when this (regime, volatility,
             # UTC hour) bucket has a proven negative expectancy on our own signals.
             if self._app._bucket_blocked(regime_ctx):
