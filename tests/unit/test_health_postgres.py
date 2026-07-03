@@ -49,9 +49,12 @@ class TestHealthCheckerPostgresRetries:
         assert error is None
         connect.assert_awaited_once()
         kwargs = connect.await_args.kwargs
-        assert kwargs["dsn"] == (
-            "postgresql://postgres.projectref:secret@aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
-        )
+        # Credentials are passed via separate user/password kwargs, not
+        # embedded in the dsn string, so a logged/traced dsn never leaks the
+        # password (asyncpg may log connection kwargs on error).
+        assert kwargs["dsn"] == "postgresql://aws-0-eu-west-1.pooler.supabase.com:6543/postgres"
+        assert kwargs["user"] == "postgres.projectref"
+        assert kwargs["password"] == "secret"
         assert isinstance(kwargs["ssl"], ssl.SSLContext)
         assert kwargs["ssl"].verify_mode == ssl.CERT_NONE
         assert kwargs["statement_cache_size"] == 0

@@ -111,13 +111,17 @@ def asyncpg_pool_connect_kwargs(dsn: str) -> dict[str, Any]:
         if key.lower() == "sslmode":
             mode = value.lower()
             if mode == "require":
-                # libpq sslmode=require: encrypt but do not abort when the CA
-                # chain is not trusted (Supabase pooler uses a cert not always
-                # in Render's bundle). CERT_OPTIONAL keeps the connection
-                # encrypted and verifies when possible, matching libpq semantics.
+                # libpq sslmode=require encrypts the connection without
+                # requiring certificate-chain verification. Supabase pooler can
+                # present a chain that is not trusted by Render's CA bundle; a
+                # plain ssl=True in asyncpg verifies it and fails. CERT_OPTIONAL
+                # would still validate a presented server cert and raise on an
+                # untrusted chain (the client always receives a cert in a TLS
+                # handshake, so CERT_OPTIONAL != "skip verification" here) —
+                # only CERT_NONE actually reproduces libpq's sslmode=require.
                 context = ssl.create_default_context()
                 context.check_hostname = False
-                context.verify_mode = ssl.CERT_OPTIONAL
+                context.verify_mode = ssl.CERT_NONE
                 ssl_arg = context
             elif mode in {"verify-ca", "verify-full"}:
                 ssl_arg = True

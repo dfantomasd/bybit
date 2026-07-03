@@ -466,8 +466,11 @@ def test_asyncpg_pool_connect_kwargs_makes_sslmode_explicit() -> None:
     assert kwargs["user"] == "postgres.ref"
     assert kwargs["password"] == "secret"
     assert isinstance(kwargs["ssl"], ssl.SSLContext)
-    # CERT_OPTIONAL: encrypted channel, verify when CA trusts cert (libpq sslmode=require semantics).
-    assert kwargs["ssl"].verify_mode == ssl.CERT_OPTIONAL
+    # CERT_NONE: encrypted channel, no certificate-chain verification — this is
+    # what libpq's sslmode=require actually does. CERT_OPTIONAL would still
+    # validate the server's certificate (a TLS server always presents one) and
+    # raise on Supabase pooler's untrusted chain, defeating the purpose.
+    assert kwargs["ssl"].verify_mode == ssl.CERT_NONE
     assert kwargs["ssl"].check_hostname is False
 
 

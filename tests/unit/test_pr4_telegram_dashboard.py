@@ -985,7 +985,7 @@ async def test_db_probe_success_redacts_dsn(monkeypatch: pytest.MonkeyPatch) -> 
     text = await bot._render_db_probe_text()
 
     assert "asyncpg.connect OK" in text
-    assert "SSL arg: <code>SSLContext(optional_verify)</code>" in text
+    assert "SSL arg: <code>SSLContext(no_verify)</code>" in text
     assert "username_has_project_ref" in text
     assert "secret" not in text
 
@@ -1006,7 +1006,7 @@ async def test_db_probe_failure_reports_sanitized_error(monkeypatch: pytest.Monk
 
     assert "asyncpg.connect failed" in text
     assert "EAUTHQUERY failed" in text
-    assert "SSL arg: <code>SSLContext(optional_verify)</code>" in text
+    assert "SSL arg: <code>SSLContext(no_verify)</code>" in text
     assert "secret" not in text
 
 
