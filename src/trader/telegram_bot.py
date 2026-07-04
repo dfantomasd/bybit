@@ -286,7 +286,15 @@ class TelegramMonitorBot:
 
     async def start(self, http_app: Any | None = None) -> bool:
         if not self.enabled:
-            log.info("telegram_bot_disabled")
+            self._polling_disabled_reason = (
+                "token_missing" if not self._config.token else "allowed_chat_ids_empty"
+            )
+            log.info(
+                "telegram_bot_disabled",
+                reason=self._polling_disabled_reason,
+                allowed_chats=len(self._config.allowed_chat_ids),
+                token_configured=bool(self._config.token),
+            )
             return False
         if not self._uses_webhook():
             if not await self._acquire_polling_lock():
@@ -369,7 +377,12 @@ class TelegramMonitorBot:
                 if http_app is None:
                     self._polling_disabled_reason = "webhook_http_app_missing"
                     log.error("telegram_webhook_requires_http_app")
-                    await self._teardown_app()
+                    try:
+                        if getattr(app, "running", False):
+                            await app.stop()
+                        await app.shutdown()
+                    except Exception as exc:
+                        log.debug("telegram_webhook_missing_http_app_cleanup_failed", error=str(exc))
                     return False
                 self._mount_webhook_route(http_app)
                 await self._activate_webhook(app)
@@ -454,11 +467,10 @@ class TelegramMonitorBot:
         @http_app.post("/telegram/webhook")
         async def telegram_webhook(incoming: Request) -> Response:
             secret = bot_ref._config.webhook_secret.strip()
-            if not secret:
-                raise HTTPException(status_code=403, detail="webhook secret not configured")
-            provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-            if not hmac.compare_digest(provided, secret):
-                raise HTTPException(status_code=403, detail="invalid webhook secret")
+            if secret:
+                provided = incoming.headers.get("X-Telegram-Bot-Api-Secret-Token", "")
+                if not hmac.compare_digest(provided, secret):
+                    raise HTTPException(status_code=403, detail="invalid webhook secret")
             tg_app = bot_ref._app
             if tg_app is None:
                 raise HTTPException(status_code=503, detail="telegram not ready")
