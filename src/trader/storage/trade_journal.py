@@ -695,7 +695,9 @@ class TradeJournal:
                 requested_notional_usd numeric,
                 regime text,
                 rationale text,
-                features jsonb
+                features jsonb,
+                model_decision jsonb,
+                blocked_reason text
             );
             CREATE INDEX IF NOT EXISTS idx_trade_signals_symbol_created
                 ON trade_signals (symbol, created_at DESC);
@@ -1149,8 +1151,7 @@ class TradeJournal:
         requested_notional = None
         if proposal.entry_price is not None:
             requested_notional = Decimal(str(proposal.entry_price)) * Decimal(str(proposal.requested_qty))
-        await self._execute(
-            """
+        query = """
             INSERT INTO trade_signals (
                 proposal_id, created_at, strategy_id, symbol, side, confidence,
                 entry_price, take_profit, stop_loss, requested_qty,
@@ -1159,7 +1160,8 @@ class TradeJournal:
             )
             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14::jsonb, $15::jsonb, $16)
             ON CONFLICT (proposal_id) DO NOTHING
-            """,
+            """
+        args = (
             proposal.proposal_id,
             proposal.timestamp,
             proposal.strategy_id,
@@ -1177,6 +1179,28 @@ class TradeJournal:
             json.dumps(model_decision) if model_decision is not None else None,
             blocked_reason,
         )
+        await self._execute(query, *args)
+        if self._trade_signal_metadata_columns_missing(getattr(self, "_last_write_error", None)):
+            await self._ensure_trade_signal_metadata_columns()
+            await self._execute(query, *args)
+
+    @staticmethod
+    def _trade_signal_metadata_columns_missing(error: object) -> bool:
+        text = str(error or "").lower()
+        return (
+            "trade_signals" in text
+            and (
+                'column "model_decision"' in text
+                or 'column "blocked_reason"' in text
+                or "column model_decision" in text
+                or "column blocked_reason" in text
+            )
+            and ("does not exist" in text or "undefinedcolumn" in text)
+        )
+
+    async def _ensure_trade_signal_metadata_columns(self) -> None:
+        await self._execute("ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision jsonb")
+        await self._execute("ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS blocked_reason text")
 
     async def record_risk_decision(self, symbol: str, decision: RiskDecision) -> None:
         await self._execute(
@@ -3967,10 +3991,11 @@ class TradeJournal:
                 "online_learned_at",
             ),
             "trade_signals": (
-                "signal_id",
+                "proposal_id",
                 "symbol",
                 "side",
-                "strategy_name",
+                "strategy_id",
+                "model_decision",
                 "blocked_reason",
                 "created_at",
             ),

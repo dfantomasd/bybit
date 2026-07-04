@@ -42,6 +42,21 @@ class _SignalCaptureJournal(DirectionalTradeJournal):
         self.executed.append((query, args))
 
 
+class _RecoveringSignalCaptureJournal(_SignalCaptureJournal):
+    def __init__(self) -> None:
+        super().__init__()
+        self._last_write_error: str | None = None
+        self._failed_insert_once = False
+
+    async def _execute(self, query: str, *args: Any) -> None:
+        self.executed.append((query, args))
+        if query.lstrip().upper().startswith("INSERT INTO TRADE_SIGNALS") and not self._failed_insert_once:
+            self._failed_insert_once = True
+            self._last_write_error = 'column "model_decision" of relation "trade_signals" does not exist'
+            return
+        self._last_write_error = None
+
+
 def _prediction(entry_time: datetime, *, side: str = "Sell") -> dict[str, Any]:
     return {
         "prediction_id": "00000000-0000-0000-0000-000000000001",
@@ -130,6 +145,37 @@ async def test_record_signal_accepts_and_persists_blocked_reason() -> None:
     query, args = journal.executed[0]
     assert "blocked_reason" in query
     assert args[-1] == "model_gate_canary_blocked"
+
+
+@pytest.mark.asyncio
+async def test_record_signal_repairs_missing_metadata_columns_and_retries() -> None:
+    journal = _RecoveringSignalCaptureJournal()
+    proposal = TradeProposal(
+        strategy_id="trend",
+        symbol="LINKUSDT",
+        market_type=MarketType.LINEAR,
+        side=OrderSide.BUY,
+        requested_qty=Decimal("10"),
+        entry_price=Decimal("7.5"),
+        confidence=0.7,
+        regime=MarketRegime.BULL_TREND,
+        rationale="repair test",
+    )
+
+    await journal.record_signal(
+        proposal=proposal,
+        feature_vector=None,
+        regime_context=None,
+        model_decision={"score": 0.7},
+        blocked_reason="expectancy_stats_ready",
+    )
+
+    assert len(journal.executed) == 4
+    assert journal.executed[0][0].lstrip().startswith("INSERT INTO trade_signals")
+    assert "ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision" in journal.executed[1][0]
+    assert "ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS blocked_reason" in journal.executed[2][0]
+    assert journal.executed[3][0].lstrip().startswith("INSERT INTO trade_signals")
+    assert journal._last_write_error is None
 
 
 @pytest.mark.asyncio
