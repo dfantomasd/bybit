@@ -2527,15 +2527,15 @@ class TradeJournal:
         order_link_id: str | None = None,
     ) -> str:
         """Write a shadow-mode prediction event; return prediction_id."""
-        rows = await self._fetch(
-            """
+        query = """
             INSERT INTO prediction_events (
                 symbol, interval, model_version, feature_snapshot_id,
                 score, strategy_signal, decision, metadata, order_link_id
             )
             VALUES ($1, $2, $3, $4::uuid, $5, $6, $7, $8::jsonb, $9)
             RETURNING prediction_id
-            """,
+            """
+        args = (
             symbol,
             interval,
             model_version,
@@ -2546,7 +2546,29 @@ class TradeJournal:
             json.dumps(metadata or {}),
             order_link_id,
         )
+        rows = await self._fetch(query, *args)
+        if not rows and self._prediction_event_metadata_columns_missing(getattr(self, "_last_read_error", None)):
+            await self._ensure_prediction_event_metadata_columns()
+            rows = await self._fetch(query, *args)
         return str(rows[0]["prediction_id"]) if rows else ""
+
+    @staticmethod
+    def _prediction_event_metadata_columns_missing(error: object) -> bool:
+        text = str(error or "").lower()
+        return (
+            "prediction_events" in text
+            and (
+                'column "metadata"' in text
+                or 'column "order_link_id"' in text
+                or "column metadata" in text
+                or "column order_link_id" in text
+            )
+            and ("does not exist" in text or "undefinedcolumn" in text)
+        )
+
+    async def _ensure_prediction_event_metadata_columns(self) -> None:
+        await self._execute("ALTER TABLE prediction_events ADD COLUMN IF NOT EXISTS metadata jsonb")
+        await self._execute("ALTER TABLE prediction_events ADD COLUMN IF NOT EXISTS order_link_id text")
 
     async def link_prediction_to_order(self, prediction_id: str, order_link_id: str) -> None:
         """Link an existing prediction_event to its executed order."""

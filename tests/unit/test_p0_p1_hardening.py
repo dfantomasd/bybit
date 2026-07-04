@@ -646,6 +646,50 @@ async def test_first_training_dataset_can_be_built_without_existing_model() -> N
     assert calls[0]["args"][3] == snapshot_id
 
 
+@pytest.mark.asyncio
+async def test_record_prediction_event_repairs_missing_metadata_columns_and_retries() -> None:
+    """Legacy prediction_events tables should not silently drop baseline/model observations."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal.__new__(TradeJournal)
+    journal._enabled = True
+    journal._last_read_error = None
+    prediction_id = str(uuid.uuid4())
+    fetch_calls: list[dict[str, Any]] = []
+    execute_calls: list[str] = []
+
+    async def _capture_fetch(query: str, *args: Any) -> list[Any]:
+        fetch_calls.append({"query": query, "args": args})
+        if len(fetch_calls) == 1:
+            journal._last_read_error = 'column "metadata" of relation "prediction_events" does not exist'
+            return []
+        journal._last_read_error = None
+        return [{"prediction_id": prediction_id}]
+
+    async def _capture_execute(query: str, *args: Any) -> None:
+        del args
+        execute_calls.append(query)
+
+    journal._fetch = _capture_fetch  # type: ignore[method-assign]
+    journal._execute = _capture_execute  # type: ignore[method-assign]
+
+    result = await journal.record_prediction_event(
+        symbol="BTCUSDT",
+        interval="1",
+        model_version="RULE_BASELINE_V1",
+        score=0.65,
+        strategy_signal="Buy",
+        decision="SHADOW_BASELINE",
+        feature_snapshot_id=str(uuid.uuid4()),
+        metadata={"source": "test"},
+    )
+
+    assert result == prediction_id
+    assert len(fetch_calls) == 2
+    assert any("ALTER TABLE prediction_events ADD COLUMN IF NOT EXISTS metadata" in q for q in execute_calls)
+    assert any("ALTER TABLE prediction_events ADD COLUMN IF NOT EXISTS order_link_id" in q for q in execute_calls)
+
+
 # ===========================================================================
 # P0.9 Fee-aware outcome labels
 # ===========================================================================
