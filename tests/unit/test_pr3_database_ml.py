@@ -581,6 +581,42 @@ async def test_feature_snapshot_written() -> None:
 
 
 @pytest.mark.asyncio
+async def test_feature_snapshot_returns_existing_id_after_conflict_fallback() -> None:
+    """record_feature_snapshot must not lose the link when fallback insert returns no row."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+    journal._enabled = True
+    existing_id = uuid.uuid4()
+    queries: list[str] = []
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict]:
+        del args
+        queries.append(query)
+        if "SELECT snapshot_id" in query:
+            return [{"snapshot_id": existing_id}]
+        return []
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    snapshot_id = await journal.record_feature_snapshot(
+        symbol="DOGEUSDT",
+        interval="1",
+        candle_open_time=datetime(2026, 1, 1, tzinfo=UTC),
+        feature_schema_hash="abc123",
+        feature_names=["rsi", "ema"],
+        feature_values=[45.0, 0.02],
+    )
+
+    assert snapshot_id == str(existing_id)
+    assert len(queries) == 3
+    assert "ON CONFLICT (symbol, interval, candle_open_time, feature_schema_hash)" in queries[0]
+    assert "ON CONFLICT DO NOTHING" in queries[1]
+    assert "SELECT snapshot_id" in queries[2]
+
+
+@pytest.mark.asyncio
 async def test_db_diagnostics_reports_trainable_samples_and_latest_model() -> None:
     """DB diagnostics should expose enough model/training state for Telegram controls."""
     from trader.storage.trade_journal import TradeJournal

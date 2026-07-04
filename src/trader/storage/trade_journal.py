@@ -2493,6 +2493,24 @@ class TradeJournal:
                 """,
                 *args,
             )
+        if not rows and self.is_enabled:
+            rows = await self._fetch(
+                """
+                SELECT snapshot_id
+                FROM feature_snapshots
+                WHERE symbol = $1
+                  AND interval = $2
+                  AND candle_open_time = $3
+                  AND feature_schema_hash = $4
+                  AND training_eligible = true
+                ORDER BY created_at ASC, snapshot_id ASC
+                LIMIT 1
+                """,
+                symbol,
+                interval,
+                candle_open_time,
+                feature_schema_hash,
+            )
         return str(rows[0]["snapshot_id"]) if rows else ""
 
     async def record_prediction_event(
