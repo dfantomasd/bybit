@@ -3091,6 +3091,7 @@ class TelegramMonitorBot:
         paper_horizon = _dict_or_empty(paper_horizon)
         paper_baseline = _dict_or_empty(paper_horizon.get("baseline"))
         paper_model_gate = _dict_or_empty(paper_horizon.get("model_gate"))
+        recent_signal_block_reasons = _list_or_empty(db_diag.get("recent_signal_block_reasons"))
         gate_side_filtered = int((shadow_gate or {}).get("side_filtered_count") or 0)
         gate_score_blocks = int((shadow_gate or {}).get("score_block_count") or 0)
         gate_score_block_avg = (shadow_gate or {}).get("score_block_avg_net_return_bps")
@@ -3104,6 +3105,46 @@ class TelegramMonitorBot:
             if isinstance(runtime_diag, dict)
             else None,
         }
+
+        def _block_reason_hint(reason: str) -> str:
+            normalized = reason.lower()
+            if "approved_or_unknown" in normalized:
+                return "сигнал дошёл дальше или старый ряд без причины"
+            if "net_edge" in normalized or "edge" in normalized:
+                return "ожидаемая net-edge ниже комиссий/маржи; смотреть TP/SL/fee/threshold"
+            if "min_notional" in normalized or "notional" in normalized:
+                return "размер заявки ниже лимита инструмента; смотреть sizing/min notional"
+            if "model_gate" in normalized or "champion" in normalized:
+                return "model-gate/CHAMPION не пропустил; нужен GOOD + paper-gate"
+            if "strategy_regime" in normalized or "expectancy" in normalized:
+                return "bucket/regime expectancy фильтр режет токсичный режим"
+            if "confidence" in normalized:
+                return "confidence ниже режима/стратегии"
+            if "cooldown" in normalized:
+                return "cooldown после входа/ошибки"
+            if "feature" in normalized or "snapshot" in normalized:
+                return "нет/устарел feature snapshot"
+            if "paused" in normalized:
+                return "бот на паузе"
+            if "pending" in normalized:
+                return "есть pending-заявка по символу"
+            if "position" in normalized:
+                return "уже есть позиция/ограничение по стороне"
+            if "risk" in normalized:
+                return "RiskManager отклонил размер/экспозицию"
+            return "смотреть контекст в Runtime diagnostics"
+
+        block_reason_lines = []
+        for row in recent_signal_block_reasons[:8]:
+            if not isinstance(row, dict):
+                continue
+            reason = str(row.get("reason") or "unknown")
+            count = int(row.get("count") or 0)
+            latest = str(row.get("latest_at") or "n/a")
+            block_reason_lines.append(
+                f"• <code>{html.escape(reason)}</code>: <code>{count}</code> "
+                f"(latest <code>{html.escape(latest[:19])}</code>) — {html.escape(_block_reason_hint(reason))}"
+            )
 
         blockers: list[str] = []
         if shadow:
@@ -3184,6 +3225,7 @@ class TelegramMonitorBot:
                 "approved_shadow_entries": hour_shadow_entries,
                 "strategy_paper_baseline": paper_baseline,
                 "strategy_paper_model_gate": paper_model_gate,
+                "recent_signal_block_reasons_24h": recent_signal_block_reasons,
                 "shadow_gate": shadow_gate,
                 "gate_breakdown": {
                     "side_filtered_count": gate_side_filtered,
@@ -3276,6 +3318,22 @@ class TelegramMonitorBot:
             f"Если candidates &gt; 0, но approved=0 — вход отрезан финальными execution-фильтрами "
             f"(часто net-edge/min-notional), ждать {model_horizon}m outcome ещё нечему.",
         ]
+        if block_reason_lines:
+            lines.extend(
+                [
+                    "",
+                    "<b>Почему входы не доходят до paper/live (trade_signals за 24h)</b>",
+                    *block_reason_lines,
+                ]
+            )
+        else:
+            lines.extend(
+                [
+                    "",
+                    "<b>Почему входы не доходят до paper/live (trade_signals за 24h)</b>",
+                    "Нет свежих записанных причин. Если кандидаты есть, но список пустой — проверьте запись trade_signals/БД.",
+                ]
+            )
         runtime_explainers = self._render_runtime_explainers(runtime_diag if isinstance(runtime_diag, dict) else {})
         if runtime_explainers:
             lines.extend(["", *runtime_explainers])

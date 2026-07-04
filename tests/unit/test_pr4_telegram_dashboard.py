@@ -972,6 +972,50 @@ async def test_deep_report_shows_model_gate_breakdown() -> None:
     assert "&quot;gate_breakdown&quot;" in text
 
 
+@pytest.mark.asyncio
+async def test_deep_report_shows_recent_signal_block_reasons() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.diagnostics_provider = MagicMock(
+        return_value={
+            "hour_signals_emitted": 5,
+            "hour_shadow_order_would_be_placed": 0,
+            "shadow_mode": True,
+        }
+    )
+    bot._controller.db_diagnostics_provider = AsyncMock(
+        return_value={
+            "connected": True,
+            "latest_model_version": {
+                "version": "v5",
+                "status": "SHADOW_CHALLENGER",
+                "metrics": {"quality": "WEAK", "horizon_minutes": 5, "walk_forward_expectancy_bps": -1.0},
+            },
+            "model_gate_horizon_minutes": 5,
+            "recent_signal_block_reasons": [
+                {
+                    "reason": "net_edge_rejected",
+                    "count": 4,
+                    "latest_at": "2026-06-29T10:00:00+00:00",
+                },
+                {
+                    "reason": "min_notional_rejected",
+                    "count": 1,
+                    "latest_at": "2026-06-29T10:01:00+00:00",
+                },
+            ],
+        }
+    )
+
+    text = await bot._render_deep_report_text()
+
+    assert "Почему входы не доходят до paper/live" in text
+    assert "net_edge_rejected" in text
+    assert "ожидаемая net-edge ниже комиссий" in text
+    assert "min_notional_rejected" in text
+    assert "&quot;recent_signal_block_reasons_24h&quot;" in text
+
+
 def test_diagnostics_menu_has_db_probe_button() -> None:
     bot = _make_bot()
 

@@ -3830,6 +3830,41 @@ class TradeJournal:
         async with self._diag_lock:
             return await self._get_db_diagnostics_unlocked(lite=lite)
 
+    async def get_recent_signal_block_reasons(
+        self,
+        *,
+        hours: int = 24,
+        limit: int = 10,
+    ) -> list[dict[str, Any]]:
+        """Aggregate recent trade-signal blockers for operator diagnostics."""
+        safe_hours = max(1, min(int(hours), 24 * 14))
+        safe_limit = max(1, min(int(limit), 50))
+        rows = await self._fetch(
+            """
+            SELECT
+                COALESCE(NULLIF(blocked_reason, ''), 'approved_or_unknown') AS reason,
+                count(*) AS cnt,
+                count(*) FILTER (WHERE blocked_reason IS NULL OR blocked_reason = '') AS approved_or_unknown_count,
+                max(created_at) AS latest_at
+            FROM trade_signals
+            WHERE created_at >= now() - ($1::int * interval '1 hour')
+            GROUP BY reason
+            ORDER BY cnt DESC, reason ASC
+            LIMIT $2
+            """,
+            safe_hours,
+            safe_limit,
+        )
+        return [
+            {
+                "reason": str(row["reason"]),
+                "count": int(row["cnt"] or 0),
+                "approved_or_unknown_count": int(row["approved_or_unknown_count"] or 0),
+                "latest_at": row["latest_at"].isoformat() if row["latest_at"] else None,
+            }
+            for row in rows
+        ]
+
     async def _get_db_diagnostics_unlocked(self, *, lite: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
             "connected": self.is_enabled,
@@ -3856,6 +3891,7 @@ class TradeJournal:
             "active_model_version": {},
             "shadow_gate_15m": {},
             "paper_pnl_15m": {},
+            "recent_signal_block_reasons": [],
             "storage_stats": {},
         }
         if not self.is_enabled:
@@ -4006,6 +4042,11 @@ class TradeJournal:
             result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
+            result["recent_signal_block_reasons"] = await _read_or_default(
+                "recent_signal_block_reasons",
+                [],
+                lambda: self.get_recent_signal_block_reasons(hours=24, limit=10),
+            )
 
             # Per-schema breakdown: newest schema first. Wrapped in its own try/except so
             # a query failure here cannot break the rest of get_db_diagnostics().

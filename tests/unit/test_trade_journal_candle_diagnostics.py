@@ -67,6 +67,38 @@ async def test_latest_candle_time_uses_only_confirmed_candles() -> None:
 
 
 @pytest.mark.asyncio
+async def test_recent_signal_block_reasons_are_bounded_and_serialized() -> None:
+    journal = TradeJournal("postgresql://example/db")
+    latest = datetime(2026, 6, 29, 10, 0, tzinfo=UTC)
+    fetch = _FetchRecorder(
+        [
+            {
+                "reason": "net_edge_rejected",
+                "cnt": 7,
+                "approved_or_unknown_count": 0,
+                "latest_at": latest,
+            }
+        ]
+    )
+    journal._fetch = fetch  # type: ignore[method-assign]
+
+    rows = await journal.get_recent_signal_block_reasons(hours=9999, limit=9999)
+
+    assert rows == [
+        {
+            "reason": "net_edge_rejected",
+            "count": 7,
+            "approved_or_unknown_count": 0,
+            "latest_at": latest.isoformat(),
+        }
+    ]
+    query, args = fetch.calls[0]
+    assert "FROM trade_signals" in query
+    assert "blocked_reason" in query
+    assert args == (24 * 14, 50)
+
+
+@pytest.mark.asyncio
 async def test_db_diagnostics_reports_last_confirmed_candle_age() -> None:
     journal = TradeJournal("postgresql://example/db")
     journal._pool = object()  # type: ignore[assignment]
