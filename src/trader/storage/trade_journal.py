@@ -2598,8 +2598,7 @@ class TradeJournal:
         label_schema_version: str = LABEL_SCHEMA_VERSION,
     ) -> None:
         """Write or update outcome label for a prediction."""
-        await self._execute(
-            """
+        query = """
             INSERT INTO prediction_outcomes (
                 prediction_id, horizon_minutes, gross_return_bps, cost_bps,
                 label_threshold_bps, net_return_bps,
@@ -2617,7 +2616,8 @@ class TradeJournal:
                 label = EXCLUDED.label,
                 resolved_at = now(),
                 label_schema_version = EXCLUDED.label_schema_version
-            """,
+            """
+        args = (
             prediction_id,
             horizon_minutes,
             gross_return_bps,
@@ -2629,6 +2629,37 @@ class TradeJournal:
             label,
             label_schema_version,
         )
+        await self._execute(query, *args)
+        if self._prediction_outcome_columns_missing(getattr(self, "_last_write_error", None)):
+            await self._ensure_prediction_outcome_extended_columns()
+            await self._execute(query, *args)
+
+    @staticmethod
+    def _prediction_outcome_columns_missing(error: object) -> bool:
+        text = str(error or "").lower()
+        return (
+            "prediction_outcomes" in text
+            and (
+                'column "gross_return_bps"' in text
+                or 'column "cost_bps"' in text
+                or 'column "label_threshold_bps"' in text
+                or 'column "label_schema_version"' in text
+                or "column gross_return_bps" in text
+                or "column cost_bps" in text
+                or "column label_threshold_bps" in text
+                or "column label_schema_version" in text
+            )
+            and ("does not exist" in text or "undefinedcolumn" in text)
+        )
+
+    async def _ensure_prediction_outcome_extended_columns(self) -> None:
+        await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_schema_version text")
+        await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps double precision")
+        await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps double precision")
+        await self._execute(
+            "ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps double precision"
+        )
+        await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS online_learned_at timestamptz")
 
     async def resolve_outcomes_from_candles(
         self,

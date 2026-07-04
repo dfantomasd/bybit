@@ -695,6 +695,45 @@ async def test_record_prediction_event_repairs_missing_metadata_columns_and_retr
 # ===========================================================================
 
 
+@pytest.mark.asyncio
+async def test_resolve_prediction_outcomes_repairs_missing_extended_columns_and_retries() -> None:
+    """Legacy prediction_outcomes tables should not silently drop labels."""
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal.__new__(TradeJournal)
+    journal._enabled = True
+    journal._last_write_error = None
+    execute_calls: list[tuple[str, tuple[Any, ...]]] = []
+
+    async def _capture_execute(query: str, *args: Any) -> None:
+        execute_calls.append((query, args))
+        if query.lstrip().upper().startswith("INSERT INTO PREDICTION_OUTCOMES") and len(execute_calls) == 1:
+            journal._last_write_error = 'column "label_threshold_bps" of relation "prediction_outcomes" does not exist'
+            return
+        journal._last_write_error = None
+
+    journal._execute = _capture_execute  # type: ignore[method-assign]
+
+    await journal.resolve_prediction_outcomes(
+        prediction_id=str(uuid.uuid4()),
+        horizon_minutes=5,
+        net_return_bps=10.0,
+        max_favorable_excursion_bps=12.0,
+        max_adverse_excursion_bps=-3.0,
+        label=1,
+        gross_return_bps=15.0,
+        cost_bps=5.0,
+        label_threshold_bps=5.0,
+        label_schema_version="directional_net_v2",
+    )
+
+    queries = [query for query, _args in execute_calls]
+    assert queries[0].lstrip().startswith("INSERT INTO prediction_outcomes")
+    assert any("ADD COLUMN IF NOT EXISTS label_threshold_bps" in query for query in queries)
+    assert queries[-1].lstrip().startswith("INSERT INTO prediction_outcomes")
+    assert journal._last_write_error is None
+
+
 def test_short_prediction_label_direction() -> None:
     """Short trade: profit when price falls; gross return should be positive."""
     from trader.analytics.outcome_labeler import label_outcome

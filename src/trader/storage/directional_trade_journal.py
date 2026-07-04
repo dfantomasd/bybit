@@ -340,8 +340,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
     ) -> None:
         """Write or replace one versioned directional outcome."""
 
-        await self._execute(
-            """
+        query = """
             INSERT INTO prediction_outcomes (
                 prediction_id, horizon_minutes, gross_return_bps, cost_bps,
                 label_threshold_bps, net_return_bps,
@@ -359,7 +358,8 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                 label = EXCLUDED.label,
                 label_schema_version = EXCLUDED.label_schema_version,
                 resolved_at = now()
-            """,
+            """
+        args = (
             prediction_id,
             horizon_minutes,
             gross_return_bps,
@@ -371,6 +371,10 @@ class DirectionalTradeJournal(_BaseTradeJournal):
             label,
             label_schema_version,
         )
+        await self._execute(query, *args)
+        if self._prediction_outcome_columns_missing(getattr(self, "_last_write_error", None)):
+            await self._ensure_prediction_outcome_extended_columns()
+            await self._execute(query, *args)
 
     async def resolve_outcomes_from_realized_pnl(
         self,

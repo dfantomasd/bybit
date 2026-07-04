@@ -57,6 +57,21 @@ class _RecoveringSignalCaptureJournal(_SignalCaptureJournal):
         self._last_write_error = None
 
 
+class _RecoveringOutcomeJournal(DirectionalTradeJournal):
+    def __init__(self) -> None:
+        self.executed: list[tuple[str, tuple[Any, ...]]] = []
+        self._last_write_error: str | None = None
+        self._failed_insert_once = False
+
+    async def _execute(self, query: str, *args: Any) -> None:
+        self.executed.append((query, args))
+        if query.lstrip().upper().startswith("INSERT INTO PREDICTION_OUTCOMES") and not self._failed_insert_once:
+            self._failed_insert_once = True
+            self._last_write_error = 'column "gross_return_bps" of relation "prediction_outcomes" does not exist'
+            return
+        self._last_write_error = None
+
+
 def _prediction(entry_time: datetime, *, side: str = "Sell") -> dict[str, Any]:
     return {
         "prediction_id": "00000000-0000-0000-0000-000000000001",
@@ -175,6 +190,31 @@ async def test_record_signal_repairs_missing_metadata_columns_and_retries() -> N
     assert "ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS model_decision" in journal.executed[1][0]
     assert "ALTER TABLE trade_signals ADD COLUMN IF NOT EXISTS blocked_reason" in journal.executed[2][0]
     assert journal.executed[3][0].lstrip().startswith("INSERT INTO trade_signals")
+    assert journal._last_write_error is None
+
+
+@pytest.mark.asyncio
+async def test_directional_resolve_prediction_outcomes_repairs_missing_extended_columns() -> None:
+    journal = _RecoveringOutcomeJournal()
+
+    await journal.resolve_prediction_outcomes(
+        prediction_id="00000000-0000-0000-0000-000000000001",
+        horizon_minutes=5,
+        net_return_bps=10.0,
+        max_favorable_excursion_bps=12.0,
+        max_adverse_excursion_bps=-3.0,
+        label=1,
+        gross_return_bps=15.0,
+        cost_bps=5.0,
+        label_threshold_bps=5.0,
+        label_schema_version="directional_net_v2",
+    )
+
+    queries = [query for query, _args in journal.executed]
+    assert queries[0].lstrip().startswith("INSERT INTO prediction_outcomes")
+    assert any("ADD COLUMN IF NOT EXISTS gross_return_bps" in query for query in queries)
+    assert any("ADD COLUMN IF NOT EXISTS label_threshold_bps" in query for query in queries)
+    assert queries[-1].lstrip().startswith("INSERT INTO prediction_outcomes")
     assert journal._last_write_error is None
 
 
