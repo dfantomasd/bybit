@@ -327,6 +327,7 @@ async def test_live_rejects_low_edge_increments_counter():
     assert result is None
     assert engine._diag_net_edge_rejected == 1
     assert engine._diag_no_tp_rejected == 0
+    assert engine.consume_last_pre_risk_rejection_reason() == "net_edge_rejected"
 
 
 @pytest.mark.asyncio

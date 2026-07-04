@@ -412,6 +412,19 @@ def test_pre_strategy_expectancy_blocks_are_persisted_as_blocked_signals() -> No
     assert "return" in src.split(bucket_marker, maxsplit=1)[1][:120]
 
 
+def test_execution_pre_risk_none_decision_records_specific_reason() -> None:
+    import inspect
+
+    from trader.modules.trading_loop import TradingLoopModule
+
+    src = inspect.getsource(TradingLoopModule.start)
+    assert 'await _record_signal(str(pre_risk_reason or "no_decision"))' in src
+    assert "consume_last_pre_risk_rejection_reason" in src
+    decision_none_block = src.split("if decision is None:", maxsplit=1)[1].split("return", maxsplit=1)[0]
+    assert "pre_risk_reason" in decision_none_block
+    assert "consume_last_pre_risk_rejection_reason" in decision_none_block
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------

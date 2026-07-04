@@ -208,6 +208,8 @@ class TestExecutionEngine:
         counts = engine.get_diag_counts()
         assert counts["net_edge_rejected"] == 1
         assert counts["shadow_order_would_be_placed"] == 0
+        assert engine.consume_last_pre_risk_rejection_reason() == "net_edge_rejected"
+        assert engine.consume_last_pre_risk_rejection_reason() is None
 
     @pytest.mark.asyncio
     async def test_shadow_probe_bypasses_engine_live_net_edge_gate_in_shadow(self):

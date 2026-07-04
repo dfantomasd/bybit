@@ -1098,7 +1098,10 @@ class TradingLoopModule(AppBoundModule):
             from trader.domain.enums import RiskDecisionStatus
 
             if decision is None:
-                await _record_signal("no_decision")
+                pre_risk_reason = None
+                if hasattr(self._app._execution_engine, "consume_last_pre_risk_rejection_reason"):
+                    pre_risk_reason = self._app._execution_engine.consume_last_pre_risk_rejection_reason()
+                await _record_signal(str(pre_risk_reason or "no_decision"))
                 return
             if decision.status == RiskDecisionStatus.REJECTED:
                 self._app._record_diag("risk_rejected")

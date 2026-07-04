@@ -201,6 +201,7 @@ class ExecutionEngine:
         self._diag_maker_filled: int = 0
         self._diag_maker_escalated: int = 0
         self._diag_maker_aborted: int = 0
+        self._last_pre_risk_rejection_reason: str | None = None
 
         # symbol → last *successful* entry timestamp
         self._last_entry_at: dict[str, datetime] = {}
@@ -915,6 +916,7 @@ class ExecutionEngine:
     ) -> RiskDecision | None:
         """Submit implementation guarded by ``_submit_lock``."""
         symbol = proposal.symbol
+        self._last_pre_risk_rejection_reason = None
         _t_engine_start = datetime.now(UTC)
         notional_buffer_pct = self._min_notional_buffer_for_balance(available_balance)
         from trader.strategies.shadow_probe import is_shadow_probe_strategy
@@ -1216,6 +1218,7 @@ class ExecutionEngine:
             # Fail-closed: TP required for LIVE entries
             if proposal.take_profit is None:
                 self._diag_no_tp_rejected += 1
+                self._last_pre_risk_rejection_reason = "no_tp_rejected"
                 log.warning(
                     "execution.rejected_no_take_profit",
                     symbol=symbol,
@@ -1225,6 +1228,7 @@ class ExecutionEngine:
                 exposure_reserved = False
                 return None
             if proposal.entry_price is None or proposal.entry_price <= Decimal("0"):
+                self._last_pre_risk_rejection_reason = "net_edge_missing_entry_price"
                 log.warning(
                     "execution.rejected_no_entry_price_for_net_edge",
                     symbol=symbol,
@@ -1253,6 +1257,7 @@ class ExecutionEngine:
             if fee_unavailable:
                 self._diag_fee_unavailable_rejected += 1
                 if not self._shadow_mode:
+                    self._last_pre_risk_rejection_reason = "fee_unavailable_rejected"
                     log.warning("execution.fee_rate_unavailable_rejected_live", symbol=symbol)
                     self._release_exposure_reservation(proposal)
                     exposure_reserved = False
@@ -1267,6 +1272,7 @@ class ExecutionEngine:
                 proposal.side,
             )
             if tp_d is None:
+                self._last_pre_risk_rejection_reason = "net_edge_invalid_take_profit"
                 self._release_exposure_reservation(proposal)
                 exposure_reserved = False
                 return None
@@ -1319,6 +1325,7 @@ class ExecutionEngine:
 
             if net_edge_pct < min_edge:
                 self._diag_net_edge_rejected += 1
+                self._last_pre_risk_rejection_reason = "net_edge_rejected"
                 log.warning(
                     "execution.net_edge_too_low",
                     symbol=symbol,
@@ -2263,6 +2270,12 @@ class ExecutionEngine:
             "maker_escalated": self._diag_maker_escalated,
             "maker_aborted": self._diag_maker_aborted,
         }
+
+    def consume_last_pre_risk_rejection_reason(self) -> str | None:
+        """Return and clear the last pre-risk rejection reason from submit()."""
+        reason = self._last_pre_risk_rejection_reason
+        self._last_pre_risk_rejection_reason = None
+        return reason
 
     def pending_entry_diagnostics(self) -> dict[str, Any]:
         """Return pending entry details for diagnostics/heartbeat."""
