@@ -460,7 +460,14 @@ async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
             "latest_model_version": {
                 "version": "v20260612_0934_h15m_dnv1",
                 "status": "SHADOW_CHALLENGER",
-                "metrics": {"quality": "WEAK", "walk_forward_expectancy_bps": -46.91},
+                "metrics": {
+                    "quality": "WEAK",
+                    "walk_forward_expectancy_bps": -46.91,
+                    "wf_positive_folds": 1,
+                    "wf_folds": 5,
+                    "wf_min_bps": -60.0,
+                    "wf_std_bps": 31.0,
+                },
             },
             "shadow_gate_15m": {"total_count": 111, "lift_vs_all_bps": 6.98},
             "paper_pnl_15m": {
@@ -478,6 +485,8 @@ async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
     assert "НЕ ГОТОВО" in reply_text
     assert "ПОЧТИ" not in reply_text
     assert "Качество модели GOOD" in reply_text
+    assert "folds 1/5" in reply_text
+    assert "std +31.00 bps" in reply_text
     assert "Walk-forward модели > 0 bps" in reply_text
     assert "Paper model-gate: 20+ сделок и PnL > 0" in reply_text
 
@@ -729,7 +738,15 @@ async def test_render_model_uses_lite_db_diag(monkeypatch: pytest.MonkeyPatch) -
                 "version": "v-lite",
                 "status": "SHADOW_CHALLENGER",
                 "training_samples": 500,
-                "metrics": {"quality": "GOOD", "lift_bps": 1.5, "precision": 0.55},
+                "metrics": {
+                    "quality": "GOOD",
+                    "lift_bps": 1.5,
+                    "precision": 0.55,
+                    "wf_positive_folds": 3,
+                    "wf_folds": 5,
+                    "wf_min_bps": 1.2,
+                    "wf_std_bps": 4.5,
+                },
             },
             "training_eligible_15m": 500,
         }
@@ -740,6 +757,8 @@ async def test_render_model_uses_lite_db_diag(monkeypatch: pytest.MonkeyPatch) -
 
     load_diag.assert_awaited_once_with(lite=True)
     assert "v-lite" in text
+    assert "folds 3/5" in text
+    assert "std +4.50 bps" in text
 
 
 @pytest.mark.asyncio

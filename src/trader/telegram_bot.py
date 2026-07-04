@@ -1131,6 +1131,31 @@ class TelegramMonitorBot:
             pass
         return horizon, gate if isinstance(gate, dict) else {}
 
+    @staticmethod
+    def _walk_forward_stability_text(metrics: dict[str, Any]) -> str:
+        """Compact explanation of walk-forward stability gates used for model quality."""
+
+        def _fmt_bps(value: Any) -> str:
+            if value is None:
+                return "n/a"
+            try:
+                return f"{float(value):+.2f} bps"
+            except (TypeError, ValueError):
+                return "n/a"
+
+        positive = metrics.get("wf_positive_folds")
+        folds = metrics.get("wf_folds")
+        parts: list[str] = []
+        if positive is not None or folds is not None:
+            parts.append(f"folds {int(positive or 0)}/{int(folds or 0)}")
+        if metrics.get("wf_min_bps") is not None:
+            parts.append(f"min {_fmt_bps(metrics.get('wf_min_bps'))}")
+        if metrics.get("wf_std_bps") is not None:
+            parts.append(f"std {_fmt_bps(metrics.get('wf_std_bps'))}")
+        if metrics.get("wf_mean_bps") is not None:
+            parts.append(f"mean {_fmt_bps(metrics.get('wf_mean_bps'))}")
+        return ", ".join(parts) if parts else "n/a"
+
     def _train_defaults(self) -> tuple[int, int, float]:
         """Return (min_samples, horizon_minutes, label_bps) aligned with auto-trainer config."""
         runtime = self._runtime_settings()
@@ -3433,6 +3458,7 @@ class TelegramMonitorBot:
         model_version = readiness_model.get("version")
         model_quality = str(model_metrics.get("quality") or "n/a")
         walk_forward_bps = _as_float(model_metrics.get("walk_forward_expectancy_bps"))
+        wf_stability = self._walk_forward_stability_text(model_metrics)
         champion_ver = model_info.get("champion_version", "none")
         if champion_ver == "none" and readiness_model.get("status") == "CHAMPION":
             champion_ver = model_version or "none"
@@ -3551,8 +3577,12 @@ class TelegramMonitorBot:
         require(
             "Качество модели GOOD",
             model_quality_ok,
-            self._ru(model_quality) if model_version else "модель еще не обучена",
-            "Не включайте CANARY_LIVE: дождитесь новой модели с quality=GOOD или меняйте стратегию/признаки.",
+            (
+                f"{self._ru(model_quality)}; WF {wf_stability}"
+                if model_version
+                else "модель еще не обучена"
+            ),
+            "Не включайте CANARY_LIVE: нужна модель с quality=GOOD; если WF min/std/folds плохие — ждём больше данных или меняем стратегию/признаки.",
         )
         require(
             "Walk-forward модели > 0 bps",
@@ -5399,6 +5429,7 @@ class TelegramMonitorBot:
                 lift = metrics.get("lift_bps")
                 precision = metrics.get("precision")
                 best_thresh = metrics.get("best_threshold")
+                wf_stability = self._walk_forward_stability_text(metrics)
                 samples = int(latest.get("training_samples") or 0)
                 actual_samples = int(latest.get("actual_training_samples", samples) or samples)
                 compatible_samples = int(latest.get("training_samples_compatible", 0) or 0)
@@ -5417,6 +5448,7 @@ class TelegramMonitorBot:
                     f"Версия: <code>{version}</code>",
                     f"Статус: <code>{status}</code>  Качество: <code>{quality}</code>",
                     f"Lift (val-split): <code>{lift_str}</code>",
+                    f"Walk-forward: <code>{html.escape(wf_stability)}</code>",
                     f"Precision: <code>{prec_str}</code>  Порог: <code>{thresh_str}</code>",
                     f"Обучено: <code>{samples}</code> образцов"
                     + (
