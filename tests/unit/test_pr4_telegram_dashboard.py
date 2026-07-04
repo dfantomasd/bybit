@@ -907,6 +907,10 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
                 "port": 5432,
                 "database": "trades",
             },
+            "schema_health": {
+                "ok": False,
+                "missing_columns": ["prediction_outcomes.label_threshold_bps"],
+            },
         }
     )
 
@@ -915,6 +919,7 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "econnrefused" in text
     assert "db.internal" in text
     assert "connection_target" in text
+    assert "prediction_outcomes.label_threshold_bps" in text
 
 
 @pytest.mark.asyncio

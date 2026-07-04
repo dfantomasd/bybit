@@ -3922,6 +3922,117 @@ class TradeJournal:
             for row in rows
         ]
 
+    @staticmethod
+    def _critical_schema_columns() -> dict[str, tuple[str, ...]]:
+        """Columns that must exist for live diagnostics/training to work."""
+        return {
+            "feature_snapshots": (
+                "snapshot_id",
+                "created_at",
+                "symbol",
+                "interval",
+                "candle_open_time",
+                "feature_schema_hash",
+                "feature_names",
+                "feature_values",
+                "training_eligible",
+                "invalid_reason",
+                "invalidated_at",
+            ),
+            "prediction_events": (
+                "prediction_id",
+                "created_at",
+                "symbol",
+                "interval",
+                "model_version",
+                "feature_snapshot_id",
+                "score",
+                "strategy_signal",
+                "decision",
+                "metadata",
+                "order_link_id",
+            ),
+            "prediction_outcomes": (
+                "prediction_id",
+                "horizon_minutes",
+                "net_return_bps",
+                "max_favorable_excursion_bps",
+                "max_adverse_excursion_bps",
+                "label",
+                "resolved_at",
+                "label_schema_version",
+                "gross_return_bps",
+                "cost_bps",
+                "label_threshold_bps",
+                "online_learned_at",
+            ),
+            "trade_signals": (
+                "signal_id",
+                "symbol",
+                "side",
+                "strategy_name",
+                "blocked_reason",
+                "created_at",
+            ),
+            "training_runs": (
+                "run_id",
+                "model_version",
+                "status",
+                "sample_count",
+                "error",
+                "metrics",
+                "started_at",
+                "finished_at",
+            ),
+            "model_versions": (
+                "version",
+                "status",
+                "training_samples",
+                "artifact",
+                "metrics",
+                "training_finished_at",
+                "created_at",
+            ),
+        }
+
+    async def get_schema_health(self) -> dict[str, Any]:
+        """Cheap schema smoke-test for Telegram diagnostics.
+
+        Supabase pooler/asyncpg DDL hiccups can leave the network probe green while
+        a later training/report query fails on a missing column.  Checking the
+        handful of columns the live ML/reporting path relies on makes the blocker
+        explicit in the operator report.
+        """
+        critical = self._critical_schema_columns()
+        expected = {(table, column) for table, columns in critical.items() for column in columns}
+        if not self.is_enabled:
+            return {
+                "ok": False,
+                "error": "db_not_connected",
+                "checked_columns": len(expected),
+                "missing_columns": [f"{table}.{column}" for table, column in sorted(expected)],
+            }
+
+        rows = await self._fetch(
+            """
+            SELECT table_name, column_name
+            FROM information_schema.columns
+            WHERE table_schema = 'public'
+              AND table_name = ANY($1::text[])
+            """,
+            list(critical.keys()),
+        )
+        existing = {(str(row["table_name"]), str(row["column_name"])) for row in rows}
+        missing = sorted(expected - existing)
+        health: dict[str, Any] = {
+            "ok": not missing,
+            "checked_columns": len(expected),
+            "missing_columns": [f"{table}.{column}" for table, column in missing],
+        }
+        if missing:
+            health["missing_count"] = len(missing)
+        return health
+
     async def _get_db_diagnostics_unlocked(self, *, lite: bool = False) -> dict[str, Any]:
         result: dict[str, Any] = {
             "connected": self.is_enabled,
@@ -3949,6 +4060,7 @@ class TradeJournal:
             "shadow_gate_15m": {},
             "paper_pnl_15m": {},
             "recent_signal_block_reasons": [],
+            "schema_health": {},
             "storage_stats": {},
         }
         if not self.is_enabled:
@@ -3976,6 +4088,7 @@ class TradeJournal:
                     feature_snapshots,
                     prediction_outcomes,
                     labelled_samples_15m,
+                    schema_health,
                     training_rows,
                     model_rows,
                     champion_rows,
@@ -4005,6 +4118,7 @@ class TradeJournal:
                         0,
                         self.get_labelled_15m_readiness_count,
                     ),
+                    _read_or_default("schema_health", {}, self.get_schema_health),
                     self._fetch(
                         """
                         SELECT status, model_version, sample_count, error, metrics, started_at, finished_at
@@ -4043,6 +4157,7 @@ class TradeJournal:
                 result["prediction_outcomes"] = int(prediction_outcomes or 0)
                 result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
                 result["training_eligible_15m"] = result["labelled_samples_15m"]
+                result["schema_health"] = schema_health or {}
                 if training_rows:
                     result["latest_training_run"] = dict(training_rows[0])
                 if model_rows:
@@ -4061,6 +4176,7 @@ class TradeJournal:
                 prediction_outcomes,
                 by_horizon_rows,
                 labelled_samples_15m,
+                schema_health,
             ) = await asyncio.gather(
                 _read_or_default("candle_readiness_counts", {}, self.get_candle_readiness_counts),
                 _read_or_default("latest_candle_1m", None, lambda: self.get_latest_candle_time("1")),
@@ -4084,6 +4200,7 @@ class TradeJournal:
                     ),
                 ),
                 _read_or_default("labelled_15m_readiness_count", 0, self.get_labelled_15m_readiness_count),
+                _read_or_default("schema_health", {}, self.get_schema_health),
             )
             result["candles_by_interval"] = candles_by_interval
             result["latest_candle_1m"] = latest_candle_1m
@@ -4097,6 +4214,7 @@ class TradeJournal:
                 str(row["horizon_minutes"]): int(row["cnt"]) for row in by_horizon_rows
             }
             result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
+            result["schema_health"] = schema_health or {}
             # P1: training_eligible = samples with label + features (same logic as trainer)
             result["training_eligible_15m"] = result["labelled_samples_15m"]
             result["recent_signal_block_reasons"] = await _read_or_default(

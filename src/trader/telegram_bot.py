@@ -3261,6 +3261,7 @@ class TelegramMonitorBot:
                 "candles_by_interval": db_diag.get("candles_by_interval"),
                 "feature_snapshots": db_diag.get("feature_snapshots"),
                 "prediction_outcomes": db_diag.get("prediction_outcomes"),
+                "schema_health": db_diag.get("schema_health"),
                 "training_eligible_by_horizon": db_diag.get("training_eligible_by_horizon"),
                 "latest_training_run": db_diag.get("latest_training_run"),
                 "training_config": db_diag.get("training_config"),
@@ -3550,6 +3551,18 @@ class TelegramMonitorBot:
             bool(db_diag.get("connected")),
             "хранилище доступно" if db_diag.get("connected") else "бот не видит Postgres",
             self._db_connection_fix_hint(db_diag),
+        )
+        schema_health = db_diag.get("schema_health") if isinstance(db_diag.get("schema_health"), dict) else {}
+        missing_schema_columns = schema_health.get("missing_columns") if isinstance(schema_health, dict) else []
+        require(
+            "Схема БД актуальна",
+            bool(schema_health.get("ok", True)),
+            (
+                "ok"
+                if schema_health.get("ok", True)
+                else f"не хватает колонок: {', '.join(str(item) for item in missing_schema_columns[:5])}"
+            ),
+            "Перезапустите сервис, чтобы schema bootstrap применил миграции; если не помогло — пришлите Полную сводку.",
         )
         require(
             "Свежая свеча 1m",
