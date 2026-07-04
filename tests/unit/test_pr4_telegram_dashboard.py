@@ -911,6 +911,13 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
                 "ok": False,
                 "missing_columns": ["prediction_outcomes.label_threshold_bps"],
             },
+            "prediction_events": 12,
+            "prediction_event_decision_counts": {
+                "total_count": 12,
+                "resolved_count": 7,
+                "pending_count": 5,
+                "by_decision": {"SHADOW_BASELINE": {"total_count": 12}},
+            },
         }
     )
 
@@ -920,6 +927,8 @@ async def test_deep_report_compact_db_includes_connect_error_and_target() -> Non
     assert "db.internal" in text
     assert "connection_target" in text
     assert "prediction_outcomes.label_threshold_bps" in text
+    assert "prediction_events" in text
+    assert "SHADOW_BASELINE" in text
 
 
 @pytest.mark.asyncio

@@ -145,6 +145,10 @@ async def test_db_diagnostics_uses_capped_readiness_counts() -> None:
             assert "LIMIT $1" in query
             assert args == (1000,)
             return [{"cnt": 1000}]
+        if "FROM prediction_events" in query and "LIMIT $1" in query:
+            assert "LIMIT $1" in query
+            assert args == (1000,)
+            return [{"cnt": 1000}]
         if "FROM prediction_outcomes" in query and "horizon_minutes = 15" in query and "LIMIT $1" in query:
             assert "LIMIT $1" in query
             assert args == (1000,)
@@ -161,6 +165,7 @@ async def test_db_diagnostics_uses_capped_readiness_counts() -> None:
 
     assert diag["candles_by_interval"] == {"1": 1000, "5": 200}
     assert diag["feature_snapshots"] == 1000
+    assert diag["prediction_events"] == 1000
     assert diag["prediction_outcomes"] == 1000
     assert diag["training_eligible_15m"] == 1000
 

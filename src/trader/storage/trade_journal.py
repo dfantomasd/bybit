@@ -2263,6 +2263,20 @@ class TradeJournal:
         )
         return int(rows[0]["cnt"]) if rows else 0
 
+    async def get_prediction_event_readiness_count(self, limit: int = 1000) -> int:
+        rows = await self._fetch(
+            """
+            SELECT count(*) AS cnt
+            FROM (
+                SELECT 1
+                FROM prediction_events
+                LIMIT $1
+            ) capped
+            """,
+            int(limit),
+        )
+        return int(rows[0]["cnt"]) if rows else 0
+
     async def get_prediction_outcome_readiness_count(self, limit: int = 1000) -> int:
         rows = await self._fetch(
             """
@@ -4158,6 +4172,7 @@ class TradeJournal:
             "latest_candle_1m": None,
             "last_confirmed_candle_age_s": None,
             "feature_snapshots": 0,
+            "prediction_events": 0,
             "prediction_outcomes": 0,
             "prediction_outcomes_by_horizon": {},
             "labelled_samples_15m": 0,
@@ -4193,6 +4208,7 @@ class TradeJournal:
                     latest_candle_1m,
                     candles_by_interval,
                     feature_snapshots,
+                    prediction_events,
                     prediction_outcomes,
                     labelled_samples_15m,
                     schema_health,
@@ -4214,6 +4230,11 @@ class TradeJournal:
                         "feature_snapshot_readiness_count",
                         0,
                         self.get_feature_snapshot_readiness_count,
+                    ),
+                    _read_or_default(
+                        "prediction_event_readiness_count",
+                        0,
+                        self.get_prediction_event_readiness_count,
                     ),
                     _read_or_default(
                         "prediction_outcome_readiness_count",
@@ -4261,6 +4282,7 @@ class TradeJournal:
                     )
                 result["candles_by_interval"] = candles_by_interval
                 result["feature_snapshots"] = int(feature_snapshots or 0)
+                result["prediction_events"] = int(prediction_events or 0)
                 result["prediction_outcomes"] = int(prediction_outcomes or 0)
                 result["labelled_samples_15m"] = int(labelled_samples_15m or 0)
                 result["training_eligible_15m"] = result["labelled_samples_15m"]
@@ -4280,6 +4302,7 @@ class TradeJournal:
                 candles_by_interval,
                 latest_candle_1m,
                 feature_snapshots,
+                prediction_events,
                 prediction_outcomes,
                 by_horizon_rows,
                 labelled_samples_15m,
@@ -4288,6 +4311,7 @@ class TradeJournal:
                 _read_or_default("candle_readiness_counts", {}, self.get_candle_readiness_counts),
                 _read_or_default("latest_candle_1m", None, lambda: self.get_latest_candle_time("1")),
                 _read_or_default("feature_snapshot_readiness_count", 0, self.get_feature_snapshot_readiness_count),
+                _read_or_default("prediction_event_readiness_count", 0, self.get_prediction_event_readiness_count),
                 _read_or_default("prediction_outcome_readiness_count", 0, self.get_prediction_outcome_readiness_count),
                 _read_or_default(
                     "prediction_outcomes_by_horizon",
@@ -4316,6 +4340,7 @@ class TradeJournal:
                     0.0, (datetime.now(tz=UTC) - latest_candle_1m).total_seconds()
                 )
             result["feature_snapshots"] = int(feature_snapshots or 0)
+            result["prediction_events"] = int(prediction_events or 0)
             result["prediction_outcomes"] = int(prediction_outcomes or 0)
             result["prediction_outcomes_by_horizon"] = {
                 str(row["horizon_minutes"]): int(row["cnt"]) for row in by_horizon_rows
