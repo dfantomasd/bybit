@@ -629,29 +629,6 @@ class TradingLoopModule(AppBoundModule):
                 except Exception as exc:
                     log.warning("strategy_loop.regime_error", symbol=symbol, error=str(exc))
 
-            stats_ready, stats_block_reason = self._app._expectancy_stats_ready()
-            if not stats_ready:
-                reason = stats_block_reason or "expectancy_stats_not_ready"
-                self._app._record_diag(reason)
-                log.warning(
-                    "strategy_loop.expectancy_stats_not_ready",
-                    symbol=symbol,
-                    reason=reason,
-                    bucket_stats_refreshed_at=(
-                        self._app._bucket_stats_refreshed_at.isoformat()
-                        if self._app._bucket_stats_refreshed_at is not None
-                        else None
-                    ),
-                )
-                return
-
-            # Regime-bucket gate: skip evaluation when this (regime, volatility,
-            # UTC hour) bucket has a proven negative expectancy on our own signals.
-            if self._app._bucket_blocked(regime_ctx):
-                self._app._record_diag("bucket_blocked")
-                log.debug("strategy_loop.bucket_blocked", symbol=symbol)
-                return
-
             # Skip symbols with an existing open position — the engine would
             # reject them anyway, but avoiding the ensemble call prevents
             # no_decision entries from polluting the training dataset.
@@ -688,6 +665,38 @@ class TradingLoopModule(AppBoundModule):
                         model_decision=model_decision_meta,
                         blocked_reason=blocked,
                     )
+
+            stats_ready, stats_block_reason = self._app._expectancy_stats_ready()
+            if not stats_ready:
+                reason = stats_block_reason or "expectancy_stats_not_ready"
+                self._app._record_diag(reason)
+                log.warning(
+                    "strategy_loop.expectancy_stats_not_ready",
+                    symbol=symbol,
+                    reason=reason,
+                    bucket_stats_refreshed_at=(
+                        self._app._bucket_stats_refreshed_at.isoformat()
+                        if self._app._bucket_stats_refreshed_at is not None
+                        else None
+                    ),
+                )
+                await _record_signal(reason)
+                return
+
+            # Regime-bucket gate: skip execution when this (regime, volatility,
+            # UTC hour) bucket has a proven negative expectancy on our own signals.
+            # The proposal is intentionally evaluated first so the blocked reason
+            # is persisted in trade_signals and visible in Telegram diagnostics.
+            if self._app._bucket_blocked(regime_ctx):
+                self._app._record_diag("bucket_blocked")
+                log.debug(
+                    "strategy_loop.bucket_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                )
+                await _record_signal("bucket_blocked")
+                return
 
             if self._app._strategy_blocked(proposal.strategy_id):
                 self._app._record_diag("strategy_expectancy_blocked")

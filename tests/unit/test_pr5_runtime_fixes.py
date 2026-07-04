@@ -395,6 +395,23 @@ def test_strategy_expectancy_blocks_are_persisted_as_blocked_signals() -> None:
         assert "return" in after[:120]
 
 
+def test_pre_strategy_expectancy_blocks_are_persisted_as_blocked_signals() -> None:
+    import inspect
+
+    from trader.modules.trading_loop import TradingLoopModule
+
+    src = inspect.getsource(TradingLoopModule.start)
+    assert "stats_ready, stats_block_reason = self._app._expectancy_stats_ready()" in src
+    stats_marker = "await _record_signal(reason)"
+    bucket_marker = 'await _record_signal("bucket_blocked")'
+    assert stats_marker in src
+    assert bucket_marker in src
+    assert src.index("proposal = self._app._strategy_ensemble.evaluate_all") < src.index(stats_marker)
+    assert src.index("proposal = self._app._strategy_ensemble.evaluate_all") < src.index(bucket_marker)
+    assert "return" in src.split(stats_marker, maxsplit=1)[1][:120]
+    assert "return" in src.split(bucket_marker, maxsplit=1)[1][:120]
+
+
 # ---------------------------------------------------------------------------
 # ЭТАП 1 — feature_pipeline symbols_updated log
 # ---------------------------------------------------------------------------
