@@ -601,7 +601,27 @@ class TradeJournal:
         assert self._pool is not None
         async with self._pool.acquire() as conn:
             await conn.execute("SET statement_timeout = '60s'")
-            await _execute_schema_script(
+            # Run the whole bootstrap as one transaction so Supabase's
+            # transaction-mode pooler keeps every statement on the same backend
+            # connection. Without this, each individual conn.execute() is its
+            # own implicit transaction and the pooler is free to hand later
+            # statements to a different backend mid-script, which has produced
+            # "connection dropped"-style failures (surfacing from asyncpg as a
+            # bare "'NoneType' object has no attribute 'decode'") partway
+            # through bootstrap. It also makes bootstrap atomic: a failure no
+            # longer leaves the first N statements committed and the rest missing.
+            async with conn.transaction():
+                await self._run_schema_scripts(conn)
+        for coro, name in (
+            (self._ensure_model_registry_indexes_deferred(), "trade-journal-model-registry-index"),
+            (self._ensure_feature_snapshot_unique_index_deferred(), "trade-journal-feature-index"),
+        ):
+            task = asyncio.create_task(coro, name=name)
+            self._background_tasks.add(task)
+            task.add_done_callback(self._background_tasks.discard)
+
+    async def _run_schema_scripts(self, conn: Any) -> None:
+        await _execute_schema_script(
                 conn,
                 """
             CREATE TABLE IF NOT EXISTS durable_order_state (
@@ -863,10 +883,10 @@ class TradeJournal:
             CREATE INDEX IF NOT EXISTS idx_execution_events_order_link
                 ON execution_events (order_link_id);
             """
-            )
-            await _execute_schema_script(
-                conn,
-                """
+        )
+        await _execute_schema_script(
+            conn,
+            """
                 -- Legacy deployments may have these tables without created_at
                 -- because CREATE TABLE IF NOT EXISTS does not backfill columns.
                 -- Repair them before journal writes start, otherwise individual
@@ -951,13 +971,6 @@ class TradeJournal:
                 );
             """,
             )
-        for coro, name in (
-            (self._ensure_model_registry_indexes_deferred(), "trade-journal-model-registry-index"),
-            (self._ensure_feature_snapshot_unique_index_deferred(), "trade-journal-feature-index"),
-        ):
-            task = asyncio.create_task(coro, name=name)
-            self._background_tasks.add(task)
-            task.add_done_callback(self._background_tasks.discard)
 
     async def _ensure_model_registry_indexes_deferred(self) -> None:
         """Repair model registry metadata and champion uniqueness outside startup."""
