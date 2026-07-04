@@ -132,6 +132,23 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
 
 
 @pytest.mark.asyncio
+async def test_schema_bootstrap_uses_single_column_alter_statements() -> None:
+    pool = _FakePool()
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    alter_add_column_statements = [
+        sql
+        for sql in pool.conn.executed_sql
+        if "ALTER TABLE" in sql.upper() and "ADD COLUMN IF NOT EXISTS" in sql.upper()
+    ]
+    assert alter_add_column_statements
+    assert all(statement.upper().count("ADD COLUMN IF NOT EXISTS") == 1 for statement in alter_add_column_statements)
+
+
+@pytest.mark.asyncio
 async def test_legacy_journal_tables_get_created_at_backfill() -> None:
     pool = _FakePool()
     journal = TradeJournal("postgresql://example/db")

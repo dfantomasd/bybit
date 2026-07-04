@@ -802,7 +802,8 @@ class TradeJournal:
                 order_link_id text
             );
             ALTER TABLE prediction_events
-                ADD COLUMN IF NOT EXISTS metadata jsonb,
+                ADD COLUMN IF NOT EXISTS metadata jsonb;
+            ALTER TABLE prediction_events
                 ADD COLUMN IF NOT EXISTS order_link_id text;
             CREATE INDEX IF NOT EXISTS idx_prediction_events_symbol_time
                 ON prediction_events (symbol, created_at DESC);
@@ -869,16 +870,26 @@ class TradeJournal:
                 created_at timestamptz NOT NULL DEFAULT now()
             );
             ALTER TABLE model_promotion_log
-                ADD COLUMN IF NOT EXISTS decision text,
-                ADD COLUMN IF NOT EXISTS challenger_version text,
-                ADD COLUMN IF NOT EXISTS champion_version text,
-                ADD COLUMN IF NOT EXISTS new_champion_version text,
-                ADD COLUMN IF NOT EXISTS from_version text,
-                ADD COLUMN IF NOT EXISTS to_version text,
-                ADD COLUMN IF NOT EXISTS reasons jsonb DEFAULT '[]'::jsonb,
-                ADD COLUMN IF NOT EXISTS metrics jsonb DEFAULT '{}'::jsonb,
-                ADD COLUMN IF NOT EXISTS metrics_snapshot jsonb,
-                ADD COLUMN IF NOT EXISTS decided_at timestamptz DEFAULT now(),
+                ADD COLUMN IF NOT EXISTS decision text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS challenger_version text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS champion_version text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS new_champion_version text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS from_version text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS to_version text;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS reasons jsonb DEFAULT '[]'::jsonb;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS metrics jsonb DEFAULT '{}'::jsonb;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS metrics_snapshot jsonb;
+            ALTER TABLE model_promotion_log
+                ADD COLUMN IF NOT EXISTS decided_at timestamptz DEFAULT now();
+            ALTER TABLE model_promotion_log
                 ADD COLUMN IF NOT EXISTS created_at timestamptz DEFAULT now();
             CREATE INDEX IF NOT EXISTS idx_model_promotion_log_created
                 ON model_promotion_log (created_at DESC);
