@@ -82,6 +82,23 @@ async def test_telegram_webhook_start_registers_route_and_webhook() -> None:
     health = bot.health_snapshot()
     assert health["delivery_mode"] == "webhook"
     assert health["webhook_active"] is True
+    assert mock_app.bot.set_webhook.await_args.kwargs["drop_pending_updates"] is False
+
+
+@pytest.mark.asyncio
+async def test_telegram_webhook_app_is_ready_before_registering_webhook() -> None:
+    bot = _make_webhook_bot()
+    http_app = FastAPI()
+    mock_app = _mock_application()
+
+    async def _assert_ready_when_registering(**_kwargs: object) -> None:
+        assert bot._app is mock_app
+
+    mock_app.bot.set_webhook.side_effect = _assert_ready_when_registering
+
+    with patch("trader.telegram_bot.Application") as mock_app_cls:
+        mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
+        assert await bot.start(http_app=http_app) is True
 
 
 @pytest.mark.asyncio

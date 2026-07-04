@@ -375,6 +375,12 @@ class TelegramMonitorBot:
         try:
             await app.initialize()
             await app.start()
+            # Make the Telegram application visible to the webhook endpoint
+            # before registering the webhook with Telegram. Telegram can deliver
+            # a pending update immediately after set_webhook returns; if
+            # self._app is still None, /telegram/webhook answers 503 and the
+            # bot looks "started but deaf" to the operator.
+            self._app = app
             if self._uses_webhook():
                 if http_app is None:
                     self._polling_disabled_reason = "webhook_http_app_missing"
@@ -393,7 +399,6 @@ class TelegramMonitorBot:
             else:
                 await self._start_polling(app)
                 self._start_polling_watchdog()
-            self._app = app
             self._started_at = datetime.now(tz=UTC)
             self._polling_conflict_count = 0
             self._polling_disabled_reason = None
@@ -410,6 +415,8 @@ class TelegramMonitorBot:
             self._last_start_error = f"{type(exc).__name__}: {exc}"
             self._last_start_error_at = datetime.now(tz=UTC)
             log.warning("telegram_bot_start_failed", error=self._last_start_error)
+            if self._app is app:
+                self._app = None
             try:
                 if getattr(app, "running", False):
                     await app.stop()
@@ -522,7 +529,7 @@ class TelegramMonitorBot:
         await app.bot.set_webhook(
             url=url,
             secret_token=secret,
-            drop_pending_updates=True,
+            drop_pending_updates=False,
         )
         log.info("telegram_webhook_registered", url=url)
 
