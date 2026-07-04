@@ -447,7 +447,15 @@ class TelegramBridgeModule(AppBoundModule):
             controller=controller,
             net_results_provider=self._app._get_net_results,
         )
-        started = await self._app._telegram_bot.start(http_app=self._app._fastapi_app)
+        try:
+            started = await self._app._telegram_bot.start(http_app=self._app._fastapi_app)
+        except Exception as exc:
+            log.warning(
+                "telegram_bot_not_started",
+                error=f"{type(exc).__name__}: {exc}",
+                health=self._app._telegram_bot.health_snapshot(),
+            )
+            return
         if started:
             from trader.monitoring.deploy_info import deploy_label
 

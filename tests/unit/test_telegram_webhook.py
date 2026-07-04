@@ -175,6 +175,23 @@ async def test_telegram_webhook_start_starts_delivery_watchdog() -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_start_failure_is_visible_in_health() -> None:
+    bot = _make_webhook_bot()
+    http_app = FastAPI()
+    mock_app = _mock_application()
+    mock_app.bot.set_webhook.side_effect = RuntimeError("telegram api down")
+
+    with patch("trader.telegram_bot.Application") as mock_app_cls:
+        mock_app_cls.builder.return_value.token.return_value.build.return_value = mock_app
+        with pytest.raises(RuntimeError, match="telegram api down"):
+            await bot.start(http_app=http_app)
+
+    health = bot.health_snapshot()
+    assert health["last_start_error"] == "RuntimeError: telegram api down"
+    assert health["last_start_error_at"] is not None
+
+
+@pytest.mark.asyncio
 async def test_telegram_webhook_shutdown_preserves_registration() -> None:
     bot = _make_webhook_bot()
     http_app = FastAPI()

@@ -254,6 +254,8 @@ class TelegramMonitorBot:
         self._last_handler_at: datetime | None = None
         self._last_polling_error_at: datetime | None = None
         self._last_polling_error: str | None = None
+        self._last_start_error_at: datetime | None = None
+        self._last_start_error: str | None = None
         self._polling_conflict_count: int = 0
         self._polling_network_error_count: int = 0
         self._polling_disabled_reason: str | None = None
@@ -395,6 +397,8 @@ class TelegramMonitorBot:
             self._started_at = datetime.now(tz=UTC)
             self._polling_conflict_count = 0
             self._polling_disabled_reason = None
+            self._last_start_error = None
+            self._last_start_error_at = None
             self._polling_recovery_pending = False
             log.info(
                 "telegram_bot_started",
@@ -402,7 +406,10 @@ class TelegramMonitorBot:
                 delivery_mode=self._config.delivery_mode,
             )
             return True
-        except Exception:
+        except Exception as exc:
+            self._last_start_error = f"{type(exc).__name__}: {exc}"
+            self._last_start_error_at = datetime.now(tz=UTC)
+            log.warning("telegram_bot_start_failed", error=self._last_start_error)
             try:
                 if getattr(app, "running", False):
                     await app.stop()
@@ -1084,6 +1091,8 @@ class TelegramMonitorBot:
             "last_callback_at": self._last_callback_at.isoformat() if self._last_callback_at else None,
             "last_polling_error_at": (self._last_polling_error_at.isoformat() if self._last_polling_error_at else None),
             "last_polling_error": self._last_polling_error,
+            "last_start_error_at": (self._last_start_error_at.isoformat() if self._last_start_error_at else None),
+            "last_start_error": self._last_start_error,
             "polling_conflict_count": self._polling_conflict_count,
             "polling_network_error_count": self._polling_network_error_count,
             "polling_disabled_reason": self._polling_disabled_reason,
