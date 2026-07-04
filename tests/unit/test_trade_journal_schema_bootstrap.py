@@ -15,9 +15,15 @@ class _FakeConnection:
         self.feature_snapshot_eligibility_seen = False
         self.executed_sql: list[str] = []
         self.fetchval_sql: list[str] = []
+        self.existing_columns: set[tuple[str, str]] = set()
+        self.fail_once_on: str | None = None
+        self.failed_once = False
 
     async def execute(self, sql: str) -> None:
         self.executed_sql.append(sql)
+        if self.fail_once_on and self.fail_once_on in sql and not self.failed_once:
+            self.failed_once = True
+            raise AttributeError("'NoneType' object has no attribute 'decode'")
         label_alter_pos = sql.find("ALTER TABLE prediction_outcomes")
         label_index_pos = sql.find("idx_prediction_outcomes_label_schema")
         label_alter = label_alter_pos >= 0 and "label_schema_version" in sql[label_alter_pos:]
@@ -41,8 +47,10 @@ class _FakeConnection:
         if feature_alter:
             self.feature_snapshot_eligibility_seen = True
 
-    async def fetchval(self, sql: str) -> object:
+    async def fetchval(self, sql: str, *args: object) -> object:
         self.fetchval_sql.append(sql)
+        if "information_schema.columns" in sql and len(args) >= 2:
+            return 1 if (str(args[0]), str(args[1])) in self.existing_columns else None
         return None
 
     def transaction(self) -> "_FakeTransaction":
@@ -134,6 +142,22 @@ async def test_legacy_journal_tables_get_created_at_backfill() -> None:
     ):
         assert f"ALTER TABLE {table}" in sql
         assert "ADD COLUMN IF NOT EXISTS created_at" in sql
+
+
+@pytest.mark.asyncio
+async def test_schema_bootstrap_recovers_if_idempotent_add_column_hits_pooler_decode_bug() -> None:
+    pool = _FakePool()
+    pool.conn.fail_once_on = "ADD COLUMN IF NOT EXISTS training_eligible"
+    pool.conn.existing_columns.add(("feature_snapshots", "training_eligible"))
+    journal = TradeJournal("postgresql://example/db")
+    journal._pool = cast(Any, pool)
+
+    await journal._ensure_schema()
+
+    sql = "\n".join(pool.conn.executed_sql)
+    assert pool.conn.failed_once is True
+    assert "information_schema.columns" in "\n".join(pool.conn.fetchval_sql)
+    assert "ADD COLUMN IF NOT EXISTS label_threshold_bps" in sql
 
 
 @pytest.mark.asyncio

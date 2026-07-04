@@ -240,8 +240,65 @@ async def _execute_schema_script(conn: Any, script: str) -> None:
         try:
             await conn.execute(statement)
         except Exception as exc:
+            if await _recover_add_column_if_not_exists(conn, statement):
+                log.warning(
+                    "trade_journal.schema_add_column_recovered",
+                    statement_index=statement_index,
+                    label=_schema_statement_label(statement),
+                    error=str(exc),
+                )
+                continue
             label = _schema_statement_label(statement)
             raise RuntimeError(f"schema statement #{statement_index} failed: {label}: {exc}") from exc
+
+
+async def _recover_add_column_if_not_exists(conn: Any, statement: str) -> bool:
+    """Recover from pooler/driver hiccups on simple ADD COLUMN IF NOT EXISTS DDL.
+
+    Supabase transaction pooler + asyncpg can occasionally raise low-level codec
+    errors on idempotent ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` statements
+    during startup. If the target column already exists, the intended migration
+    is complete and bootstrap should continue. If it does not exist, retry the
+    same add without ``IF NOT EXISTS`` so a transient parse/cache issue does not
+    leave later critical columns (for example ``label_threshold_bps``) unapplied.
+    """
+
+    import re
+
+    sql = statement.strip()
+    match = re.search(
+        r"ALTER\s+TABLE\s+(?P<table>[A-Za-z_][\w.]*)\s+ADD\s+COLUMN\s+IF\s+NOT\s+EXISTS\s+"
+        r"(?P<column>[A-Za-z_][\w]*)\s+(?P<definition>.+?)\s*$",
+        sql,
+        flags=re.IGNORECASE | re.DOTALL,
+    )
+    if match is None:
+        return False
+    table = match.group("table").split(".")[-1].strip('"')
+    column = match.group("column").strip('"')
+    definition = match.group("definition").strip()
+    try:
+        exists = await conn.fetchval(
+            """
+            SELECT 1
+            FROM information_schema.columns
+            WHERE table_schema = current_schema()
+              AND table_name = $1
+              AND column_name = $2
+            LIMIT 1
+            """,
+            table,
+            column,
+        )
+    except Exception:
+        return False
+    if exists:
+        return True
+    try:
+        await conn.execute(f'ALTER TABLE "{table}" ADD COLUMN "{column}" {definition}')
+        return True
+    except Exception:
+        return False
 
 
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
