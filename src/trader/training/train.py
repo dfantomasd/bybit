@@ -345,6 +345,34 @@ def _summarise_walk_forward(fold_metrics: list[dict[str, Any]]) -> dict[str, Any
     }
 
 
+def _walk_forward_quality(
+    metrics: dict[str, Any],
+    *,
+    min_positive_folds: int,
+    min_pass_count: int,
+    min_wf_bps: float,
+    max_wf_std_bps: float,
+) -> str:
+    """Return GOOD only for positive, stable, sufficiently active walk-forward results."""
+
+    wf_mean = metrics.get("wf_mean_bps")
+    if wf_mean is None:
+        return "WEAK"
+    wf_std = metrics.get("wf_std_bps")
+    wf_min = metrics.get("wf_min_bps")
+    if float(wf_mean) < float(min_wf_bps):
+        return "WEAK"
+    if int(metrics.get("wf_positive_folds") or 0) < int(min_positive_folds):
+        return "WEAK"
+    if int(metrics.get("total_pass_count") or 0) < int(min_pass_count):
+        return "WEAK"
+    if wf_std is not None and float(wf_std) > float(max_wf_std_bps):
+        return "WEAK"
+    if wf_min is not None and float(wf_min) < float(min_wf_bps):
+        return "WEAK"
+    return "GOOD"
+
+
 def _negative_bucket_keep_mask(
     *,
     returns_bps: np.ndarray,
@@ -890,15 +918,18 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
                 "All samples are the same class; cannot train a useful model."
             )
         model.fit_batch(x_arr, y, params=model.model_params)
+        min_quality_positive_folds = max(
+            min_positive_folds,
+            min(max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", min_positive_folds))), len(folds)),
+        )
         metrics = {
-            "quality": "GOOD"
-            if (
-                best.get("wf_mean_bps") is not None
-                and float(best["wf_mean_bps"]) > 0
-                and int(best.get("wf_positive_folds") or 0) >= min_positive_folds
-                and int(best.get("total_pass_count") or 0) >= int(settings.MODEL_MIN_PASS_COUNT_FOR_PROMOTION)
-            )
-            else "WEAK",
+            "quality": _walk_forward_quality(
+                best,
+                min_positive_folds=min_quality_positive_folds,
+                min_pass_count=int(settings.MODEL_MIN_PASS_COUNT_FOR_PROMOTION),
+                min_wf_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_BPS", 0.0)),
+                max_wf_std_bps=float(getattr(settings, "MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS", 25.0)),
+            ),
             "accuracy": None,
             "avg_net_return_all_bps": float(np.mean(returns_bps)) if len(returns_bps) else 0.0,
             "best_threshold": best.get("selected_score_threshold"),
