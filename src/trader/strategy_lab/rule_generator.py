@@ -35,6 +35,9 @@ class RuleCandidate:
     validation_lift_bps: float | None
     pass_rate: float
     score: float
+    validation_positive_folds: int = 0
+    validation_folds: int = 0
+    validation_worst_fold_avg_net_bps: float | None = None
     symbol: str | None = None
     side: str | None = None
     segment: str = "all"
@@ -52,6 +55,8 @@ class RuleSearchConfig:
     min_validation_count: int = 10
     min_train_avg_net_bps: float = 0.0
     min_validation_avg_net_bps: float = 0.0
+    min_validation_positive_folds: int = 2
+    validation_folds: int = 3
     max_candidates_per_feature: int = 8
     top_n: int = 20
     quantiles: tuple[float, ...] = (0.10, 0.20, 0.30, 0.70, 0.80, 0.90)
@@ -113,9 +118,30 @@ def _score_rule(
     if validation_avg < config.min_validation_avg_net_bps:
         return None
 
+    fold_count = min(
+        max(1, int(config.validation_folds)),
+        max(1, validation_count // max(1, int(config.min_validation_count))),
+    )
+    fold_avgs: list[float] = []
+    if fold_count > 1:
+        validation_positions = np.flatnonzero(validation_mask)
+        for fold_positions in np.array_split(validation_positions, fold_count):
+            if len(fold_positions) < config.min_validation_count:
+                continue
+            fold_returns = returns_bps[validation_idx][fold_positions]
+            fold_avgs.append(float(np.mean(fold_returns)))
+    if not fold_avgs:
+        fold_avgs = [validation_avg]
+    positive_folds = sum(avg >= config.min_validation_avg_net_bps for avg in fold_avgs)
+    required_positive_folds = min(max(1, int(config.min_validation_positive_folds)), len(fold_avgs))
+    worst_fold_avg = min(fold_avgs) if fold_avgs else validation_avg
+    if positive_folds < required_positive_folds:
+        return None
+
     pass_rate = float(validation_count / len(validation_idx)) if len(validation_idx) else 0.0
     scarcity_penalty = 5.0 / max(validation_count, 1) ** 0.5
-    score = validation_avg + min(validation_lift, 50.0) * 0.25 - scarcity_penalty
+    instability_penalty = max(0.0, validation_avg - worst_fold_avg) * 0.15
+    score = validation_avg + min(validation_lift, 50.0) * 0.25 - scarcity_penalty - instability_penalty
     rule_id = "rule_" + "_and_".join(
         f"{condition.feature}_{'ge' if condition.op == '>=' else 'le'}_{condition.threshold:.6g}"
         for condition in conditions
@@ -129,6 +155,9 @@ def _score_rule(
         validation_count=validation_count,
         validation_avg_net_bps=validation_avg,
         validation_lift_bps=validation_lift,
+        validation_positive_folds=int(positive_folds),
+        validation_folds=len(fold_avgs),
+        validation_worst_fold_avg_net_bps=float(worst_fold_avg),
         pass_rate=pass_rate,
         score=score,
     )
