@@ -356,6 +356,35 @@ class OperatorControlsModule(AppBoundModule):
             if self._app._settings is not None
             else None,
             "model_gate_quality": self._app._model_gate_quality,
+            "model_auto_promote_enabled": (
+                getattr(self._app._settings, "MODEL_AUTO_PROMOTE_ENABLED", False)
+                if self._app._settings is not None
+                else False
+            ),
+            "model_auto_promote_min_lift_bps": (
+                getattr(self._app._settings, "MODEL_AUTO_PROMOTE_MIN_LIFT_BPS", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "model_auto_promote_min_wf_bps": (
+                getattr(self._app._settings, "MODEL_AUTO_PROMOTE_MIN_WF_BPS", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "model_auto_promote_min_pass_count": (
+                getattr(self._app._settings, "MODEL_MIN_PASS_COUNT_FOR_PROMOTION", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "model_auto_promote_max_drawdown_bps": (
+                getattr(
+                    self._app._settings,
+                    "MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS",
+                    getattr(self._app._settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", None),
+                )
+                if self._app._settings is not None
+                else None
+            ),
             "scalp_strict_shadow": self._app._scalp_strict_shadow(),
             "shadow_apply_net_edge_gate": (
                 self._app._execution_engine._shadow_apply_net_edge_gate

@@ -406,6 +406,17 @@ class TestBucketGate:
         assert settings["expectancy_stats_required_for_entries"] is True
         assert settings["expectancy_stats_max_age_s"] == app._settings.EXPECTANCY_STATS_MAX_AGE_SECONDS
         assert settings["expectancy_stats_ready"] is True
+        assert settings["model_auto_promote_enabled"] == app._settings.MODEL_AUTO_PROMOTE_ENABLED
+        assert settings["model_auto_promote_min_lift_bps"] == app._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS
+        assert settings["model_auto_promote_min_wf_bps"] == app._settings.MODEL_AUTO_PROMOTE_MIN_WF_BPS
+        assert (
+            settings["model_auto_promote_min_pass_count"]
+            == app._settings.MODEL_MIN_PASS_COUNT_FOR_PROMOTION
+        )
+        assert (
+            settings["model_auto_promote_max_drawdown_bps"]
+            == app._settings.MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS
+        )
         assert settings["strategy_side_stats_count"] == 2
         assert settings["strategy_side_block_enabled"] is True
         assert settings["strategy_side_confidence_gate_enabled"] is True
