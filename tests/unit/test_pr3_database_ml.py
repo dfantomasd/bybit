@@ -510,6 +510,39 @@ async def test_live_paper_enrichment_uses_live_zero_over_stale_metrics() -> None
 
 
 @pytest.mark.asyncio
+async def test_live_paper_enrichment_preserves_live_drawdown() -> None:
+    from trader.storage.trade_journal import TradeJournal
+
+    journal = TradeJournal(postgres_dsn="postgresql://fake:fake@localhost/fake", enabled=True)
+    journal._pool = MagicMock()
+
+    async def mock_fetch(query: str, *args: Any) -> list[dict[str, Any]]:
+        del query, args
+        return [
+            {"net_return_bps": 10.0},
+            {"net_return_bps": -40.0},
+            {"net_return_bps": 15.0},
+        ]
+
+    journal._fetch = mock_fetch  # type: ignore[method-assign]
+
+    enriched = await journal._enrich_model_with_live_paper(
+        {
+            "version": "champion",
+            "metrics": {
+                "walk_forward_expectancy_bps": 4.0,
+                "paper_gate": {"count": 80, "max_drawdown_bps": 0.0},
+            },
+        }
+    )
+
+    assert enriched is not None
+    assert enriched["paper_gate_count"] == 3
+    assert enriched["paper_gate_max_drawdown_bps"] == -40.0
+    assert enriched["metrics"]["paper_gate"]["max_drawdown_bps"] == -40.0
+
+
+@pytest.mark.asyncio
 async def test_market_candle_upsert_sql() -> None:
     """upsert_market_candle should build correct SQL and not duplicate on conflict."""
     from trader.storage.trade_journal import TradeJournal

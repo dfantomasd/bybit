@@ -3752,13 +3752,16 @@ class TradeJournal:
             enriched["paper_gate_count"] = live_count
             enriched["paper_gate_total_bps"] = live.get("total_bps")
             enriched["paper_gate_avg_bps"] = live.get("avg_bps")
+            enriched["paper_gate_max_drawdown_bps"] = live.get("max_drawdown_bps")
             enriched["paper_gate_source"] = "live_outcomes"
             enriched_metrics = dict(metrics)
             enriched_metrics["paper_gate"] = {
                 "count": live_count,
                 "total_bps": live.get("total_bps"),
                 "avg_bps": live.get("avg_bps"),
+                "max_drawdown_bps": live.get("max_drawdown_bps"),
             }
+            enriched["metrics"] = enriched_metrics
             enriched["selection_reason"] = selection_reason(enriched_metrics)
             return enriched
         except Exception as exc:
