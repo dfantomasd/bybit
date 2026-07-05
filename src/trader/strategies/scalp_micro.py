@@ -103,8 +103,9 @@ class ScalpMicroStrategy(BaseStrategy):
         imbalance_provider: Retained for interface compatibility; not used.
                             OB confirmation comes from ob_imbalance_l5 feature.
         min_imbalance:      Retained for interface compatibility; not used.
-        shadow_relaxed:     When True, loosens all thresholds and skips hard
-                            net-edge / OB-data fails to maximise paper data volume.
+        shadow_relaxed:     When True, loosens technical thresholds and OB-data
+                            fails to maximise paper data volume, while still
+                            rejecting negative net-edge proposals.
     """
 
     _global_signal_times: ClassVar[deque[datetime]] = deque(maxlen=256)
@@ -290,7 +291,7 @@ class ScalpMicroStrategy(BaseStrategy):
         atr_abs = atr_pct * current_price
         gross_edge_pct = atr_pct * _TP_ATR_MULT * 100.0
         net_edge_pct = self._net_edge_pct(gross_edge_pct, spread_bps)
-        if not self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
+        if net_edge_pct < self._min_net_return_pct:
             self._diag("scalp_net_edge_rejected", symbol=symbol, side=side)
             log.debug(
                 "scalp_micro.net_edge_rejected",
@@ -301,13 +302,6 @@ class ScalpMicroStrategy(BaseStrategy):
                 spread_bps=spread_bps,
             )
             return None
-        if self._shadow_relaxed and net_edge_pct < self._min_net_return_pct:
-            log.debug(
-                "scalp_micro.net_edge_skipped_shadow",
-                symbol=symbol,
-                net_edge_pct=round(net_edge_pct, 4),
-                min_required_pct=self._min_net_return_pct,
-            )
 
         # --- Position sizing with notional cap ---
         sl_dist_pct = atr_pct * _SL_ATR_MULT

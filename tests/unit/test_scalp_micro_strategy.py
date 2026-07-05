@@ -210,11 +210,11 @@ class TestScalpMicroStrategy:
     # Shadow-relaxed mode
     # ------------------------------------------------------------------
 
-    def test_shadow_relaxed_allows_negative_net_edge(self) -> None:
+    def test_shadow_relaxed_rejects_negative_net_edge(self) -> None:
         rejections: list[str] = []
         strat = _strategy(taker_fee_pct=0.40, shadow_relaxed=True, diag_hook=rejections.append)
-        assert strat.evaluate(_vector(), _PRICE, 1000.0) is not None
-        assert "scalp_net_edge_rejected" not in rejections
+        assert strat.evaluate(_vector(), _PRICE, 1000.0) is None
+        assert "scalp_net_edge_rejected" in rejections
 
     def test_shadow_relaxed_allows_weaker_ewma(self) -> None:
         strat = _strategy(shadow_relaxed=True)
