@@ -343,6 +343,19 @@ def test_model_progress_reports_actual_and_compatible_samples() -> None:
     assert "Совместимо:" in src
 
 
+def test_model_progress_paper_gate_requires_drawdown_limit() -> None:
+    import inspect
+
+    from trader.modules.training import TrainingModule
+
+    src = inspect.getsource(TrainingModule.run_model_progress_reporter)
+    assert "paper_gate_drawdown_bps" in src
+    assert "MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS" in src
+    assert "has_paper_drawdown" in src
+    assert "has_paper_gate = paper_gate_count >= min_paper_gate and paper_gate_bps > 0 and has_paper_drawdown" in src
+    assert "DD в лимите" in src
+
+
 def test_canary_gate_scores_side_aware_model_features() -> None:
     import inspect
 

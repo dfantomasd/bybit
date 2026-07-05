@@ -571,6 +571,13 @@ class TrainingModule(ModuleTaskMixin):
                 min_lift = float(self._app._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS)
                 min_wf_bps = float(self._app._settings.MODEL_AUTO_PROMOTE_MIN_WF_BPS)
                 min_paper_gate = max(20, int(getattr(self._app._settings, "MODEL_MIN_PASS_COUNT_FOR_PROMOTION", 20)))
+                max_paper_drawdown_bps = float(
+                    getattr(
+                        self._app._settings,
+                        "MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS",
+                        getattr(self._app._settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0),
+                    )
+                )
                 required_quality = str(self._app._settings.MODEL_AUTO_PROMOTE_MIN_QUALITY or "GOOD").upper()
 
                 raw_metrics = latest_model.get("metrics")
@@ -593,6 +600,7 @@ class TrainingModule(ModuleTaskMixin):
 
                 paper_gate_count = 0
                 paper_gate_bps = 0.0
+                paper_gate_drawdown_bps = 0.0
                 if version and version != "—" and self._app._trade_journal is not None:
                     paper = await self._app._trade_journal.get_live_paper_gate_stats(
                         version,
@@ -601,6 +609,7 @@ class TrainingModule(ModuleTaskMixin):
                     )
                     paper_gate_count = int(paper.get("count") or 0)
                     paper_gate_bps = float(paper.get("total_bps") or 0.0)
+                    paper_gate_drawdown_bps = abs(float(paper.get("max_drawdown_bps") or 0.0))
 
                 # Build promotion checklist
                 def check(ok: bool, label: str) -> str:
@@ -609,7 +618,8 @@ class TrainingModule(ModuleTaskMixin):
                 has_signals = resolved_count >= min_signals
                 has_lift = lift_bps is not None and float(lift_bps) >= min_lift
                 has_wf = challenger_wf_bps is not None and challenger_wf_bps >= min_wf_bps
-                has_paper_gate = paper_gate_count >= min_paper_gate and paper_gate_bps > 0
+                has_paper_drawdown = paper_gate_drawdown_bps <= max_paper_drawdown_bps
+                has_paper_gate = paper_gate_count >= min_paper_gate and paper_gate_bps > 0 and has_paper_drawdown
                 has_quality = bool(model_quality) and model_quality == required_quality
                 beats_champion = lift_bps is not None and float(lift_bps) > champion_wf_bps
                 is_challenger = status == "SHADOW_CHALLENGER"
@@ -634,7 +644,10 @@ class TrainingModule(ModuleTaskMixin):
                 lift_str = f"{float(lift_bps):+.2f} bps" if lift_bps is not None else "н/д"
                 wf_str = f"{challenger_wf_bps:+.2f} bps" if challenger_wf_bps is not None else "н/д"
                 precision_str = f"{float(pass_precision) * 100:.1f}%" if pass_precision is not None else "н/д"
-                paper_gate_str = f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps"
+                paper_gate_str = (
+                    f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps, "
+                    f"DD {paper_gate_drawdown_bps:.1f}/{max_paper_drawdown_bps:.0f} bps"
+                )
 
                 lines = [
                     "📊 <b>Прогресс модели</b>",
@@ -676,7 +689,7 @@ class TrainingModule(ModuleTaskMixin):
                     check(has_lift, f"Lift ≥ {min_lift:+.1f} bps → сейчас {lift_str}"),
                     check(
                         has_paper_gate,
-                        f"Paper GATE ≥ {min_paper_gate} и > 0 bps → сейчас {paper_gate_str}",
+                        f"Paper GATE ≥ {min_paper_gate}, > 0 bps и DD в лимите → сейчас {paper_gate_str}",
                     ),
                     check(has_wf, f"Walk-forward ≥ {min_wf_bps:+.1f} bps → сейчас {wf_str}"),
                     check(has_quality, f"Quality = {required_quality} → сейчас {model_quality or 'н/д'}"),
@@ -720,7 +733,7 @@ class TrainingModule(ModuleTaskMixin):
                     if not has_lift:
                         missing.append("lift > 0")
                     if not has_paper_gate:
-                        missing.append(f"paper GATE ≥ {min_paper_gate} с > 0 bps")
+                        missing.append(f"paper GATE ≥ {min_paper_gate} с > 0 bps и DD ≤ {max_paper_drawdown_bps:.0f} bps")
                     if not has_wf:
                         missing.append(f"walk-forward ≥ {min_wf_bps:+.1f} bps")
                     if not has_quality:
