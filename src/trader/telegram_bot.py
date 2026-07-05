@@ -3116,8 +3116,10 @@ class TelegramMonitorBot:
                 return "размер заявки ниже лимита инструмента; смотреть sizing/min notional"
             if "model_gate" in normalized or "champion" in normalized:
                 return "model-gate/CHAMPION не пропустил; нужен GOOD + paper-gate"
+            if "strategy_side" in normalized:
+                return "strategy×side expectancy фильтр режет убыточное направление стратегии"
             if "strategy_regime" in normalized or "expectancy" in normalized:
-                return "bucket/regime expectancy фильтр режет токсичный режим"
+                return "bucket/regime/strategy expectancy фильтр режет токсичный контекст"
             if "confidence" in normalized:
                 return "confidence ниже режима/стратегии"
             if "cooldown" in normalized:

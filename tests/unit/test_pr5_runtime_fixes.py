@@ -386,6 +386,7 @@ def test_strategy_expectancy_blocks_are_persisted_as_blocked_signals() -> None:
     src = inspect.getsource(TradingLoopModule.start)
     for reason in (
         "strategy_expectancy_blocked",
+        "strategy_side_expectancy_blocked",
         "strategy_regime_expectancy_blocked",
         "strategy_regime_confidence_blocked",
     ):

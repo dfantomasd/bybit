@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from trader.operator_priorities import (
     full_priority_overview,
+    signal_filter_priority_text,
     strategy_priority_text,
 )
 
@@ -28,3 +29,11 @@ def test_full_priority_overview_uses_runtime_strategy_order() -> None:
     assert "Приоритет безопасности" in text
     assert "scalp_micro_v1" in text
     assert "SCALP" in text
+
+
+def test_signal_filter_priority_mentions_strategy_side_gate() -> None:
+    text = signal_filter_priority_text()
+
+    assert "Symbol-side gate" in text
+    assert "strategy×side" in text
+    assert "Model gate" in text
