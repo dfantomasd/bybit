@@ -172,8 +172,19 @@ class DiagnosticsModule(AppBoundModule):
         paper_gate = DiagnosticsModule.dict_or_empty(paper.get("model_gate"))
         paper_count = int(paper_gate.get("count") or 0)
         paper_total_bps = DiagnosticsModule.float_or_none(paper_gate.get("total_bps"))
+        paper_drawdown_raw = DiagnosticsModule.float_or_none(paper_gate.get("max_drawdown_bps"))
+        paper_drawdown_bps = abs(paper_drawdown_raw) if paper_drawdown_raw is not None else None
+        max_paper_drawdown_bps = float(
+            getattr(
+                self._app._settings,
+                "MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS",
+                getattr(self._app._settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0),
+            )
+        )
         metrics["paper_gate_count"] = paper_count
         metrics["paper_gate_total_bps"] = paper_total_bps
+        metrics["paper_gate_max_drawdown_bps"] = paper_drawdown_bps
+        metrics["paper_gate_max_drawdown_limit_bps"] = max_paper_drawdown_bps
         shadow_close_count = int(runtime_diag.get("hour_shadow_closed") or 0)
         shadow_close_avg_pct = DiagnosticsModule.float_or_none(runtime_diag.get("hour_shadow_closed_avg_pnl_pct"))
         metrics["shadow_close_count_1h"] = shadow_close_count
@@ -184,6 +195,8 @@ class DiagnosticsModule(AppBoundModule):
             issues.append(f"insufficient_paper_gate_trades:{paper_count}")
         if paper_total_bps is None or paper_total_bps <= 0:
             issues.append(f"non_positive_paper_gate_bps:{paper_total_bps}")
+        if paper_drawdown_bps is not None and paper_drawdown_bps > max_paper_drawdown_bps:
+            issues.append(f"paper_gate_drawdown_bps:{paper_drawdown_bps:.4f}>{max_paper_drawdown_bps:.4f}")
 
         return {
             "ready": not issues,

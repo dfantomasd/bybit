@@ -355,6 +355,50 @@ def test_economic_readiness_flags_empty_db_paper_when_shadow_closes_exist() -> N
     assert report["metrics"]["shadow_close_avg_pnl_pct_1h"] == -0.1688
 
 
+def test_economic_readiness_blocks_excessive_paper_gate_drawdown() -> None:
+    """Positive paper PnL is not enough when model-gate drawdown exceeds the active risk limit."""
+    from trader.app import TradingApplication
+
+    app = TradingApplication()
+    app._settings = _active_settings()
+    app._settings.MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS = 500.0
+
+    report = app._economic_readiness_report(
+        db_diag={
+            "connected": True,
+            "latest_candle_1m": datetime.now(tz=UTC),
+            "feature_snapshots": 5000,
+            "prediction_outcomes": 3000,
+            "training_eligible_by_horizon": {"5": 2500},
+            "active_model_version": {
+                "version": "v_good_5m",
+                "status": "CHAMPION",
+                "metrics": {
+                    "quality": "GOOD",
+                    "horizon_minutes": 5,
+                    "walk_forward_expectancy_bps": 2.5,
+                },
+            },
+            "shadow_gate_by_horizon": {"5": {"total_count": 120, "lift_vs_all_bps": 1.2}},
+            "paper_pnl_by_horizon": {
+                "5": {
+                    "model_gate": {
+                        "count": 35,
+                        "total_bps": 18.0,
+                        "max_drawdown_bps": -750.0,
+                    }
+                }
+            },
+        },
+        runtime_diag={"active_symbols": ["ETHUSDT", "XRPUSDT", "DOGEUSDT"]},
+    )
+
+    assert report["ready"] is False
+    assert "paper_gate_drawdown_bps:750.0000>500.0000" in report["issues"]
+    assert report["metrics"]["paper_gate_max_drawdown_bps"] == 750.0
+    assert report["metrics"]["paper_gate_max_drawdown_limit_bps"] == 500.0
+
+
 def test_economic_readiness_does_not_fallback_when_model_horizon_is_zero() -> None:
     """Explicit 5m=0 must not be masked by legacy 15m sample counts."""
     from trader.app import TradingApplication
