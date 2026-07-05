@@ -457,6 +457,19 @@ class OperatorControlsModule(AppBoundModule):
                 and count >= self._app._settings.STRATEGY_SIDE_MIN_SAMPLES
                 and avg_bps < self._app._settings.STRATEGY_SIDE_BLOCK_AVG_BPS
             ][:20],
+            "strategy_side_confidence_limited": [
+                f"{strategy_id}:{side}:{count}:{avg_bps:+.1f}"
+                for (strategy_id, side), (avg_bps, count) in strategy_side_stats.items()
+                if self._app._settings is not None
+                and (
+                    count < self._app._settings.STRATEGY_SIDE_MIN_SAMPLES
+                    or avg_bps < self._app._settings.STRATEGY_SIDE_WEAK_AVG_BPS
+                )
+                and not (
+                    count >= self._app._settings.STRATEGY_SIDE_MIN_SAMPLES
+                    and avg_bps < self._app._settings.STRATEGY_SIDE_BLOCK_AVG_BPS
+                )
+            ][:20],
             "strategy_regime_stats_count": len(strategy_regime_stats),
             "strategy_regime_block_enabled": (
                 getattr(self._app._settings, "STRATEGY_REGIME_BLOCK_ENABLED", None)

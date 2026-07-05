@@ -385,7 +385,10 @@ class TestBucketGate:
         app._bucket_stats_refreshed_at = datetime.now(tz=UTC) - timedelta(seconds=42)
         app._shadow_probe_side_stats = {("XRPUSDT", "Buy"): (-2.0, 8)}
         app._shadow_probe_symbol_stats = {"XRPUSDT": (-2.0, 8)}
-        app._strategy_side_stats = {("scalp_micro_v1", "Buy"): (-8.0, 12)}
+        app._strategy_side_stats = {
+            ("scalp_micro_v1", "Buy"): (-8.0, 12),
+            ("mean_reversion_v1", "Sell"): (1.0, 8),
+        }
         app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (-8.0, 12)}
         app._shadow_probe_symbol_cooldowns = {"XRPUSDT": datetime.now(tz=UTC) + timedelta(seconds=120)}
         app._shadow_probe_eligible_symbols = {"XRPUSDT"}
@@ -400,7 +403,7 @@ class TestBucketGate:
         assert settings["expectancy_stats_required_for_entries"] is True
         assert settings["expectancy_stats_max_age_s"] == app._settings.EXPECTANCY_STATS_MAX_AGE_SECONDS
         assert settings["expectancy_stats_ready"] is True
-        assert settings["strategy_side_stats_count"] == 1
+        assert settings["strategy_side_stats_count"] == 2
         assert settings["strategy_side_block_enabled"] is True
         assert settings["strategy_side_confidence_gate_enabled"] is True
         assert settings["strategy_side_weak_min_confidence"] == app._settings.STRATEGY_SIDE_WEAK_MIN_CONFIDENCE
@@ -409,6 +412,7 @@ class TestBucketGate:
             == app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE
         )
         assert settings["strategy_side_blocked"] == ["scalp_micro_v1:Buy"]
+        assert settings["strategy_side_confidence_limited"] == ["mean_reversion_v1:Sell:8:+1.0"]
         assert settings["strategy_regime_stats_count"] == 1
         assert settings["strategy_regime_block_enabled"] is True
         assert settings["strategy_regime_confidence_gate_enabled"] is True
