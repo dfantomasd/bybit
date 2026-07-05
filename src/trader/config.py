@@ -758,6 +758,8 @@ class Settings(BaseSettings):
     """Minimum positive walk-forward folds required before auto-promotion."""
     MODEL_AUTO_PROMOTE_MAX_WF_STD_BPS: float = 25.0
     """Maximum walk-forward fold standard deviation allowed before auto-promotion."""
+    MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS: float = 1500.0
+    """Maximum recent challenger return drawdown allowed before auto-promotion."""
     MODEL_AUTO_PROMOTE_MIN_QUALITY: str = "WEAK"
     """Minimum stored training quality allowed for shadow auto-promotion.
 

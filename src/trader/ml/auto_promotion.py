@@ -119,6 +119,7 @@ class AutoPromotionConfig:
     min_bootstrap_samples: int = 50
     horizon_minutes: int = 15
     max_champion_drawdown_bps: float = 1500.0
+    max_challenger_drawdown_bps: float = 1500.0
     min_champion_wf_bps: float = 0.0
     returns_limit: int = 200
     label_schema_version: str = LABEL_SCHEMA_VERSION
@@ -152,6 +153,13 @@ class AutoPromotionConfig:
                 use_tpsl_exit=bool(getattr(settings, "MODEL_LABEL_USE_TPSL_EXIT", False))
             ),
             max_champion_drawdown_bps=float(getattr(settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0)),
+            max_challenger_drawdown_bps=float(
+                getattr(
+                    settings,
+                    "MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS",
+                    getattr(settings, "MODEL_CHAMPION_MAX_DRAWDOWN_BPS", 1500.0),
+                )
+            ),
             min_champion_wf_bps=float(getattr(settings, "MODEL_CHAMPION_MIN_WF_BPS", 0.0)),
         )
 
@@ -307,6 +315,17 @@ class AutoPromotionEngine:
             horizon_minutes=self._config.horizon_minutes,
             label_schema_version=self._config.label_schema_version,
         )
+        challenger_drawdown_bps = _float_or_none(metrics.get("max_drawdown_bps"))
+        if challenger_drawdown_bps is None and challenger_returns:
+            challenger_drawdown_bps = _max_drawdown_bps([float(value) for value in challenger_returns])
+        if (
+            challenger_drawdown_bps is not None
+            and challenger_drawdown_bps > self._config.max_challenger_drawdown_bps
+        ):
+            reasons.append(
+                "challenger_drawdown:"
+                f"{challenger_drawdown_bps:.4f}>{self._config.max_challenger_drawdown_bps:.4f}"
+            )
         p_value: float | None = None
         mean_diff_bps: float | None = None
         if (
@@ -347,6 +366,7 @@ class AutoPromotionEngine:
             "wf_folds": wf_folds,
             "wf_positive_folds": wf_positive_folds,
             "wf_std_bps": wf_std_bps,
+            "challenger_drawdown_bps": challenger_drawdown_bps,
             "walk_forward_chronology": metrics.get("walk_forward_chronology"),
             "bootstrap_p_value": p_value,
             "bootstrap_mean_diff_bps": mean_diff_bps,

@@ -164,6 +164,9 @@ class _Journal:
         if model_version == "RULE_BASELINE_V1":
             return [0.0] * 80
         if model_version in self.models:
+            metrics = self.models[model_version].get("metrics") or {}
+            if isinstance(metrics, dict) and isinstance(metrics.get("returns_bps"), list):
+                return list(metrics["returns_bps"])
             return [8.0] * 80
         return []
 
@@ -287,6 +290,23 @@ async def test_should_promote_blocks_unstable_walk_forward_folds() -> None:
     assert decision.promote is False
     assert any(reason.startswith("unstable_walk_forward_folds") for reason in decision.reasons)
     assert any(reason.startswith("unstable_walk_forward_std") for reason in decision.reasons)
+
+
+@pytest.mark.asyncio
+async def test_should_promote_blocks_excessive_challenger_drawdown() -> None:
+    challenger = _model("high-drawdown")
+    challenger["metrics"]["returns_bps"] = [20.0] * 60 + [-1000.0] + [20.0] * 19
+    journal = _Journal([_model("champion", status=ModelStatus.CHAMPION, wf_bps=1.0), challenger])
+    engine = AutoPromotionEngine(
+        trade_journal=journal,
+        config=replace(_config(), max_challenger_drawdown_bps=500.0),
+    )
+
+    decision = await engine.should_promote(None, "high-drawdown")
+
+    assert decision.promote is False
+    assert any(reason.startswith("challenger_drawdown") for reason in decision.reasons)
+    assert decision.metrics["challenger_drawdown_bps"] > 500.0
 
 
 @pytest.mark.asyncio
