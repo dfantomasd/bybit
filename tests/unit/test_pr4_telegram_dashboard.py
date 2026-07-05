@@ -488,7 +488,7 @@ async def test_canary_readiness_blocks_weak_unprofitable_model() -> None:
     assert "folds 1/5" in reply_text
     assert "std +31.00 bps" in reply_text
     assert "Walk-forward модели > 0 bps" in reply_text
-    assert "Paper model-gate: 20+ сделок и PnL > 0" in reply_text
+    assert "Paper model-gate: 20+ сделок, PnL > 0, просадка в лимите" in reply_text
 
 
 @pytest.mark.asyncio

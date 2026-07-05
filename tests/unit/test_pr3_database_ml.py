@@ -1152,7 +1152,7 @@ async def test_database_model_telegram_screen() -> None:
             "paper_notional_usd": 5.0,
             "paper_pnl_15m": {
                 "baseline": {"count": 20, "total_bps": 10.0, "max_drawdown_bps": -4.0},
-                "model_gate": {"count": 12, "total_bps": 18.0, "max_drawdown_bps": -2.0},
+                "model_gate": {"count": 25, "total_bps": 18.0, "max_drawdown_bps": -2000.0},
             },
         }
 
@@ -1213,6 +1213,8 @@ async def test_database_model_telegram_screen() -> None:
     assert "observed=<code>20</code>, pending=<code>0</code>" in text
     assert "Paper baseline" in text
     assert "Paper model gate" in text
+    assert "❌ Paper gate ≥ 20 сделок > 0 bps и DD в лимите" in text
+    assert "DD 2000.0/1500 bps" in text
     assert "score_below_regime_threshold" in text
 
 

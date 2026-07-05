@@ -3550,6 +3550,15 @@ class TelegramMonitorBot:
         gate_lift = _as_float(gate.get("lift_vs_all_bps"))
         paper_gate_count = int(paper_gate.get("count") or 0)
         paper_gate_bps = _as_float(paper_gate.get("total_bps")) or 0.0
+        paper_gate_drawdown_bps = abs(_as_float(paper_gate.get("max_drawdown_bps")) or 0.0)
+        paper_gate_drawdown_limit_bps = float(
+            runtime.get(
+                "model_auto_promote_max_drawdown_bps",
+                runtime.get("model_champion_max_drawdown_bps", 1500.0),
+            )
+            or 1500.0
+        )
+        paper_gate_drawdown_ok = paper_gate_drawdown_bps <= paper_gate_drawdown_limit_bps
         paper_base_count = int(paper_baseline.get("count") or 0)
         model_version = readiness_model.get("version")
         model_quality = str(model_metrics.get("quality") or "n/a")
@@ -3562,7 +3571,7 @@ class TelegramMonitorBot:
         walk_forward_ok = walk_forward_bps is not None and walk_forward_bps > 0
         champion_ok = champion_ver not in ("none", "", None)
         gate_ready = gate_total >= 50 and gate_lift is not None and gate_lift > 0
-        paper_gate_ready = paper_gate_count >= 20 and paper_gate_bps > 0
+        paper_gate_ready = paper_gate_count >= 20 and paper_gate_bps > 0 and paper_gate_drawdown_ok
         ws_age = diag.get("last_ws_message_age_s")
         loop_at = diag.get("last_strategy_loop_at")
         hour_api_rejected = int(diag.get("hour_api_rejected") or 0)
@@ -3713,10 +3722,13 @@ class TelegramMonitorBot:
             "Дайте модели поработать в тени; если lift остается <= 0, меняйте стратегию/признаки.",
         )
         require(
-            "Paper model-gate: 20+ сделок и PnL > 0",
+            "Paper model-gate: 20+ сделок, PnL > 0, просадка в лимите",
             paper_gate_ready,
-            f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps",
-            "Дождитесь 20+ бумажных сделок; если PnL <= 0, CANARY_LIVE запускать нельзя.",
+            (
+                f"{paper_gate_count} сделок, {paper_gate_bps:+.1f} bps, "
+                f"DD {paper_gate_drawdown_bps:.1f}/{paper_gate_drawdown_limit_bps:.0f} bps"
+            ),
+            "Дождитесь 20+ бумажных сделок; если PnL <= 0 или просадка выше лимита, CANARY_LIVE запускать нельзя.",
         )
         in_canary_live = self._config.trading_mode == "CANARY_LIVE"
         if in_canary_live:
@@ -4232,6 +4244,14 @@ class TelegramMonitorBot:
             paper_notional = float(db_diag.get("paper_notional_usd") or 5.0)
             paper_baseline = paper.get("baseline", {}) or {}
             paper_gate = paper.get("model_gate", {}) or {}
+            runtime = self._runtime_settings()
+            paper_gate_drawdown_limit_bps = float(
+                runtime.get(
+                    "model_auto_promote_max_drawdown_bps",
+                    runtime.get("model_champion_max_drawdown_bps", 1500.0),
+                )
+                or 1500.0
+            )
             event_counts = db_diag.get("prediction_event_decision_counts", {}) or {}
             event_by_decision = event_counts.get("by_decision", {}) if isinstance(event_counts, dict) else {}
 
@@ -4452,18 +4472,31 @@ class TelegramMonitorBot:
             # 6. Paper gate
             paper_gate_count = int(paper_gate.get("count") or 0)
             paper_gate_bps_val = float(paper_gate.get("total_bps") or 0.0)
+            paper_gate_drawdown_val = abs(float(paper_gate.get("max_drawdown_bps") or 0.0))
+            paper_gate_drawdown_ok = paper_gate_drawdown_val <= paper_gate_drawdown_limit_bps
             shadow_close_count = int(diag.get("hour_shadow_closed") or 0) if isinstance(diag, dict) else 0
             shadow_close_avg = diag.get("hour_shadow_closed_avg_pnl_pct") if isinstance(diag, dict) else None
             if paper_gate_count < 20:
                 paper_road_icon = "⏳"
                 paper_road_val = f"ждём 20 бумажных сделок (сейчас {paper_gate_count})"
-            elif paper_gate_bps_val > 0:
-                paper_road_icon = "✅"
-                paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps"
-            else:
+            elif paper_gate_bps_val <= 0:
                 paper_road_icon = "❌"
                 paper_road_val = f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps (нужен > 0)"
-            lines.append(f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps → <code>{paper_road_val}</code>")
+            elif not paper_gate_drawdown_ok:
+                paper_road_icon = "❌"
+                paper_road_val = (
+                    f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps, "
+                    f"DD {paper_gate_drawdown_val:.1f}/{paper_gate_drawdown_limit_bps:.0f} bps"
+                )
+            else:
+                paper_road_icon = "✅"
+                paper_road_val = (
+                    f"{paper_gate_count} сделок, {paper_gate_bps_val:+.1f} bps, "
+                    f"DD {paper_gate_drawdown_val:.1f}/{paper_gate_drawdown_limit_bps:.0f} bps"
+                )
+            lines.append(
+                f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps и DD в лимите → <code>{paper_road_val}</code>"
+            )
             if paper_gate_count == 0 and shadow_close_count > 0:
                 shadow_avg_str = (
                     f"{float(shadow_close_avg):+.4f}%"
@@ -4484,6 +4517,7 @@ class TelegramMonitorBot:
                 and float(gate_lift) > 0
                 and paper_gate_count >= 20
                 and paper_gate_bps_val > 0
+                and paper_gate_drawdown_ok
             ):
                 lines.append("\n🚀 <b>Все условия выполнены!</b> Можно включать CANARY на Render.")
             else:
