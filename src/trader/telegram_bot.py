@@ -3117,7 +3117,7 @@ class TelegramMonitorBot:
             if "model_gate" in normalized or "champion" in normalized:
                 return "model-gate/CHAMPION не пропустил; нужен GOOD + paper-gate"
             if "strategy_side" in normalized:
-                return "strategy×side expectancy фильтр режет убыточное направление стратегии"
+                return "strategy×side фильтр режет слабое направление стратегии или требует выше confidence"
             if "strategy_regime" in normalized or "expectancy" in normalized:
                 return "bucket/regime/strategy expectancy фильтр режет токсичный контекст"
             if "confidence" in normalized:

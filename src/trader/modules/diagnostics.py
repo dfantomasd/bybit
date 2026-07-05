@@ -267,6 +267,7 @@ class DiagnosticsModule(AppBoundModule):
             "bucket_blocked": int(diag.get("hour_bucket_blocked") or 0),
             "symbol_side_blocked": int(diag.get("hour_symbol_side_blocked") or 0),
             "strategy_side_blocked": int(diag.get("hour_strategy_side_expectancy_blocked") or 0),
+            "strategy_side_confidence_blocked": int(diag.get("hour_strategy_side_confidence_blocked") or 0),
             "strategy_regime_blocked": int(diag.get("hour_strategy_regime_expectancy_blocked") or 0),
             "strategy_regime_confidence_blocked": int(diag.get("hour_strategy_regime_confidence_blocked") or 0),
             "trend_confirmation_blocked": int(diag.get("hour_trend_confirmation_blocked") or 0),

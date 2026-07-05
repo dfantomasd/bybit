@@ -683,6 +683,9 @@ class TradingApplication:
     def _strategy_side_blocked(self, strategy_id: str, side: str) -> bool:
         return self._modules.signal_policy.strategy_side_blocked(strategy_id, side)
 
+    def _strategy_side_confidence_floor(self, strategy_id: str, side: str) -> float | None:
+        return self._modules.signal_policy.strategy_side_confidence_floor(strategy_id, side)
+
     def _strategy_regime_confidence_floor(self, strategy_id: str, regime_ctx: Any | None) -> float | None:
         return self._modules.signal_policy.strategy_regime_confidence_floor(strategy_id, regime_ctx)
 

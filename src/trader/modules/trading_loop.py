@@ -720,6 +720,23 @@ class TradingLoopModule(AppBoundModule):
                 )
                 await _record_signal("strategy_side_expectancy_blocked")
                 return
+            side_confidence_floor = self._app._strategy_side_confidence_floor(
+                proposal.strategy_id,
+                proposal.side.value,
+            )
+            if side_confidence_floor is not None and float(proposal.confidence) < side_confidence_floor:
+                self._app._record_diag("strategy_side_confidence_blocked")
+                log.info(
+                    "strategy_loop.strategy_side_confidence_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                    confidence=round(float(proposal.confidence), 3),
+                    required_confidence=round(side_confidence_floor, 3),
+                    stats=self._app._strategy_side_stats.get((proposal.strategy_id, proposal.side.value)),
+                )
+                await _record_signal("strategy_side_confidence_blocked")
+                return
             if self._app._strategy_regime_blocked(proposal.strategy_id, regime_ctx):
                 self._app._record_diag("strategy_regime_expectancy_blocked")
                 regime = (

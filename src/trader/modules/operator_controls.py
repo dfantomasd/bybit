@@ -435,6 +435,21 @@ class OperatorControlsModule(AppBoundModule):
                 if self._app._settings is not None
                 else None
             ),
+            "strategy_side_confidence_gate_enabled": (
+                getattr(self._app._settings, "STRATEGY_SIDE_CONFIDENCE_GATE_ENABLED", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "strategy_side_weak_min_confidence": (
+                getattr(self._app._settings, "STRATEGY_SIDE_WEAK_MIN_CONFIDENCE", None)
+                if self._app._settings is not None
+                else None
+            ),
+            "strategy_side_immature_min_confidence": (
+                getattr(self._app._settings, "STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE", None)
+                if self._app._settings is not None
+                else None
+            ),
             "strategy_side_blocked": [
                 f"{strategy_id}:{side}"
                 for (strategy_id, side), (avg_bps, count) in strategy_side_stats.items()

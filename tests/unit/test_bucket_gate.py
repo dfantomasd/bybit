@@ -222,6 +222,30 @@ class TestBucketGate:
 
         assert app._strategy_side_blocked("mean_reversion_v1", "Buy") is False
 
+    def test_strategy_side_confidence_floor_for_immature_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_side_stats = {("mean_reversion_v1", "Buy"): (1.0, 6)}
+
+        assert (
+            app._strategy_side_confidence_floor("mean_reversion_v1", "Buy")
+            == app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE
+        )
+
+    def test_strategy_side_confidence_floor_for_weak_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_side_stats = {("mean_reversion_v1", "Buy"): (1.0, 12)}
+
+        assert (
+            app._strategy_side_confidence_floor("mean_reversion_v1", "Buy")
+            == app._settings.STRATEGY_SIDE_WEAK_MIN_CONFIDENCE
+        )
+
+    def test_strategy_side_confidence_floor_not_needed_for_positive_pair(self) -> None:
+        app = _make_active_app()
+        app._strategy_side_stats = {("mean_reversion_v1", "Buy"): (4.0, 12)}
+
+        assert app._strategy_side_confidence_floor("mean_reversion_v1", "Buy") is None
+
     def test_negative_strategy_regime_blocks_only_that_regime(self) -> None:
         app = _make_active_app()
         app._strategy_stats = {"scalp_micro_v1": (3.0, 50)}
@@ -378,6 +402,12 @@ class TestBucketGate:
         assert settings["expectancy_stats_ready"] is True
         assert settings["strategy_side_stats_count"] == 1
         assert settings["strategy_side_block_enabled"] is True
+        assert settings["strategy_side_confidence_gate_enabled"] is True
+        assert settings["strategy_side_weak_min_confidence"] == app._settings.STRATEGY_SIDE_WEAK_MIN_CONFIDENCE
+        assert (
+            settings["strategy_side_immature_min_confidence"]
+            == app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE
+        )
         assert settings["strategy_side_blocked"] == ["scalp_micro_v1:Buy"]
         assert settings["strategy_regime_stats_count"] == 1
         assert settings["strategy_regime_block_enabled"] is True

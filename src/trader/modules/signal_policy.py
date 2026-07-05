@@ -74,6 +74,7 @@ class SignalPolicyModule(AppBoundModule):
                 self._app._settings.HOUR_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_SIDE_BLOCK_ENABLED,
+                self._app._settings.STRATEGY_SIDE_CONFIDENCE_GATE_ENABLED,
                 self._app._settings.STRATEGY_REGIME_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED,
                 self._app._settings.SYMBOL_SIDE_BLOCK_ENABLED,
@@ -538,6 +539,24 @@ class SignalPolicyModule(AppBoundModule):
             count >= self._app._settings.STRATEGY_SIDE_MIN_SAMPLES
             and avg_bps < self._app._settings.STRATEGY_SIDE_BLOCK_AVG_BPS
         )
+
+    def strategy_side_confidence_floor(self, strategy_id: str, side: str) -> float | None:
+        """Return an elevated confidence floor for weak strategy+side pairs."""
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return None
+        if not self._app._settings.STRATEGY_SIDE_CONFIDENCE_GATE_ENABLED:
+            return None
+        stats = self._app._strategy_side_stats.get((strategy_id, side))
+        if stats is None:
+            return None
+        avg_bps, count = stats
+        if count < self._app._settings.STRATEGY_SIDE_MIN_SAMPLES:
+            return float(self._app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE)
+        if avg_bps < self._app._settings.STRATEGY_SIDE_WEAK_AVG_BPS:
+            return float(self._app._settings.STRATEGY_SIDE_WEAK_MIN_CONFIDENCE)
+        return None
 
     def strategy_regime_blocked(self, strategy_id: str, regime_ctx: Any | None) -> bool:
         """Block a strategy only in regimes where it has proven net-negative.
