@@ -73,6 +73,7 @@ class SignalPolicyModule(AppBoundModule):
                 self._app._settings.BUCKET_BLOCK_ENABLED,
                 self._app._settings.HOUR_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_BLOCK_ENABLED,
+                self._app._settings.STRATEGY_SIDE_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_REGIME_BLOCK_ENABLED,
                 self._app._settings.STRATEGY_REGIME_CONFIDENCE_GATE_ENABLED,
                 self._app._settings.SYMBOL_SIDE_BLOCK_ENABLED,
@@ -519,6 +520,23 @@ class SignalPolicyModule(AppBoundModule):
         avg_bps, count = stats
         return bool(
             count >= self._app._settings.STRATEGY_MIN_SAMPLES and avg_bps < self._app._settings.STRATEGY_BLOCK_AVG_BPS
+        )
+
+    def strategy_side_blocked(self, strategy_id: str, side: str) -> bool:
+        """Block a proven-toxic direction for a strategy without killing the other side."""
+
+        assert self._app._settings is not None
+        if not self.expectancy_gates_apply():
+            return False
+        if not self._app._settings.STRATEGY_SIDE_BLOCK_ENABLED:
+            return False
+        stats = self._app._strategy_side_stats.get((strategy_id, side))
+        if stats is None:
+            return False
+        avg_bps, count = stats
+        return bool(
+            count >= self._app._settings.STRATEGY_SIDE_MIN_SAMPLES
+            and avg_bps < self._app._settings.STRATEGY_SIDE_BLOCK_AVG_BPS
         )
 
     def strategy_regime_blocked(self, strategy_id: str, regime_ctx: Any | None) -> bool:

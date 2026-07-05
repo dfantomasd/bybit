@@ -709,6 +709,17 @@ class TradingLoopModule(AppBoundModule):
                 )
                 await _record_signal("strategy_expectancy_blocked")
                 return
+            if self._app._strategy_side_blocked(proposal.strategy_id, proposal.side.value):
+                self._app._record_diag("strategy_side_expectancy_blocked")
+                log.info(
+                    "strategy_loop.strategy_side_expectancy_blocked",
+                    symbol=proposal.symbol,
+                    side=proposal.side.value,
+                    strategy_id=proposal.strategy_id,
+                    stats=self._app._strategy_side_stats.get((proposal.strategy_id, proposal.side.value)),
+                )
+                await _record_signal("strategy_side_expectancy_blocked")
+                return
             if self._app._strategy_regime_blocked(proposal.strategy_id, regime_ctx):
                 self._app._record_diag("strategy_regime_expectancy_blocked")
                 regime = (

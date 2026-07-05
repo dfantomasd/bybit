@@ -23,6 +23,9 @@ def _make_app(**overrides) -> TradingApplication:
         "STRATEGY_BLOCK_ENABLED": True,
         "STRATEGY_MIN_SAMPLES": 20,
         "STRATEGY_BLOCK_AVG_BPS": 0.0,
+        "STRATEGY_SIDE_BLOCK_ENABLED": True,
+        "STRATEGY_SIDE_MIN_SAMPLES": 12,
+        "STRATEGY_SIDE_BLOCK_AVG_BPS": -2.0,
         "SYMBOL_SIDE_BLOCK_ENABLED": True,
         "SYMBOL_SIDE_MIN_SAMPLES": 20,
         "SYMBOL_SIDE_BLOCK_AVG_BPS": -2.0,
@@ -196,6 +199,28 @@ class TestBucketGate:
         app._strategy_stats = {"scalp_micro_v1": (2.0, 50)}
 
         assert app._strategy_blocked("scalp_micro_v1") is False
+
+    def test_negative_strategy_side_blocks_only_that_direction(self) -> None:
+        app = _make_active_app()
+        app._strategy_side_stats = {
+            ("mean_reversion_v1", "Buy"): (-5.0, 12),
+            ("mean_reversion_v1", "Sell"): (3.0, 12),
+        }
+
+        assert app._strategy_side_blocked("mean_reversion_v1", "Buy") is True
+        assert app._strategy_side_blocked("mean_reversion_v1", "Sell") is False
+
+    def test_strategy_side_waits_for_min_samples(self) -> None:
+        app = _make_active_app()
+        app._strategy_side_stats = {("mean_reversion_v1", "Buy"): (-50.0, 11)}
+
+        assert app._strategy_side_blocked("mean_reversion_v1", "Buy") is False
+
+    def test_strategy_side_disabled_setting_never_blocks(self) -> None:
+        app = _make_active_app(STRATEGY_SIDE_BLOCK_ENABLED=False)
+        app._strategy_side_stats = {("mean_reversion_v1", "Buy"): (-50.0, 50)}
+
+        assert app._strategy_side_blocked("mean_reversion_v1", "Buy") is False
 
     def test_negative_strategy_regime_blocks_only_that_regime(self) -> None:
         app = _make_active_app()

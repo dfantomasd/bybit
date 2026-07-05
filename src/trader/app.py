@@ -86,6 +86,9 @@ class TradingApplication:
         # Strategy × regime expectancy: blocks toxic combinations while keeping
         # the same strategy available in regimes where it still works.
         self._strategy_regime_stats: dict[tuple[str, str], tuple[float, int]] = {}
+        # Strategy × side expectancy: a strategy may be profitable only in one
+        # direction, especially on crypto perp regimes with asymmetric drift.
+        self._strategy_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Symbol-side expectancy stats: {(symbol, side): (avg_bps, count)}
         self._symbol_side_stats: dict[tuple[str, str], tuple[float, int]] = {}
         # Shadow probe paper stats (active even in SHADOW mode)
@@ -676,6 +679,9 @@ class TradingApplication:
 
     def _strategy_regime_blocked(self, strategy_id: str, regime_ctx: Any | None) -> bool:
         return self._modules.signal_policy.strategy_regime_blocked(strategy_id, regime_ctx)
+
+    def _strategy_side_blocked(self, strategy_id: str, side: str) -> bool:
+        return self._modules.signal_policy.strategy_side_blocked(strategy_id, side)
 
     def _strategy_regime_confidence_floor(self, strategy_id: str, regime_ctx: Any | None) -> float | None:
         return self._modules.signal_policy.strategy_regime_confidence_floor(strategy_id, regime_ctx)
