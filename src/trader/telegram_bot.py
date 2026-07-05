@@ -3148,6 +3148,28 @@ class TelegramMonitorBot:
                 f"(latest <code>{html.escape(latest[:19])}</code>) — {html.escape(_block_reason_hint(reason))}"
             )
 
+        def _runtime_list(name: str, *, limit: int = 8) -> list[str]:
+            raw = runtime_settings.get(name) if isinstance(runtime_settings, dict) else None
+            if not isinstance(raw, list):
+                return []
+            return [str(item) for item in raw[:limit]]
+
+        def _format_gate_items(items: list[str]) -> str:
+            if not items:
+                return "<code>нет</code>"
+            return ", ".join(f"<code>{html.escape(item)}</code>" for item in items)
+
+        strategy_gate_lines = [
+            "• hard strategy×side: "
+            + _format_gate_items(_runtime_list("strategy_side_blocked"))
+            + " | confidence-limited: "
+            + _format_gate_items(_runtime_list("strategy_side_confidence_limited")),
+            "• hard strategy×regime: "
+            + _format_gate_items(_runtime_list("strategy_regime_blocked"))
+            + " | confidence-limited: "
+            + _format_gate_items(_runtime_list("strategy_regime_confidence_limited")),
+        ]
+
         blockers: list[str] = []
         if shadow:
             blockers.append("SHADOW включен: реальные ордера намеренно не отправляются.")
@@ -3323,6 +3345,9 @@ class TelegramMonitorBot:
             "• Paper/Shadow closes появляются только после approved shadow entry. "
             f"Если candidates &gt; 0, но approved=0 — вход отрезан финальными execution-фильтрами "
             f"(часто net-edge/min-notional), ждать {model_horizon}m outcome ещё нечему.",
+            "",
+            "<b>Strategy gates: что сейчас режет или требует выше confidence</b>",
+            *strategy_gate_lines,
         ]
         if block_reason_lines:
             lines.extend(

@@ -1030,6 +1030,30 @@ async def test_deep_report_shows_recent_signal_block_reasons() -> None:
     assert "&quot;recent_signal_block_reasons_24h&quot;" in text
 
 
+@pytest.mark.asyncio
+async def test_deep_report_shows_strategy_gate_limits() -> None:
+    bot = _make_bot()
+    assert bot._controller is not None
+    bot._controller.runtime_settings = MagicMock(
+        return_value={
+            "strategy_side_blocked": ["scalp_micro_v1:Buy"],
+            "strategy_side_confidence_limited": ["mean_reversion_v1:Sell:8:+1.0"],
+            "strategy_regime_blocked": ["scalp_micro_v1:SIDEWAYS"],
+            "strategy_regime_confidence_limited": ["mean_reversion_v1:BULL_TREND:8:+1.0"],
+        }
+    )
+    bot._controller.diagnostics_provider = MagicMock(return_value={"shadow_mode": True})
+    bot._controller.db_diagnostics_provider = AsyncMock(return_value={"connected": True})
+
+    text = await bot._render_deep_report_text()
+
+    assert "Strategy gates: что сейчас режет" in text
+    assert "scalp_micro_v1:Buy" in text
+    assert "mean_reversion_v1:Sell:8:+1.0" in text
+    assert "scalp_micro_v1:SIDEWAYS" in text
+    assert "mean_reversion_v1:BULL_TREND:8:+1.0" in text
+
+
 def test_diagnostics_menu_has_db_probe_button() -> None:
     bot = _make_bot()
 
