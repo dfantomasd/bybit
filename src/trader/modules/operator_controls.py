@@ -498,6 +498,19 @@ class OperatorControlsModule(AppBoundModule):
                 and count >= self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
                 and avg_bps < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
             ][:20],
+            "strategy_regime_confidence_limited": [
+                f"{strategy_id}:{regime}:{count}:{avg_bps:+.1f}"
+                for (strategy_id, regime), (avg_bps, count) in strategy_regime_stats.items()
+                if self._app._settings is not None
+                and (
+                    count < self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
+                    or avg_bps < self._app._settings.STRATEGY_REGIME_WEAK_AVG_BPS
+                )
+                and not (
+                    count >= self._app._settings.STRATEGY_REGIME_MIN_SAMPLES
+                    and avg_bps < self._app._settings.STRATEGY_REGIME_BLOCK_AVG_BPS
+                )
+            ][:20],
             "shadow_probe_side_stats_count": len(shadow_probe_side_stats),
             "shadow_probe_symbol_stats_count": len(shadow_probe_symbol_stats),
             "shadow_probe_blocked_symbols": blocked_probe_symbols,
