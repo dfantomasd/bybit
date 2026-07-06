@@ -38,6 +38,10 @@ def test_auth_errors_are_not_treated_as_transient_schema_errors() -> None:
     )
 
 
+def test_pooler_decode_attribute_error_is_treated_as_transient_schema_error() -> None:
+    assert TradeJournal._is_transient_schema_error("'NoneType' object has no attribute 'decode'")
+
+
 @pytest.mark.asyncio
 async def test_reconnect_if_needed_respects_backoff_window() -> None:
     journal = TradeJournal("postgresql://example/db")

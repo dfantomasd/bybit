@@ -587,6 +587,10 @@ class TradeJournal:
             or "SERVER CLOSED THE CONNECTION" in upper
             or "SSL SYSCALL" in upper
             or "TIMEOUT" in upper
+            # asyncpg raises this AttributeError when a pooler (e.g. Supabase's
+            # transaction-mode pgbouncer) tears down the socket mid-protocol-read
+            # during DDL; it is a dropped connection, not a real schema failure.
+            or "'NONETYPE' OBJECT HAS NO ATTRIBUTE 'DECODE'" in upper
         )
 
     def _schedule_reconnect_backoff(self, error: str) -> None:
