@@ -71,6 +71,33 @@ class TestRetentionRunner:
         assert report.orphan_snapshots_deleted == 5
 
     @pytest.mark.asyncio
+    async def test_run_data_retention_prunes_old_outcomes_by_resolved_at(self) -> None:
+        # prediction_outcomes has no created_at column (only resolved_at) —
+        # filtering the delete on created_at raises "column does not exist"
+        # and silently no-ops through store._execute's own error handling.
+        store = AsyncMock()
+        store._execute = AsyncMock(return_value="DELETE 2")
+        store._fetch = AsyncMock(return_value=[])
+
+        report = await run_data_retention(
+            store,
+            RetentionSettings(
+                candle_retention_days={},
+                export_enabled=False,
+                prediction_outcome_retention_days=90,
+            ),
+        )
+
+        outcome_calls = [
+            call for call in store._execute.await_args_list if "DELETE FROM prediction_outcomes" in str(call.args[0])
+        ]
+        assert outcome_calls, "expected a DELETE FROM prediction_outcomes call"
+        assert "resolved_at" in str(outcome_calls[0].args[0])
+        assert "created_at" not in str(outcome_calls[0].args[0])
+        assert report.old_outcomes_deleted == 2
+        assert not report.errors
+
+    @pytest.mark.asyncio
     async def test_get_pnl_attribution_shadow_fallback(self) -> None:
         store = AsyncMock()
         store._fetch = AsyncMock(
