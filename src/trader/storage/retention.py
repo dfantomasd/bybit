@@ -270,10 +270,13 @@ async def run_data_retention(store: RetentionStore, settings: RetentionSettings)
         report.errors.append(f"orphan_predictions: {exc}")
 
     try:
+        # prediction_outcomes has no created_at column — resolved_at is the
+        # only timestamp on the row, and it's null until the outcome resolves,
+        # so unresolved (pending) rows are correctly left alone here.
         result = await store._execute(
             """
             DELETE FROM prediction_outcomes
-            WHERE created_at < now() - ($1::text || ' days')::interval
+            WHERE resolved_at < now() - ($1::text || ' days')::interval
             """,
             str(settings.prediction_outcome_retention_days),
         )
