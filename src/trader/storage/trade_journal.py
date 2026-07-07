@@ -197,6 +197,17 @@ def _split_sql_statements(script: str) -> list[str]:
                     i += 2
                     continue
                 in_string = False
+        elif ch == "-" and i + 1 < len(script) and script[i + 1] == "-":
+            # Line comment: consume verbatim through end-of-line so a ';'
+            # inside comment prose (e.g. "-- a; b.") doesn't split the
+            # statement early and leave a dangling fragment.
+            newline = script.find("\n", i)
+            if newline == -1:
+                current.append(script[i:])
+                break
+            current.append(script[i:newline])
+            i = newline
+            continue
         elif ch == "$":
             # Look for a dollar-quote opening tag: $identifier$ or $$
             m = re.match(r"\$([A-Za-z_]\w*)?\$", script[i:])

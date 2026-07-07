@@ -6,7 +6,7 @@ from typing import Any, cast
 
 import pytest
 
-from trader.storage.trade_journal import TradeJournal
+from trader.storage.trade_journal import TradeJournal, _split_sql_statements
 
 
 class _FakeConnection:
@@ -129,6 +129,27 @@ async def test_ml_and_pending_state_indexes_are_bootstrapped() -> None:
     assert "uq_model_versions_one_champion" in sql
     assert "idx_feature_snapshots_unique_eligible" in sql
     assert "duplicate_snapshot_same_candle" in sql
+
+
+def test_split_sql_statements_ignores_semicolons_inside_line_comments() -> None:
+    script = """
+        ALTER TABLE market_candles
+            ADD COLUMN IF NOT EXISTS updated_at timestamptz NOT NULL DEFAULT now();
+        -- Training eligibility: snapshots created before candle close may have
+        -- stale prices; the audit script marks them training_eligible = false.
+        ALTER TABLE feature_snapshots
+            ADD COLUMN IF NOT EXISTS training_eligible boolean NOT NULL DEFAULT true;
+    """
+
+    statements = _split_sql_statements(script)
+
+    assert len(statements) == 2
+    assert "ALTER TABLE feature_snapshots" in statements[1]
+    assert "ADD COLUMN IF NOT EXISTS training_eligible" in statements[1]
+    # No fragment should consist only of comment text with the real DDL split off.
+    for statement in statements:
+        body_lines = [line.strip() for line in statement.splitlines() if line.strip() and not line.strip().startswith("--")]
+        assert body_lines, f"statement has no executable SQL: {statement!r}"
 
 
 @pytest.mark.asyncio
