@@ -288,9 +288,7 @@ class TelegramMonitorBot:
 
     async def start(self, http_app: Any | None = None) -> bool:
         if not self.enabled:
-            self._polling_disabled_reason = (
-                "token_missing" if not self._config.token else "allowed_chat_ids_empty"
-            )
+            self._polling_disabled_reason = "token_missing" if not self._config.token else "allowed_chat_ids_empty"
             log.info(
                 "telegram_bot_disabled",
                 reason=self._polling_disabled_reason,
@@ -929,7 +927,9 @@ class TelegramMonitorBot:
         await self.notify(f"{icon} <b>Позиция закрыта</b>\n{symbol} PnL: <code>{realized_pnl:+.4f} USDT</code>")
 
     async def notify_circuit_breaker(self, breaker_type: str, reason: str) -> None:
-        await self.notify(f"⚠️ <b>Защитный стоп</b>\nТип: <code>{html.escape(breaker_type)}</code>\nПричина: {html.escape(reason)}")
+        await self.notify(
+            f"⚠️ <b>Защитный стоп</b>\nТип: <code>{html.escape(breaker_type)}</code>\nПричина: {html.escape(reason)}"
+        )
 
     async def notify_risk_changed(self, old_profile: str, new_profile: str) -> None:
         await self.notify(f"⚙️ <b>Риск-профиль изменен</b>\n{old_profile} → <code>{new_profile}</code>")
@@ -2621,8 +2621,8 @@ class TelegramMonitorBot:
                     if value.verify_mode == ssl.CERT_OPTIONAL:
                         return "SSLContext(optional_verify)"
                     return "SSLContext(verify)"
-            except Exception:
-                pass
+            except Exception as exc:
+                log.debug("telegram.db_probe_ssl_label_failed", error=str(exc))
             return str(value)
 
         def _tcp_probe_sync(host: Any, port: Any, timeout: float = 3.0) -> str:
@@ -2678,7 +2678,7 @@ class TelegramMonitorBot:
             import asyncpg
 
             from trader.config import Settings
-            from trader.storage.trade_journal import asyncpg_pool_connect_kwargs, _safe_connection_target
+            from trader.storage.trade_journal import _safe_connection_target, asyncpg_pool_connect_kwargs
 
             dsn = Settings().POSTGRES_DSN.get_secret_value()
             target = _safe_connection_target(dsn)
@@ -2716,14 +2716,14 @@ class TelegramMonitorBot:
             tcp_probe = "n/a"
             try:
                 from trader.config import Settings
-                from trader.storage.trade_journal import asyncpg_pool_connect_kwargs, _safe_connection_target
+                from trader.storage.trade_journal import _safe_connection_target, asyncpg_pool_connect_kwargs
 
                 dsn = Settings().POSTGRES_DSN.get_secret_value()
                 target = _safe_connection_target(dsn)
                 ssl_mode = _ssl_arg_label(asyncpg_pool_connect_kwargs(dsn).get("ssl", "dsn/default"))
                 tcp_probe = await asyncio.to_thread(_tcp_probe_sync, target.get("host"), target.get("port"))
-            except Exception:
-                pass
+            except Exception as probe_exc:
+                log.debug("telegram.db_probe_context_failed", error=str(probe_exc))
             hint = _db_probe_error_hint(exc, target, tcp_probe)
             return (
                 "🧪 <b>DB probe</b>\n"
@@ -3694,11 +3694,7 @@ class TelegramMonitorBot:
         require(
             "Качество модели GOOD",
             model_quality_ok,
-            (
-                f"{self._ru(model_quality)}; WF {wf_stability}"
-                if model_version
-                else "модель еще не обучена"
-            ),
+            (f"{self._ru(model_quality)}; WF {wf_stability}" if model_version else "модель еще не обучена"),
             "Не включайте CANARY_LIVE: нужна модель с quality=GOOD; если WF min/std/folds плохие — ждём больше данных или меняем стратегию/признаки.",
         )
         require(
@@ -4498,11 +4494,7 @@ class TelegramMonitorBot:
                 f"{paper_road_icon} Paper gate ≥ 20 сделок > 0 bps и DD в лимите → <code>{paper_road_val}</code>"
             )
             if paper_gate_count == 0 and shadow_close_count > 0:
-                shadow_avg_str = (
-                    f"{float(shadow_close_avg):+.4f}%"
-                    if shadow_close_avg is not None
-                    else "n/a"
-                )
+                shadow_avg_str = f"{float(shadow_close_avg):+.4f}%" if shadow_close_avg is not None else "n/a"
                 lines.append(
                     "⚠️ Runtime shadow closes есть, но DB paper gate пуст: "
                     f"<code>{shadow_close_count} закрытий, avg {shadow_avg_str}</code>. "

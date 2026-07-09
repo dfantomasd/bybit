@@ -16,8 +16,8 @@ from typing import Any
 import click
 import numpy as np
 
-from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_rules, discover_segmented_rules
 from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+from trader.strategy_lab.rule_generator import RuleSearchConfig, discover_rules, discover_segmented_rules
 from trader.training.eligibility import training_decision_filter_sql, training_strategy_filter_sql
 from trader.training.labels import active_label_schema_version
 from trader.training.train import _settings_horizon, _settings_label_bps

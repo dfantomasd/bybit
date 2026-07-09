@@ -564,9 +564,7 @@ def _settings_horizon() -> int:
         import logging
         import os
 
-        logging.getLogger(__name__).warning(
-            "historical_seed.settings_load_failed_using_default_horizon", exc_info=exc
-        )
+        logging.getLogger(__name__).warning("historical_seed.settings_load_failed_using_default_horizon", exc_info=exc)
         try:
             return int(os.environ.get("MODEL_LABEL_HORIZON", "15"))
         except (TypeError, ValueError):

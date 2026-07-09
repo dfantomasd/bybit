@@ -10,10 +10,10 @@ from decimal import Decimal
 from threading import RLock
 from typing import Any
 
+from trader.risk.profiles import RiskLimits
+
 # Pending exposure reservations older than this are considered stale and pruned.
 _PENDING_EXPOSURE_TTL_S = 120
-
-from trader.risk.profiles import RiskLimits
 
 # Base-asset families for correlation heuristic
 _CRYPTO_FAMILIES: dict[str, list[str]] = {
@@ -324,11 +324,7 @@ class ExposureTracker:
                 # can't each pass this check independently and collectively
                 # blow through the cap before any of them lands in _positions.
                 pending_margin = (
-                    sum(
-                        Decimal(str(p["notional"]))
-                        for oid, p in self._pending_exposure.items()
-                        if oid != order_id
-                    )
+                    sum(Decimal(str(p["notional"])) for oid, p in self._pending_exposure.items() if oid != order_id)
                     / lev
                 )
                 current_margin += pending_margin
@@ -356,11 +352,7 @@ class ExposureTracker:
                 # Include other in-flight reservations, using the requested
                 # stop distance as the best available proxy for their risk.
                 pending_risk = (
-                    sum(
-                        Decimal(str(p["notional"]))
-                        for oid, p in self._pending_exposure.items()
-                        if oid != order_id
-                    )
+                    sum(Decimal(str(p["notional"])) for oid, p in self._pending_exposure.items() if oid != order_id)
                     * sdp
                 )
                 current_risk += pending_risk

@@ -170,14 +170,10 @@ class SignalFusion:
                     ("volume", context.signal_volume),
                 ]
                 buy_signals = sum(
-                    self.signal_weights.get(name, 1.0)
-                    for name, s in named_signals
-                    if s is not None and s > 0
+                    self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s > 0
                 )
                 sell_signals = sum(
-                    self.signal_weights.get(name, 1.0)
-                    for name, s in named_signals
-                    if s is not None and s < 0
+                    self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s < 0
                 )
 
                 if buy_signals > sell_signals:
@@ -211,12 +207,8 @@ class SignalFusion:
             ("volume", context.signal_volume),
         ]
 
-        buy_weight = sum(
-            self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s > 0
-        )
-        sell_weight = sum(
-            self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s < 0
-        )
+        buy_weight = sum(self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s > 0)
+        sell_weight = sum(self.signal_weights.get(name, 1.0) for name, s in named_signals if s is not None and s < 0)
 
         if buy_weight > sell_weight:
             return 1.0, 0.5, "Большинство сигналов BUY (взвешенное голосование)"

@@ -57,8 +57,14 @@ def label_outcome(
     slip = slippage_bps if slippage_bps is not None else MODEL_FALLBACK_SLIPPAGE_BPS
     sprd = spread_bps if spread_bps is not None else MODEL_FALLBACK_SPREAD_BPS
 
-    highs = [float(Decimal(str(candle.get("high") if candle.get("high") is not None else entry_price))) for candle in horizon_candles]
-    lows = [float(Decimal(str(candle.get("low") if candle.get("low") is not None else entry_price))) for candle in horizon_candles]
+    highs = [
+        float(Decimal(str(candle.get("high") if candle.get("high") is not None else entry_price)))
+        for candle in horizon_candles
+    ]
+    lows = [
+        float(Decimal(str(candle.get("low") if candle.get("low") is not None else entry_price)))
+        for candle in horizon_candles
+    ]
     if not highs or not lows:
         highs = [float(entry_price)]
         lows = [float(entry_price)]

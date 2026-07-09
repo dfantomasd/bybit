@@ -309,17 +309,17 @@ class TestExecutionEngine:
     def test_exit_price_rounding_is_conservative_for_both_sides(self):
         engine = _make_engine()
 
+        assert engine._round_exit_price(Decimal("101.24"), Decimal("0.1"), OrderSide.BUY) == Decimal("101.2")
         assert engine._round_exit_price(
-            Decimal("101.24"), Decimal("0.1"), OrderSide.BUY
-        ) == Decimal("101.2")
-        assert engine._round_exit_price(Decimal("99.26"), Decimal("0.1"), OrderSide.BUY, ) == Decimal(
-            "99.2"
-        )
+            Decimal("99.26"),
+            Decimal("0.1"),
+            OrderSide.BUY,
+        ) == Decimal("99.2")
+        assert engine._round_exit_price(Decimal("98.24"), Decimal("0.1"), OrderSide.SELL) == Decimal("98.3")
         assert engine._round_exit_price(
-            Decimal("98.24"), Decimal("0.1"), OrderSide.SELL
-        ) == Decimal("98.3")
-        assert engine._round_exit_price(
-            Decimal("101.24"), Decimal("0.1"), OrderSide.SELL, 
+            Decimal("101.24"),
+            Decimal("0.1"),
+            OrderSide.SELL,
         ) == Decimal("101.3")
 
     @pytest.mark.asyncio

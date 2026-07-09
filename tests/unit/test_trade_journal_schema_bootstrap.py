@@ -63,12 +63,12 @@ class _FakeConnection:
             ]
         return []
 
-    def transaction(self) -> "_FakeTransaction":
+    def transaction(self) -> _FakeTransaction:
         return _FakeTransaction()
 
 
 class _FakeTransaction:
-    async def __aenter__(self) -> "_FakeTransaction":
+    async def __aenter__(self) -> _FakeTransaction:
         return self
 
     async def __aexit__(self, exc_type: object, exc: object, tb: object) -> None:
@@ -148,7 +148,9 @@ def test_split_sql_statements_ignores_semicolons_inside_line_comments() -> None:
     assert "ADD COLUMN IF NOT EXISTS training_eligible" in statements[1]
     # No fragment should consist only of comment text with the real DDL split off.
     for statement in statements:
-        body_lines = [line.strip() for line in statement.splitlines() if line.strip() and not line.strip().startswith("--")]
+        body_lines = [
+            line.strip() for line in statement.splitlines() if line.strip() and not line.strip().startswith("--")
+        ]
         assert body_lines, f"statement has no executable SQL: {statement!r}"
 
 

@@ -287,9 +287,7 @@ class OperatorControlsModule(AppBoundModule):
         if isinstance(bucket_stats_refreshed_at, datetime):
             bucket_stats_age_s = max(
                 0.0,
-                (
-                    now - bucket_stats_refreshed_at.astimezone(UTC)
-                ).total_seconds(),
+                (now - bucket_stats_refreshed_at.astimezone(UTC)).total_seconds(),
             )
         expectancy_stats_max_age_s = (
             getattr(self._app._settings, "EXPECTANCY_STATS_MAX_AGE_SECONDS", None)
@@ -323,7 +321,9 @@ class OperatorControlsModule(AppBoundModule):
             ][:20]
 
         return {
-            "app_started_at": app_started_at.astimezone(UTC).isoformat() if isinstance(app_started_at, datetime) else None,
+            "app_started_at": app_started_at.astimezone(UTC).isoformat()
+            if isinstance(app_started_at, datetime)
+            else None,
             "app_uptime_s": app_uptime_s,
             "deploy_info": get_deploy_info(),
             "paused": self._app._trading_paused,

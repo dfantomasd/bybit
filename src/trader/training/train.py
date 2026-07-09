@@ -99,9 +99,7 @@ async def _configure_training_connection(conn: Any) -> None:
         ) from exc
 
     if read_only in {"on", "true", "1", "yes"}:
-        raise RuntimeError(
-            "training DB connection is read-only; use the primary Postgres DSN/user for training"
-        )
+        raise RuntimeError("training DB connection is read-only; use the primary Postgres DSN/user for training")
 
 
 def _walk_forward_splits(
@@ -920,7 +918,10 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         model.fit_batch(x_arr, y, params=model.model_params)
         min_quality_positive_folds = max(
             min_positive_folds,
-            min(max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", min_positive_folds))), len(folds)),
+            min(
+                max(1, int(getattr(settings, "MODEL_AUTO_PROMOTE_MIN_WF_POSITIVE_FOLDS", min_positive_folds))),
+                len(folds),
+            ),
         )
         metrics = {
             "quality": _walk_forward_quality(

@@ -268,17 +268,19 @@ class TestBucketGate:
         app = _make_active_app()
         app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (1.0, 6)}
 
-        assert app._strategy_regime_confidence_floor(
-            "scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")
-        ) == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
+        assert (
+            app._strategy_regime_confidence_floor("scalp_micro_v1", _regime_ctx(regime="SIDEWAYS"))
+            == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
+        )
 
     def test_strategy_regime_confidence_floor_for_weak_pair(self) -> None:
         app = _make_active_app()
         app._strategy_regime_stats = {("scalp_micro_v1", "SIDEWAYS"): (1.0, 12)}
 
-        assert app._strategy_regime_confidence_floor(
-            "scalp_micro_v1", _regime_ctx(regime="SIDEWAYS")
-        ) == app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE
+        assert (
+            app._strategy_regime_confidence_floor("scalp_micro_v1", _regime_ctx(regime="SIDEWAYS"))
+            == app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE
+        )
 
     def test_strategy_regime_confidence_floor_not_needed_for_positive_pair(self) -> None:
         app = _make_active_app()
@@ -409,22 +411,13 @@ class TestBucketGate:
         assert settings["model_auto_promote_enabled"] == app._settings.MODEL_AUTO_PROMOTE_ENABLED
         assert settings["model_auto_promote_min_lift_bps"] == app._settings.MODEL_AUTO_PROMOTE_MIN_LIFT_BPS
         assert settings["model_auto_promote_min_wf_bps"] == app._settings.MODEL_AUTO_PROMOTE_MIN_WF_BPS
-        assert (
-            settings["model_auto_promote_min_pass_count"]
-            == app._settings.MODEL_MIN_PASS_COUNT_FOR_PROMOTION
-        )
-        assert (
-            settings["model_auto_promote_max_drawdown_bps"]
-            == app._settings.MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS
-        )
+        assert settings["model_auto_promote_min_pass_count"] == app._settings.MODEL_MIN_PASS_COUNT_FOR_PROMOTION
+        assert settings["model_auto_promote_max_drawdown_bps"] == app._settings.MODEL_AUTO_PROMOTE_MAX_DRAWDOWN_BPS
         assert settings["strategy_side_stats_count"] == 2
         assert settings["strategy_side_block_enabled"] is True
         assert settings["strategy_side_confidence_gate_enabled"] is True
         assert settings["strategy_side_weak_min_confidence"] == app._settings.STRATEGY_SIDE_WEAK_MIN_CONFIDENCE
-        assert (
-            settings["strategy_side_immature_min_confidence"]
-            == app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE
-        )
+        assert settings["strategy_side_immature_min_confidence"] == app._settings.STRATEGY_SIDE_IMMATURE_MIN_CONFIDENCE
         assert settings["strategy_side_blocked"] == ["scalp_micro_v1:Buy"]
         assert settings["strategy_side_confidence_limited"] == ["mean_reversion_v1:Sell:8:+1.0"]
         assert settings["strategy_regime_stats_count"] == 2
@@ -432,8 +425,7 @@ class TestBucketGate:
         assert settings["strategy_regime_confidence_gate_enabled"] is True
         assert settings["strategy_regime_weak_min_confidence"] == app._settings.STRATEGY_REGIME_WEAK_MIN_CONFIDENCE
         assert (
-            settings["strategy_regime_immature_min_confidence"]
-            == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
+            settings["strategy_regime_immature_min_confidence"] == app._settings.STRATEGY_REGIME_IMMATURE_MIN_CONFIDENCE
         )
         assert settings["strategy_regime_blocked"] == ["scalp_micro_v1:SIDEWAYS"]
         assert settings["strategy_regime_confidence_limited"] == ["mean_reversion_v1:BULL_TREND:8:+1.0"]

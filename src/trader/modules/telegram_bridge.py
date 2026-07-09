@@ -110,7 +110,9 @@ class TelegramBridgeModule(AppBoundModule):
                     active_version = str(active_model.get("version") or "") if isinstance(active_model, dict) else ""
                     if not active_version:
                         latest_model = diag.get("latest_model_version") or {}
-                        active_version = str(latest_model.get("version") or "") if isinstance(latest_model, dict) else ""
+                        active_version = (
+                            str(latest_model.get("version") or "") if isinstance(latest_model, dict) else ""
+                        )
                     if active_version:
                         gate: dict[str, Any] = {"model_version": active_version}
                         metrics = active_model.get("metrics") if isinstance(active_model, dict) else {}

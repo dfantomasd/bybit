@@ -315,12 +315,7 @@ async def _recover_add_column_if_not_exists(conn: Any, statement: str) -> bool:
 def _paper_stats_from_rows(rows: list[Any]) -> dict[str, Any]:
     import math
 
-    returns = [
-        v
-        for row in rows
-        for v in [float(row.get("net_return_bps") or 0.0)]
-        if math.isfinite(v)
-    ]
+    returns = [v for row in rows for v in [float(row.get("net_return_bps") or 0.0)] if math.isfinite(v)]
     equity = 0.0
     peak = 0.0
     max_drawdown = 0.0
@@ -947,7 +942,7 @@ class TradeJournal:
                 ON execution_events (symbol, created_at DESC);
             CREATE INDEX IF NOT EXISTS idx_execution_events_order_link
                 ON execution_events (order_link_id);
-            """
+            """,
             )
             await _execute_schema_script(
                 conn,
@@ -1971,10 +1966,7 @@ class TradeJournal:
             str(lookback_days),
             LABEL_SCHEMA_VERSION,
         )
-        return {
-            (str(row["strategy_id"]), str(row["regime"])): (float(row["avg_bps"]), int(row["cnt"]))
-            for row in rows
-        }
+        return {(str(row["strategy_id"]), str(row["regime"])): (float(row["avg_bps"]), int(row["cnt"])) for row in rows}
 
     async def get_strategy_side_stats(
         self,
@@ -2006,10 +1998,7 @@ class TradeJournal:
             str(lookback_days),
             LABEL_SCHEMA_VERSION,
         )
-        return {
-            (str(row["strategy_id"]), str(row["side"])): (float(row["avg_bps"]), int(row["cnt"]))
-            for row in rows
-        }
+        return {(str(row["strategy_id"]), str(row["side"])): (float(row["avg_bps"]), int(row["cnt"])) for row in rows}
 
     async def get_shadow_probe_symbol_side_stats(
         self,
@@ -2718,7 +2707,9 @@ class TradeJournal:
 
     async def _ensure_prediction_outcome_extended_columns(self) -> None:
         await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_schema_version text")
-        await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps double precision")
+        await self._execute(
+            "ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS gross_return_bps double precision"
+        )
         await self._execute("ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS cost_bps double precision")
         await self._execute(
             "ALTER TABLE prediction_outcomes ADD COLUMN IF NOT EXISTS label_threshold_bps double precision"
@@ -2813,7 +2804,6 @@ class TradeJournal:
             candle_open_time = horizon_rows[0]["open_time"]
             if candle_open_time.tzinfo is None:
                 candle_open_time = candle_open_time.replace(tzinfo=UTC)
-            from datetime import timedelta as _td
 
             if abs((candle_open_time - horizon_time).total_seconds()) > 5 * 60:
                 continue
