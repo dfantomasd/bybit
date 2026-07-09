@@ -891,6 +891,8 @@ async def test_deep_report_tolerates_none_provider_payloads() -> None:
     assert "ПОЛНАЯ СВОДКА ДЛЯ АНАЛИЗА" in text
     assert "Runtime settings JSON" in text
     assert "Compare / PnL / Costs JSON" in text
+    assert "Training progress" in text
+    assert "&quot;training_progress&quot;" in text
 
 
 @pytest.mark.asyncio
@@ -980,6 +982,7 @@ async def test_deep_report_shows_model_gate_breakdown() -> None:
     text = await bot._render_deep_report_text()
 
     assert "Gate breakdown" in text
+    assert "Training progress" in text
     assert "side-filter=<code>21</code>" in text
     assert "score-block=<code>7</code>" in text
     assert "score avg=<code>-1.25</code>" in text
