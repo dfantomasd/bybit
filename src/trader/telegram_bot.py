@@ -3128,7 +3128,8 @@ class TelegramMonitorBot:
             app_uptime_hours = max(0.0, float(app_uptime_s or 0.0) / 3600.0)
         except (TypeError, ValueError):
             app_uptime_hours = 0.0
-        filtered_per_hour = (filtered_count / app_uptime_hours) if app_uptime_hours > 0 and filtered_count > 0 else None
+        rate_window_ready = app_uptime_hours >= 0.5
+        filtered_per_hour = (filtered_count / app_uptime_hours) if rate_window_ready and filtered_count > 0 else None
         train_eta_hours = (
             (remaining_to_train / filtered_per_hour)
             if filtered_per_hour is not None and filtered_per_hour > 0 and remaining_to_train > 0
@@ -3152,6 +3153,10 @@ class TelegramMonitorBot:
             "estimated_hours_to_min_samples_since_restart": round(train_eta_hours, 1)
             if train_eta_hours is not None
             else None,
+            "rate_estimate_ready": rate_window_ready,
+            "rate_estimate_note": None
+            if rate_window_ready
+            else "wait until app_uptime_s >= 1800; DB samples predate this restart",
             "feature_schema_hash": horizon_schema.get("feature_schema_hash"),
             "best_schema_hash": horizon_schema.get("best_schema_hash"),
             "label_schema_version": training_config.get("label_schema_version") or db_diag.get("label_schema_version"),
@@ -3421,8 +3426,14 @@ class TelegramMonitorBot:
                 if trainable_is_thresholded
                 else "либо порог уже достигнут, либо нет совместимых samples в текущей schema."
             ),
-            f"• Скорость с момента рестарта: <code>{html.escape(str(training_progress['estimated_filtered_per_hour_since_restart'] or 'n/a'))}</code> "
-            f"samples/hour; ETA до min: <code>{html.escape(str(training_progress['estimated_hours_to_min_samples_since_restart'] or 'n/a'))}</code> hours",
+            "• Скорость с момента рестарта: "
+            + (
+                f"<code>{html.escape(str(training_progress['estimated_filtered_per_hour_since_restart']))}</code> "
+                f"samples/hour; ETA до min: "
+                f"<code>{html.escape(str(training_progress['estimated_hours_to_min_samples_since_restart']))}</code> hours"
+                if training_progress["rate_estimate_ready"]
+                else "<code>n/a</code> — новый контейнер живёт меньше 30 минут; DB samples накоплены до рестарта."
+            ),
             f"• Pools: scalp=<code>{int(pool_breakdown.get('scalp_micro_v1_active_schema') or 0)}</code>, "
             f"hv_probe=<code>{int(pool_breakdown.get('shadow_probe_hv_v2_active_schema') or 0)}</code>, "
             f"candle_sampler=<code>{int(pool_breakdown.get('candle_sampler_v1_active_schema') or 0)}</code>, "
