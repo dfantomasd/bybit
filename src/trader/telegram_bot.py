@@ -3105,6 +3105,67 @@ class TelegramMonitorBot:
             if isinstance(runtime_diag, dict)
             else None,
         }
+        training_by_horizon = _dict_or_empty(db_diag.get("training_eligible_by_horizon"))
+        filtered_by_horizon = _dict_or_empty(db_diag.get("training_filtered_total_by_horizon"))
+        newest_by_horizon = _dict_or_empty(db_diag.get("newest_training_schema_by_horizon"))
+        pool_breakdown = _dict_or_empty(db_diag.get("training_pool_breakdown"))
+        training_config = _dict_or_empty(db_diag.get("training_config"))
+        model_min_samples = int(runtime_settings.get("model_auto_train_min_samples") or 1000)
+        report_horizon_key = str(model_horizon)
+        horizon_schema = _dict_or_empty(newest_by_horizon.get(report_horizon_key))
+        filtered_count = int(
+            filtered_by_horizon.get(report_horizon_key)
+            or pool_breakdown.get(f"filtered_total_{report_horizon_key}m")
+            or horizon_schema.get("sample_count")
+            or 0
+        )
+        newest_schema_count = int(horizon_schema.get("sample_count") or 0)
+        best_schema_count = int(horizon_schema.get("best_schema_count") or filtered_count or 0)
+        trainable_count = int(training_by_horizon.get(report_horizon_key) or 0)
+        remaining_to_train = max(0, model_min_samples - max(best_schema_count, trainable_count))
+        app_uptime_s = runtime_settings.get("app_uptime_s") if isinstance(runtime_settings, dict) else None
+        try:
+            app_uptime_hours = max(0.0, float(app_uptime_s or 0.0) / 3600.0)
+        except (TypeError, ValueError):
+            app_uptime_hours = 0.0
+        filtered_per_hour = (filtered_count / app_uptime_hours) if app_uptime_hours > 0 and filtered_count > 0 else None
+        train_eta_hours = (
+            (remaining_to_train / filtered_per_hour)
+            if filtered_per_hour is not None and filtered_per_hour > 0 and remaining_to_train > 0
+            else 0.0
+            if remaining_to_train == 0
+            else None
+        )
+        trainable_is_thresholded = trainable_count == 0 and 0 < best_schema_count < model_min_samples
+        training_progress = {
+            "horizon_minutes": model_horizon,
+            "min_samples_required": model_min_samples,
+            "trainable_schema_count": trainable_count,
+            "trainable_is_thresholded": trainable_is_thresholded,
+            "filtered_distinct_candles": filtered_count,
+            "newest_schema_count": newest_schema_count,
+            "best_schema_count": best_schema_count,
+            "remaining_to_min_samples": remaining_to_train,
+            "estimated_filtered_per_hour_since_restart": round(filtered_per_hour, 2)
+            if filtered_per_hour is not None
+            else None,
+            "estimated_hours_to_min_samples_since_restart": round(train_eta_hours, 1)
+            if train_eta_hours is not None
+            else None,
+            "feature_schema_hash": horizon_schema.get("feature_schema_hash"),
+            "best_schema_hash": horizon_schema.get("best_schema_hash"),
+            "label_schema_version": training_config.get("label_schema_version") or db_diag.get("label_schema_version"),
+            "label_threshold_bps": training_config.get("label_threshold_bps")
+            or db_diag.get("training_label_threshold_bps"),
+            "strategy_allowlist": training_config.get("strategy_allowlist"),
+            "include_candle_baseline": training_config.get("include_candle_baseline"),
+            "pool_breakdown": pool_breakdown,
+        }
+        paper_db_empty_but_runtime_closes = (
+            int(shadow_closes.get("total") or 0) > 0
+            and int((paper_baseline or {}).get("count") or 0) == 0
+            and int((paper_model_gate or {}).get("count") or 0) == 0
+        )
 
         def _block_reason_hint(reason: str) -> str:
             normalized = reason.lower()
@@ -3259,7 +3320,9 @@ class TelegramMonitorBot:
                 },
                 "candle_sampler_runtime": candle_sampler,
                 "shadow_closes_runtime": shadow_closes,
+                "paper_db_empty_but_runtime_closes": paper_db_empty_but_runtime_closes,
             },
+            "training_progress": training_progress,
             "hour": {
                 "signal_candidates": hour_signal_candidates,
                 "approved_entries": hour_approved_entries,
@@ -3346,9 +3409,40 @@ class TelegramMonitorBot:
             f"Если candidates &gt; 0, но approved=0 — вход отрезан финальными execution-фильтрами "
             f"(часто net-edge/min-notional), ждать {model_horizon}m outcome ещё нечему.",
             "",
+            "<b>Training progress: что смотреть вместо одной строки “готово”</b>",
+            f"• Horizon: <code>{model_horizon}m</code>; required: <code>{model_min_samples}</code>; "
+            f"trainable_schema_count: <code>{trainable_count}</code>",
+            f"• filtered/newest/best: <code>{filtered_count}</code> / "
+            f"<code>{newest_schema_count}</code> / <code>{best_schema_count}</code>; "
+            f"remaining_to_min: <code>{remaining_to_train}</code>",
+            "• Почему trainable может быть 0: "
+            + (
+                "это ожидаемая ступенька до min_samples; при достижении порога должно стать 1000+."
+                if trainable_is_thresholded
+                else "либо порог уже достигнут, либо нет совместимых samples в текущей schema."
+            ),
+            f"• Скорость с момента рестарта: <code>{html.escape(str(training_progress['estimated_filtered_per_hour_since_restart'] or 'n/a'))}</code> "
+            f"samples/hour; ETA до min: <code>{html.escape(str(training_progress['estimated_hours_to_min_samples_since_restart'] or 'n/a'))}</code> hours",
+            f"• Pools: scalp=<code>{int(pool_breakdown.get('scalp_micro_v1_active_schema') or 0)}</code>, "
+            f"hv_probe=<code>{int(pool_breakdown.get('shadow_probe_hv_v2_active_schema') or 0)}</code>, "
+            f"candle_sampler=<code>{int(pool_breakdown.get('candle_sampler_v1_active_schema') or 0)}</code>, "
+            f"other=<code>{int(pool_breakdown.get('other_active_schema') or 0)}</code>",
+            "• Считать багом: best_schema_count ≥ required, но trainable_schema_count всё ещё 0; "
+            "или filtered/newest/best не растут 6-12 часов при healthy runtime.",
+            "",
             "<b>Strategy gates: что сейчас режет или требует выше confidence</b>",
             *strategy_gate_lines,
         ]
+        if paper_db_empty_but_runtime_closes:
+            lines.extend(
+                [
+                    "",
+                    "<b>Shadow close ↔ DB paper sanity</b>",
+                    "⚠️ Runtime shadow closes есть, но DB paper baseline/model_gate пуст. "
+                    "До первой модели это может быть нормально для model_gate, но baseline должен начать появляться "
+                    "после записи paper outcomes; если так держится после 20+ closes — чинить запись/агрегацию.",
+                ]
+            )
         if block_reason_lines:
             lines.extend(
                 [
