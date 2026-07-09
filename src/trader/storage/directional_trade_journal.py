@@ -20,7 +20,8 @@ import structlog
 from trader.domain.models import FeatureVector, RegimeContext, TradeProposal
 from trader.features.source_candle_guard import source_candle_for_feature
 from trader.storage import trade_journal as _base_module
-from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal, _execute_schema_script
+from trader.storage.trade_journal import TradeJournal as _BaseTradeJournal
+from trader.storage.trade_journal import _execute_schema_script
 from trader.training.labels import (
     LABEL_SCHEMA_VERSION,
     CostModelBps,
@@ -321,7 +322,7 @@ class DirectionalTradeJournal(_BaseTradeJournal):
                     ADD COLUMN IF NOT EXISTS label_schema_version text;
                 CREATE INDEX IF NOT EXISTS idx_prediction_outcomes_schema_horizon
                     ON prediction_outcomes (label_schema_version, horizon_minutes);
-                """
+                """,
             )
 
     async def resolve_prediction_outcomes(

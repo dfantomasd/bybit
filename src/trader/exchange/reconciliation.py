@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from decimal import Decimal, InvalidOperation
 from typing import Any
 
 import structlog
@@ -252,8 +253,7 @@ class ReconciliationService:
                     exch_pos.get("size", "0") if isinstance(exch_pos, dict) else str(getattr(exch_pos, "size", "0"))
                 )
                 try:
-                    from decimal import Decimal as _D, InvalidOperation
-                    if local_size is not None and _D(str(local_size)) != _D(exch_size_str):
+                    if local_size is not None and Decimal(str(local_size)) != Decimal(exch_size_str):
                         diffs.append(f"Position {symbol} size mismatch: local={local_size} exchange={exch_size_str}")
                 except InvalidOperation:
                     diffs.append(f"Position {symbol} size unreadable: exchange={exch_size_str}")

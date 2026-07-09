@@ -253,9 +253,7 @@ class MLKellyPredictor(KellyPredictorBase):
             # filter NaN, which would otherwise silently propagate into the
             # Decimal-typed position size).
             if not math.isfinite(kelly_pred) or not math.isfinite(frac_pred):
-                logger.error(
-                    f"kelly_predictor.non_finite_prediction: kelly_pred={kelly_pred}, frac_pred={frac_pred}"
-                )
+                logger.error(f"kelly_predictor.non_finite_prediction: kelly_pred={kelly_pred}, frac_pred={frac_pred}")
                 return self._fallback_prediction(features)
 
             # Clamp to reasonable ranges

@@ -257,8 +257,7 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_LOSS_GUARD_WINDOW == 5  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS == 300  # type: ignore[union-attr]
         assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
-            "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,"
-            "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
+            "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
         )
         assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is True  # type: ignore[union-attr]
 

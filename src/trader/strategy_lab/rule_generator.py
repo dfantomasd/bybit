@@ -325,9 +325,7 @@ def discover_segmented_rules(
             train_fraction=train_fraction,
             config=cfg,
         )
-        segment_reports[segment_name] = {
-            key: value for key, value in report.items() if key != "rules"
-        }
+        segment_reports[segment_name] = {key: value for key, value in report.items() if key != "rules"}
         if side is None:
             # Runtime-discovered rules must be directional. Keep aggregate
             # segment diagnostics, but do not emit side-less rules into the

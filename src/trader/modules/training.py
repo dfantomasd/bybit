@@ -733,7 +733,9 @@ class TrainingModule(ModuleTaskMixin):
                     if not has_lift:
                         missing.append("lift > 0")
                     if not has_paper_gate:
-                        missing.append(f"paper GATE ≥ {min_paper_gate} с > 0 bps и DD ≤ {max_paper_drawdown_bps:.0f} bps")
+                        missing.append(
+                            f"paper GATE ≥ {min_paper_gate} с > 0 bps и DD ≤ {max_paper_drawdown_bps:.0f} bps"
+                        )
                     if not has_wf:
                         missing.append(f"walk-forward ≥ {min_wf_bps:+.1f} bps")
                     if not has_quality:
@@ -807,10 +809,19 @@ class TrainingModule(ModuleTaskMixin):
             # Never forward the full os.environ to avoid leaking secrets
             # (API keys, tokens, DSN passwords) to the child process.
             _safe_env_passthrough = {
-                "PATH", "HOME", "USER", "LANG", "LC_ALL", "LC_CTYPE",
-                "TZ", "PYTHONPATH", "PYTHONDONTWRITEBYTECODE", "VIRTUAL_ENV",
+                "PATH",
+                "HOME",
+                "USER",
+                "LANG",
+                "LC_ALL",
+                "LC_CTYPE",
+                "TZ",
+                "PYTHONPATH",
+                "PYTHONDONTWRITEBYTECODE",
+                "VIRTUAL_ENV",
                 # Postgres DSN is required for training data queries.
-                "POSTGRES_DSN", "DATABASE_URL",
+                "POSTGRES_DSN",
+                "DATABASE_URL",
             }
             train_env = {k: v for k, v in os.environ.items() if k in _safe_env_passthrough}
             # Keep sklearn/BLAS from saturating the single Render starter CPU.
@@ -846,31 +857,31 @@ class TrainingModule(ModuleTaskMixin):
             timed_out = False
             _notified_running = False
             try:
-              while True:
-                try:
-                    stdout_b, stderr_b = await asyncio.wait_for(
-                        asyncio.shield(communicate_task),
-                        timeout=_TRAINING_HEARTBEAT_SECONDS,
-                    )
-                    break
-                except TimeoutError:
-                    elapsed = (datetime.now(tz=UTC) - started_at).total_seconds()
-                    if elapsed >= _TRAINING_TIMEOUT_SECONDS:
-                        timed_out = True
-                        if proc.returncode is None:
-                            proc.kill()
-                        try:
-                            stdout_b, stderr_b = await asyncio.wait_for(communicate_task, timeout=10.0)
-                        except TimeoutError:
-                            communicate_task.cancel()
-                            with contextlib.suppress(asyncio.CancelledError):
-                                await communicate_task
-                            stdout_b = b""
-                            stderr_b = f"training timeout after {elapsed:.0f}s".encode()
+                while True:
+                    try:
+                        stdout_b, stderr_b = await asyncio.wait_for(
+                            asyncio.shield(communicate_task),
+                            timeout=_TRAINING_HEARTBEAT_SECONDS,
+                        )
                         break
-                    if self._app._telegram_bot is not None and not _notified_running:
-                        await self._app._telegram_bot.notify(f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)")
-                        _notified_running = True
+                    except TimeoutError:
+                        elapsed = (datetime.now(tz=UTC) - started_at).total_seconds()
+                        if elapsed >= _TRAINING_TIMEOUT_SECONDS:
+                            timed_out = True
+                            if proc.returncode is None:
+                                proc.kill()
+                            try:
+                                stdout_b, stderr_b = await asyncio.wait_for(communicate_task, timeout=10.0)
+                            except TimeoutError:
+                                communicate_task.cancel()
+                                with contextlib.suppress(asyncio.CancelledError):
+                                    await communicate_task
+                                stdout_b = b""
+                                stderr_b = f"training timeout after {elapsed:.0f}s".encode()
+                            break
+                        if self._app._telegram_bot is not None and not _notified_running:
+                            await self._app._telegram_bot.notify(f"⏳ <b>Обучение модели...</b> (~{int(elapsed)}с)")
+                            _notified_running = True
             except asyncio.CancelledError:
                 # Kill the subprocess so it does not become an orphan when the
                 # event loop is shutting down.
@@ -949,7 +960,10 @@ class TrainingModule(ModuleTaskMixin):
         )
         if not batch:
             return
-        if self._app._model_registry.challenger is None or self._app._model_registry.challenger.version != challenger.version:
+        if (
+            self._app._model_registry.challenger is None
+            or self._app._model_registry.challenger.version != challenger.version
+        ):
             # A promotion/retrain swapped the registry's challenger while we
             # were awaiting the batch fetch above. This batch was labelled
             # against the old challenger_version filter — applying it to

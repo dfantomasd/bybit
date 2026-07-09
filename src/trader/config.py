@@ -921,11 +921,7 @@ class Settings(BaseSettings):
             )
             self.TRAIN_INCLUDE_CANDLE_BASELINE = True
 
-        if (
-            self.STARTER_OPTIMIZED_MODE
-            and self.SCREENER_MAX_PRICE_USD <= 0
-            and self.SCREENER_MIN_PRICE_USD < 25.0
-        ):
+        if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0 and self.SCREENER_MIN_PRICE_USD < 25.0:
             self.SCREENER_MAX_PRICE_USD = 25.0
         if (
             self.SCREENER_MAX_PRICE_USD > 0

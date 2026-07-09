@@ -11,7 +11,6 @@ import hashlib
 import hmac
 import json
 import logging
-import os
 import pickle
 from dataclasses import dataclass
 from datetime import UTC, datetime

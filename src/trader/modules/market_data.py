@@ -657,7 +657,7 @@ class MarketDataModule(ModuleTaskMixin):
             # to a single transient blip (both just a warning log), silently
             # freezing that symbol's CandleStore/features forever.
             consecutive_failures: dict[str, int] = {}
-            _ESCALATE_AFTER = 10
+            _escalate_after = 10
 
             while not self._app._shutdown_event.is_set():
                 try:
@@ -769,7 +769,7 @@ class MarketDataModule(ModuleTaskMixin):
                     if symbol is not None:
                         count = consecutive_failures.get(symbol, 0) + 1
                         consecutive_failures[symbol] = count
-                        if count >= _ESCALATE_AFTER:
+                        if count >= _escalate_after:
                             log.error(
                                 "ws_consumer.persistent_failure",
                                 symbol=symbol,
@@ -842,10 +842,7 @@ class MarketDataModule(ModuleTaskMixin):
                 # The event queue is local to _start_public_ws, so we track pressure
                 # by checking if health checker reports recent WS staleness
                 ws_stale = False
-                if (
-                    self._app._health_checker is not None
-                    and self._app._health_checker._last_ws_message_at is not None
-                ):
+                if self._app._health_checker is not None and self._app._health_checker._last_ws_message_at is not None:
                     ws_age = (datetime.now(tz=UTC) - self._app._health_checker._last_ws_message_at).total_seconds()
                     ws_stale = ws_age > ws_stale_threshold_s
 

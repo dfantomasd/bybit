@@ -64,7 +64,9 @@ def _normalise_side(side: str | None) -> str | None:
     return None
 
 
-def _parse_rule(raw: dict[str, Any], *, min_validation_count: int, min_validation_net_bps: float) -> DiscoveredRule | None:
+def _parse_rule(
+    raw: dict[str, Any], *, min_validation_count: int, min_validation_net_bps: float
+) -> DiscoveredRule | None:
     side = _normalise_side(raw.get("side"))
     if side is None:
         return None
@@ -92,9 +94,7 @@ def _parse_rule(raw: dict[str, Any], *, min_validation_count: int, min_validatio
         symbol=str(symbol).upper() if symbol else None,
         validation_count=validation_count,
         validation_avg_net_bps=validation_avg_f,
-        validation_lift_bps=(
-            float(raw["validation_lift_bps"]) if raw.get("validation_lift_bps") is not None else None
-        ),
+        validation_lift_bps=(float(raw["validation_lift_bps"]) if raw.get("validation_lift_bps") is not None else None),
         score=float(raw["score"]) if raw.get("score") is not None else validation_avg_f,
     )
 

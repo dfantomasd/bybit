@@ -745,9 +745,7 @@ class RiskManager:
         """Start a background task that resets daily stats at UTC midnight."""
         if self._daily_reset_task is not None and not self._daily_reset_task.done():
             return
-        self._daily_reset_task = asyncio.create_task(
-            self._daily_reset_loop(), name="risk-manager-daily-reset"
-        )
+        self._daily_reset_task = asyncio.create_task(self._daily_reset_loop(), name="risk-manager-daily-reset")
 
     def stop_daily_reset_scheduler(self) -> None:
         if self._daily_reset_task is not None:
@@ -760,6 +758,7 @@ class RiskManager:
             next_midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
             if next_midnight <= now:
                 from datetime import timedelta
+
                 next_midnight = next_midnight + timedelta(days=1)
             wait_seconds = (next_midnight - now).total_seconds()
             await asyncio.sleep(wait_seconds)

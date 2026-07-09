@@ -114,9 +114,7 @@ def assess_liquidity(
     if position_size_usd > directional_depth / 2:
         # Position would be >50% of the relevant side's depth (risky)
         is_liquid = False
-        rejection_reasons.append(
-            f"Position size ${position_size_usd} > 50% of directional depth ${directional_depth}"
-        )
+        rejection_reasons.append(f"Position size ${position_size_usd} > 50% of directional depth ${directional_depth}")
 
     # Calculate liquidity score (0-1)
     depth_ratio = min(1.0, float(total_depth / max(Decimal("100000"), min_depth_usd)))

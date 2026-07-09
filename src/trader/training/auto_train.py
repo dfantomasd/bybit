@@ -16,8 +16,8 @@ from typing import Any
 
 import click
 
-from trader.training.labels import active_label_schema_version
 from trader.storage.trade_journal import asyncpg_pool_connect_kwargs
+from trader.training.labels import active_label_schema_version
 
 log = logging.getLogger(__name__)
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")

@@ -306,7 +306,7 @@ class ExecutionRuntimeModule(AppBoundModule):
             # duplicate terminal event. The authoritative record is order_pending_state
             # (resolved_at) which survives restarts.
             _released_cache: set[str] = set()
-            _RELEASED_CACHE_MAX = 10_000
+            _released_cache_max = 10_000
 
             async def _release_pending(order_link_id: str, symbol: str) -> None:
                 """Release a pending entry slot exactly once and persist the resolution."""
@@ -331,13 +331,13 @@ class ExecutionRuntimeModule(AppBoundModule):
                     # pending slot so it doesn't leak and block future orders.
                     if self._app._execution_engine is not None:
                         self._app._execution_engine.mark_entry_resolved(order_link_id)
-                    if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                    if len(_released_cache) >= _released_cache_max:
                         _released_cache.clear()
                     _released_cache.add(order_link_id)
                     return
                 if self._app._execution_engine is not None:
                     self._app._execution_engine.mark_entry_resolved(order_link_id)
-                if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                if len(_released_cache) >= _released_cache_max:
                     _released_cache.clear()
                 _released_cache.add(order_link_id)
                 if self._app._trade_journal is not None and self._app._trade_journal.is_enabled:
@@ -447,7 +447,7 @@ class ExecutionRuntimeModule(AppBoundModule):
                             if not order_link_id.startswith("unknown:"):
                                 await _release_pending(order_link_id, event.symbol)
                             else:
-                                if len(_released_cache) >= _RELEASED_CACHE_MAX:
+                                if len(_released_cache) >= _released_cache_max:
                                     _released_cache.clear()
                                 _released_cache.add(order_link_id)
                         # Trigger position sync on fill

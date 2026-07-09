@@ -281,11 +281,9 @@ class RegimePredictorEnhanced:
             next_5m_regime = self.regime_names[next_5m_class]
             prob_next_5m = float(transition_proba[next_5m_class])
 
-            next_15m_class = next_5m_class
             next_15m_regime = next_5m_regime
             prob_next_15m = prob_next_5m
 
-            next_60m_class = next_5m_class
             next_60m_regime = next_5m_regime
             prob_next_60m = prob_next_5m
 

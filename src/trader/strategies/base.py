@@ -33,3 +33,4 @@ class BaseStrategy(ABC):
 
         Default: no-op. Stateful strategies must override.
         """
+        return None

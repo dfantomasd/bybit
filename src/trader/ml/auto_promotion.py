@@ -318,13 +318,9 @@ class AutoPromotionEngine:
         challenger_drawdown_bps = _float_or_none(metrics.get("max_drawdown_bps"))
         if challenger_drawdown_bps is None and challenger_returns:
             challenger_drawdown_bps = _max_drawdown_bps([float(value) for value in challenger_returns])
-        if (
-            challenger_drawdown_bps is not None
-            and challenger_drawdown_bps > self._config.max_challenger_drawdown_bps
-        ):
+        if challenger_drawdown_bps is not None and challenger_drawdown_bps > self._config.max_challenger_drawdown_bps:
             reasons.append(
-                "challenger_drawdown:"
-                f"{challenger_drawdown_bps:.4f}>{self._config.max_challenger_drawdown_bps:.4f}"
+                f"challenger_drawdown:{challenger_drawdown_bps:.4f}>{self._config.max_challenger_drawdown_bps:.4f}"
             )
         p_value: float | None = None
         mean_diff_bps: float | None = None
