@@ -1,0 +1,29 @@
+name: Render Keepalive
+
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: render-keepalive
+  cancel-in-progress: true
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      RENDER_KEEPALIVE_URL: ${{ secrets.RENDER_KEEPALIVE_URL }}
+      DEFAULT_RENDER_KEEPALIVE_URL: https://bybit-monitor.onrender.com
+    steps:
+      - name: Ping Render liveness endpoint
+        shell: bash
+        run: |
+          set -euo pipefail
+          base_url="${RENDER_KEEPALIVE_URL:-$DEFAULT_RENDER_KEEPALIVE_URL}"
+          base_url="${base_url%/}"
+          curl --fail --silent --show-error --max-time 75 --retry 2 --retry-delay 10 "$base_url/livez"

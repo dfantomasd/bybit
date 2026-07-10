@@ -2,7 +2,7 @@ services:
   - type: web
     name: bybit-monitor
     runtime: docker
-    plan: starter
+    plan: free
     dockerfilePath: ./Dockerfile
     dockerContext: .
     dockerCommand: trader
