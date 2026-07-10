@@ -898,8 +898,9 @@ class Settings(BaseSettings):
             # in every Settings consumer (runtime, diagnostics, and trainer
             # subprocess) regardless of stale deployment overrides.
             # Keep the probe strict enough that collected labels are useful for
-            # training after fees. Do not override TRAIN_* here; Render envs
-            # remain the source of truth for the training cohort.
+            # training after fees. Force the training cohort away from the
+            # per-candle baseline: its mostly-random direction labels dominate
+            # the sample count and create extreme class imbalance after costs.
             self.SHADOW_PROBE_MIN_ABS_IMBALANCE = max(float(self.SHADOW_PROBE_MIN_ABS_IMBALANCE), 0.08)
             self.SHADOW_PROBE_MIN_TP_PCT = max(float(self.SHADOW_PROBE_MIN_TP_PCT), 0.75)
             self.SHADOW_PROBE_MAX_TP_PCT = 1.50
@@ -917,6 +918,8 @@ class Settings(BaseSettings):
             self.SHADOW_LOSS_GUARD_MIN_CLOSED = 5
             self.SHADOW_LOSS_GUARD_WINDOW = 5
             self.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS = 300
+            self.TRAIN_STRATEGY_ALLOWLIST = "scalp_micro_v1,shadow_probe_hv_v2"
+            self.TRAIN_INCLUDE_CANDLE_BASELINE = False
 
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0 and self.SCREENER_MIN_PRICE_USD < 25.0:
             self.SCREENER_MAX_PRICE_USD = 25.0

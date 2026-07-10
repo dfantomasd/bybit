@@ -240,14 +240,14 @@ class TestSettingsSafetyGates:
             TRAIN_INCLUDE_CANDLE_BASELINE="true",
         )
 
-        assert settings.SHADOW_PROBE_MIN_ABS_IMBALANCE == 0.04  # type: ignore[union-attr]
-        assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.60  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_ABS_IMBALANCE == 0.08  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_TP_PCT == 0.75  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_MAX_TP_PCT == 1.50  # type: ignore[union-attr]
-        assert settings.SHADOW_PROBE_MIN_SL_PCT == 0.25  # type: ignore[union-attr]
-        assert settings.SHADOW_PROBE_MIN_NET_RETURN_PCT == 0.12  # type: ignore[union-attr]
-        assert settings.SHADOW_PROBE_MIN_NET_REWARD_RISK == 1.10  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_SL_PCT == 0.40  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_NET_RETURN_PCT == 0.30  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_MIN_NET_REWARD_RISK == 1.30  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS == 60  # type: ignore[union-attr]
-        assert settings.SHADOW_PROBE_SELL_ENABLED is True  # type: ignore[union-attr]
+        assert settings.SHADOW_PROBE_SELL_ENABLED is False  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_SIDE_BLOCK_ENABLED is True  # type: ignore[union-attr]
         assert settings.SHADOW_PROBE_QUALITY_FILTER_ENABLED is True  # type: ignore[union-attr]
         assert settings.SCALP_STRICT_SHADOW is True  # type: ignore[union-attr]
@@ -256,10 +256,8 @@ class TestSettingsSafetyGates:
         assert settings.SHADOW_LOSS_GUARD_MIN_CLOSED == 5  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_WINDOW == 5  # type: ignore[union-attr]
         assert settings.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS == 300  # type: ignore[union-attr]
-        assert settings.TRAIN_STRATEGY_ALLOWLIST == (  # type: ignore[union-attr]
-            "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
-        )
-        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is True  # type: ignore[union-attr]
+        assert settings.TRAIN_STRATEGY_ALLOWLIST == "scalp_micro_v1,shadow_probe_hv_v2"  # type: ignore[union-attr]
+        assert settings.TRAIN_INCLUDE_CANDLE_BASELINE is False  # type: ignore[union-attr]
 
     def test_legacy_profile_keeps_explicit_training_pool(self) -> None:
         settings = self._make_settings(
