@@ -12,7 +12,14 @@ def _feature_vector(*, symbol: str = "XRPUSDT", **overrides: float) -> FeatureVe
     features = {
         "ema_9": 1.01,
         "ema_21": 1.0,
+        "ewma_tier_signal": 0.004,
+        "vwap_distance_pct": -0.25,
         "rsi_14": 0.55,
+        "adx_14": 0.24,
+        "macd_hist": 0.0001,
+        "volume_zscore": 0.4,
+        "ob_data_present": 1.0,
+        "ob_imbalance_l5": 0.10,
         "atr_14_pct": 0.004,
     }
     features.update(overrides)
@@ -70,7 +77,7 @@ def test_shadow_probe_emits_from_orderbook_imbalance() -> None:
         cooldown_seconds=30,
     )
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=0.5, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(), current_price=0.5, available_balance_usd=25.0)
 
     assert proposal is not None
     assert proposal.strategy_id == "shadow_probe_hv_v2"
@@ -90,7 +97,7 @@ def test_shadow_probe_rejects_ema_only_without_obi() -> None:
     rejections: list[str] = []
     strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: None, diag_hook=rejections.append)
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=2.0, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(ob_data_present=0.0), current_price=2.0, available_balance_usd=25.0)
 
     assert proposal is None
     assert "shadow_probe_imbalance_missing" in rejections
@@ -121,7 +128,7 @@ def test_shadow_probe_blocks_book_ema_conflict() -> None:
     rejections: list[str] = []
     strategy = ShadowProbeStrategy(imbalance_provider=lambda _symbol: -0.08, diag_hook=rejections.append)
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=1.01, ema_21=1.0), current_price=1.0, available_balance_usd=25.0)
+    proposal = strategy.evaluate(_feature_vector(), current_price=1.0, available_balance_usd=25.0)
 
     assert proposal is None
     assert "shadow_probe_book_ema_conflict:XRPUSDT" in rejections
@@ -170,9 +177,44 @@ def test_shadow_probe_blocks_sell_when_disabled() -> None:
         sell_enabled=False,
     )
 
-    proposal = strategy.evaluate(_feature_vector(ema_9=0.99, ema_21=1.0), current_price=1.0, available_balance_usd=25.0)
+    proposal = strategy.evaluate(
+        _feature_vector(
+            ewma_tier_signal=-0.004,
+            vwap_distance_pct=0.25,
+            macd_hist=-0.0001,
+            ob_imbalance_l5=-0.12,
+        ),
+        current_price=1.0,
+        available_balance_usd=25.0,
+    )
 
     assert proposal is None
+
+
+def test_shadow_probe_rejects_without_vwap_pullback() -> None:
+    rejections: list[str] = []
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.12,
+        diag_hook=rejections.append,
+    )
+
+    proposal = strategy.evaluate(_feature_vector(vwap_distance_pct=0.4), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is None
+    assert "shadow_probe_entry_filter:XRPUSDT" in rejections
+
+
+def test_shadow_probe_rejects_dead_volume() -> None:
+    rejections: list[str] = []
+    strategy = ShadowProbeStrategy(
+        imbalance_provider=lambda _symbol: 0.12,
+        diag_hook=rejections.append,
+    )
+
+    proposal = strategy.evaluate(_feature_vector(volume_zscore=-1.0), current_price=1.0, available_balance_usd=25.0)
+
+    assert proposal is None
+    assert "shadow_probe_entry_filter:XRPUSDT" in rejections
 
 
 def test_shadow_probe_respects_side_and_symbol_filters() -> None:

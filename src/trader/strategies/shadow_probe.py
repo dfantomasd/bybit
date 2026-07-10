@@ -23,6 +23,21 @@ _PRICE_DECIMALS = Decimal("0.00000001")
 # Worst-case qty shrink from confidence/regime/VWAP penalties after risk sizing.
 _PROBE_WORST_CASE_QTY_MULTIPLIER = Decimal("0.25")
 
+# Probe entry logic: VWAP pullback in the direction of a real EMA stack, with
+# momentum and book confirmation. These are intentionally close to scalp_micro
+# but slightly looser so SHADOW can still discover enough outcomes.
+_EWMA_MIN = 0.002
+_VWAP_BUY_LOW = -0.55
+_VWAP_BUY_HIGH = 0.10
+_VWAP_SELL_LOW = -0.10
+_VWAP_SELL_HIGH = 0.55
+_RSI_BUY_MIN = 0.35
+_RSI_BUY_MAX = 0.64
+_RSI_SELL_MIN = 0.36
+_RSI_SELL_MAX = 0.65
+_ADX_MIN = 0.18
+_VOLUME_ZSCORE_MIN = -0.4
+
 
 def _price(value: float) -> Decimal:
     return Decimal(str(value)).quantize(_PRICE_DECIMALS)
@@ -170,35 +185,60 @@ class ShadowProbeStrategy(BaseStrategy):
 
     @staticmethod
     def _ema_side(features: dict[str, float]) -> OrderSide | None:
-        ema9 = features.get("ema_9")
-        ema21 = features.get("ema_21")
+        ewma = features.get("ewma_tier_signal")
         rsi = features.get("rsi_14")
-        if ema9 is None or ema21 is None:
+        if ewma is None or rsi is None:
             return None
-        if ema9 > ema21 and (rsi is None or rsi < 0.68):
+        if ewma > _EWMA_MIN and _RSI_BUY_MIN < rsi < _RSI_BUY_MAX:
             return OrderSide.BUY
-        if ema9 < ema21 and (rsi is None or rsi > 0.32):
+        if ewma < -_EWMA_MIN and _RSI_SELL_MIN < rsi < _RSI_SELL_MAX:
             return OrderSide.SELL
         return None
 
     def _side_from_features(self, vec: FeatureVector, features: dict[str, float]) -> tuple[OrderSide | None, str]:
         ema_side = self._ema_side(features)
+        if ema_side is None:
+            return None, "entry setup unavailable"
+
+        vwap_dist = features.get("vwap_distance_pct")
+        if vwap_dist is None:
+            return None, "VWAP distance unavailable"
+        if ema_side == OrderSide.BUY and not (_VWAP_BUY_LOW < vwap_dist < _VWAP_BUY_HIGH):
+            return None, f"VWAP pullback rejected vwap={vwap_dist:+.3f}"
+        if ema_side == OrderSide.SELL and not (_VWAP_SELL_LOW < vwap_dist < _VWAP_SELL_HIGH):
+            return None, f"VWAP pullback rejected vwap={vwap_dist:+.3f}"
+
+        adx = features.get("adx_14")
+        if adx is None or adx < _ADX_MIN:
+            return None, "ADX below trend threshold"
+
+        macd_hist = features.get("macd_hist")
+        if macd_hist is not None:
+            if ema_side == OrderSide.BUY and macd_hist <= 0:
+                return None, "MACD momentum rejected"
+            if ema_side == OrderSide.SELL and macd_hist >= 0:
+                return None, "MACD momentum rejected"
+
+        volume_zscore = features.get("volume_zscore")
+        if volume_zscore is not None and volume_zscore < _VOLUME_ZSCORE_MIN:
+            return None, "volume below threshold"
+
         imbalance = None
         if self._imbalance_provider is not None:
             try:
                 imbalance = self._imbalance_provider(vec.symbol)
             except Exception:
                 imbalance = None
+        if imbalance is None and features.get("ob_data_present", 0.0) >= 1.0:
+            imbalance = features.get("ob_imbalance_l5")
         if imbalance is None:
             return None, "orderbook imbalance unavailable"
         if abs(imbalance) < self._min_abs_imbalance:
             return None, f"orderbook imbalance below threshold {imbalance:+.3f}"
         side = OrderSide.BUY if imbalance > 0 else OrderSide.SELL
-        if ema_side is None:
-            return None, f"EMA confirmation unavailable imbalance={imbalance:+.3f}"
         if side != ema_side:
             return None, f"book/EMA conflict imbalance={imbalance:+.3f}"
-        return side, f"book imbalance {imbalance:+.3f}"
+        return side, f"VWAP pullback + EMA/OB confirmation imbalance={imbalance:+.3f}"
 
     def evaluate(
         self,
@@ -241,12 +281,12 @@ class ShadowProbeStrategy(BaseStrategy):
 
         side, reason = self._side_from_features(feature_vector, features)
         if side is None:
-            if "unavailable" in reason:
+            if "setup" in reason or "VWAP" in reason or "ADX" in reason or "MACD" in reason or "volume" in reason:
+                self._diag("shadow_probe_entry_filter", symbol=feature_vector.symbol)
+            elif "unavailable" in reason:
                 self._diag("shadow_probe_imbalance_missing", symbol=feature_vector.symbol)
             elif "below threshold" in reason:
                 self._diag("shadow_probe_imbalance_weak", symbol=feature_vector.symbol)
-            elif "EMA confirmation unavailable" in reason:
-                self._diag("shadow_probe_ema_missing", symbol=feature_vector.symbol)
             elif "book/EMA conflict" in reason:
                 self._diag("shadow_probe_book_ema_conflict", symbol=feature_vector.symbol)
             else:
