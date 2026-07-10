@@ -897,29 +897,26 @@ class Settings(BaseSettings):
             # render.yaml changes. Keep the versioned research cohort isolated
             # in every Settings consumer (runtime, diagnostics, and trainer
             # subprocess) regardless of stale deployment overrides.
-            # Include basic ensemble strategies so their signals feed training
-            # data and speed up schema-change sample accumulation.
-            self.SHADOW_PROBE_MIN_ABS_IMBALANCE = 0.04
-            self.SHADOW_PROBE_MIN_TP_PCT = 0.60
+            # Keep the probe strict enough that collected labels are useful for
+            # training after fees. Do not override TRAIN_* here; Render envs
+            # remain the source of truth for the training cohort.
+            self.SHADOW_PROBE_MIN_ABS_IMBALANCE = max(float(self.SHADOW_PROBE_MIN_ABS_IMBALANCE), 0.08)
+            self.SHADOW_PROBE_MIN_TP_PCT = max(float(self.SHADOW_PROBE_MIN_TP_PCT), 0.75)
             self.SHADOW_PROBE_MAX_TP_PCT = 1.50
-            self.SHADOW_PROBE_MIN_SL_PCT = 0.25
-            self.SHADOW_PROBE_MIN_NET_RETURN_PCT = 0.12
-            self.SHADOW_PROBE_MIN_NET_REWARD_RISK = 1.10
+            self.SHADOW_PROBE_MIN_SL_PCT = max(float(self.SHADOW_PROBE_MIN_SL_PCT), 0.35)
+            self.SHADOW_PROBE_MIN_NET_RETURN_PCT = max(float(self.SHADOW_PROBE_MIN_NET_RETURN_PCT), 0.25)
+            self.SHADOW_PROBE_MIN_NET_REWARD_RISK = max(float(self.SHADOW_PROBE_MIN_NET_REWARD_RISK), 1.30)
             self.SHADOW_PROBE_SYMBOL_WARMUP_SECONDS = 60
-            self.SHADOW_PROBE_SELL_ENABLED = True
             self.SHADOW_PROBE_SIDE_BLOCK_ENABLED = True
             self.SHADOW_PROBE_QUALITY_FILTER_ENABLED = True
+            self.SHADOW_PROBE_BASELINE_MIN_AVG_BPS = max(float(self.SHADOW_PROBE_BASELINE_MIN_AVG_BPS), 0.0)
+            self.SHADOW_PROBE_SYMBOL_MIN_AVG_BPS = max(float(self.SHADOW_PROBE_SYMBOL_MIN_AVG_BPS), 0.0)
             self.SCALP_STRICT_SHADOW = True
             self.BUCKET_STATS_REFRESH_SECONDS = 300
             self.SHADOW_LOSS_GUARD_ENABLED = True
             self.SHADOW_LOSS_GUARD_MIN_CLOSED = 5
             self.SHADOW_LOSS_GUARD_WINDOW = 5
             self.SHADOW_LOSS_GUARD_COOLDOWN_SECONDS = 300
-            self.TRAIN_STRATEGY_ALLOWLIST = (
-                "scalp_micro_v1,shadow_probe_hv_v2,discovered_rule_v1,"
-                "mean_reversion_v1,macd_zerocross_v1,atr_breakout_v1"
-            )
-            self.TRAIN_INCLUDE_CANDLE_BASELINE = True
 
         if self.STARTER_OPTIMIZED_MODE and self.SCREENER_MAX_PRICE_USD <= 0 and self.SCREENER_MIN_PRICE_USD < 25.0:
             self.SCREENER_MAX_PRICE_USD = 25.0

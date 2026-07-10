@@ -10,8 +10,10 @@ import pytest
 from trader.ml.challenger import ChallengerModel
 from trader.training.train import (
     _candidate_specs,
+    _class_balance_diagnostics,
     _configure_training_connection,
     _filter_timestamps_by_mask,
+    _format_class_balance_diagnostics,
     _negative_bucket_keep_mask,
     _validate_walk_forward_chronology,
     _walk_forward_splits,
@@ -101,6 +103,23 @@ def test_candidate_specs_include_requested_families_only() -> None:
         {"model_type": "LOGREG", "C": 1.0},
         {"model_type": "LOGREG", "C": 10.0},
     ]
+
+
+def test_class_balance_diagnostics_reports_invalid_walk_forward_folds() -> None:
+    returns = np.array([-4.0, -3.0, -2.0, -1.0, 1.0, 2.0], dtype=np.float32)
+    folds = [(np.array([0, 1, 2, 3]), np.array([4, 5]))]
+
+    diagnostics = _class_balance_diagnostics(returns, [0.0, 2.0], folds)
+
+    assert diagnostics[0]["positive"] == 2
+    assert diagnostics[0]["negative"] == 4
+    assert diagnostics[0]["invalid_folds"] == 1
+    assert diagnostics[0]["folds"][0]["train_positive"] == 0
+    assert diagnostics[0]["folds"][0]["validation_negative"] == 0
+    assert diagnostics[1]["positive"] == 0
+    summary = _format_class_balance_diagnostics(diagnostics)
+    assert "thr=0bps pos=2 neg=4 invalid_folds=1" in summary
+    assert "f0:tr+0/-4,val+2/-0" in summary
 
 
 def test_negative_bucket_filter_excludes_stable_losers() -> None:

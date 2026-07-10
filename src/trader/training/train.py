@@ -176,6 +176,73 @@ def _filter_timestamps_by_mask(timestamps: list[datetime], keep_mask: np.ndarray
     return [ts for ts, keep in zip(timestamps, keep_mask, strict=True) if bool(keep)]
 
 
+def _class_balance_diagnostics(
+    returns_bps: np.ndarray,
+    thresholds: list[float],
+    folds: list[tuple[np.ndarray, np.ndarray]],
+) -> list[dict[str, Any]]:
+    """Summarise label class balance for candidate thresholds and walk-forward folds."""
+
+    diagnostics: list[dict[str, Any]] = []
+    for threshold in thresholds:
+        y = (returns_bps > float(threshold)).astype(np.int32)
+        fold_rows: list[dict[str, int]] = []
+        invalid_fold_count = 0
+        for fold_idx, (train_idx, val_idx) in enumerate(folds):
+            y_train = y[train_idx]
+            y_val = y[val_idx]
+            train_positive = int(y_train.sum())
+            val_positive = int(y_val.sum())
+            train_negative = int(len(y_train) - train_positive)
+            val_negative = int(len(y_val) - val_positive)
+            valid = train_positive > 0 and train_negative > 0 and val_positive > 0 and val_negative > 0
+            if not valid:
+                invalid_fold_count += 1
+            fold_rows.append(
+                {
+                    "fold": int(fold_idx),
+                    "train_positive": train_positive,
+                    "train_negative": train_negative,
+                    "validation_positive": val_positive,
+                    "validation_negative": val_negative,
+                    "valid": int(valid),
+                }
+            )
+        positives = int(y.sum())
+        diagnostics.append(
+            {
+                "threshold_bps": float(threshold),
+                "positive": positives,
+                "negative": int(len(y) - positives),
+                "invalid_folds": invalid_fold_count,
+                "folds": fold_rows,
+            }
+        )
+    return diagnostics
+
+
+def _format_class_balance_diagnostics(diagnostics: list[dict[str, Any]], *, limit: int = 6) -> str:
+    """Return a compact operator-facing class-balance summary."""
+
+    parts: list[str] = []
+    for row in diagnostics[:limit]:
+        fold_bits: list[str] = []
+        for fold in (row.get("folds") or [])[:3]:
+            fold_bits.append(
+                "f{fold}:tr+{train_positive}/-{train_negative},val+{validation_positive}/-{validation_negative}".format(
+                    **fold
+                )
+            )
+        suffix = f", folds=[{'; '.join(fold_bits)}]" if fold_bits else ""
+        parts.append(
+            "thr={threshold_bps:g}bps pos={positive} neg={negative} invalid_folds={invalid_folds}{suffix}".format(
+                suffix=suffix,
+                **row,
+            )
+        )
+    return " | ".join(parts)
+
+
 def _candidate_specs(enabled: str) -> list[dict[str, Any]]:
     families = {item.strip().upper() for item in str(enabled or "").split(",") if item.strip()}
     if not families:
@@ -863,6 +930,7 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
             return summary
 
         tasks = [(spec, threshold) for threshold in label_thresholds for spec in candidates]
+        class_balance_diag = _class_balance_diagnostics(returns_bps, label_thresholds, folds)
 
         try:
             from joblib import Parallel
@@ -875,7 +943,25 @@ async def _train(min_samples: int, label_bps_threshold: float, horizon_minutes: 
         candidate_results: list[dict[str, Any]] = [r for r in raw_results if r is not None]
 
         if not candidate_results:
-            raise RuntimeError("no trainable model candidate survived walk-forward validation")
+            balance_summary = _format_class_balance_diagnostics(class_balance_diag)
+            msg = (
+                "no trainable model candidate survived walk-forward validation; "
+                f"class_balance: {balance_summary}"
+            )
+            await pool.execute(
+                "UPDATE training_runs SET status='FAILED', error=$1, metrics=$2::jsonb, finished_at=now() "
+                "WHERE run_id=$3",
+                msg,
+                json.dumps(
+                    {
+                        "class_balance_by_threshold": class_balance_diag,
+                        "label_thresholds": label_thresholds,
+                        "candidate_count": len(candidates),
+                    }
+                ),
+                run_id,
+            )
+            raise RuntimeError(msg)
 
         min_positive_folds = min(3, len(folds))
         eligible_results = [r for r in candidate_results if int(r.get("wf_positive_folds") or 0) >= min_positive_folds]
