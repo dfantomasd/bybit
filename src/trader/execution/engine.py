@@ -1439,7 +1439,19 @@ class ExecutionEngine:
                 stop=str(proposal.stop_loss),
                 tp=str(proposal.take_profit),
                 order_link_id=intent.order_link_id,
+                proposal_id=str(proposal.proposal_id),
+                strategy_id=proposal.strategy_id,
+                feature_id=str(proposal.feature_id) if proposal.feature_id is not None else None,
+                regime=proposal.regime.value,
                 confidence=round(proposal.confidence, 3),
+                expected_return=proposal.expected_return,
+                expected_risk=proposal.expected_risk,
+                requested_notional_usd=(
+                    str(proposal.requested_notional_usd)
+                    if proposal.requested_notional_usd is not None
+                    else None
+                ),
+                rationale=proposal.rationale,
                 mode="SHADOW_NO_EXECUTION",
             )
             if self._trade_journal is not None:
