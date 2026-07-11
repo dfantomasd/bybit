@@ -1,8 +1,9 @@
 name: Render Keepalive
 
 on:
-  schedule:
-    - cron: "*/10 * * * *"
+  # Render Free is not a reliable 24/7 host for this trading service. Keeping
+  # it awake continuously can exhaust billing/traffic limits, so leave this as
+  # a manual rescue ping only.
   workflow_dispatch:
 
 permissions:
